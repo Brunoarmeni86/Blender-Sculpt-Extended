@@ -738,6 +738,9 @@ static void restore_position_grids(const MutableSpan<float3> positions,
                                    const MutableSpan<bool> modified_grids)
 {
   PRF_scope(ProfileCategory::Editor);
+  /* Compression publishes indices and positions asynchronously. Wait before reading either
+   * array, including its size, just as restore_position_mesh does. */
+  undo_data.ensure_compression_complete();
   const int nodes_num = undo_data.compressed_indices.size();
 
   struct LocalData {
@@ -1302,13 +1305,14 @@ enum class SculptLayerPersistentRestoreResult {
 static bool sculpt_layer_undo_persistent_payload_swap(MultiresSculptLayer &layer,
                                                        PositionUndoStorage &undo_data)
 {
+  /* The worker publishes both compressed arrays together. Inspecting their lengths before the
+   * acquire/wait can select a fallback or an empty transaction while compression is in flight. */
+  undo_data.ensure_compression_complete();
   if (!undo_data.sculpt_layer_undo || undo_data.sculpt_layer_grid_area <= 0 ||
       undo_data.compressed_layer_disps.size() != undo_data.compressed_indices.size())
   {
     return false;
   }
-
-  undo_data.ensure_compression_complete();
 
   const int area = undo_data.sculpt_layer_grid_area;
   const int side = bke::subdiv::grid_size_from_level(layer.level);
@@ -3705,3 +3709,4 @@ std::optional<Span<float>> orig_mask_data_lookup_grids(const Object & /*object*/
 }  // namespace ed::sculpt_paint
 
 }  // namespace blender
+
