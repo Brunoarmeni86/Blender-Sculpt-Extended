@@ -24,6 +24,14 @@ struct MultiresFaceSetGrid;
 
 namespace bke::multires_layers {
 
+/* Zero is reserved for new BMesh elements. V2 avoids interpreting legacy zero-based IDs as
+ * the first surviving corner. Seed these attributes before converting the mesh to BMesh. */
+inline constexpr char corner_id_attribute[] = ".sculpt_layer_corner_id_v2";
+inline constexpr char corner_prev_attribute[] = ".sculpt_layer_corner_prev_v2";
+inline constexpr char corner_next_attribute[] = ".sculpt_layer_corner_next_v2";
+inline constexpr char corner_face_size_attribute[] = ".sculpt_layer_face_size_v2";
+inline constexpr char vertex_id_attribute[] = ".sculpt_layer_vertex_id";
+
 /** True when a layer contributes to evaluation at all: visible, finite and non-zero strength.
  * This is useful for performance-sensitive callers which want to pre-filter layers before
  * iterating over every grid/sample. */
@@ -75,7 +83,9 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
 void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh);
 /** Remap layer grids from the hidden identity attribute after a topology edit.
  * Duplicated or invalid identities are treated as new corners with zero delta. */
-bool remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh);
+bool remap_after_topology_edit(MultiresModifierData &mmd,
+                               Mesh &mesh,
+                               BitVector<> *r_reset_corners = nullptr);
 /** Recording requires a visible layer with finite non-zero strength at a valid sculpt level, including L0. */
 bool can_record(const MultiresModifierData &mmd, const Mesh &mesh);
 /** Bake contributions into the native CD_MDISPS base. Reject hidden variants,
@@ -189,3 +199,4 @@ bool visible_direct_delta(Object &object,
 
 }  // namespace bke::multires_layers
 }  // namespace blender
+
