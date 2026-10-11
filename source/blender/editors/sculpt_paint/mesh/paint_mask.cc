@@ -528,7 +528,7 @@ static void fill_mask_grids(Main &bmain,
     return;
   }
   pbvh.tag_masks_changed(changed_nodes);
-  multires_mark_as_modified(&depsgraph, &object, MULTIRES_COORDS_MODIFIED);
+  multires_mark_as_modified(&depsgraph, &object, MULTIRES_MASK_MODIFIED);
   changed_nodes.foreach_index([&](const int i) {
     BKE_pbvh_node_fully_masked_set(nodes[i], value == 1.0f);
     BKE_pbvh_node_fully_unmasked_set(nodes[i], value == 0.0f);
@@ -648,7 +648,7 @@ static void invert_mask_grids(Main &bmain,
       exec_mode::grain_size(1));
   pbvh.tag_masks_changed(node_mask);
 
-  multires_mark_as_modified(&depsgraph, &object, MULTIRES_COORDS_MODIFIED);
+  multires_mark_as_modified(&depsgraph, &object, MULTIRES_MASK_MODIFIED);
 }
 
 static void invert_mask_bmesh(const Depsgraph &depsgraph,
@@ -915,7 +915,7 @@ static void gesture_end(bContext &C, gesture::GestureData &gesture_data)
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(&C);
   Object &object = *gesture_data.vc.obact;
   if (bke::object::pbvh_get(object)->type() == bke::pbvh::Type::Grids) {
-    multires_mark_as_modified(depsgraph, &object, MULTIRES_COORDS_MODIFIED);
+    multires_mark_as_modified(depsgraph, &object, MULTIRES_MASK_MODIFIED);
   }
   undo::push_end(object);
 }

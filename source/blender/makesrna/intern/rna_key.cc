@@ -34,6 +34,8 @@ const EnumPropertyItem rna_enum_keyblock_type_items[] = {
 
 #ifdef RNA_RUNTIME
 
+#  include "BKE_multires_sculpt_layers.hh"
+
 #  include <algorithm>
 #  include <cstddef>
 #  include <fmt/format.h>
@@ -45,7 +47,6 @@ const EnumPropertyItem rna_enum_keyblock_type_items[] = {
 #  include "DNA_mesh_types.h"
 #  include "DNA_object_types.h"
 
-#  include "BLI_listbase.h"
 #  include "BLI_string.h"
 #  include "BLI_string_utf8.h"
 #  include "BLI_string_utils.hh"
@@ -726,6 +727,7 @@ static std::optional<std::string> rna_ShapeKey_path(const PointerRNA *ptr)
 
 static void rna_Key_update_data(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
 {
+  blender::bke::multires_layers::shape_key_fast_cache_invalidate();
   Key *key = id_cast<Key *>(ptr->owner_id);
   Object *ob;
 
@@ -734,6 +736,46 @@ static void rna_Key_update_data(Main *bmain, Scene * /*scene*/, PointerRNA *ptr)
   {
     if (BKE_key_from_object(ob) == key) {
       DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+      WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ob);
+    }
+  }
+}
+
+static void rna_ShapeKey_value_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  Key *key = reinterpret_cast<Key *>(ptr->owner_id);
+  KeyBlock *key_block = static_cast<KeyBlock *>(ptr->data);
+  if (key == nullptr || key_block == nullptr) {
+    rna_Key_update_data(bmain, scene, ptr);
+    return;
+  }
+
+  bool found_user = false;
+  bool all_fast = true;
+
+  for (Object *ob = static_cast<Object *>(bmain->objects.first); ob != nullptr;
+       ob = reinterpret_cast<Object *>(ob->id.next))
+  {
+    if (BKE_key_from_object(ob) != key) {
+      continue;
+    }
+    found_user = true;
+    if (!blender::bke::multires_layers::shape_key_fast_update(*ob, *key, *key_block)) {
+      all_fast = false;
+      break;
+    }
+  }
+
+  if (!found_user || !all_fast) {
+    rna_Key_update_data(bmain, scene, ptr);
+    return;
+  }
+
+  /* Live Multires CCG was updated in-place: deliberately avoid ID_RECALC_GEOMETRY. */
+  for (Object *ob = static_cast<Object *>(bmain->objects.first); ob != nullptr;
+       ob = reinterpret_cast<Object *>(ob->id.next))
+  {
+    if (BKE_key_from_object(ob) == key) {
       WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ob);
     }
   }
@@ -987,7 +1029,7 @@ static void rna_def_keyblock(BlenderRNA *brna)
       prop, nullptr, "rna_ShapeKey_value_set", "rna_ShapeKey_value_range");
   RNA_def_property_ui_range(prop, -10.0f, 10.0f, 10, 3);
   RNA_def_property_ui_text(prop, "Value", "Value of shape key at the current frame");
-  RNA_def_property_update(prop, ND_KEYS, "rna_Key_update_data");
+  RNA_def_property_update(prop, ND_KEYS, "rna_ShapeKey_value_update");
 
   prop = RNA_def_property(srna, "interpolation", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_sdna(prop, nullptr, "type");

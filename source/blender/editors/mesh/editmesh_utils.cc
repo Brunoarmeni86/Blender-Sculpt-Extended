@@ -12,6 +12,7 @@
 
 #include "DNA_key_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 
 #include "BLI_array.hh"
@@ -27,6 +28,8 @@
 #include "BKE_editmesh_bvh.hh"
 #include "BKE_layer.hh"
 #include "BKE_mesh.hh"
+#include "BKE_modifier.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_mesh_mapping.hh"
 #include "BKE_report.hh"
 
@@ -365,6 +368,16 @@ void EDBM_mesh_load_ex(Main *bmain, Object *ob, bool free_data)
   params.calc_object_remap = true;
   params.update_shapekey_indices = !free_data;
   BM_mesh_bm_to_me(bmain, bm, mesh, &params);
+  for (ModifierData &md : ob->modifiers) {
+    if (md.type == eModifierType_Multires) {
+      auto *mmd = reinterpret_cast<MultiresModifierData *>(&md);
+      if (!mmd->sculpt_layers.is_empty()) {
+        if (!bke::multires_layers::base_remap_after_topology_edit(*mmd, *mesh)) {
+          BKE_modifier_set_error(ob, &md, "L0 layer remap failed; layer data retained");
+        }
+      }
+    }
+  }
 }
 
 void EDBM_mesh_load(Main *bmain, Object *ob)

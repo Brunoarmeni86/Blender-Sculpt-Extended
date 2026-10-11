@@ -126,6 +126,17 @@ void shrinkwrapModifier_deform(ShrinkwrapModifierData *smd,
                                float (*vertexCos)[3],
                                int numVerts);
 
+/** Native modifier algorithms for Multires grid samples. Weights already include inversion.
+ * Projection positions and normals must match positions for normal projection. */
+bool shrinkwrap_samples_deform(const ModifierEvalContext &ctx,
+                               ShrinkwrapModifierData &smd,
+                               MutableSpan<float3> positions,
+                               Span<float3> normals,
+                               Span<float3> projection_positions,
+                               Span<float> weights);
+/** Same subdivision reference coordinates as the normal modifier. */
+Array<float3> shrinkwrap_subdivided_positions(Mesh &mesh, int subdivision_level);
+
 struct ShrinkwrapParams {
   /** Shrink target. */
   Object *target = nullptr;

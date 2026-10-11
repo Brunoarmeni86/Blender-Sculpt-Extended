@@ -9,6 +9,7 @@
 #pragma once
 
 #include <optional>
+#include <memory>
 
 #include "BKE_brush.hh"
 #include "BKE_bvhutils.hh"
@@ -34,7 +35,12 @@
 
 namespace blender {
 
+struct MultiresSculptLayer;
+
 namespace ed::sculpt_paint {
+namespace brushes {
+struct ElasticGrabWeightCache;
+}
 namespace auto_mask {
 struct Cache;
 }
@@ -113,6 +119,8 @@ class PositionDeformData {
    * Positions from the original mesh. Not the same as #eval if there are deform modifiers.
    */
   MutableSpan<float3> orig_;
+  MultiresSculptLayer *base_layer_ = nullptr;
+  bool base_recording_blocked_ = false;
 
   std::optional<ShapeKeyData> shape_key_data_;
 
@@ -213,6 +221,10 @@ struct StrokeToggleSettings {
  * needed for individual brush strokes.
  */
 struct StrokeCache {
+  /* SCULPT_ELASTIC_GRAB_EXACT_V2: freed with this stroke, never stored in DNA. */
+  std::shared_ptr<brushes::ElasticGrabWeightCache> elastic_grab_weight_cache;
+  /* SCULPT_ELASTIC_ACCELERATED_V2: approximate weights must never share Exact entries. */
+  std::shared_ptr<brushes::ElasticGrabWeightCache> elastic_grab_accelerated_cache;
   /* Invariants */
   float initial_radius = 0.0f;
   float3 scale = float3(0);
@@ -871,6 +883,13 @@ std::optional<Span<float4>> orig_color_data_lookup_mesh(const Object &object,
 inline Span<float4> orig_color_data_get_mesh(const Object &object, const bke::pbvh::MeshNode &node)
 {
   return *orig_color_data_lookup_mesh(object, node);
+}
+std::optional<Span<float4>> orig_color_data_lookup_grids(const Object &object,
+                                                         const bke::pbvh::GridsNode &node);
+inline Span<float4> orig_color_data_get_grids(const Object &object,
+                                              const bke::pbvh::GridsNode &node)
+{
+  return *orig_color_data_lookup_grids(object, node);
 }
 
 std::optional<Span<int>> orig_face_set_data_lookup_mesh(const Object &object,

@@ -11,6 +11,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 #include <variant>
@@ -1037,6 +1038,24 @@ static void apply_but_func(bContext *C, Button *but)
 }
 
 /* typically call apply_but_undo(), apply_but_autokey() */
+/* SCULPT_LAYER_UNDO_CONTROLS_V36: preserve normal RNA/owner/HUD guards. */
+static bool sculpt_controls_property_undo(const Button *but)
+{
+  const char *enabled = std::getenv("BLENDER_SCULPT_LAYER_UNDO_CONTROLS");
+  if (!enabled || enabled[0] != '1' || !(but->flag & BUT_UNDO) ||
+      !but->rnaprop || !but->rnapoin.owner_id || !but->rnapoin.type ||
+      !ID_CHECK_UNDO(but->rnapoin.owner_id) || !RNA_struct_undo_check(but->rnapoin.type))
+  {
+    return false;
+  }
+  bContext *C = static_cast<bContext *>(but->block->evil_C);
+  const ARegion *region = CTX_wm_region(C);
+  return (!region || region->regiontype != RGN_TYPE_HUD) &&
+         BKE_paintmode_get_active_from_context(C) == PaintMode::Sculpt &&
+         (STREQ(RNA_struct_identifier(but->rnapoin.type), "MultiresSculptLayer") ||
+          STREQ(RNA_struct_identifier(but->rnapoin.type), "MultiresModifier"));
+}
+
 static void apply_but_undo(Button *but, bool use_undo_grouped = false)
 {
   if (!(but->flag & BUT_UNDO)) {
@@ -1052,6 +1071,18 @@ static void apply_but_undo(Button *but, bool use_undo_grouped = false)
   std::optional<StringRef> str;
   size_t str_len_clip = SIZE_MAX - 1;
   bool skip_undo = false;
+  /* SCULPT_LAYERS_UI_UNDO_V1: narrowly opt in to normal UI memfile undo. */
+  const char *layer_undo_env = std::getenv("BLENDER_SCULPT_LAYER_UI_UNDO");
+  const bool sculpt_layer_property_undo = sculpt_controls_property_undo(but) || (
+      layer_undo_env && layer_undo_env[0] == '1' && but->rnaprop &&
+      but->rnapoin.owner_id && but->rnapoin.type &&
+      ID_CHECK_UNDO(but->rnapoin.owner_id) && RNA_struct_undo_check(but->rnapoin.type) &&
+      STREQ(RNA_struct_identifier(but->rnapoin.type), "MultiresSculptLayer") &&
+      (STREQ(RNA_property_identifier(but->rnaprop), "strength") ||
+       STREQ(RNA_property_identifier(but->rnaprop), "visible")) &&
+      BKE_paintmode_get_active_from_context(static_cast<bContext *>(but->block->evil_C)) ==
+          PaintMode::Sculpt);
+
 
   /* define which string to use for undo */
   if (but->type == ButtonType::Menu) {
@@ -1086,7 +1117,7 @@ static void apply_but_undo(Button *but, bool use_undo_grouped = false)
     }
     else {
       ID *id = but->rnapoin.owner_id;
-      if (!ED_undo_is_legacy_compatible_for_property(
+      if (!sculpt_layer_property_undo && !ED_undo_is_legacy_compatible_for_property(
               static_cast<bContext *>(but->block->evil_C), id, but->rnapoin))
       {
         skip_undo = true;
@@ -1094,7 +1125,7 @@ static void apply_but_undo(Button *but, bool use_undo_grouped = false)
     }
   }
 
-  if (skip_undo == false) {
+  if (skip_undo == false && !sculpt_layer_property_undo) {
     /* XXX: disable all undo pushes from UI changes from sculpt mode as they cause memfile undo
      * steps to be written which cause lag: #71434. */
     if (BKE_paintmode_get_active_from_context(static_cast<bContext *>(but->block->evil_C)) ==
@@ -1112,6 +1143,13 @@ static void apply_but_undo(Button *but, bool use_undo_grouped = false)
   AfterFunc *after = afterfunc_new();
   str->copy_utf8_truncated(after->undostr, min_zz(str_len_clip + 1, sizeof(after->undostr)));
   after->use_undo_grouped = use_undo_grouped;
+  if (sculpt_controls_property_undo(but) && after->undostr[0]) {
+    const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
+    if (trace && trace[0] && trace[0] != '0') {
+      std::printf("[LAYER_UNDO_CONTROLS] v=36 mode=QUEUE property=%s action=%s\n",
+                  RNA_property_identifier(but->rnaprop), after->undostr);
+    }
+  }
 }
 
 static void apply_but_autokey(bContext *C, Button *but)
@@ -2389,6 +2427,10 @@ static void apply_but(
 #endif
   }
 
+  if (!data->cancel && sculpt_controls_property_undo(but)) {
+    ED_undo_sculpt_controls_begin(C);
+  }
+
   /* ensures we are writing actual values */
   char *editstr = but->editstr;
   double *editval = but->editval;
@@ -2914,6 +2956,9 @@ static void but_paste_menu(bContext *C, Button *but, const StringRef value)
     WM_global_reportf(
         RPT_ERROR, "Paste of \"%s\": cannot assign value to property", std::string(value).c_str());
     return;
+  }
+  if (sculpt_controls_property_undo(but)) {
+    ED_undo_sculpt_controls_begin(C);
   }
   RNA_property_enum_set(&but->rnapoin, prop, item_index);
   RNA_property_update(C, &but->rnapoin, prop);
@@ -10811,10 +10856,13 @@ static int handle_uilist_event(bContext *C, const wmEvent *event, ARegion *regio
       CLAMP(value, min, max);
 
       if (value != value_orig) {
+        Button *but = button_first(listbox->block);
+        if (but && but->type == ButtonType::ListRow && sculpt_controls_property_undo(but)) {
+          ED_undo_sculpt_controls_begin(C);
+        }
         RNA_property_int_set(&listbox->rnapoin, listbox->rnaprop, value);
         RNA_property_update(C, &listbox->rnapoin, listbox->rnaprop);
 
-        Button *but = button_first(listbox->block);
         if (but && but->type == ButtonType::ListRow) {
           apply_but_undo(but, true);
         }

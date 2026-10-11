@@ -30,6 +30,7 @@ struct BVHTreeFromMesh;
 
 struct LineartModifierRuntime;
 struct Mesh;
+struct MDisps;
 
 /* WARNING ALERT! TYPEDEF VALUES ARE WRITTEN IN FILES! SO DO NOT CHANGE!
  * (ONLY ADD NEW ITEMS AT THE END)
@@ -1215,6 +1216,55 @@ enum MultiresModifierFlag : char {
 };
 ENUM_OPERATORS(MultiresModifierFlag);
 
+struct MultiresSculptLayer {
+  MultiresSculptLayer *next = nullptr;
+  MultiresSculptLayer *prev = nullptr;
+  char name[64] = "Layer";
+  float strength = 1.0f;
+  int flag = 0;
+  int level = -1;
+  int grids_num = 0;
+  MDisps *disps = nullptr;
+  /* Lazy cage-space offsets, independent of the high-resolution grids. */
+  float (*base_deltas)[3] = nullptr;
+  int base_verts_num = 0;
+  char _pad_base[4] = {};
+  /* Lightweight organizational folder metadata.
+   * group_id == 0 means that the layer is not in a group. */
+  int group_id = 0;
+  int group_flag = 0;
+  char group_name[64] = "";
+
+};
+
+struct MultiresColorGrid {
+  float (*colors)[4];
+  int totcolor;
+  int level;
+};
+
+/* Persistent per-CCG-grid Face Set data.
+ * Uniform grids keep ids == nullptr and store only uniform_id.
+ * ids is allocated lazily only when a grid contains a high-resolution boundary. */
+struct MultiresFaceSetGrid {
+  int *ids = nullptr;
+  int totid = 0;
+  int level = 0;
+  int uniform_id = 1;
+  char _pad[4] = {};
+};
+
+enum MultiresSculptLayerFlag {
+  MULTIRES_SCULPT_LAYER_VISIBLE = (1 << 0),
+  /* Used only while a containing Sculpt Layer group is hidden. */
+  MULTIRES_SCULPT_LAYER_GROUP_SAVED_VISIBLE = (1 << 1),
+};
+
+enum MultiresSculptLayerGroupFlag {
+  MULTIRES_SCULPT_LAYER_GROUP_HIDDEN = (1 << 0),
+  MULTIRES_SCULPT_LAYER_GROUP_COLLAPSED = (1 << 1),
+};
+
 struct MultiresModifierData {
   DNA_DEFINE_CXX_METHODS(MultiresModifierData)
 
@@ -1229,6 +1279,51 @@ struct MultiresModifierData {
   short uv_smooth = SUBSURF_UV_SMOOTH_PRESERVE_BOUNDARIES;
   short boundary_smooth = SUBSURF_BOUNDARY_SMOOTH_ALL;
   char _pad2[2] = {};
+
+  /* Persistent additive sculpt layers. The base displacement remains in CD_MDISPS. */
+  ListBaseT<MultiresSculptLayer> sculpt_layers = {nullptr, nullptr};
+  int sculpt_layer_active = 0;
+  /** Explicit recording state. Old files default to recording disabled. */
+  int sculpt_layer_recording = 0;
+
+  /* Persistent per-grid RGBA paint data for multires sculpting. */
+  MultiresColorGrid *sculpt_color_grids = nullptr;
+  int sculpt_color_grids_num = 0;
+  int sculpt_color_level = 0;
+
+  /* Face Set master data at the highest stored Multires resolution. Lower
+   * sculpt levels sample this data instead of destructively downsampling it. */
+  MultiresFaceSetGrid *sculpt_face_set_grids = nullptr;
+  int sculpt_face_set_grids_num = 0;
+  int sculpt_face_set_level = 0;
+
+  /* Optional procedural texture displacement evaluated directly by Multires. */
+  struct Tex *sculpt_displacement_texture = nullptr;
+  char sculpt_displacement_uv_layer[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";
+  float sculpt_displacement_strength = 0.0f;
+  float sculpt_displacement_midlevel = 0.5f;
+  int sculpt_displacement_enabled = 0;
+  /* Zero deliberately means UV so older custom builds retain their mapping. */
+  int sculpt_displacement_mapping = 0;
+  int _pad_sculpt_displacement = 0;
+  struct Object *sculpt_displacement_map_object = nullptr;
+  char sculpt_displacement_map_bone[64] = "";
+
+  /* Standard Shrinkwrap options, evaluated after Multires displacement. */
+  struct Object *sculpt_shrinkwrap_target = nullptr;
+  float sculpt_shrinkwrap_offset = 0.0f;
+  float sculpt_shrinkwrap_strength = 1.0f;
+  int sculpt_shrinkwrap_enabled = 0;
+  int _pad_sculpt_shrinkwrap = 0;
+  struct Object *sculpt_shrinkwrap_aux_target = nullptr;
+  char sculpt_shrinkwrap_vgroup[64] = "";
+  float sculpt_shrinkwrap_project_limit = 0.0f;
+  short sculpt_shrinkwrap_method = MOD_SHRINKWRAP_NEAREST_SURFACE;
+  char sculpt_shrinkwrap_options = MOD_SHRINKWRAP_PROJECT_ALLOW_POS_DIR;
+  char sculpt_shrinkwrap_mode = MOD_SHRINKWRAP_ON_SURFACE;
+  char sculpt_shrinkwrap_axis = 0;
+  char sculpt_shrinkwrap_subsurf_levels = 0;
+  char _pad_sculpt_shrinkwrap_options[6] = {};
 };
 
 /** DEPRECATED: only used for versioning. */

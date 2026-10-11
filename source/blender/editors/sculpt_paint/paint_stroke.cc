@@ -7,6 +7,7 @@
  */
 
 #include <algorithm>
+#include <chrono>
 #include <cfloat>
 #include <cmath>
 #include <fmt/format.h>
@@ -54,6 +55,26 @@
 #include "mesh/sculpt_intern.hh"
 
 namespace blender::ed::sculpt_paint {
+
+/* SCULPT_ADAPTIVE_STROKE_V1 */
+bool sculpt_adaptive_stroke_supported(const Brush &brush)
+{
+  if (!(brush.flag2 & BRUSH_SCULPT_ADAPTIVE_STROKE) ||
+      brush.stroke_method != BRUSH_STROKE_SPACE || (brush.flag & BRUSH_SCENE_SPACING)) {
+    return false;
+  }
+  return ELEM(brush.sculpt_brush_type,
+              SCULPT_BRUSH_TYPE_DRAW,
+              SCULPT_BRUSH_TYPE_DRAW_SHARP,
+              SCULPT_BRUSH_TYPE_CLAY,
+              SCULPT_BRUSH_TYPE_CLAY_STRIPS);
+}
+
+bool sculpt_uniform_accumulation_enabled(const Brush &brush)
+{
+  return sculpt_adaptive_stroke_supported(brush) &&
+         !(brush.flag2 & BRUSH_SCULPT_NO_UNIFORM_ACCUMULATION);
+}
 
 /*** Cursors ***/
 static void paint_draw_smooth_cursor(bContext *C,
@@ -509,6 +530,17 @@ void PaintStroke::add_step(bContext *C, wmOperator *op, const float2 mval, float
   this->last_mouse_position = mval;
   last_pressure_ = pressure;
 
+  if (mode == PaintMode::Sculpt && sculpt_adaptive_stroke_supported(brush) &&
+      tot_samples_ == 0 && !adaptive_emitting_) {
+    adaptive_sampler_.reset(mval.x, mval.y, pressure);
+    adaptive_filter_.reset(mval.x, mval.y, std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    /* The initial stamp has unit weight; moving dabs use distance weights. */
+    if (sculpt_uniform_accumulation_enabled(brush)) {
+      paint_runtime->overlap_factor = 1.0f;
+    }
+  }
+
   if (paint_stroke_use_scene_spacing(brush, mode)) {
     BLI_assert(mode != PaintMode::Texture2D);
     float3 world_space_position;
@@ -763,6 +795,87 @@ int PaintStroke::space_stroke(bContext *C,
   const Paint &paint = *BKE_paint_get_active_from_context(C);
   const PaintMode mode = BKE_paintmode_get_active_from_context(C);
   const Brush &brush = *BKE_paint_brush_for_read(&paint);
+
+  /* SCULPT_ADAPTIVE_STROKE_V1: fixed distance distribution, independent
+   * of input event frequency. Pressure changes are retained even without a dab.
+   * Pressure still controls radius/strength through the existing brush curves. */
+  if (mode == PaintMode::Sculpt && sculpt_adaptive_stroke_supported(brush)) {
+    if (!adaptive_sampler_.initialized) {
+      adaptive_sampler_.reset(last_mouse_position.x, last_mouse_position.y, last_pressure_);
+    }
+    if (adaptive_spacing_ == 0.0) {
+      /* Freeze spacing for this stroke; adaptive radius spacing is a later phase. */
+      const double radius = std::max(1.0f, BKE_brush_radius_get(&paint, &brush));
+      adaptive_spacing_ = std::max(double(zoom_2d_),
+                                  radius * double(brush.spacing) * zoom_2d_ / 50.0);
+      adaptive_reference_spacing_ = std::max(double(zoom_2d_),
+                                            radius * 10.0 * zoom_2d_ / 50.0);
+    }
+    const bool uniform = sculpt_uniform_accumulation_enabled(brush);
+    const bool interpolate = !(brush.flag2 & BRUSH_SCULPT_NO_PRESSURE_INTERPOLATION);
+    const bool dynamic_spacing = brush.flag2 & BRUSH_SCULPT_ADAPTIVE_SPACING;
+    const bool stabilize = (brush.flag2 & BRUSH_SCULPT_ADAPTIVE_STABILIZATION) &&
+                           !(brush.flag & BRUSH_SMOOTH_STROKE);
+    /* SCULPT_ADAPTIVE_STROKE_V2: the original V1 path remains below. */
+    if (dynamic_spacing || stabilize) {
+      const double now = std::chrono::duration<double>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      const double radius = std::max(1.0f, BKE_brush_radius_get(&paint, &brush));
+      double target_x = final_mouse.x, target_y = final_mouse.y;
+      if (stabilize) {
+        if (!adaptive_filter_.initialized) {
+          adaptive_filter_.reset(adaptive_sampler_.x, adaptive_sampler_.y, now);
+        }
+        const int strength = brush.flag2 & BRUSH_SCULPT_STABILIZATION_STRONG ? 2 :
+                             brush.flag2 & BRUSH_SCULPT_STABILIZATION_LIGHT ? 1 : 0;
+        if (adaptive_finishing_) {
+          adaptive_filter_.reset(target_x, target_y, now);
+        }
+        else {
+          adaptive_filter_.update(target_x, target_y, now, radius, strength);
+          target_x = adaptive_filter_.x;
+          target_y = adaptive_filter_.y;
+        }
+      }
+      struct Spacing { double spacing, reference; };
+      auto spacing_at_pressure = [&](double p) {
+        if (!dynamic_spacing) {
+          return Spacing{adaptive_spacing_, adaptive_reference_spacing_};
+        }
+        const double size_factor = BKE_brush_use_size_pressure(&brush) ?
+            std::max(0.0f, BKE_curvemapping_evaluateF(brush.curve_size, 0, float(p))) : 1.0;
+        const double effective_radius = std::max(1.0, radius * size_factor);
+        return Spacing{std::max(1.0, effective_radius * brush.spacing * zoom_2d_ / 50.0),
+                       std::max(1.0, effective_radius * 10.0 * zoom_2d_ / 50.0)};
+      };
+      auto emit = [&](double x, double y, double p, double dose, double fraction, double distance) {
+        paint_runtime->overlap_factor = uniform ? float(dose) :
+            paint_stroke_integrate_overlap(brush, 1.0f) * float(fraction);
+        stroke_distance_ += float(distance / zoom_2d_);
+        /* The sampler keeps the pressure history, not this emitted dab. */
+        adaptive_emitting_ = true;
+        this->add_step(C, op, float2(float(x), float(y)), float(p));
+        adaptive_emitting_ = false;
+      };
+      int count = adaptive_sampler_.sample_adaptive(
+          target_x, target_y, final_pressure, interpolate, spacing_at_pressure, emit);
+      if (adaptive_finishing_) {
+        count += adaptive_sampler_.finish(emit);
+      }
+      return count;
+    }
+    return adaptive_sampler_.sample(
+        final_mouse.x, final_mouse.y, final_pressure, adaptive_spacing_, interpolate,
+        [&](double x, double y, double p) {
+          paint_runtime->overlap_factor = uniform ?
+              float(adaptive_spacing_ / adaptive_reference_spacing_) :
+              paint_stroke_integrate_overlap(brush, 1.0f);
+          stroke_distance_ += float(adaptive_spacing_ / zoom_2d_);
+          adaptive_emitting_ = true;
+          this->add_step(C, op, float2(float(x), float(y)), float(p));
+          adaptive_emitting_ = false;
+        });
+  }
 
   float2 mouse_delta = final_mouse - this->last_mouse_position;
   float length = normalize_v2(mouse_delta);
@@ -1543,6 +1656,13 @@ wmOperatorStatus PaintStroke::modal(bContext *C, wmOperator *op, const wmEvent *
       mouse = {float(event->mval[0]), float(event->mval[1])};
       if (this->constrain_line) {
         paint_stroke_line_constrain(this->last_mouse_position, this->constrained_pos, mouse);
+      }
+      if (stroke_started_ && mode == PaintMode::Sculpt &&
+          sculpt_adaptive_stroke_supported(*br) &&
+          (br->flag2 & (BRUSH_SCULPT_ADAPTIVE_SPACING | BRUSH_SCULPT_ADAPTIVE_STABILIZATION))) {
+        adaptive_finishing_ = true;
+        this->space_stroke(C, op, mouse, float(adaptive_sampler_.pressure));
+        adaptive_finishing_ = false;
       }
       this->line_end(C, op, mouse);
       this->done(C, false);

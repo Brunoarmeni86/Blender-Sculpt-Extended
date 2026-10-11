@@ -6,6 +6,11 @@
  * \ingroup bke
  */
 
+#include "BLI_time.h"
+#include <cstdlib>
+#include <cstdio>
+#include <algorithm>
+
 #include <cfloat>
 
 #include "BLI_array_utils.hh"
@@ -556,6 +561,11 @@ Tree Tree::from_grids(const Mesh &base_mesh, const SubdivCCG &subdiv_ccg)
 
   update_mask_grids(subdiv_ccg, nodes.index_range(), pbvh);
 
+  /* Building the PBVH needs to tag every node so bounds, normals and draw data are initialized.
+   * Those tags are not sculpt edits and must not seed the persistent V3 change journal.
+   * Otherwise the first Multires flush incorrectly reports the entire PBVH as position-dirty. */
+  pbvh.clear_changes();
+
   return pbvh;
 }
 
@@ -609,21 +619,80 @@ Tree::~Tree()
   pixels_free(this);
 }
 
+/* V4.4b2 sparse PBVH journal.
+ *
+ * Recording is proportional to the nodes actually tagged. Duplicate node IDs are allowed while
+ * recording because that keeps the hot tag path cheap; changed_nodes() sorts and deduplicates only
+ * when the journal is consumed. */
+static void journal_nodes(Vector<int> &journal, const IndexMask &node_mask)
+{
+  journal.reserve(journal.size() + node_mask.size());
+  node_mask.foreach_index([&](const int i) { journal.append(i); });
+}
+
+static IndexMask journal_mask(const Span<int> journal, IndexMaskMemory &memory)
+{
+  if (journal.is_empty()) {
+    return {};
+  }
+
+  Vector<int> indices;
+  indices.reserve(journal.size());
+  indices.extend(journal);
+  std::sort(indices.begin(), indices.end());
+
+  const auto unique_end = std::unique(indices.begin(), indices.end());
+  const int64_t unique_num = unique_end - indices.begin();
+  return IndexMask::from_indices(indices.as_span().take_front(unique_num), memory);
+}
+
 void Tree::tag_positions_changed(const IndexMask &node_mask)
 {
-  bounds_dirty_.resize(std::max(bounds_dirty_.size(), node_mask.min_array_size()), false);
-  normals_dirty_.resize(std::max(normals_dirty_.size(), node_mask.min_array_size()), false);
-  node_mask.set_bits(bounds_dirty_);
-  node_mask.set_bits(normals_dirty_);
+  /* Sculpt Mesh V2 sparse operational dirty sets.
+   * Keep tagging proportional to the PBVH nodes actually touched by the stroke.
+   * Duplicates are intentionally cheap here and are removed by journal_mask()
+   * only when bounds/normals are consumed. */
+  journal_nodes(bounds_dirty_, node_mask);
+  journal_nodes(normals_dirty_, node_mask);
+  journal_nodes(change_positions_, node_mask);
   if (this->draw_data) {
     this->draw_data->tag_positions_changed(node_mask);
   }
+}
+
+IndexMask Tree::changed_nodes(const ChangeType type, IndexMaskMemory &memory) const
+{
+  switch (type) {
+    case ChangeType::Positions:
+      return journal_mask(change_positions_, memory);
+    case ChangeType::Masks:
+      return journal_mask(change_masks_, memory);
+    case ChangeType::Visibility:
+      return journal_mask(change_visibility_, memory);
+    case ChangeType::FaceSets:
+      return journal_mask(change_face_sets_, memory);
+    case ChangeType::Topology:
+      return journal_mask(change_topology_, memory);
+  }
+  BLI_assert_unreachable();
+  return {};
+}
+
+void Tree::clear_changes()
+{
+  /* Vector::clear() keeps capacity, so repeated sculpt flushes do not scan PBVH-sized bitsets. */
+  change_positions_.clear();
+  change_masks_.clear();
+  change_visibility_.clear();
+  change_face_sets_.clear();
+  change_topology_.clear();
 }
 
 void Tree::tag_visibility_changed(const IndexMask &node_mask)
 {
   visibility_dirty_.resize(std::max(visibility_dirty_.size(), node_mask.min_array_size()), false);
   node_mask.set_bits(visibility_dirty_);
+  journal_nodes(change_visibility_, node_mask);
   if (this->draw_data) {
     this->draw_data->tag_visibility_changed(node_mask);
   }
@@ -631,6 +700,7 @@ void Tree::tag_visibility_changed(const IndexMask &node_mask)
 
 void Tree::tag_topology_changed(const IndexMask &node_mask)
 {
+  journal_nodes(change_topology_, node_mask);
   if (this->draw_data) {
     this->draw_data->tag_topology_changed(node_mask);
   }
@@ -638,6 +708,7 @@ void Tree::tag_topology_changed(const IndexMask &node_mask)
 
 void Tree::tag_face_sets_changed(const IndexMask &node_mask)
 {
+  journal_nodes(change_face_sets_, node_mask);
   if (this->draw_data) {
     this->draw_data->tag_face_sets_changed(node_mask);
   }
@@ -645,6 +716,7 @@ void Tree::tag_face_sets_changed(const IndexMask &node_mask)
 
 void Tree::tag_masks_changed(const IndexMask &node_mask)
 {
+  journal_nodes(change_masks_, node_mask);
   if (this->draw_data) {
     this->draw_data->tag_masks_changed(node_mask);
   }
@@ -1130,6 +1202,16 @@ static void calc_node_vert_normals(const GroupedSpan<int> vert_to_face_map,
       exec_mode::grain_size(1));
 }
 
+/* Sculpt Mesh V3 Deep Probe: diagnostics only, enabled unless explicitly set to 0. */
+static bool sculpt_mesh_v3deep_enabled()
+{
+  static const bool enabled = []() {
+    const char *value = std::getenv("BLENDER_SCULPT_V3_DEEP_PROBE");
+    return !value || value[0] != '0';
+  }();
+  return enabled;
+}
+
 static void update_normals_mesh(Object &object_orig,
                                 Object &object_eval,
                                 const Span<MeshNode> nodes,
@@ -1147,6 +1229,17 @@ static void update_normals_mesh(Object &object_orig,
    * Those boundary face and vertex indices are deduplicated with #VectorSet in order to avoid
    * duplicate work recalculation for the same vertex, and to make parallel storage for vertices
    * during recalculation thread-safe. */
+  /* Sculpt Mesh V3 Local Normals Fix: clean caches need no writable update.
+   * Preserve full recalculation when either cache is dirty, even with no tagged nodes. */
+  if (nodes_to_update.is_empty() &&
+      !vert_normals_cache_eval(object_orig, object_eval).is_dirty() &&
+      !face_normals_cache_eval(object_orig, object_eval).is_dirty())
+  {
+    return;
+  }
+
+  const bool v3deep = sculpt_mesh_v3deep_enabled();
+  const double v3deep_start = v3deep ? BLI_time_now_seconds() : 0.0;
   Mesh &mesh = *id_cast<Mesh *>(object_orig.data);
   const Span<float3> positions = bke::pbvh::vert_positions_eval_from_eval(object_eval);
   const OffsetIndices faces = mesh.faces();
@@ -1158,6 +1251,9 @@ static void update_normals_mesh(Object &object_orig,
   SharedCache<Vector<float3>> &face_normals_cache = face_normals_cache_eval_for_write(object_orig,
                                                                                       object_eval);
 
+  const bool v3deep_face_full = v3deep && face_normals_cache.is_dirty();
+  const bool v3deep_vert_full = v3deep && vert_normals_cache.is_dirty();
+  const double v3deep_boundary_start = v3deep ? BLI_time_now_seconds() : 0.0;
   VectorSet<int> boundary_faces;
   nodes_to_update.foreach_index([&](const int i) {
     const MeshNode &node = nodes[i];
@@ -1168,6 +1264,7 @@ static void update_normals_mesh(Object &object_orig,
 
   VectorSet<int> boundary_verts;
 
+  const double v3deep_faces_start = v3deep ? BLI_time_now_seconds() : 0.0;
   threading::parallel_invoke(
       [&]() {
         if (face_normals_cache.is_dirty()) {
@@ -1190,6 +1287,7 @@ static void update_normals_mesh(Object &object_orig,
           boundary_verts.add_multiple(corner_verts.slice(faces[face]));
         }
       });
+  const double v3deep_verts_start = v3deep ? BLI_time_now_seconds() : 0.0;
   const Span<float3> face_normals = face_normals_cache.data();
 
   if (vert_normals_cache.is_dirty()) {
@@ -1205,13 +1303,31 @@ static void update_normals_mesh(Object &object_orig,
       calc_boundary_vert_normals(vert_to_face_map, face_normals, boundary_verts, r_data);
     });
   }
+  if (v3deep && mesh.verts_num >= 1'000'000) {
+    const double end = BLI_time_now_seconds();
+    const double total_ms = (end - v3deep_start) * 1000.0;
+    if (total_ms >= 0.50) {
+      std::fprintf(stderr,
+                   "[SculptMeshV3Normals] nodes=%lld boundary_faces=%lld boundary_verts=%lld "
+                   "full_faces=%d full_verts=%d total=%.3f ms setup=%.3f "
+                   "boundary=%.3f faces_parallel=%.3f verts=%.3f\n",
+                   static_cast<long long>(nodes_to_update.size()),
+                   static_cast<long long>(boundary_faces.size()),
+                   static_cast<long long>(boundary_verts.size()),
+                   int(v3deep_face_full), int(v3deep_vert_full), total_ms,
+                   (v3deep_boundary_start - v3deep_start) * 1000.0,
+                   (v3deep_faces_start - v3deep_boundary_start) * 1000.0,
+                   (v3deep_verts_start - v3deep_faces_start) * 1000.0,
+                   (end - v3deep_verts_start) * 1000.0);
+    }
+  }
 }
 
 void Tree::update_normals(Object &object_orig, Object &object_eval)
 {
   PRF_scope(ProfileCategory::Core);
   IndexMaskMemory memory;
-  const IndexMask nodes_to_update = IndexMask::from_bits(normals_dirty_, memory);
+  const IndexMask nodes_to_update = journal_mask(normals_dirty_, memory);
 
   switch (this->type()) {
     case Type::Mesh: {
@@ -1233,7 +1349,7 @@ void Tree::update_normals(Object &object_orig, Object &object_eval)
       break;
     }
   }
-  normals_dirty_.clear_and_shrink();
+  normals_dirty_.clear();
 }
 
 void update_normals(const Depsgraph &depsgraph, Object &object_orig, Tree &pbvh)
@@ -1288,7 +1404,7 @@ void update_node_bounds_bmesh(BMeshNode &node)
 void Tree::flush_bounds_to_parents()
 {
   IndexMaskMemory memory;
-  const IndexMask node_mask = IndexMask::from_bits(bounds_dirty_, memory);
+  const IndexMask node_mask = journal_mask(bounds_dirty_, memory);
 
   std::visit(
       [&](auto &nodes) {
@@ -1322,13 +1438,13 @@ void Tree::flush_bounds_to_parents()
         }
       },
       this->nodes_);
-  bounds_dirty_.clear_and_shrink();
+  bounds_dirty_.clear();
 }
 
 void Tree::update_bounds_mesh(const Span<float3> vert_positions)
 {
   IndexMaskMemory memory;
-  const IndexMask nodes_to_update = IndexMask::from_bits(bounds_dirty_, memory);
+  const IndexMask nodes_to_update = journal_mask(bounds_dirty_, memory);
   if (nodes_to_update.is_empty()) {
     return;
   }
@@ -1342,7 +1458,7 @@ void Tree::update_bounds_mesh(const Span<float3> vert_positions)
 void Tree::update_bounds_grids(const Span<float3> positions, const int grid_area)
 {
   IndexMaskMemory memory;
-  const IndexMask nodes_to_update = IndexMask::from_bits(bounds_dirty_, memory);
+  const IndexMask nodes_to_update = journal_mask(bounds_dirty_, memory);
   if (nodes_to_update.is_empty()) {
     return;
   }
@@ -1356,7 +1472,7 @@ void Tree::update_bounds_grids(const Span<float3> positions, const int grid_area
 void Tree::update_bounds_bmesh(const BMesh & /*bm*/)
 {
   IndexMaskMemory memory;
-  const IndexMask nodes_to_update = IndexMask::from_bits(bounds_dirty_, memory);
+  const IndexMask nodes_to_update = journal_mask(bounds_dirty_, memory);
   if (nodes_to_update.is_empty()) {
     return;
   }

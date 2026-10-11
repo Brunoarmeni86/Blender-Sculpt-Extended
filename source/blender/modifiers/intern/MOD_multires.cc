@@ -7,27 +7,41 @@
  */
 
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include "BLI_time.h"
+#include <cmath>
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_listbase.h"
 #include "BLI_utildefines.h"
+#include "BLI_memory_utils.hh"
+
+#include "BLO_read_write.hh"
 
 #include "BLT_translation.hh"
 
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_screen_types.h"
+#include "DNA_texture_types.h"
 
 #include "BKE_context.hh"
+#include "MOD_util.hh"
 #include "BKE_customdata.hh"
 #include "BKE_mesh.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_paint.hh"
 #include "BKE_subdiv.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_subdiv_deform.hh"
 #include "BKE_subdiv_mesh.hh"
+#include "BKE_subdiv_foreach.hh"
+#include "BKE_texture.h"
 
 #include "UI_interface.hh"
 #include "UI_interface_layout.hh"
@@ -38,6 +52,7 @@
 
 #include "WM_types.hh" /* For subdivide operator UI. */
 
+#include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph_query.hh"
 
 #include "MOD_ui_common.hh"
@@ -60,7 +75,14 @@ static void init_data(ModifierData *md)
 
 static void copy_data(const ModifierData *md_src, ModifierData *md_dst, const int flag)
 {
+  const MultiresModifierData *src = reinterpret_cast<const MultiresModifierData *>(md_src);
+  MultiresModifierData *dst = reinterpret_cast<MultiresModifierData *>(md_dst);
+  bke::multires_layers::clear(*dst);
   BKE_modifier_copydata_generic(md_src, md_dst, flag);
+  /* Generic copying is a shallow struct copy, so discard the copied list links before
+   * deep-copying the actual layer storage. */
+  dst->sculpt_layers.clear_no_delete();
+  bke::multires_layers::copy(*dst, *src);
 }
 
 static void free_runtime_data(void *runtime_data_v)
@@ -78,8 +100,185 @@ static void free_runtime_data(void *runtime_data_v)
 static void free_data(ModifierData *md)
 {
   MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
+  bke::multires_layers::clear(*mmd);
   free_runtime_data(mmd->modifier.runtime);
 }
+
+
+static bool depends_on_time(Scene * /*scene*/, ModifierData *md)
+{
+  MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
+  return mmd->sculpt_displacement_texture != nullptr &&
+         BKE_texture_dependsOnTime(mmd->sculpt_displacement_texture);
+}
+
+static void foreach_ID_link(ModifierData *md, Object *ob, IDWalkFunc walk, void *user_data)
+{
+  MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
+  walk(user_data,
+       ob,
+       reinterpret_cast<ID **>(&mmd->sculpt_displacement_texture),
+       IDWALK_CB_USER);
+  walk(user_data, ob, reinterpret_cast<ID **>(&mmd->sculpt_shrinkwrap_target), IDWALK_CB_NOP);
+  walk(user_data, ob, reinterpret_cast<ID **>(&mmd->sculpt_shrinkwrap_aux_target), IDWALK_CB_NOP);
+  walk(user_data, ob, reinterpret_cast<ID **>(&mmd->sculpt_displacement_map_object),
+       IDWALK_CB_NOP);
+}
+
+static void required_data_mask(ModifierData *md, CustomData_MeshMasks *r_masks)
+{
+  const auto *mmd = reinterpret_cast<const MultiresModifierData *>(md);
+  if (mmd->sculpt_shrinkwrap_vgroup[0]) {
+    r_masks->vmask |= CD_MASK_MDEFORMVERT;
+  }
+}
+
+static void foreach_tex_link(ModifierData *md, Object *ob, TexWalkFunc walk, void *user_data)
+{
+  PointerRNA ptr = RNA_pointer_create_discrete(&ob->id, RNA_Modifier, md);
+  PropertyRNA *prop = RNA_struct_find_property(&ptr, "sculpt_displacement_texture");
+  walk(user_data, ob, md, &ptr, prop);
+}
+
+static void update_depsgraph(ModifierData *md, const ModifierUpdateDepsgraphContext *ctx)
+{
+  MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
+  if (mmd->sculpt_displacement_map_object && mmd->sculpt_displacement_mapping == 3) {
+    MOD_depsgraph_update_object_bone_relation(ctx->node, mmd->sculpt_displacement_map_object,
+        mmd->sculpt_displacement_map_bone, "Multires Texture Coordinates");
+  }
+  if (ELEM(mmd->sculpt_displacement_mapping, 2, 3)) {
+    DEG_add_depends_on_transform_relation(ctx->node, "Multires Texture Coordinates");
+  }
+  if (mmd->sculpt_displacement_texture != nullptr) {
+    DEG_add_generic_id_relation(
+        ctx->node, &mmd->sculpt_displacement_texture->id, "Multires Texture Displacement");
+  }
+  for (Object *target : {mmd->sculpt_shrinkwrap_target, mmd->sculpt_shrinkwrap_aux_target}) {
+    if (target && target != ctx->object) {
+      DEG_add_object_relation(ctx->node, target, DEG_OB_COMP_TRANSFORM, "Multires Shrinkwrap");
+      DEG_add_object_relation(ctx->node, target, DEG_OB_COMP_GEOMETRY, "Multires Shrinkwrap");
+      if (mmd->sculpt_shrinkwrap_method == MOD_SHRINKWRAP_TARGET_PROJECT) {
+        DEG_add_special_eval_flag(ctx->node, &target->id, DAG_EVAL_NEED_SHRINKWRAP_BOUNDARY);
+      }
+    }
+  }
+  DEG_add_depends_on_transform_relation(ctx->node, "Multires Shrinkwrap");
+}
+
+static void blend_write(BlendWriter *writer, const ID * /*id_owner*/, const ModifierData *md)
+{
+  const MultiresModifierData *mmd = reinterpret_cast<const MultiresModifierData *>(md);
+  writer->write_struct(mmd);
+  writer->write_struct_list(&mmd->sculpt_layers);
+  for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    if (layer.base_deltas && layer.base_verts_num > 0) {
+      writer->write_raw(sizeof(float) * size_t(layer.base_verts_num) * 3, layer.base_deltas);
+    }
+    if (layer.disps == nullptr || layer.grids_num <= 0) {
+      continue;
+    }
+    writer->write_struct_array(layer.grids_num, layer.disps);
+    for (int i = 0; i < layer.grids_num; i++) {
+      const MDisps &grid = layer.disps[i];
+      if (grid.disps != nullptr && grid.totdisp > 0) {
+        writer->write_raw(sizeof(float) * size_t(grid.totdisp) * 3, grid.disps);
+      }
+    }
+  }
+  if (mmd->sculpt_color_grids && mmd->sculpt_color_grids_num > 0) {
+    writer->write_struct_array(mmd->sculpt_color_grids_num, mmd->sculpt_color_grids);
+    for (int i = 0; i < mmd->sculpt_color_grids_num; i++) {
+      const MultiresColorGrid &grid = mmd->sculpt_color_grids[i];
+      if (grid.colors && grid.totcolor > 0) {
+        writer->write_raw(sizeof(float) * size_t(grid.totcolor) * 4, grid.colors);
+      }
+    }
+  }
+  if (mmd->sculpt_face_set_grids && mmd->sculpt_face_set_grids_num > 0) {
+    writer->write_struct_array(mmd->sculpt_face_set_grids_num, mmd->sculpt_face_set_grids);
+    for (int i = 0; i < mmd->sculpt_face_set_grids_num; i++) {
+      const MultiresFaceSetGrid &grid = mmd->sculpt_face_set_grids[i];
+      if (grid.ids && grid.totid > 0) {
+        writer->write_raw(sizeof(int) * size_t(grid.totid), grid.ids);
+      }
+    }
+  }
+}
+
+static void blend_read(BlendDataReader *reader, ModifierData *md)
+{
+  MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
+  BLO_read_struct_list(reader, MultiresSculptLayer, &mmd->sculpt_layers);
+  for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    if (layer.base_deltas && layer.base_verts_num > 0) {
+      if (!BLO_read_array(reader, reinterpret_cast<float **>(&layer.base_deltas),
+                          layer.base_verts_num, 3)) {
+        layer.base_deltas = nullptr;
+        layer.base_verts_num = 0;
+      }
+    }
+    else {
+      layer.base_deltas = nullptr;
+      layer.base_verts_num = 0;
+    }
+    if (layer.grids_num <= 0 || layer.disps == nullptr) {
+      continue;
+    }
+    if (!BLO_read_array(reader, &layer.disps, layer.grids_num)) {
+      layer.disps = nullptr;
+      layer.grids_num = 0;
+      continue;
+    }
+    for (int i = 0; i < layer.grids_num; i++) {
+      MDisps &grid = layer.disps[i];
+      if (grid.totdisp <= 0 || grid.disps == nullptr) {
+        continue;
+      }
+      if (!BLO_read_array(reader, reinterpret_cast<float **>(&grid.disps), grid.totdisp, 3)) {
+        grid.disps = nullptr;
+        grid.totdisp = 0;
+      }
+    }
+  }
+  if (mmd->sculpt_color_grids_num > 0 && mmd->sculpt_color_grids) {
+    if (!BLO_read_array(reader, &mmd->sculpt_color_grids, mmd->sculpt_color_grids_num)) {
+      mmd->sculpt_color_grids = nullptr;
+      mmd->sculpt_color_grids_num = 0;
+      mmd->sculpt_color_level = 0;
+    }
+    else {
+      for (int i = 0; i < mmd->sculpt_color_grids_num; i++) {
+        MultiresColorGrid &grid = mmd->sculpt_color_grids[i];
+        if (grid.totcolor > 0 && grid.colors &&
+            !BLO_read_array(reader, reinterpret_cast<float **>(&grid.colors), grid.totcolor, 4))
+        {
+          grid.colors = nullptr;
+          grid.totcolor = 0;
+        }
+      }
+    }
+  }
+  if (mmd->sculpt_face_set_grids_num > 0 && mmd->sculpt_face_set_grids) {
+    if (!BLO_read_array(reader, &mmd->sculpt_face_set_grids, mmd->sculpt_face_set_grids_num)) {
+      mmd->sculpt_face_set_grids = nullptr;
+      mmd->sculpt_face_set_grids_num = 0;
+      mmd->sculpt_face_set_level = 0;
+    }
+    else {
+      for (int i = 0; i < mmd->sculpt_face_set_grids_num; i++) {
+        MultiresFaceSetGrid &grid = mmd->sculpt_face_set_grids[i];
+        if (grid.totid > 0 && grid.ids &&
+            !BLO_read_array(reader, &grid.ids, grid.totid))
+        {
+          grid.ids = nullptr;
+          grid.totid = 0;
+        }
+      }
+    }
+  }
+}
+
 
 static MultiresRuntimeData *multires_ensure_runtime(MultiresModifierData *mmd)
 {
@@ -106,6 +305,41 @@ static bke::subdiv::Subdiv *subdiv_descriptor_ensure(MultiresModifierData *mmd,
 
 /* Subdivide into fully qualified mesh. */
 
+/* Use the same mask evaluator and subdivision vertex indexing as CCG. This keeps
+ * Object/Render evaluation and Bake consistent with the live Sculpt preview. */
+static Array<float> multires_shrinkwrap_mesh_masks(bke::subdiv::Subdiv &subdiv,
+                                                 const bke::subdiv::ToMeshSettings &settings,
+                                                 const Mesh &base_mesh,
+                                                 const int verts_num)
+{
+  SubdivCCGMaskEvaluator evaluator{};
+  if (!BKE_subdiv_ccg_mask_init_from_paint(&evaluator, &base_mesh)) {
+    return {};
+  }
+  Array<float> masks(verts_num, 0.0f);
+  struct UserData {
+    SubdivCCGMaskEvaluator *evaluator;
+    MutableSpan<float> masks;
+  } data{&evaluator, masks};
+  bke::subdiv::ForeachContext context{};
+  context.user_data = &data;
+  context.vert_corner = context.vert_edge = [](
+      const bke::subdiv::ForeachContext *ctx, void *, const int ptex, const float u,
+      const float v, int, int, int, const int vert) {
+    auto &data = *static_cast<UserData *>(ctx->user_data);
+    data.masks[vert] = data.evaluator->eval_mask(data.evaluator, ptex, u, v);
+  };
+  context.vert_inner = [](
+      const bke::subdiv::ForeachContext *ctx, void *, const int ptex, const float u,
+      const float v, int, int, const int vert) {
+    auto &data = *static_cast<UserData *>(ctx->user_data);
+    data.masks[vert] = data.evaluator->eval_mask(data.evaluator, ptex, u, v);
+  };
+  bke::subdiv::foreach_subdiv_geometry(&subdiv, &context, &settings, &base_mesh);
+  evaluator.free(&evaluator);
+  return masks;
+}
+
 static Mesh *multires_as_mesh(const MultiresModifierData *mmd,
                               const ModifierEvalContext *ctx,
                               Mesh *mesh,
@@ -128,8 +362,17 @@ static Mesh *multires_as_mesh(const MultiresModifierData *mmd,
   if (mesh_settings.resolution < 3) {
     return result;
   }
-  bke::subdiv::displacement_attach_from_multires(subdiv, mesh, mmd);
+  bke::subdiv::displacement_attach_from_multires(
+      subdiv, mesh, mmd, multires_texture_mapping_matrix(*mmd, *ctx->object));
   result = bke::subdiv::subdiv_to_mesh(subdiv, &mesh_settings, mesh);
+  if (result != nullptr && result != mesh) {
+    if (mmd->sculpt_shrinkwrap_enabled) {
+      const Array<float> masks = multires_shrinkwrap_mesh_masks(
+          *subdiv, mesh_settings, *mesh, result->verts_num);
+      bke::multires_layers::shrinkwrap_mesh(
+          ctx->depsgraph, *ctx->object, *mmd, *result, true, masks);
+    }
+  }
   return result;
 }
 
@@ -162,8 +405,18 @@ static Mesh *multires_as_ccg(MultiresModifierData *mmd,
   if (ccg_settings.resolution < 3) {
     return result;
   }
-  bke::subdiv::displacement_attach_from_multires(subdiv, mesh, mmd);
+  bke::subdiv::displacement_attach_from_multires(
+      subdiv, mesh, mmd, multires_texture_mapping_matrix(*mmd, *ctx->object));
   result = BKE_subdiv_to_ccg_mesh(*subdiv, ccg_settings, *mesh);
+  if (result && result->runtime->subdiv_ccg) {
+    SubdivCCG &ccg = *result->runtime->subdiv_ccg;
+    if (bke::multires_layers::shrinkwrap_ccg(
+            ctx->depsgraph, *ctx->object, *mmd, *mesh, ccg))
+    {
+      BKE_subdiv_ccg_average_grids(ccg);
+      BKE_subdiv_ccg_recalc_normals(ccg);
+    }
+  }
 
   /* NOTE: CCG becomes an owner of Subdiv descriptor, so can not share
    * this pointer. Not sure if it's needed, but might have a second look
@@ -176,15 +429,61 @@ static Mesh *multires_as_ccg(MultiresModifierData *mmd,
 
 static Mesh *modify_mesh(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mesh)
 {
+  /* LAYER_VISIBLE_EVAL_TRACE_V2 */
+  const char *layer_trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool layer_trace = layer_trace_env && layer_trace_env[0] && layer_trace_env[0] != '0';
+  const double layer_eval_start = layer_trace ? BLI_time_now_seconds() : 0.0;
+  BLI_SCOPED_DEFER([&]() {
+    if (layer_trace) {
+      std::printf("[MULTIRES_MODIFIER_EVAL] sculpt=%d total=%.3fms\n",
+                  int((ctx->object->mode & OB_MODE_SCULPT) != 0),
+                  (BLI_time_now_seconds() - layer_eval_start) * 1000.0);
+    }
+  });
   Mesh *result = mesh;
 #if !defined(WITH_OPENSUBDIV)
   BKE_modifier_set_error(ctx->object, md, "Disabled, built without OpenSubdiv");
   return result;
 #endif
   MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
+  Mesh *cage_copy = nullptr;
+  bool use_base_deltas = false;
+  for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    use_base_deltas |= layer.base_deltas && (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE);
+  }
+  if (use_base_deltas && !((ctx->object->mode & OB_MODE_SCULPT) &&
+                          (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh))) {
+    cage_copy = BKE_mesh_copy_for_eval(*mesh);
+    if (!bke::multires_layers::base_deltas_apply(*mmd, cage_copy->vert_positions_for_write())) {
+      BKE_id_free(nullptr, cage_copy);
+      BKE_modifier_set_error(ctx->object, md, "Invalid L0 layer data; base mesh retained");
+      return result;
+    }
+    cage_copy->tag_positions_changed();
+    mesh = cage_copy;
+    result = mesh;
+  }
+  BLI_SCOPED_DEFER([&]() {
+    if (cage_copy && result != cage_copy) {
+      BKE_id_free(nullptr, cage_copy);
+    }
+  });
   bke::subdiv::Settings subdiv_settings;
   BKE_multires_subdiv_settings_init(&subdiv_settings, mmd);
-  if (subdiv_settings.level == 0) {
+  const Scene *scene = DEG_get_evaluated_scene(ctx->depsgraph);
+  const bool use_render = ctx->flag & MOD_APPLY_RENDER;
+  const bool ignore_simplify = ctx->flag & MOD_APPLY_IGNORE_SIMPLIFY;
+  if (subdiv_settings.level == 0 ||
+      multires_get_level(scene, ctx->object, mmd, use_render, ignore_simplify) == 0) {
+    if (mmd->sculpt_shrinkwrap_enabled && mmd->sculpt_shrinkwrap_target &&
+        !((ctx->object->mode & OB_MODE_SCULPT) &&
+          (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh))) {
+      if (!cage_copy) {
+        cage_copy = BKE_mesh_copy_for_eval(*mesh);
+        result = cage_copy;
+      }
+      bke::multires_layers::shrinkwrap_mesh(ctx->depsgraph, *ctx->object, *mmd, *result);
+    }
     return result;
   }
   MultiresRuntimeData *runtime_data = multires_ensure_runtime(mmd);
@@ -277,7 +576,8 @@ static void deform_matrices(ModifierData *md,
     /* Happens on bad topology, also on empty input mesh. */
     return;
   }
-  bke::subdiv::displacement_attach_from_multires(subdiv, mesh, mmd);
+  bke::subdiv::displacement_attach_from_multires(
+      subdiv, mesh, mmd, multires_texture_mapping_matrix(*mmd, *ctx->object));
   bke::subdiv::deform_coarse_vertices(subdiv, mesh, positions);
   if (subdiv != runtime_data->subdiv) {
     bke::subdiv::free(subdiv);
@@ -289,6 +589,7 @@ static void panel_draw(const bContext *C, Panel *panel)
   ui::Layout &layout = *panel->layout;
 
   PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
+  MultiresModifierData *mmd = static_cast<MultiresModifierData *>(ptr->data);
 
   layout.use_property_split_set(true);
 
@@ -304,6 +605,127 @@ static void panel_draw(const bContext *C, Panel *panel)
   block_lock_clear(block);
 
   layout.prop(ptr, "show_only_control_edges", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+
+  /* Persistent sculpt layers. Keep this compact in the modifier panel; the same data is also
+   * exposed through RNA for scripts and for a future dedicated Sculpt Layers editor. */
+  {
+    layout.separator();
+    layout.label(IFACE_("Sculpt Layers"), ICON_MOD_MULTIRES);
+
+    ui::Layout &base_box = layout.box();
+    base_box.label(IFACE_("Base - native Multires surface"), ICON_MOD_MULTIRES);
+    base_box.label(IFACE_("Stored separately from sculpt layers"), ICON_NONE);
+    base_box.op("SCULPT_OT_multires_base_capture", IFACE_("Bake Visible into Base..."), ICON_NONE);
+
+    if (const MultiresSculptLayer *active = bke::multires_layers::active(*mmd)) {
+      /* REC L0: allow recording base deltas at sculpt level zero.
+       * Level zero with REC off still edits the real base mesh. Sculpt Base Mesh
+       * mode remains a separate explicit base-edit mode and keeps REC disabled. */
+      const bool sculpt_base_mesh =
+          (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) != 0;
+      const bool editing_base =
+          sculpt_base_mesh || (mmd->sculptlvl == 0 && !mmd->sculpt_layer_recording);
+      ui::Layout &active_box = layout.box();
+      ui::Layout &record_row = active_box.row(false);
+      record_row.enabled_set(!sculpt_base_mesh);
+      record_row.prop(ptr, "sculpt_layer_recording", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+      if (editing_base) {
+        active_box.label(IFACE_("Editing base mesh coordinates"), ICON_INFO);
+      }
+      active_box.label(!editing_base && mmd->sculpt_layer_recording ? IFACE_("Recording into:") :
+                                                  IFACE_("Selected layer (REC off):"), ICON_RADIOBUT_ON);
+      active_box.label(active->name, ICON_NONE);
+      active_box.op("SCULPT_OT_multires_layer_commit", IFACE_("Commit Pending Changes"), ICON_NONE);
+      active_box.op("SCULPT_OT_multires_layer_snapshot", IFACE_("Create Hidden Copy"), ICON_DUPLICATE);
+      active_box.label(IFACE_("Save the .blend to keep changes on disk"), ICON_NONE);
+      if (!editing_base && (!(active->flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
+          !std::isfinite(active->strength) || std::abs(active->strength) < 1e-6f ||
+          mmd->sculptlvl > mmd->totlvl)) {
+        active_box.label(IFACE_("Recording requires a valid sculpt level and a visible layer with non-zero strength"), ICON_ERROR);
+      }
+    }
+
+    ui::Layout &layer_tools = layout.row(false);
+    layer_tools.op("SCULPT_OT_multires_layer_add", IFACE_("Add"), ICON_ADD);
+    layer_tools.op("SCULPT_OT_multires_layer_duplicate", IFACE_("Duplicate"), ICON_DUPLICATE);
+    layer_tools.op("SCULPT_OT_multires_layer_delete", IFACE_("Delete"), ICON_X);
+    PointerRNA move_up = layer_tools.op(
+        "SCULPT_OT_multires_layer_move", IFACE_("Up"), ICON_TRIA_UP);
+    RNA_enum_set(&move_up, "direction", -1);
+    PointerRNA move_down = layer_tools.op(
+        "SCULPT_OT_multires_layer_move", IFACE_("Down"), ICON_TRIA_DOWN);
+    RNA_enum_set(&move_down, "direction", 1);
+    ui::Layout &group_tools = layout.row(false);
+    group_tools.op("SCULPT_OT_multires_layer_group_create", IFACE_("New Group"), ICON_FILE_FOLDER);
+group_tools.op("SCULPT_OT_multires_layer_group_remove", IFACE_("Ungroup"), ICON_X);
+    layer_tools.op("SCULPT_OT_multires_layer_merge", IFACE_("Merge Down"), ICON_TRIA_DOWN);
+    layer_tools.op("SCULPT_OT_multires_layer_flatten", IFACE_("Flatten"), ICON_TRIA_DOWN);
+
+    int last_sculpt_group_id = 0;
+    for (int i = 0; i < mmd->sculpt_layers.count(); i++) {
+      MultiresSculptLayer *layer = static_cast<MultiresSculptLayer *>(
+          BLI_findlink(&mmd->sculpt_layers, i));
+      if (layer == nullptr) {
+        continue;
+      }
+      if (layer->group_id != 0 && layer->group_id != last_sculpt_group_id) {
+        const bool group_hidden =
+            (layer->group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN) != 0;
+        const bool group_collapsed =
+            (layer->group_flag & MULTIRES_SCULPT_LAYER_GROUP_COLLAPSED) != 0;
+
+        ui::Layout &group_row = layout.row(false);
+        PointerRNA collapse_ptr = group_row.op(
+            "SCULPT_OT_multires_layer_group_collapse",
+            "",
+            group_collapsed ? ICON_TRIA_RIGHT : ICON_TRIA_DOWN);
+        RNA_int_set(&collapse_ptr, "group_id", layer->group_id);
+
+        group_row.label(layer->group_name[0] ? layer->group_name : IFACE_("Group"),
+                        ICON_FILE_FOLDER);
+
+        PointerRNA visibility_ptr = group_row.op(
+            "SCULPT_OT_multires_layer_group_visibility",
+            group_hidden ? IFACE_("Show") : IFACE_("Hide"),
+            group_hidden ? ICON_RESTRICT_VIEW_ON : ICON_RESTRICT_VIEW_OFF);
+        RNA_int_set(&visibility_ptr, "group_id", layer->group_id);
+
+        PointerRNA add_active_ptr = group_row.op(
+            "SCULPT_OT_multires_layer_group_add_active",
+            IFACE_("+ Active"),
+            ICON_ADD);
+        RNA_int_set(&add_active_ptr, "group_id", layer->group_id);
+
+        PointerRNA merge_group_ptr = group_row.op(
+            "SCULPT_OT_multires_layer_group_merge",
+            IFACE_("Merge"),
+            ICON_NONE);
+        RNA_int_set(&merge_group_ptr, "group_id", layer->group_id);
+      }
+
+      last_sculpt_group_id = layer->group_id;
+      if (layer->group_id != 0 &&
+          (layer->group_flag & MULTIRES_SCULPT_LAYER_GROUP_COLLAPSED))
+      {
+        continue;
+      }
+      PointerRNA layer_ptr = RNA_pointer_create_discrete(
+          &CTX_data_active_object(C)->id, RNA_MultiresSculptLayer, layer);
+      ui::Layout &row = layout.row(false);
+      PointerRNA op_ptr = row.op("SCULPT_OT_multires_layer_set_active",
+                                 i == mmd->sculpt_layer_active ? IFACE_("Editing") : IFACE_("Select"),
+                                 i == mmd->sculpt_layer_active ? ICON_RADIOBUT_ON :
+                                                                  ICON_RADIOBUT_OFF);
+      RNA_int_set(&op_ptr, "index", i);
+      row.prop(&layer_ptr, "visible", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+      row.prop(&layer_ptr, "name", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+      row.prop(&layer_ptr, "strength", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+      PointerRNA solo_ptr = row.op("SCULPT_OT_multires_layer_solo",
+                                   IFACE_("Solo"),
+                                   ICON_RESTRICT_VIEW_OFF);
+      RNA_int_set(&solo_ptr, "index", i);
+    }
+  }
 
   modifier_error_message_draw(layout, ptr);
 }
@@ -366,7 +788,8 @@ static void shape_panel_draw(const bContext * /*C*/, Panel *panel)
   ui::Layout &layout = *panel->layout;
 
   PointerRNA ob_ptr;
-  modifier_panel_get_property_pointers(panel, &ob_ptr);
+  PointerRNA *ptr = modifier_panel_get_property_pointers(panel, &ob_ptr);
+  const auto *mmd = static_cast<const MultiresModifierData *>(ptr->data);
 
   layout.enabled_set(RNA_enum_get(&ob_ptr, "mode") != OB_MODE_EDIT);
 
@@ -379,6 +802,20 @@ static void shape_panel_draw(const bContext * /*C*/, Panel *panel)
   RNA_boolean_set(&op_ptr, "apply_heuristic", true);
   op_ptr = row->op("OBJECT_OT_multires_base_apply", IFACE_("Conform Base"), ICON_NONE);
   RNA_boolean_set(&op_ptr, "apply_heuristic", false);
+
+  if (!mmd->sculpt_layers.is_empty()) {
+    ui::Layout &col = layout.column(false);
+    col.enabled_set(RNA_enum_get(&ob_ptr, "mode") == OB_MODE_OBJECT);
+    col.label(IFACE_("Conform Base — Preserve Layers (Experimental)"), ICON_NONE);
+    op_ptr = col.op("OBJECT_OT_multires_conform_layers", IFACE_("From Final Result"), ICON_NONE);
+    if (op_ptr.type != nullptr && op_ptr.data != nullptr) {
+      RNA_boolean_set(&op_ptr, "include_visible_layers", true);
+    }
+    op_ptr = col.op("OBJECT_OT_multires_conform_layers", IFACE_("Without Layers"), ICON_NONE);
+    if (op_ptr.type != nullptr && op_ptr.data != nullptr) {
+      RNA_boolean_set(&op_ptr, "include_visible_layers", false);
+    }
+  }
 }
 
 static void generate_panel_draw(const bContext * /*C*/, Panel *panel)
@@ -407,6 +844,34 @@ static void generate_panel_draw(const bContext * /*C*/, Panel *panel)
   }
 }
 
+
+static void displacement_panel_draw(const bContext * /*C*/, Panel *panel)
+{
+  ui::Layout &layout = *panel->layout;
+  PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
+
+  layout.use_property_split_set(true);
+  layout.prop(ptr, "use_sculpt_displacement", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+
+  ui::Layout &col = layout.column(false);
+  col.active_set(RNA_boolean_get(ptr, "use_sculpt_displacement"));
+  col.prop(ptr, "sculpt_displacement_texture", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  col.prop(ptr, "sculpt_displacement_coords", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  const int mapping = RNA_enum_get(ptr, "sculpt_displacement_coords");
+  if (mapping == 0) {
+    col.prop(ptr, "sculpt_displacement_uv_layer", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
+  else if (mapping == 3) {
+    col.prop(ptr, "sculpt_displacement_coords_object", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    col.prop(ptr, "sculpt_displacement_coords_bone", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
+  col.prop(ptr, "sculpt_displacement_strength", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  col.prop(ptr, "sculpt_displacement_midlevel", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  col.op("SCULPT_OT_multires_texture_displacement_bake",
+         IFACE_("Bake to Active Sculpt Layer"),
+         ICON_NONE);
+}
+
 static void advanced_panel_draw(const bContext * /*C*/, Panel *panel)
 {
   ui::Layout &layout = *panel->layout;
@@ -430,6 +895,60 @@ static void advanced_panel_draw(const bContext * /*C*/, Panel *panel)
   layout.prop(ptr, "use_custom_normals", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 }
 
+static void shrinkwrap_panel_draw(const bContext * /*C*/, Panel *panel)
+{
+  ui::Layout &layout = *panel->layout;
+  PointerRNA ob_ptr;
+  PointerRNA *ptr = modifier_panel_get_property_pointers(panel, &ob_ptr);
+  const ui::eUI_Item_Flag toggles_flag = ui::ITEM_R_TOGGLE | ui::ITEM_R_FORCE_BLANK_DECORATE;
+  layout.use_property_split_set(true);
+  layout.prop(ptr, "use_sculpt_shrinkwrap", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  ui::Layout &controls = layout.column(false);
+  controls.active_set(RNA_boolean_get(ptr, "use_sculpt_shrinkwrap"));
+  int wrap_method = RNA_enum_get(ptr, "sculpt_shrinkwrap_wrap_method");
+
+  controls.prop(ptr, "sculpt_shrinkwrap_wrap_method", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+
+  if (ELEM(wrap_method,
+           MOD_SHRINKWRAP_PROJECT,
+           MOD_SHRINKWRAP_NEAREST_SURFACE,
+           MOD_SHRINKWRAP_TARGET_PROJECT))
+  {
+    controls.prop(ptr, "sculpt_shrinkwrap_wrap_mode", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
+
+  if (wrap_method == MOD_SHRINKWRAP_PROJECT) {
+    controls.prop(ptr, "sculpt_shrinkwrap_project_limit", UI_ITEM_NONE, IFACE_("Limit"), ICON_NONE);
+    controls.prop(ptr, "sculpt_shrinkwrap_subsurf_levels", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+
+    ui::Layout *col = &controls.column(false);
+    ui::Layout &row = col->row(true, IFACE_("Axis"));
+    row.prop(ptr, "sculpt_shrinkwrap_use_project_x", toggles_flag, std::nullopt, ICON_NONE);
+    row.prop(ptr, "sculpt_shrinkwrap_use_project_y", toggles_flag, std::nullopt, ICON_NONE);
+    row.prop(ptr, "sculpt_shrinkwrap_use_project_z", toggles_flag, std::nullopt, ICON_NONE);
+
+    col->prop(ptr, "sculpt_shrinkwrap_use_negative_direction", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    col->prop(ptr, "sculpt_shrinkwrap_use_positive_direction", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+
+    controls.prop(ptr, "sculpt_shrinkwrap_cull_face", ui::ITEM_R_EXPAND, std::nullopt, ICON_NONE);
+    col = &controls.column(false);
+    col->active_set(RNA_boolean_get(ptr, "sculpt_shrinkwrap_use_negative_direction") &&
+                    RNA_enum_get(ptr, "sculpt_shrinkwrap_cull_face") != 0);
+    col->prop(ptr, "sculpt_shrinkwrap_use_invert_cull", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
+
+  controls.prop(ptr, "sculpt_shrinkwrap_target", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  if (wrap_method == MOD_SHRINKWRAP_PROJECT) {
+    controls.prop(ptr, "sculpt_shrinkwrap_auxiliary_target", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
+  controls.prop(ptr, "sculpt_shrinkwrap_offset", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+
+  modifier_vgroup_ui(controls, ptr, &ob_ptr, "sculpt_shrinkwrap_vertex_group", "sculpt_shrinkwrap_invert_vertex_group", std::nullopt);
+
+  controls.prop(ptr, "sculpt_shrinkwrap_strength", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  controls.op("SCULPT_OT_multires_shrinkwrap_bake", IFACE_("Bake to Active Sculpt Layer"), ICON_NONE);
+}
+
 static void panel_register(ARegionType *region_type)
 {
   PanelType *panel_type = modifier_panel_register(region_type, eModifierType_Multires, panel_draw);
@@ -438,8 +957,16 @@ static void panel_register(ARegionType *region_type)
   modifier_subpanel_register(region_type, "shape", "Shape", nullptr, shape_panel_draw, panel_type);
   modifier_subpanel_register(
       region_type, "generate", "Generate", nullptr, generate_panel_draw, panel_type);
+  modifier_subpanel_register(region_type,
+                             "texture_displacement",
+                             "Texture Displacement",
+                             nullptr,
+                             displacement_panel_draw,
+                             panel_type);
   modifier_subpanel_register(
       region_type, "advanced", "Advanced", nullptr, advanced_panel_draw, panel_type);
+  modifier_subpanel_register(
+      region_type, "shrinkwrap", "Shrinkwrap", nullptr, shrinkwrap_panel_draw, panel_type);
 }
 
 ModifierTypeInfo modifierType_Multires = {
@@ -463,18 +990,18 @@ ModifierTypeInfo modifierType_Multires = {
     /*modify_geometry_set*/ nullptr,
 
     /*init_data*/ init_data,
-    /*required_data_mask*/ nullptr,
+    /*required_data_mask*/ required_data_mask,
     /*free_data*/ free_data,
     /*is_disabled*/ nullptr,
-    /*update_depsgraph*/ nullptr,
-    /*depends_on_time*/ nullptr,
+    /*update_depsgraph*/ update_depsgraph,
+    /*depends_on_time*/ depends_on_time,
     /*depends_on_normals*/ nullptr,
-    /*foreach_ID_link*/ nullptr,
-    /*foreach_tex_link*/ nullptr,
+    /*foreach_ID_link*/ foreach_ID_link,
+    /*foreach_tex_link*/ foreach_tex_link,
     /*free_runtime_data*/ free_runtime_data,
     /*panel_register*/ panel_register,
-    /*blend_write*/ nullptr,
-    /*blend_read*/ nullptr,
+    /*blend_write*/ blend_write,
+    /*blend_read*/ blend_read,
     /*foreach_cache*/ nullptr,
     /*foreach_working_space_color*/ nullptr,
 };

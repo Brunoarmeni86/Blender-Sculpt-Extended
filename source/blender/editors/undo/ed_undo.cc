@@ -7,13 +7,20 @@
  */
 
 #include <cstring>
+#include <cstdlib>
+#include <cstdio>
+#include <cmath>
+#include <string>
+#include <utility>
 
 #include "CLG_log.h"
 
 #include "DNA_object_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_scene_types.h"
 
 #include "BLI_listbase.h"
+#include "BLI_vector.hh"
 #include "BLI_utildefines.h"
 
 #include "BKE_blender_undo.hh"
@@ -22,6 +29,13 @@
 #include "BKE_global.hh"
 #include "BKE_layer.hh"
 #include "BKE_main.hh"
+#include "BKE_mesh.hh"
+#include "BKE_object_types.hh"
+#include "BKE_paint_types.hh"
+#include "BKE_subdiv_ccg.hh"
+#include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
+#include "../../depsgraph/DEG_depsgraph.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -92,6 +106,41 @@ void ED_undo_group_end(bContext *C)
 {
   wmWindowManager *wm = CTX_wm_manager(C);
   BKE_undosys_stack_group_end(wm->runtime->undo_stack);
+}
+
+/* SCULPT_LAYER_UNDO_CONTROLS_V36: main-thread action boundary only. */
+bool ED_undo_sculpt_controls_begin(bContext *C)
+{
+  const char *enabled = std::getenv("BLENDER_SCULPT_LAYER_UNDO_CONTROLS");
+  if (!enabled || enabled[0] != '1' || U.undosteps <= 0 ||
+      !(U.uiflag & USER_GLOBALUNDO))
+  {
+    return false;
+  }
+  wmWindowManager *wm = CTX_wm_manager(C);
+  Object *ob = CTX_data_active_object(C);
+  if (!wm || wm->op_undo_depth != 0 || !ob || ob->type != OB_MESH ||
+      !(ob->mode & OB_MODE_SCULPT) || ob->id.lib)
+  {
+    return false;
+  }
+  bool has_layers = false;
+  for (const ModifierData &md : ob->modifiers) {
+    if (md.type == eModifierType_Multires) {
+      const auto &mmd = *reinterpret_cast<const MultiresModifierData *>(&md);
+      has_layers |= !mmd.sculpt_layers.is_empty();
+    }
+  }
+  UndoStack *ustack = wm->runtime->undo_stack;
+  if (!has_layers || !BKE_undosys_sculpt_step_pair_memfile(ustack, C)) {
+    return false;
+  }
+  const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  if (trace && trace[0] && trace[0] != '0') {
+    std::printf("[LAYER_UNDO_CONTROLS] v=36 mode=PAIR action=%s redo_preserved=%d\n",
+                ustack->step_active->name, ustack->step_active->next != nullptr);
+  }
+  return true;
 }
 
 void ED_undo_push(bContext *C, const char *str)
@@ -239,6 +288,191 @@ static void ed_undo_step_post(bContext *C,
  * May undo or redo several steps at once only if the target step is a 'skipped' one.
  * The target step will be the one immediately before or after the active one.
  */
+/* SCULPT_LAYER_UNDO_BOUNDARY_V1
+ * Sculpt-mode layer controls do not create property undo steps. Preserve them
+ * across the entire operation, including Memfile decode and post callbacks.
+ * Never retain ID/layer pointers across undo: identities are checked again.
+ * Coordinate undo remains the responsibility of Undo Frame v1. */
+struct SculptLayerBoundaryItem {
+  std::string name;
+  float strength;
+  bool visible;
+};
+struct SculptLayerBoundaryModifier {
+  std::string name;
+  int level;
+  int top_level;
+  int active;
+  Vector<SculptLayerBoundaryItem> layers;
+};
+struct SculptLayerBoundaryState {
+  std::string object_name;
+  int verts_num = 0;
+  int corners_num = 0;
+  Vector<SculptLayerBoundaryModifier> modifiers;
+};
+
+static SculptLayerBoundaryState sculpt_layer_boundary_capture(bContext *C)
+{
+  SculptLayerBoundaryState state;
+  const char *env = std::getenv("BLENDER_SCULPT_LAYER_UNDO_BOUNDARY");
+  const char *frame = std::getenv("BLENDER_SCULPT_LAYER_UNDO_FRAME");
+  const char *ui = std::getenv("BLENDER_SCULPT_LAYER_UI_UNDO");
+  const char *metadata = std::getenv("BLENDER_SCULPT_LAYER_UNDO_METADATA");
+  if (!env || env[0] != '1' || !frame || frame[0] != '1' ||
+      (ui && ui[0] == '1') || (metadata && metadata[0] == '1'))
+  {
+    return state;
+  }
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || ob->type != OB_MESH || !(ob->mode & OB_MODE_SCULPT) || ob->id.lib) {
+    return state;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(ob->data);
+  state.object_name = ob->id.name;
+  state.verts_num = mesh.verts_num;
+  state.corners_num = mesh.corners_num;
+  for (const ModifierData &md : ob->modifiers) {
+    if (md.type != eModifierType_Multires) {
+      continue;
+    }
+    const auto &mmd = *reinterpret_cast<const MultiresModifierData *>(&md);
+    if (mmd.sculpt_layers.is_empty()) {
+      continue;
+    }
+    SculptLayerBoundaryModifier saved;
+    saved.name = md.name;
+    saved.level = mmd.sculptlvl;
+    saved.top_level = mmd.totlvl;
+    saved.active = mmd.sculpt_layer_active;
+    for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+      saved.layers.append({layer.name, layer.strength,
+                           (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0});
+    }
+    state.modifiers.append(std::move(saved));
+  }
+  return state;
+}
+
+static void sculpt_layer_boundary_restore(bContext *C, const SculptLayerBoundaryState &state)
+{
+  if (state.modifiers.is_empty()) {
+    return;
+  }
+  const auto report_skip = [](const char *reason) {
+    std::printf("[LAYER_UNDO_BOUNDARY] mode=SKIP reason=%s\n", reason);
+  };
+  Main *bmain = CTX_data_main(C);
+  Scene *scene = CTX_data_scene(C);
+  ViewLayer *view_layer = CTX_data_view_layer(C);
+  if (!bmain || !scene || !view_layer) {
+    report_skip("CONTEXT_CHANGED");
+    return;
+  }
+  BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
+  Object *ob = BKE_view_layer_active_object_get(view_layer);
+  if (!ob || ob->id.name != state.object_name || ob->type != OB_MESH ||
+      !(ob->mode & OB_MODE_SCULPT) || ob->id.lib)
+  {
+    report_skip("OBJECT_CHANGED");
+    return;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(ob->data);
+  if (mesh.verts_num != state.verts_num || mesh.corners_num != state.corners_num) {
+    report_skip("TOPOLOGY_CHANGED");
+    return;
+  }
+  Vector<MultiresModifierData *> targets;
+  int modifier_count = 0;
+  for (ModifierData &md : ob->modifiers) {
+    if (md.type == eModifierType_Multires &&
+        !reinterpret_cast<MultiresModifierData *>(&md)->sculpt_layers.is_empty())
+    {
+      modifier_count++;
+    }
+  }
+  if (modifier_count != state.modifiers.size()) {
+    report_skip("MODIFIER_COUNT_CHANGED");
+    return;
+  }
+  int changed_values = 0;
+  /* Validate every target before writing any values. Stack-changing undo
+   * intentionally follows Blender's own restored state instead of an overlay. */
+  for (const SculptLayerBoundaryModifier &saved : state.modifiers) {
+    MultiresModifierData *mmd = nullptr;
+    for (ModifierData &md : ob->modifiers) {
+      if (md.type == eModifierType_Multires && md.name == saved.name) {
+        mmd = reinterpret_cast<MultiresModifierData *>(&md);
+        break;
+      }
+    }
+    if (!mmd || mmd->sculptlvl != saved.level || mmd->totlvl != saved.top_level ||
+        mmd->sculpt_layers.count() != saved.layers.size() || saved.active < 0 ||
+        saved.active >= saved.layers.size())
+    {
+      report_skip("STACK_OR_LEVEL_CHANGED");
+      return;
+    }
+    int i = 0;
+    for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+      const SculptLayerBoundaryItem &item = saved.layers[i++];
+      if (item.name != layer.name || !std::isfinite(item.strength) ||
+          !std::isfinite(layer.strength))
+      {
+        report_skip("LAYER_CHANGED");
+        return;
+      }
+      changed_values += (layer.strength != item.strength);
+      changed_values += (((layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0) != item.visible);
+    }
+    changed_values += (mmd->sculpt_layer_active != saved.active);
+    targets.append(mmd);
+  }
+  if (changed_values == 0) {
+    std::printf("[LAYER_UNDO_BOUNDARY] mode=UNCHANGED values=0\n");
+    return;
+  }
+  if (const SculptSession *ss = ob->runtime->sculpt_session) {
+    if (ss->cache || ss->filter_cache ||
+        (ss->subdiv_ccg && (ss->subdiv_ccg->dirty.coords || ss->subdiv_ccg->dirty.masks ||
+                            ss->subdiv_ccg->dirty.hidden)))
+    {
+      report_skip("PENDING_SCULPT_DATA");
+      return;
+    }
+  }
+  for (const int modifier_i : targets.index_range()) {
+    MultiresModifierData &mmd = *targets[modifier_i];
+    const SculptLayerBoundaryModifier &saved = state.modifiers[modifier_i];
+    int i = 0;
+    for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+      const SculptLayerBoundaryItem &item = saved.layers[i++];
+      if (layer.strength != item.strength) {
+        std::printf("[LAYER_UNDO_BOUNDARY] layer=%s strength_before=%.6f strength_after=%.6f\n",
+                    layer.name, layer.strength, item.strength);
+      }
+      layer.strength = item.strength;
+      if (item.visible) {
+        layer.flag |= MULTIRES_SCULPT_LAYER_VISIBLE;
+      }
+      else {
+        layer.flag &= ~MULTIRES_SCULPT_LAYER_VISIBLE;
+      }
+      bke::multires_layers::weight_hot_delta_cache_invalidate(&layer);
+    }
+    mmd.sculpt_layer_active = saved.active;
+  }
+  /* Do not call RNA setters: their commit would interpret decoded coordinates
+   * as another sculpt stroke. No pending data passed validation above.
+   * Rebuild from restored persistent payloads using the preserved controls. */
+  const bool released = multires_force_sculpt_rebuild(ob);
+  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  std::printf("[LAYER_UNDO_BOUNDARY] mode=RESTORE values=%d rebuild=%s\n",
+              changed_values, released ? "READY" : "FAILED");
+}
+
+
 static wmOperatorStatus ed_undo_step_direction(bContext *C,
                                                enum eUndoStepDir step,
                                                ReportList *reports)
@@ -249,6 +483,7 @@ static wmOperatorStatus ed_undo_step_direction(bContext *C,
 
   wmWindowManager *wm = CTX_wm_manager(C);
 
+  const SculptLayerBoundaryState layer_boundary = sculpt_layer_boundary_capture(C);
   ed_undo_step_pre(C, wm, step, reports);
 
   if (step == STEP_UNDO) {
@@ -259,6 +494,7 @@ static wmOperatorStatus ed_undo_step_direction(bContext *C,
   }
 
   ed_undo_step_post(C, wm, step, reports);
+  sculpt_layer_boundary_restore(C, layer_boundary);
 
   return OPERATOR_FINISHED;
 }
@@ -298,11 +534,13 @@ static int ed_undo_step_by_name(bContext *C, const char *undo_name, ReportList *
             undo_name,
             (undo_dir == STEP_UNDO) ? "STEP_UNDO" : "STEP_REDO");
 
+  const SculptLayerBoundaryState layer_boundary = sculpt_layer_boundary_capture(C);
   ed_undo_step_pre(C, wm, undo_dir, reports);
 
   BKE_undosys_step_load_data_ex(wm->runtime->undo_stack, C, undo_step_target, nullptr, true);
 
   ed_undo_step_post(C, wm, undo_dir, reports);
+  sculpt_layer_boundary_restore(C, layer_boundary);
 
   return OPERATOR_FINISHED;
 }
@@ -329,11 +567,13 @@ static int ed_undo_step_by_index(bContext *C, const int undo_index, ReportList *
             undo_index,
             (undo_dir == STEP_UNDO) ? "STEP_UNDO" : "STEP_REDO");
 
+  const SculptLayerBoundaryState layer_boundary = sculpt_layer_boundary_capture(C);
   ed_undo_step_pre(C, wm, undo_dir, reports);
 
   BKE_undosys_step_load_from_index(wm->runtime->undo_stack, C, undo_index);
 
   ed_undo_step_post(C, wm, undo_dir, reports);
+  sculpt_layer_boundary_restore(C, layer_boundary);
 
   return OPERATOR_FINISHED;
 }

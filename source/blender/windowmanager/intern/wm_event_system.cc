@@ -1279,6 +1279,24 @@ static bool wm_operator_register_check(wmWindowManager *wm, wmOperatorType *ot)
  * needed when the operator doesn't use #OPTYPE_UNDO, #OPTYPE_UNDO_GROUPED but adds an undo step.
  * \param has_register: True when an operator was registered.
  */
+/* SCULPT_LAYER_UNDO_CONTROLS_V36
+ * Native Sculpt operators keep their native begin/end journal. Commands on the
+ * layer stack and other undoable operators need the preceding Sculpt baseline.
+ * A cancelled invoke leaves the same visible brush entry and its redo tail. */
+static void wm_sculpt_controls_begin(bContext *C, const wmOperatorType *ot)
+{
+  if (!(ot->flag & (OPTYPE_UNDO | OPTYPE_UNDO_GROUPED))) {
+    return;
+  }
+  if (std::strncmp(ot->idname, "SCULPT_OT_", sizeof("SCULPT_OT_") - 1) == 0 &&
+      std::strncmp(ot->idname, "SCULPT_OT_multires_layer_",
+                   sizeof("SCULPT_OT_multires_layer_") - 1) != 0)
+  {
+    return;
+  }
+  ED_undo_sculpt_controls_begin(C);
+}
+
 static void wm_operator_finished(bContext *C,
                                  wmOperator *op,
                                  const bool repeat,
@@ -1389,6 +1407,10 @@ static wmOperatorStatus wm_operator_exec(bContext *C,
     return retval;
   }
 
+  if (!repeat) {
+    wm_sculpt_controls_begin(C, op->type);
+  }
+
   const intptr_t undo_id_prev = wm_operator_undo_active_id(wm);
   const intptr_t register_id_prev = wm_operator_register_active_id(wm);
 
@@ -1440,6 +1462,7 @@ static wmOperatorStatus wm_operator_exec_notest(bContext *C, wmOperator *op)
     return retval;
   }
 
+  wm_sculpt_controls_begin(C, op->type);
   retval = op->type->exec(C, op);
   OPERATOR_RETVAL_CHECK(retval);
 
@@ -1660,6 +1683,7 @@ static wmOperatorStatus wm_operator_invoke(bContext *C,
     PRF_scope_with_name("Operator Call (exec/invoke)", ProfileCategory::Default);
     PRF_scope_set_dynamic_name("Op: %s", ot->idname);
     wmWindowManager *wm = CTX_wm_manager(C);
+    wm_sculpt_controls_begin(C, ot);
     const intptr_t undo_id_prev = wm_operator_undo_active_id(wm);
     const intptr_t register_id_prev = wm_operator_register_active_id(wm);
 

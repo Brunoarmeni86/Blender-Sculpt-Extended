@@ -629,6 +629,66 @@ eUndoPushReturn BKE_undosys_step_push_with_type(UndoStack *ustack,
   return (retval | UNDO_PUSH_RET_SUCCESS);
 }
 
+/* SCULPT_LAYER_UNDO_CONTROLS_V36
+ * Give the last native Sculpt step a Memfile companion BEFORE a control or
+ * global operator mutates its frame. The companion replaces that same visible
+ * history entry; no extra user action and no snapshot per brush is introduced.
+ * Temporarily detach redo so encoding compares against the preceding Memfile,
+ * then restore it immediately, also on encode failure. No transaction survives
+ * this function. Inserted snapshots require barriers for the old redo chain. */
+bool BKE_undosys_sculpt_step_pair_memfile(UndoStack *ustack, bContext *C)
+{
+  UNDO_NESTED_ASSERT(false);
+  if (!ustack || !C || ustack->step_init || ustack->group_level != 0 ||
+      !ustack->step_active || ustack->step_active->type != BKE_UNDOSYS_TYPE_SCULPT ||
+      ustack->step_active->skip || ustack->step_active->use_memfile_step)
+  {
+    return false;
+  }
+  UndoStep *native = ustack->step_active;
+  UndoStep *previous_memfile = ustack->step_active_memfile;
+  char name[sizeof(native->name)];
+  STRNCPY(name, native->name);
+  ListBaseT<UndoStep> future = {nullptr, nullptr};
+  while (native->next) {
+    UndoStep *us = native->next;
+    BLI_remlink(&ustack->steps, us);
+    BLI_addtail(&future, us);
+  }
+  const eUndoPushReturn ret = BKE_undosys_step_push_with_type(
+      ustack, C, name, BKE_UNDOSYS_TYPE_MEMFILE);
+  const bool paired = (ret & UNDO_PUSH_RET_SUCCESS) &&
+                      ustack->step_active != native &&
+                      ustack->step_active->type == BKE_UNDOSYS_TYPE_MEMFILE;
+  if (paired) {
+    native->skip = true;
+    native->use_memfile_step = true;
+    ustack->step_active->use_old_bmain_data = false;
+    if (future.first) {
+      /* Undo onto the new companion must not reuse an ID based on the old
+       * immediate successor. Redo onto the old next Memfile also needs a
+       * complete read: its identical-chunk flags predate this insertion. */
+      static_cast<UndoStep *>(future.first)->use_old_bmain_data = false;
+      for (UndoStep *us = static_cast<UndoStep *>(future.first); us; us = us->next) {
+        if (us->type == BKE_UNDOSYS_TYPE_MEMFILE) {
+          us->use_old_bmain_data = false;
+          break;
+        }
+      }
+    }
+  }
+  else {
+    ustack->step_active_memfile = previous_memfile;
+  }
+  while (future.first) {
+    UndoStep *us = static_cast<UndoStep *>(future.first);
+    BLI_remlink(&future, us);
+    BLI_addtail(&ustack->steps, us);
+  }
+  undosys_stack_validate(ustack, true);
+  return paired;
+}
+
 eUndoPushReturn BKE_undosys_step_push(UndoStack *ustack, bContext *C, const char *name)
 {
   UNDO_NESTED_ASSERT(false);

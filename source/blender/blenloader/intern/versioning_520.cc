@@ -11,6 +11,9 @@
 #include "NOD_geometry_nodes_srna.hh"
 
 #include "DNA_ID.h"
+#define DNA_GENFILE_VERSIONING_MACROS
+#include "DNA_genfile.h"
+#undef DNA_GENFILE_VERSIONING_MACROS
 #include "DNA_brush_types.h"
 #include "DNA_camera_types.h"
 #include "DNA_curve_types.h"
@@ -543,8 +546,23 @@ static void version_solid_color_width_height_defaults(Main &bmain)
   }
 }
 
-void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
+void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
 {
+  /* Custom Multires builds share the Blender version number. Test the file schema so that
+   * older nearest-surface setups keep their behavior and gain standard Project defaults. */
+  if (!DNA_struct_member_exists(fd->filesdna,
+                                "MultiresModifierData",
+                                "char",
+                                "sculpt_shrinkwrap_options")) {
+    for (Object &object : bmain->objects) {
+      for (ModifierData &md : object.modifiers) {
+        if (md.type == eModifierType_Multires) {
+          auto &mmd = reinterpret_cast<MultiresModifierData &>(md);
+          mmd.sculpt_shrinkwrap_options = MOD_SHRINKWRAP_PROJECT_ALLOW_POS_DIR;
+        }
+      }
+    }
+  }
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 1)) {
     for (Scene &scene : bmain->scenes) {
       scene.r.mode |= R_SAVE_OUTPUT;

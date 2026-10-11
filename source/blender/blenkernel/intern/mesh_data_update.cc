@@ -36,6 +36,7 @@
 #include "BKE_mesh_wrapper.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
@@ -402,6 +403,10 @@ static void mesh_calc_modifiers(Depsgraph &depsgraph,
       continue;
     }
 
+    const bool multires_l0_layers = md->type == eModifierType_Multires &&
+        reinterpret_cast<MultiresModifierData *>(md)->sculptlvl == 0 &&
+        (bke::multires_layers::base_has_visible_layers(*reinterpret_cast<MultiresModifierData *>(md)) ||
+         reinterpret_cast<MultiresModifierData *>(md)->sculpt_shrinkwrap_enabled);
     if (sculpt_mode && (!has_multires || multires_applied || sculpt_dyntopo)) {
       bool unsupported = false;
 
@@ -409,7 +414,7 @@ static void mesh_calc_modifiers(Depsgraph &depsgraph,
           (reinterpret_cast<MultiresModifierData *>(md))->sculptlvl == 0)
       {
         /* If multires is on level 0 skip it silently without warning message. */
-        if (!sculpt_dyntopo) {
+        if (!sculpt_dyntopo && !multires_l0_layers) {
           continue;
         }
       }
@@ -422,7 +427,7 @@ static void mesh_calc_modifiers(Depsgraph &depsgraph,
        * that doesn't have sculpt tool-settings initialized, see #159457. */
       if (Sculpt *sculpt = scene.toolsettings->sculpt) {
         if (sculpt->flags & SCULPT_ONLY_DEFORM) {
-          unsupported |= (mti->type != ModifierTypeType::OnlyDeform);
+          unsupported |= (mti->type != ModifierTypeType::OnlyDeform) && !multires_l0_layers;
         }
       }
 

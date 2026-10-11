@@ -6,6 +6,7 @@
  * \ingroup bke
  */
 
+#include <algorithm>
 #include <cmath>
 
 #include "BKE_subdiv.hh"
@@ -14,13 +15,16 @@
 #include "DNA_meshdata_types.h"
 #include "DNA_modifier_types.h"
 
+#include "BLI_listbase.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_offset_indices.hh"
+#include "BLI_vector.hh"
 
 #include "BKE_customdata.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_subdiv_eval.hh"
 
 #include "MEM_guardedalloc.h"
@@ -38,8 +42,10 @@ struct MultiresDisplacementData {
   /* Mesh is used to read external displacement. */
   const Mesh *mesh = nullptr;
   const MultiresModifierData *mmd = nullptr;
+  float4x4 texture_matrix = float4x4::identity();
   OffsetIndices<int> faces = {};
   const MDisps *mdisps = nullptr;
+  const GridPaintMask *masks = nullptr;
   /* Indexed by PTEX face index, contains face/corner which corresponds
    * to it.
    *
@@ -49,6 +55,9 @@ struct MultiresDisplacementData {
   /* Indexed by coarse face index, returns first PTEX face index corresponding
    * to that coarse face. */
   Span<int> face_ptex_offset = {};
+  /* Layers that can actually contribute to displacement evaluation.
+   * Filtering this list once avoids checking hidden/zero-strength layers for every sample. */
+  Vector<const MultiresSculptLayer *> sampled_layers;
   /* Sanity check, is used in debug builds.
    * Controls that initialize() was called prior to eval_displacement(). */
   bool is_initialized = false;
@@ -104,7 +113,8 @@ static const MDisps *displacement_get_other_grid(const Displacement &displacemen
   return &data.mdisps[face[next_corner]];
 }
 
-BLI_INLINE AverageWith read_displacement_grid(const MDisps &displacement_grid,
+BLI_INLINE AverageWith read_displacement_grid(const MultiresDisplacementData &data,
+                                              const MDisps &displacement_grid,
                                               const int grid_size,
                                               const float grid_u,
                                               const float grid_v,
@@ -117,6 +127,45 @@ BLI_INLINE AverageWith read_displacement_grid(const MDisps &displacement_grid,
   const int x = roundf(grid_u * (grid_size - 1));
   const int y = roundf(grid_v * (grid_size - 1));
   r_tangent_D = displacement_grid.disps[y * grid_size + x];
+  /* Include layers for BOTH the current grid and every neighbour used by seam
+   * averaging. Mixing a composed grid with base-only neighbours creates cracks. */
+  /* V4.4a big-mesh fast layer sampling.
+   *
+   * x/y have already been computed once for the base displacement grid above.
+   * When a Sculpt Layer grid has the same resolution, read the exact sample
+   * directly instead of calling sample_tangent(), which would repeat
+   * validation, normalized-coordinate scaling, floor/clamp and interpolation
+   * for every layer at every high-resolution sample.
+   *
+   * Layers stored at a different Multires level keep the established
+   * sample_tangent() path, so lower-level editable layers preserve their
+   * existing interpolation semantics. */
+  if (!data.sampled_layers.is_empty()) {
+    const int corner = int(&displacement_grid - data.mdisps);
+    const int sample_index = y * grid_size + x;
+
+    for (const MultiresSculptLayer *layer : data.sampled_layers) {
+      if (layer->disps != nullptr && corner >= 0 && corner < layer->grids_num) {
+        const MDisps &layer_grid = layer->disps[corner];
+
+        if (layer_grid.disps != nullptr &&
+            layer_grid.level == displacement_grid.level &&
+            layer_grid.totdisp == displacement_grid.totdisp)
+        {
+          r_tangent_D += float3(layer_grid.disps[sample_index]) * layer->strength;
+          continue;
+        }
+      }
+
+      /* Different-resolution layer: preserve the existing resampling path. */
+      float delta[3];
+      if (::blender::bke::multires_layers::sample_tangent(
+              *layer, corner, grid_size, grid_u, grid_v, delta))
+      {
+        r_tangent_D += float3(delta);
+      }
+    }
+  }
   if (x == 0 && y == 0) {
     return AverageWith::All;
   }
@@ -167,7 +216,7 @@ static void average_read_displacement_tangent(const MultiresDisplacementData &da
                                               const float grid_v,
                                               float3 &r_tangent_D)
 {
-  read_displacement_grid(other_displacement_grid, data.grid_size, grid_u, grid_v, r_tangent_D);
+  read_displacement_grid(data, other_displacement_grid, data.grid_size, grid_u, grid_v, r_tangent_D);
 }
 
 static void average_read_displacement_object(const MultiresDisplacementData &data,
@@ -214,17 +263,21 @@ static void average_get_other_ptex_and_corner(const MultiresDisplacementData &da
 }
 
 /* NOTE: Grid coordinates are relative to the other grid already. */
-static void average_with_other(const Displacement &displacement,
+static float3 read_other_displacement(const Displacement &displacement,
                                const int ptex_face_index,
                                const int corner,
                                const float grid_u,
                                const float grid_v,
-                               const int corner_delta,
-                               float3 &r_D)
+                               const int corner_delta)
 {
   const MultiresDisplacementData &data = *static_cast<MultiresDisplacementData *>(
       displacement.user_data);
-  const MDisps other_displacement_grid = *displacement_get_other_grid(
+  /* Keep a reference to the grid in the mesh array. read_displacement_grid()
+   * uses its address to determine the mesh-corner index when sampling sculpt
+   * layers. Copying MDisps here makes that address unrelated to data.mdisps,
+   * so layer contributions are skipped (or indexed unpredictably) exactly at
+   * the seams where neighboring grids are averaged. */
+  const MDisps &other_displacement_grid = *displacement_get_other_grid(
       displacement, ptex_face_index, corner, corner_delta);
   int other_ptex_face_index, other_corner_index;
   average_get_other_ptex_and_corner(
@@ -238,9 +291,7 @@ static void average_with_other(const Displacement &displacement,
                                    other_ptex_face_index,
                                    other_corner_index,
                                    other_D);
-  /* Average result with the other displacement vector. */
-  r_D += other_D;
-  r_D *= 0.5f;
+  return other_D;
 }
 
 static void average_with_all(const Displacement &displacement,
@@ -254,9 +305,14 @@ static void average_with_all(const Displacement &displacement,
       displacement.user_data);
   const PolyCornerIndex &face_corner = data.ptex_face_corner[ptex_face_index];
   const int num_corners = data.faces[face_corner.face_index].size();
+  /* Every corner represents the same face-center point. Pairwise averaging
+   * gives later corners more weight and makes the result depend on which grid
+   * is evaluated first. Sum object-space displacements, then divide once. */
   for (int corner_delta = 1; corner_delta < num_corners; corner_delta++) {
-    average_with_other(displacement, ptex_face_index, corner, 0.0f, 0.0f, corner_delta, r_D);
+    r_D += read_other_displacement(
+        displacement, ptex_face_index, corner, 0.0f, 0.0f, corner_delta);
   }
+  r_D /= float(num_corners);
 }
 
 static void average_with_next(const Displacement &displacement,
@@ -266,7 +322,8 @@ static void average_with_next(const Displacement &displacement,
                               const float /*grid_v*/,
                               float3 &r_D)
 {
-  average_with_other(displacement, ptex_face_index, corner, 0.0f, grid_u, 1, r_D);
+  r_D = (r_D + read_other_displacement(displacement, ptex_face_index, corner, 0.0f, grid_u, 1)) *
+        0.5f;
 }
 
 static void average_with_prev(const Displacement &displacement,
@@ -276,7 +333,8 @@ static void average_with_prev(const Displacement &displacement,
                               const float grid_v,
                               float3 &r_D)
 {
-  average_with_other(displacement, ptex_face_index, corner, grid_v, 0.0f, -1, r_D);
+  r_D = (r_D + read_other_displacement(displacement, ptex_face_index, corner, grid_v, 0.0f, -1)) *
+        0.5f;
 }
 
 static void average_displacement(const Displacement &displacement,
@@ -347,7 +405,8 @@ static void eval_displacement(Displacement *displacement,
    * averaging is needed. */
   float3 tangent_D;
   const AverageWith average_with = read_displacement_grid(
-      *displacement_grid, grid_size, grid_u, grid_v, tangent_D);
+      data, *displacement_grid, grid_size, grid_u, grid_v, tangent_D);
+
   /* Convert it to the object space. */
   float3x3 tangent_matrix;
   BKE_multires_construct_tangent_matrix(tangent_matrix, dPdu, dPdv, corner_of_quad);
@@ -356,6 +415,36 @@ static void eval_displacement(Displacement *displacement,
   /* For the boundary points of grid average two (or all) neighbor grids. */
   const int corner = displacement_get_face_corner(data, ptex_face_index, u, v);
   average_displacement(*displacement, average_with, ptex_face_index, corner, grid_u, grid_v, r_D);
+
+  /* Procedural texture displacement is deliberately evaluated after MDisps/layer seam
+   * averaging. UV seams are allowed to be discontinuous, so averaging the texture
+   * contribution across neighboring grids would smear valid UV discontinuities. */
+  if (data.mmd != nullptr && data.mesh != nullptr) {
+    float tex_delta = multires_texture_displacement_sample(
+        *data.mesh, *data.subdiv, *data.mmd, ptex_face_index, u, v);
+    if (tex_delta != 0.0f && data.masks != nullptr && displacement_grid != nullptr) {
+      const ptrdiff_t grid_index = displacement_grid - data.mdisps;
+      if (grid_index >= 0 && grid_index < data.mesh->corners_num) {
+        const GridPaintMask &mask_grid = data.masks[grid_index];
+        if (mask_grid.data != nullptr) {
+          const int mask_size = grid_size_from_level(mask_grid.level);
+          if (mask_size > 0) {
+            const int mx = std::clamp(int(std::round(grid_u * float(mask_size - 1))),
+                                      0,
+                                      mask_size - 1);
+            const int my = std::clamp(int(std::round(grid_v * float(mask_size - 1))),
+                                      0,
+                                      mask_size - 1);
+            const float mask = std::clamp(mask_grid.data[my * mask_size + mx], 0.0f, 1.0f);
+            tex_delta *= 1.0f - mask;
+          }
+        }
+      }
+    }
+    if (tex_delta != 0.0f) {
+      r_D += math::transform_direction(tangent_matrix, float3(0.0f, 0.0f, tex_delta));
+    }
+  }
 }
 
 static void free_displacement(Displacement *displacement)
@@ -417,7 +506,19 @@ static void displacement_init_data(Displacement &displacement,
   data.mmd = &mmd;
   data.faces = mesh.faces();
   data.mdisps = static_cast<const MDisps *>(CustomData_get_layer(&mesh.corner_data, CD_MDISPS));
+  data.masks = static_cast<const GridPaintMask *>(
+      CustomData_get_layer(&mesh.corner_data, CD_GRID_PAINT_MASK));
   data.face_ptex_offset = face_ptex_offset_get(&subdiv);
+  data.sampled_layers.clear();
+  data.sampled_layers.reserve(mmd.sculpt_layers.count());
+  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if ((layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) == 0 || !std::isfinite(layer.strength) ||
+        std::abs(layer.strength) < 1e-6f || layer.disps == nullptr || layer.level <= 0)
+    {
+      continue;
+    }
+    data.sampled_layers.append(&layer);
+  }
   data.is_initialized = false;
   displacement_data_init_mapping(displacement, mesh);
 }
@@ -431,7 +532,8 @@ static void displacement_init_functions(Displacement *displacement)
 
 void displacement_attach_from_multires(Subdiv *subdiv,
                                        const Mesh *mesh,
-                                       const MultiresModifierData *mmd)
+                                       const MultiresModifierData *mmd,
+                                       const float4x4 &texture_matrix)
 {
   /* Make sure we don't have previously assigned displacement. */
   displacement_detach(subdiv);
@@ -444,9 +546,20 @@ void displacement_attach_from_multires(Subdiv *subdiv,
   Displacement *displacement = MEM_new_zeroed<Displacement>("multires displacement");
   displacement->user_data = MEM_new<MultiresDisplacementData>("multires displacement data");
   displacement_init_data(*displacement, *subdiv, *mesh, *mmd);
+  static_cast<MultiresDisplacementData *>(displacement->user_data)->texture_matrix = texture_matrix;
   displacement_init_functions(displacement);
   /* Finish. */
   subdiv->displacement_evaluator = displacement;
+}
+
+const float4x4 *displacement_multires_texture_matrix(const Subdiv &subdiv)
+{
+  const Displacement *displacement = subdiv.displacement_evaluator;
+  if (!displacement || displacement->eval_displacement !=
+      static_cast<decltype(displacement->eval_displacement)>(eval_displacement)) {
+    return nullptr;
+  }
+  return &static_cast<const MultiresDisplacementData *>(displacement->user_data)->texture_matrix;
 }
 
 }  // namespace blender::bke::subdiv

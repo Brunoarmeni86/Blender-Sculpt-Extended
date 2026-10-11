@@ -9,6 +9,7 @@
  * \brief A BVH for high poly meshes.
  */
 
+#include <cstdint>
 #include <variant>
 
 #include "BLI_array.hh"
@@ -225,6 +226,19 @@ enum class Type {
  * \todo Most data is public but should either be removed or become private in the future.
  * The "_" suffix means that fields shouldn't be used by consumers of the `bke::pbvh` API.
  */
+/**
+ * Persistent PBVH change domains.  These bits are deliberately independent from bounds/normals
+ * dirty flags, because viewport maintenance is allowed to clear those while a sculpt transaction
+ * is still pending.
+ */
+enum class ChangeType : int8_t {
+  Positions,
+  Masks,
+  Visibility,
+  FaceSets,
+  Topology,
+};
+
 class Tree {
   friend Node;
   Type type_;
@@ -237,15 +251,29 @@ class Tree {
    * \note Values are only meaningful for leaf nodes.
    * \note The vector's size may not match the size of the nodes array.
    */
-  BitVector<> bounds_dirty_;
+  /* Sculpt Mesh V2 sparse operational dirty sets.
+   * Duplicate IDs are allowed on the hot tag path and are deduplicated only
+   * when a consumer builds its IndexMask. */
+  Vector<int> bounds_dirty_;
 
   /**
    * If true, the normals for the corresponding node index are out of date.
    * \note Values are only meaningful for leaf nodes.
    * \note The vector's size may not match the size of the nodes array.
    */
-  BitVector<> normals_dirty_;
+  Vector<int> normals_dirty_;
 
+  /**
+   * Persistent local-change journal.  These are cleared only by an explicit consumer after a
+   * successful transaction/flush, never by draw or normal updates.
+   */
+  /* V4.4b2 sparse PBVH journal.
+   * Store only node indices that were actually tagged. */
+  Vector<int> change_positions_;
+  Vector<int> change_masks_;
+  Vector<int> change_visibility_;
+  Vector<int> change_face_sets_;
+  Vector<int> change_topology_;
   /**
    * If true, the visibility status for the corresponding node indices are out of date.
    * \note Values are only meaningful for leaf nodes.
@@ -285,6 +313,13 @@ class Tree {
    * \warning Must not be called from multiple threads in parallel.
    */
   void tag_positions_changed(const IndexMask &node_mask);
+
+  /**
+   * Nodes changed in a given domain since the previous explicit consumer clear.
+   * This is a transaction journal, not a draw/update dirty mask.
+   */
+  IndexMask changed_nodes(ChangeType type, IndexMaskMemory &memory) const;
+  void clear_changes();
 
   /** Tag nodes where face or vertex visibility has changed. */
   void tag_visibility_changed(const IndexMask &node_mask);

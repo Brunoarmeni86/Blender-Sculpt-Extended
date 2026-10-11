@@ -175,6 +175,16 @@ bool multires_reshape_context_create_from_ccg(MultiresReshapeContext *reshape_co
                                               Mesh *base_mesh,
                                               int top_level);
 
+/**
+ * Lightweight CCG context for limit-surface/tangent/PTex evaluation only.
+ * Does not acquire writable displacement or mask CustomData.
+ */
+bool multires_reshape_context_create_from_ccg_evaluation(
+    MultiresReshapeContext *reshape_context,
+    SubdivCCG *subdiv_ccg,
+    Mesh *base_mesh,
+    int top_level);
+
 bool multires_reshape_context_create_from_modifier(MultiresReshapeContext *reshape_context,
                                                    Object *object,
                                                    MultiresModifierData *mmd,

@@ -6,10 +6,16 @@
  * \ingroup bke
  */
 
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include "BLI_time.h"
+#include "BLI_threads.h"
 #include "BKE_subdiv_ccg.hh"
 
 #include "MEM_guardedalloc.h"
 
+#include "BLI_array.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_math_bits.h"
@@ -26,6 +32,7 @@
 #include "BKE_subdiv_eval.hh"
 
 #ifdef WITH_OPENSUBDIV
+#  include "opensubdiv_evaluator.hh"
 #  include "opensubdiv_topology_refiner.hh"
 #endif
 
@@ -47,6 +54,12 @@ static void subdiv_ccg_average_inner_face_grids(SubdivCCG &subdiv_ccg,
 void subdiv_ccg_average_faces_boundaries_and_corners(SubdivCCG &subdiv_ccg,
                                                      const CCGKey &key,
                                                      const IndexMask &face_mask);
+
+static bool shape_key_ccg_reuse_adjacency_enabled();
+static void shape_key_ccg_stitch_update_normals(SubdivCCG &subdiv_ccg,
+                                                 const IndexMask &face_mask,
+                                                 double &r_stitch_ms,
+                                                 double &r_normals_ms);
 
 /** \} */
 
@@ -200,10 +213,14 @@ static void subdiv_ccg_eval_special_grid(Subdiv &subdiv,
   }
 }
 
-static bool subdiv_ccg_evaluate_grids(SubdivCCG &subdiv_ccg,
+bool BKE_subdiv_ccg_evaluate_existing(SubdivCCG &subdiv_ccg,
                                       Subdiv &subdiv,
                                       SubdivCCGMaskEvaluator *mask_evaluator)
 {
+  /* LAYER_VISIBLE_CCG_EVAL_TRACE_V2 */
+  const char *layer_trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool layer_trace = layer_trace_env && layer_trace_env[0] && layer_trace_env[0] != '0';
+  const double layer_eval_start = layer_trace ? BLI_time_now_seconds() : 0.0;
   const opensubdiv::TopologyRefinerImpl *topology_refiner = subdiv.topology_refiner;
   const int num_faces = topology_refiner->base_level().GetNumFaces();
   const Span<int> face_ptex_offset = face_ptex_offset_get(&subdiv);
@@ -220,12 +237,568 @@ static bool subdiv_ccg_evaluate_grids(SubdivCCG &subdiv_ccg,
       }
     }
   });
+  const double layer_positions_end = layer_trace ? BLI_time_now_seconds() : 0.0;
   /* If displacement is used, need to calculate normals after all final
    * coordinates are known. */
   if (subdiv.displacement_evaluator != nullptr) {
     BKE_subdiv_ccg_recalc_normals(subdiv_ccg);
   }
+  if (layer_trace) {
+    const double end = BLI_time_now_seconds();
+    std::printf("[MULTIRES_CCG_EVAL] faces=%d grids=%d area=%d positions=%.3fms normals=%.3fms total=%.3fms\n",
+                num_faces, subdiv_ccg.grids_num, subdiv_ccg.grid_area,
+                (layer_positions_end - layer_eval_start) * 1000.0,
+                (end - layer_positions_end) * 1000.0,
+                (end - layer_eval_start) * 1000.0);
+  }
   return true;
+}
+
+
+#ifdef WITH_OPENSUBDIV
+/* V2.4: batch OpenSubdiv limit-surface evaluation for one dirty coarse face.
+ *
+ * Shape Key + Multires has the Multires displacement evaluator attached in this
+ * fast path. The previous code performed one OpenSubdiv patch lookup/evaluation
+ * per CCG element. Here all elements of a coarse face are evaluated in one
+ * batch, then Multires displacement and mask are applied per element.
+ */
+struct SubdivCCGFaceBatchScratch {
+  Array<OpenSubdiv_PatchCoord> patch_coords;
+  Array<int> elements;
+  Array<float3> positions;
+  Array<float3> dPdu;
+  Array<float3> dPdv;
+};
+
+/* SHAPEKEY_BATCH_PROFILE_V241
+ * Temporary CPU-time accumulation. Values are sums across worker threads. */
+struct SubdivCCGBatchProfile {
+  std::atomic<unsigned long long> faces{0};
+  std::atomic<unsigned long long> points{0};
+  std::atomic<unsigned long long> coord_ns{0};
+  std::atomic<unsigned long long> osd_ns{0};
+  std::atomic<unsigned long long> displacement_ns{0};
+  std::atomic<unsigned long long> mask_ns{0};
+};
+
+static void subdiv_ccg_profile_add_ns(std::atomic<unsigned long long> &dst,
+                                     const double seconds)
+{
+  dst.fetch_add(static_cast<unsigned long long>(seconds * 1.0e9),
+                std::memory_order_relaxed);
+}
+
+#ifdef WITH_OPENSUBDIV
+/* V2.5: evaluate multiple dirty coarse faces in one OpenSubdiv batch.
+ *
+ * The CCG grids of different coarse faces are independent until the later
+ * stitch phase, so batching only changes evaluator call granularity.
+ */
+/* SHAPEKEY_ADAPTIVE_BATCH_V261
+ *
+ * Hardened adaptive batching:
+ * - tuning key includes thread count, mask state and face-corner complexity;
+ * - scratch memory is capped both per worker and approximately in aggregate;
+ * - batch size also preserves enough parallel jobs for the current machine;
+ * - the existing 3% hysteresis keeps near-ties on the smaller/conservative batch.
+ */
+struct ShapeKeyBatchTuneState {
+  int grid_area = 0;
+  int face_bucket = 0;
+  int max_grids_per_face = 0;
+  int thread_count = 0;
+  bool has_mask = false;
+  bool warmup_done = false;
+  int trial_cursor = 0;
+  int best_batch = 1;
+  double best_ms = 1.0e30;
+  bool complete = false;
+};
+
+static int shape_key_batch_face_bucket(const int faces_num)
+{
+  int bucket = 32;
+  while (bucket < faces_num && bucket < 16384) {
+    bucket *= 2;
+  }
+  return bucket;
+}
+
+static int shape_key_batch_max_grids_per_face(const SubdivCCG &subdiv_ccg,
+                                              const Span<int> dirty_face_indices)
+{
+  int max_grids_per_face = 1;
+  for (const int face_index : dirty_face_indices) {
+    max_grids_per_face = std::max(max_grids_per_face,
+                                  int(subdiv_ccg.faces[face_index].size()));
+  }
+  return max_grids_per_face;
+}
+
+static ShapeKeyBatchTuneState &shape_key_batch_tune_state(
+    const int grid_area,
+    const int face_bucket,
+    const int max_grids_per_face,
+    const int thread_count,
+    const bool has_mask)
+{
+  static thread_local Vector<ShapeKeyBatchTuneState> states;
+  for (ShapeKeyBatchTuneState &state : states) {
+    if (state.grid_area == grid_area &&
+        state.face_bucket == face_bucket &&
+        state.max_grids_per_face == max_grids_per_face &&
+        state.thread_count == thread_count &&
+        state.has_mask == has_mask)
+    {
+      return state;
+    }
+  }
+
+  ShapeKeyBatchTuneState state;
+  state.grid_area = grid_area;
+  state.face_bucket = face_bucket;
+  state.max_grids_per_face = max_grids_per_face;
+  state.thread_count = thread_count;
+  state.has_mask = has_mask;
+  states.append(state);
+  return states.last();
+}
+
+static int shape_key_batch_memory_cap(const SubdivCCG &subdiv_ccg,
+                                      const Span<int> dirty_face_indices,
+                                      const int max_grids_per_face,
+                                      const int thread_count)
+{
+  const size_t bytes_per_point = sizeof(OpenSubdiv_PatchCoord) + sizeof(int) +
+                                 sizeof(float3) * 3;
+  const size_t bytes_per_face = size_t(max_grids_per_face) *
+                                size_t(subdiv_ccg.grid_area) * bytes_per_point;
+  if (bytes_per_face == 0) {
+    return 1;
+  }
+
+  constexpr size_t max_bytes_per_worker = size_t(1) * 1024 * 1024;
+  constexpr size_t max_total_scratch = size_t(32) * 1024 * 1024;
+  const int effective_workers = std::max(
+      1, std::min(thread_count, int(dirty_face_indices.size())));
+  const size_t total_limited_per_worker = std::max(
+      size_t(1), max_total_scratch / size_t(effective_workers));
+  const size_t worker_budget = std::min(
+      max_bytes_per_worker, total_limited_per_worker);
+
+  int memory_cap = int(worker_budget / bytes_per_face);
+  memory_cap = std::clamp(memory_cap, 1, 16);
+
+  const int desired_jobs = std::max(
+      1, std::min(int(dirty_face_indices.size()), thread_count * 2));
+  const int parallelism_cap = std::max(
+      1, int(dirty_face_indices.size()) / desired_jobs);
+
+  return std::clamp(std::min(memory_cap, parallelism_cap), 1, 16);
+}
+
+static int shape_key_batch_next_trial(ShapeKeyBatchTuneState &state,
+                                      const int max_batch)
+{
+  static constexpr int candidates[] = {1, 2, 4, 8, 16};
+  constexpr int candidates_num = int(sizeof(candidates) / sizeof(candidates[0]));
+
+  while (state.trial_cursor < candidates_num &&
+         candidates[state.trial_cursor] > max_batch)
+  {
+    state.trial_cursor++;
+  }
+
+  if (state.trial_cursor >= candidates_num) {
+    state.complete = true;
+    return std::clamp(state.best_batch, 1, max_batch);
+  }
+  return candidates[state.trial_cursor];
+}
+
+static void shape_key_batch_record_trial(ShapeKeyBatchTuneState &state,
+                                         const int tested_batch,
+                                         const double eval_ms,
+                                         const int max_batch)
+{
+  if (eval_ms > 0.0 &&
+      (state.best_ms >= 1.0e29 || eval_ms < state.best_ms * 0.97))
+  {
+    state.best_ms = eval_ms;
+    state.best_batch = tested_batch;
+  }
+
+  state.trial_cursor++;
+  shape_key_batch_next_trial(state, max_batch);
+  if (state.complete) {
+    state.best_batch = std::clamp(state.best_batch, 1, max_batch);
+  }
+}
+
+static void subdiv_ccg_eval_displaced_faces_batch(
+    Subdiv &subdiv,
+    SubdivCCG &subdiv_ccg,
+    const Span<int> face_ptex_offset,
+    SubdivCCGMaskEvaluator *mask_evaluator,
+    const Span<int> face_indices,
+    SubdivCCGFaceBatchScratch &scratch,
+    SubdivCCGBatchProfile *profile)
+{
+  const int grid_size = subdiv_ccg.grid_size;
+  const int grid_area = subdiv_ccg.grid_area;
+  const float grid_size_1_inv = 1.0f / float(grid_size - 1);
+
+  int points_num = 0;
+  for (const int face_index : face_indices) {
+    points_num += subdiv_ccg.faces[face_index].size() * grid_area;
+  }
+  if (points_num == 0) {
+    return;
+  }
+
+  const double profile_coord_start = profile ? BLI_time_now_seconds() : 0.0;
+
+  scratch.patch_coords.reinitialize(points_num);
+  scratch.elements.reinitialize(points_num);
+  scratch.positions.reinitialize(points_num);
+  scratch.dPdu.reinitialize(points_num);
+  scratch.dPdv.reinitialize(points_num);
+
+  int batch_i = 0;
+  for (const int face_index : face_indices) {
+    const IndexRange face = subdiv_ccg.faces[face_index];
+    const bool regular = face.size() == 4;
+    const int base_ptex_face_index = face_ptex_offset[face_index];
+
+    for (int corner = 0; corner < face.size(); corner++) {
+      const int grid_index = face.start() + corner;
+      const IndexRange range = grid_range(grid_area, grid_index);
+
+      for (int y = 0; y < grid_size; y++) {
+        const float grid_v = y * grid_size_1_inv;
+        for (int x = 0; x < grid_size; x++, batch_i++) {
+          const float grid_u = x * grid_size_1_inv;
+
+          int ptex_face_index;
+          float u;
+          float v;
+          if (regular) {
+            ptex_face_index = base_ptex_face_index;
+            rotate_grid_to_quad(corner, grid_u, grid_v, &u, &v);
+          }
+          else {
+            ptex_face_index = base_ptex_face_index + corner;
+            u = 1.0f - grid_v;
+            v = 1.0f - grid_u;
+          }
+
+          scratch.patch_coords[batch_i] = {ptex_face_index, u, v};
+          scratch.elements[batch_i] = range[CCG_grid_xy_to_index(grid_size, x, y)];
+        }
+      }
+    }
+  }
+
+  BLI_assert(batch_i == points_num);
+
+  if (profile) {
+    profile->faces.fetch_add(
+        static_cast<unsigned long long>(face_indices.size()), std::memory_order_relaxed);
+    profile->points.fetch_add(
+        static_cast<unsigned long long>(points_num), std::memory_order_relaxed);
+    subdiv_ccg_profile_add_ns(
+        profile->coord_ns, BLI_time_now_seconds() - profile_coord_start);
+  }
+
+  const double profile_osd_start = profile ? BLI_time_now_seconds() : 0.0;
+  subdiv.evaluator->eval_output->evaluatePatchesLimit(
+      scratch.patch_coords.data(),
+      points_num,
+      reinterpret_cast<float *>(scratch.positions.data()),
+      reinterpret_cast<float *>(scratch.dPdu.data()),
+      reinterpret_cast<float *>(scratch.dPdv.data()));
+  if (profile) {
+    subdiv_ccg_profile_add_ns(
+        profile->osd_ns, BLI_time_now_seconds() - profile_osd_start);
+  }
+
+  const double profile_displacement_start = profile ? BLI_time_now_seconds() : 0.0;
+  for (const int i : IndexRange(points_num)) {
+    const OpenSubdiv_PatchCoord &coord = scratch.patch_coords[i];
+    float3 displacement;
+    eval_displacement(&subdiv,
+                      coord.ptex_face,
+                      coord.u,
+                      coord.v,
+                      scratch.dPdu[i],
+                      scratch.dPdv[i],
+                      displacement);
+    subdiv_ccg.positions[scratch.elements[i]] = scratch.positions[i] + displacement;
+  }
+  if (profile) {
+    subdiv_ccg_profile_add_ns(
+        profile->displacement_ns, BLI_time_now_seconds() - profile_displacement_start);
+  }
+
+  const double profile_mask_start = profile ? BLI_time_now_seconds() : 0.0;
+  for (const int i : IndexRange(points_num)) {
+    const OpenSubdiv_PatchCoord &coord = scratch.patch_coords[i];
+    subdiv_ccg_eval_grid_element_mask(subdiv_ccg,
+                                      mask_evaluator,
+                                      coord.ptex_face,
+                                      coord.u,
+                                      coord.v,
+                                      scratch.elements[i]);
+  }
+  if (profile) {
+    subdiv_ccg_profile_add_ns(
+        profile->mask_ns, BLI_time_now_seconds() - profile_mask_start);
+  }
+}
+#endif
+#endif
+
+bool BKE_subdiv_ccg_evaluate_faces_existing(
+    SubdivCCG &subdiv_ccg,
+    Subdiv &subdiv,
+    const IndexMask &face_mask,
+    SubdivCCGMaskEvaluator *mask_evaluator)
+{
+#ifdef WITH_OPENSUBDIV
+  /* SHAPEKEY_CCG_PROFILE_V22B */
+  const char *shape_key_trace_env = std::getenv("BLENDER_SHAPEKEY_LOCAL_TRACE");
+  const bool shape_key_trace = shape_key_trace_env != nullptr &&
+                               shape_key_trace_env[0] != '\0' &&
+                               shape_key_trace_env[0] != '0';
+  const double profile_total_start = BLI_time_now_seconds();
+
+  if (face_mask.is_empty()) {
+    return true;
+  }
+
+  const opensubdiv::TopologyRefinerImpl *topology_refiner = subdiv.topology_refiner;
+  if (topology_refiner == nullptr) {
+    return false;
+  }
+  const int num_faces = topology_refiner->base_level().GetNumFaces();
+  if (num_faces != subdiv_ccg.faces.size()) {
+    return false;
+  }
+
+  const Span<int> face_ptex_offset = face_ptex_offset_get(&subdiv);
+  if (face_ptex_offset.size() != subdiv_ccg.faces.size() + 1) {
+    return false;
+  }
+
+  bool valid = true;
+  face_mask.foreach_index([&](const int face_index) {
+    if (face_index < 0 || face_index >= num_faces) {
+      valid = false;
+    }
+  });
+  if (!valid) {
+    return false;
+  }
+
+  /* SHAPEKEY_LOCAL_CCG_V261
+   * Hardened automatic OpenSubdiv batch tuning. One candidate is measured per
+   * slider update; geometry is never evaluated multiple times just for tuning. */
+  threading::EnumerableThreadSpecific<SubdivCCGFaceBatchScratch> face_batch_scratch;
+  SubdivCCGBatchProfile batch_profile;
+  const bool can_batch_displaced =
+      subdiv.displacement_evaluator != nullptr && subdiv.evaluator != nullptr &&
+      subdiv.evaluator->eval_output != nullptr;
+
+  Vector<int> dirty_face_indices;
+  if (can_batch_displaced) {
+    dirty_face_indices.reserve(face_mask.size());
+    face_mask.foreach_index([&](const int face_index) { dirty_face_indices.append(face_index); });
+  }
+
+  const int system_threads = std::max(1, BLI_system_thread_count());
+  const bool has_mask = mask_evaluator != nullptr;
+  const int max_grids_per_face = dirty_face_indices.is_empty() ?
+                                     1 :
+                                     shape_key_batch_max_grids_per_face(
+                                         subdiv_ccg, dirty_face_indices);
+
+  int forced_batch = 0;
+  if (const char *batch_env = std::getenv("BLENDER_SHAPEKEY_BATCH_FACES")) {
+    const int requested = std::atoi(batch_env);
+    if (requested > 0) {
+      forced_batch = std::clamp(requested, 1, 32);
+    }
+  }
+
+  int batch_faces = forced_batch > 0 ? forced_batch : 1;
+  int max_auto_batch = 1;
+  ShapeKeyBatchTuneState *tune_state = nullptr;
+  bool tune_warmup = false;
+  bool tune_trial = false;
+
+  if (can_batch_displaced && forced_batch == 0 && !dirty_face_indices.is_empty()) {
+    max_auto_batch = shape_key_batch_memory_cap(
+        subdiv_ccg, dirty_face_indices, max_grids_per_face, system_threads);
+    const int face_bucket = shape_key_batch_face_bucket(int(dirty_face_indices.size()));
+    tune_state = &shape_key_batch_tune_state(subdiv_ccg.grid_area,
+                                             face_bucket,
+                                             max_grids_per_face,
+                                             system_threads,
+                                             has_mask);
+
+    if (!tune_state->warmup_done) {
+      batch_faces = std::min(4, max_auto_batch);
+      tune_warmup = true;
+    }
+    else if (!tune_state->complete) {
+      batch_faces = shape_key_batch_next_trial(*tune_state, max_auto_batch);
+      tune_trial = !tune_state->complete;
+    }
+    else {
+      batch_faces = std::clamp(tune_state->best_batch, 1, max_auto_batch);
+    }
+  }
+
+  const bool collect_batch_profile =
+      shape_key_trace &&
+      (forced_batch > 0 || (tune_state != nullptr && tune_state->complete));
+
+  const double profile_eval_start = BLI_time_now_seconds();
+  if (can_batch_displaced) {
+    const int chunks_num =
+        (int(dirty_face_indices.size()) + batch_faces - 1) / batch_faces;
+
+    threading::parallel_for(
+        IndexRange(chunks_num),
+        1,
+        [&](const IndexRange chunk_range) {
+          for (const int chunk_i : chunk_range) {
+            const int start = chunk_i * batch_faces;
+            const int size = std::min(
+                batch_faces, int(dirty_face_indices.size()) - start);
+            subdiv_ccg_eval_displaced_faces_batch(
+                subdiv,
+                subdiv_ccg,
+                face_ptex_offset,
+                mask_evaluator,
+                dirty_face_indices.as_span().slice(start, size),
+                face_batch_scratch.local(),
+                collect_batch_profile ? &batch_profile : nullptr);
+          }
+        });
+  }
+  else {
+    face_mask.foreach_index(
+        [&](const int face_index) {
+          if (subdiv_ccg.faces[face_index].size() == 4) {
+            subdiv_ccg_eval_regular_grid(
+                subdiv, subdiv_ccg, face_ptex_offset, mask_evaluator, face_index);
+          }
+          else {
+            subdiv_ccg_eval_special_grid(
+                subdiv, subdiv_ccg, face_ptex_offset, mask_evaluator, face_index);
+          }
+        },
+        exec_mode::grain_size(8));
+  }
+  const double profile_eval_ms = (BLI_time_now_seconds() - profile_eval_start) * 1000.0;
+
+  if (tune_state != nullptr) {
+    if (tune_warmup) {
+      tune_state->warmup_done = true;
+      if (shape_key_trace) {
+        std::printf(
+            "[SHAPEKEY_AUTOTUNE] phase=WARMUP grid_area=%d bucket=%d "
+            "threads=%d mask=%d corners=%d batch=%d max=%d eval=%.3fms\n",
+            subdiv_ccg.grid_area,
+            tune_state->face_bucket,
+            system_threads,
+            has_mask ? 1 : 0,
+            max_grids_per_face,
+            batch_faces,
+            max_auto_batch,
+            profile_eval_ms);
+      }
+    }
+    else if (tune_trial) {
+      shape_key_batch_record_trial(
+          *tune_state, batch_faces, profile_eval_ms, max_auto_batch);
+      if (shape_key_trace) {
+        std::printf(
+            "[SHAPEKEY_AUTOTUNE] phase=%s grid_area=%d bucket=%d "
+            "threads=%d mask=%d corners=%d batch=%d max=%d "
+            "eval=%.3fms best=%d best_ms=%.3fms\n",
+            tune_state->complete ? "LOCKED" : "TRIAL",
+            subdiv_ccg.grid_area,
+            tune_state->face_bucket,
+            system_threads,
+            has_mask ? 1 : 0,
+            max_grids_per_face,
+            batch_faces,
+            max_auto_batch,
+            profile_eval_ms,
+            tune_state->best_batch,
+            tune_state->best_ms);
+      }
+    }
+  }
+
+  if (shape_key_trace && can_batch_displaced) {
+    if (collect_batch_profile) {
+      const double ns_to_ms = 1.0e-6;
+      std::printf(
+          "[SHAPEKEY_BATCH] mode=%s batch_faces=%d faces=%llu points=%llu "
+          "coord_cpu=%.3fms osd_cpu=%.3fms disp_cpu=%.3fms mask_cpu=%.3fms\n",
+          forced_batch > 0 ? "FORCED" : "AUTO_LOCKED",
+          batch_faces,
+          batch_profile.faces.load(std::memory_order_relaxed),
+          batch_profile.points.load(std::memory_order_relaxed),
+          double(batch_profile.coord_ns.load(std::memory_order_relaxed)) * ns_to_ms,
+          double(batch_profile.osd_ns.load(std::memory_order_relaxed)) * ns_to_ms,
+          double(batch_profile.displacement_ns.load(std::memory_order_relaxed)) * ns_to_ms,
+          double(batch_profile.mask_ns.load(std::memory_order_relaxed)) * ns_to_ms);
+    }
+    else {
+      std::printf(
+          "[SHAPEKEY_BATCH] mode=AUTO_TUNING batch_faces=%d faces=%d "
+          "detail_profile=OFF\n",
+          batch_faces,
+          int(dirty_face_indices.size()));
+    }
+  }
+
+  double profile_stitch_ms = 0.0;
+  double profile_normals_ms = 0.0;
+  if (shape_key_ccg_reuse_adjacency_enabled()) {
+    shape_key_ccg_stitch_update_normals(
+        subdiv_ccg, face_mask, profile_stitch_ms, profile_normals_ms);
+  }
+  else {
+    const double profile_stitch_start = BLI_time_now_seconds();
+    BKE_subdiv_ccg_average_stitch_faces(subdiv_ccg, face_mask);
+    profile_stitch_ms = (BLI_time_now_seconds() - profile_stitch_start) * 1000.0;
+
+    const double profile_normals_start = BLI_time_now_seconds();
+    BKE_subdiv_ccg_update_normals(subdiv_ccg, face_mask);
+    profile_normals_ms = (BLI_time_now_seconds() - profile_normals_start) * 1000.0;
+  }
+  const double profile_total_ms = (BLI_time_now_seconds() - profile_total_start) * 1000.0;
+
+  if (shape_key_trace) {
+    std::printf(
+        "[SHAPEKEY_CCG] faces=%lld eval=%.3fms stitch=%.3fms normals=%.3fms total=%.3fms\n",
+        static_cast<long long>(face_mask.size()),
+        profile_eval_ms,
+        profile_stitch_ms,
+        profile_normals_ms,
+        profile_total_ms);
+  }
+  return true;
+#else
+  UNUSED_VARS(subdiv_ccg, subdiv, face_mask, mask_evaluator);
+  return false;
+#endif
 }
 
 static void subdiv_ccg_allocate_adjacent_edges(SubdivCCG &subdiv_ccg, const int num_edges)
@@ -379,6 +952,11 @@ std::unique_ptr<SubdivCCG> BKE_subdiv_to_ccg(Subdiv &subdiv,
                                              SubdivCCGMaskEvaluator *mask_evaluator)
 {
 #ifdef WITH_OPENSUBDIV
+  /* LAYER_VISIBLE_CCG_BUILD_TRACE_V2 */
+  const char *layer_trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool layer_trace = layer_trace_env && layer_trace_env[0] && layer_trace_env[0] != '0';
+  const double layer_build_start = layer_trace ? BLI_time_now_seconds() : 0.0;
+  double layer_alloc_ms = 0.0, layer_neighbors_ms = 0.0;
   stats_begin(&subdiv.stats, SUBDIV_STATS_SUBDIV_TO_CCG);
   std::unique_ptr<SubdivCCG> subdiv_ccg = std::make_unique<SubdivCCG>();
   subdiv_ccg->subdiv = &subdiv;
@@ -390,14 +968,24 @@ std::unique_ptr<SubdivCCG> BKE_subdiv_to_ccg(Subdiv &subdiv,
   subdiv_ccg->grid_to_face_map = coarse_mesh.corner_to_face_map();
   if (coarse_mesh.corners_num) {
     BLI_assert(subdiv.topology_refiner);
+    const double alloc_start = layer_trace ? BLI_time_now_seconds() : 0.0;
     subdiv_ccg_alloc_elements(*subdiv_ccg, subdiv, settings);
+    const double alloc_end = layer_trace ? BLI_time_now_seconds() : 0.0;
     subdiv_ccg_init_faces_neighborhood(*subdiv_ccg);
-    if (!subdiv_ccg_evaluate_grids(*subdiv_ccg, subdiv, mask_evaluator)) {
+    const double neighbors_end = layer_trace ? BLI_time_now_seconds() : 0.0;
+    layer_alloc_ms = (alloc_end - alloc_start) * 1000.0;
+    layer_neighbors_ms = (neighbors_end - alloc_end) * 1000.0;
+    if (!BKE_subdiv_ccg_evaluate_existing(*subdiv_ccg, subdiv, mask_evaluator)) {
       stats_end(&subdiv.stats, SUBDIV_STATS_SUBDIV_TO_CCG);
       return nullptr;
     }
   }
   stats_end(&subdiv.stats, SUBDIV_STATS_SUBDIV_TO_CCG);
+  if (layer_trace) {
+    std::printf("[MULTIRES_CCG_BUILD] grids=%d alloc=%.3fms neighbors=%.3fms total=%.3fms\n",
+                subdiv_ccg->grids_num, layer_alloc_ms, layer_neighbors_ms,
+                (BLI_time_now_seconds() - layer_build_start) * 1000.0);
+  }
   return subdiv_ccg;
 #else
   UNUSED_VARS(subdiv, settings, coarse_mesh, mask_evaluator);
@@ -867,10 +1455,8 @@ void BKE_subdiv_ccg_average_stitch_faces(SubdivCCG &subdiv_ccg, const IndexMask 
         subdiv_ccg_average_inner_face_grids(subdiv_ccg, key, subdiv_ccg.faces[face_index]);
       },
       exec_mode::grain_size(512));
-  /* TODO(sergey): Only average elements which are adjacent to modified
-   * faces. */
-  subdiv_ccg_average_boundaries(subdiv_ccg, key, subdiv_ccg.adjacent_edges.index_range());
-  subdiv_ccg_average_corners(subdiv_ccg, key, subdiv_ccg.adjacent_verts.index_range());
+  /* V2.3: only stitch coarse edges/vertices adjacent to modified faces. */
+  subdiv_ccg_average_faces_boundaries_and_corners(subdiv_ccg, key, face_mask);
 #else
   UNUSED_VARS(subdiv_ccg, face_mask);
 #endif
@@ -1592,4 +2178,80 @@ void BKE_subdiv_ccg_eval_limit_positions(const SubdivCCG &subdiv_ccg,
 
 /** \} */
 
+}
+
+namespace blender {
+#ifdef WITH_OPENSUBDIV
+/* SHAPEKEY_CCG_POST_V28_NAMESPACE_REPAIR_V3 */
+/* SHAPEKEY_CCG_POST_V28
+ *
+ * The V2.3 local stitch and BKE_subdiv_ccg_update_normals() both discover,
+ * hash and sort the exact same coarse-edge/coarse-vertex adjacency. Reuse that
+ * adjacency for the position stitch and the subsequent normal seam averaging.
+ * Geometry math and operation order stay unchanged.
+ */
+static bool shape_key_ccg_reuse_adjacency_enabled()
+{
+  const char *value = std::getenv("BLENDER_SHAPEKEY_REUSE_ADJACENCY");
+  return value == nullptr || value[0] == '\0' || value[0] != '0';
+}
+
+static void shape_key_ccg_stitch_update_normals(SubdivCCG &subdiv_ccg,
+                                                 const IndexMask &face_mask,
+                                                 double &r_stitch_ms,
+                                                 double &r_normals_ms)
+{
+  Set<int> adjacent_vert_set;
+  Set<int> adjacent_edge_set;
+  subdiv_ccg_affected_face_adjacency(
+      subdiv_ccg, face_mask, adjacent_vert_set, adjacent_edge_set);
+
+  Vector<int> adjacent_verts(adjacent_vert_set.begin(), adjacent_vert_set.end());
+  Vector<int> adjacent_edges(adjacent_edge_set.begin(), adjacent_edge_set.end());
+  std::ranges::sort(adjacent_verts);
+  std::ranges::sort(adjacent_edges);
+
+  IndexMaskMemory edge_memory;
+  IndexMaskMemory vert_memory;
+  const IndexMask adjacent_edge_mask =
+      IndexMask::from_indices(adjacent_edges.as_span(), edge_memory);
+  const IndexMask adjacent_vert_mask =
+      IndexMask::from_indices(adjacent_verts.as_span(), vert_memory);
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+
+  const double stitch_start = BLI_time_now_seconds();
+  face_mask.foreach_index(
+      [&](const int face_index) {
+        subdiv_ccg_average_inner_face_grids(
+            subdiv_ccg, key, subdiv_ccg.faces[face_index]);
+      },
+      exec_mode::grain_size(512));
+  subdiv_ccg_average_boundaries(subdiv_ccg, key, adjacent_edge_mask);
+  subdiv_ccg_average_corners(subdiv_ccg, key, adjacent_vert_mask);
+  r_stitch_ms = (BLI_time_now_seconds() - stitch_start) * 1000.0;
+
+  const double normals_start = BLI_time_now_seconds();
+  if (!subdiv_ccg.normals.is_empty()) {
+    subdiv_ccg_recalc_inner_grid_normals(subdiv_ccg, face_mask);
+    subdiv_ccg_average_boundaries(subdiv_ccg, key, adjacent_edge_mask);
+    subdiv_ccg_average_corners(subdiv_ccg, key, adjacent_vert_mask);
+  }
+  r_normals_ms = (BLI_time_now_seconds() - normals_start) * 1000.0;
+}
+
+/* LAYER_WEIGHT_SURFACE_REUSE_V1_1_FIX
+ * Reuse the already validated Shape Key adjacency path for layer weight updates.
+ */
+void BKE_subdiv_ccg_stitch_update_normals_reuse(SubdivCCG &subdiv_ccg,
+                                                const IndexMask &face_mask,
+                                                double &r_stitch_ms,
+                                                double &r_normals_ms)
+{
+  shape_key_ccg_stitch_update_normals(
+      subdiv_ccg, face_mask, r_stitch_ms, r_normals_ms);
+}
+
+#endif  /* WITH_OPENSUBDIV */
 }  // namespace blender
+
+  // namespace blender

@@ -15,6 +15,8 @@
  * - Additional standard modifiers such as masking, brush strength, texture masking, etc.
  */
 
+#include <cstdlib>
+#include <cstdio>
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
 
 #include "DNA_brush_types.h"
@@ -29,6 +31,7 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
 
+#include "BLI_time.h"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.hh"
@@ -304,6 +307,16 @@ static void calc_bmesh(const Depsgraph &depsgraph,
 
 }  // namespace clay_strips_cc
 
+/* Sculpt Mesh V3 Deep Probe: diagnostics only, enabled unless explicitly set to 0. */
+static bool sculpt_mesh_v3deep_enabled()
+{
+  static const bool enabled = []() {
+    const char *value = std::getenv("BLENDER_SCULPT_V3_DEEP_PROBE");
+    return !value || value[0] != '0';
+  }();
+  return enabled;
+}
+
 void do_clay_strips_brush(const Depsgraph &depsgraph,
                           const Sculpt &sd,
                           Object &object,
@@ -311,6 +324,14 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
                           const float3 &plane_normal,
                           const float3 &plane_center)
 {
+  /* Sculpt Mesh V3 Clay memory probe.
+   * Diagnostic only; split the regular Mesh path without changing brush math. */
+  const double sculpt_mesh_v3_clay_total_start = BLI_time_now_seconds();
+  double sculpt_mesh_v3_clay_setup_ms = 0.0;
+  double sculpt_mesh_v3_clay_loop_ms = 0.0;
+  bool sculpt_mesh_v3_clay_mesh_path = false;
+  const bool v3deep = sculpt_mesh_v3deep_enabled();
+  double v3deep_deform_ms = 0.0, v3deep_attributes_ms = 0.0, v3deep_normals_ms = 0.0;
   PRF_scope(ProfileCategory::Editor);
   SculptSession &ss = *object.runtime->sculpt_session;
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
@@ -332,9 +353,22 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
     case bke::pbvh::Type::Mesh: {
       Mesh &mesh = *id_cast<Mesh *>(object.data);
       MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+      sculpt_mesh_v3_clay_mesh_path = true;
+      const double sculpt_mesh_v3_clay_setup_start = BLI_time_now_seconds();      const double v3deep_deform_start = v3deep ? BLI_time_now_seconds() : 0.0;
       const PositionDeformData position_data(depsgraph, object);
+      const double v3deep_attributes_start = v3deep ? BLI_time_now_seconds() : 0.0;
       const MeshAttributeData attribute_data(mesh);
+      const double v3deep_normals_start = v3deep ? BLI_time_now_seconds() : 0.0;
       const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, object);
+      if (v3deep) {
+        const double end = BLI_time_now_seconds();
+        v3deep_deform_ms = (v3deep_attributes_start - v3deep_deform_start) * 1000.0;
+        v3deep_attributes_ms = (v3deep_normals_start - v3deep_attributes_start) * 1000.0;
+        v3deep_normals_ms = (end - v3deep_normals_start) * 1000.0;
+      }
+      sculpt_mesh_v3_clay_setup_ms =
+          (BLI_time_now_seconds() - sculpt_mesh_v3_clay_setup_start) * 1000.0;
+      const double sculpt_mesh_v3_clay_loop_start = BLI_time_now_seconds();
       node_mask.foreach_index(
           [&](const int i) {
             LocalData &tls = all_tls.local();
@@ -352,7 +386,8 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
             bke::pbvh::update_node_bounds_mesh(position_data.eval, nodes[i]);
           },
           exec_mode::grain_size(1));
-      break;
+      sculpt_mesh_v3_clay_loop_ms =
+          (BLI_time_now_seconds() - sculpt_mesh_v3_clay_loop_start) * 1000.0;      break;
     }
     case bke::pbvh::Type::Grids: {
       SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
@@ -379,8 +414,31 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       break;
     }
   }
+  const double sculpt_mesh_v3_clay_pbvh_start = BLI_time_now_seconds();
   pbvh.tag_positions_changed(node_mask);
   pbvh.flush_bounds_to_parents();
+  if (sculpt_mesh_v3_clay_mesh_path) {
+    const double sculpt_mesh_v3_clay_pbvh_ms =
+        (BLI_time_now_seconds() - sculpt_mesh_v3_clay_pbvh_start) * 1000.0;
+    const double sculpt_mesh_v3_clay_total_ms =
+        (BLI_time_now_seconds() - sculpt_mesh_v3_clay_total_start) * 1000.0;
+    if (sculpt_mesh_v3_clay_total_ms >= 0.50) {
+      std::fprintf(stderr,
+                   "[SculptMeshV3Clay] nodes=%lld total=%.3f ms setup=%.3f "
+                   "node_loop=%.3f pbvh_tag_flush=%.3f\n",
+                   static_cast<long long>(node_mask.size()),
+                   sculpt_mesh_v3_clay_total_ms,
+                   sculpt_mesh_v3_clay_setup_ms,
+                   sculpt_mesh_v3_clay_loop_ms,
+                   sculpt_mesh_v3_clay_pbvh_ms);
+    }
+  }
+  if (v3deep && sculpt_mesh_v3_clay_mesh_path && sculpt_mesh_v3_clay_setup_ms >= 0.50) {
+    std::fprintf(stderr,
+                 "[SculptMeshV3Setup] nodes=%lld deform=%.3f ms attributes=%.3f normals_access=%.3f\n",
+                 static_cast<long long>(node_mask.size()),
+                 v3deep_deform_ms, v3deep_attributes_ms, v3deep_normals_ms);
+  }
 }
 
 namespace clay_strips {

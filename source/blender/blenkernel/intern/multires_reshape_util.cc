@@ -264,6 +264,39 @@ bool multires_reshape_context_create_from_ccg(MultiresReshapeContext *reshape_co
   return context_verify_or_free(reshape_context);
 }
 
+bool multires_reshape_context_create_from_ccg_evaluation(
+    MultiresReshapeContext *reshape_context,
+    SubdivCCG *subdiv_ccg,
+    Mesh *base_mesh,
+    int top_level)
+{
+  context_zero(reshape_context);
+  if (subdiv_ccg == nullptr || subdiv_ccg->subdiv == nullptr || base_mesh == nullptr) {
+    return false;
+  }
+
+  reshape_context->base_mesh = base_mesh;
+  reshape_context->base_positions = base_mesh->vert_positions();
+  reshape_context->base_edges = base_mesh->edges();
+  reshape_context->base_faces = base_mesh->faces();
+  reshape_context->base_corner_verts = base_mesh->corner_verts();
+  reshape_context->base_corner_edges = base_mesh->corner_edges();
+  reshape_context->subdiv = subdiv_ccg->subdiv;
+  reshape_context->need_free_subdiv = false;
+  reshape_context->reshape.level = subdiv_ccg->level;
+  reshape_context->reshape.grid_size = bke::subdiv::grid_size_from_level(subdiv_ccg->level);
+  reshape_context->top.level = top_level;
+  reshape_context->top.grid_size = bke::subdiv::grid_size_from_level(top_level);
+
+  /* The local V4 solver only evaluates the base limit surface, tangents and PTex mapping.
+   * Avoid CustomData_get_layer_for_write(): it triggers expensive copy-on-write of
+   * CD_MDISPS/CD_GRID_PAINT_MASK although this context never writes either layer. */
+  reshape_context->face_ptex_offset = bke::subdiv::face_ptex_offset_get(reshape_context->subdiv);
+  context_init_lookup(reshape_context);
+
+  return reshape_context->num_grids == base_mesh->corners_num;
+}
+
 bool multires_reshape_context_create_from_modifier(MultiresReshapeContext *reshape_context,
                                                    Object *object,
                                                    MultiresModifierData *mmd,
@@ -538,20 +571,41 @@ void multires_reshape_evaluate_base_mesh_limit_at_grid(
     float3 &r_P,
     float3x3 &r_tangent_matrix)
 {
+  /* V4.3a: Grid metadata is invariant for all samples of a grid.
+   * Avoid the generic grid->PTex path doing repeated face/corner lookups,
+   * and use the same direct quad parameterization as SubdivCCG evaluation. */
+  const int grid_index = grid_coord->grid_index;
+  const int face_index = multires_reshape_grid_to_face_index(reshape_context, grid_index);
+  const int corner = grid_index - reshape_context->face_start_grid_index[face_index];
+  const bool is_quad = multires_reshape_is_quad_face(reshape_context, face_index);
+
+  PTexCoord ptex_coord;
+  ptex_coord.ptex_face_index =
+      reshape_context->face_ptex_offset[face_index] + (is_quad ? 0 : corner);
+
+  if (is_quad) {
+    bke::subdiv::rotate_grid_to_quad(
+        corner, grid_coord->u, grid_coord->v, &ptex_coord.u, &ptex_coord.v);
+  }
+  else {
+    bke::subdiv::grid_uv_to_ptex_face_uv(
+        grid_coord->u, grid_coord->v, &ptex_coord.u, &ptex_coord.v);
+  }
+
   float3 dPdu;
   float3 dPdv;
-  const PTexCoord ptex_coord = multires_reshape_grid_coord_to_ptex(reshape_context, grid_coord);
-  bke::subdiv::Subdiv *subdiv = reshape_context->subdiv;
-  bke::subdiv::eval_limit_point_and_derivatives(
-      subdiv, ptex_coord.ptex_face_index, ptex_coord.u, ptex_coord.v, r_P, dPdu, dPdv);
+  bke::subdiv::eval_limit_point_and_derivatives(reshape_context->subdiv,
+                                                 ptex_coord.ptex_face_index,
+                                                 ptex_coord.u,
+                                                 ptex_coord.v,
+                                                 r_P,
+                                                 dPdu,
+                                                 dPdv);
 
-  const int face_index = multires_reshape_grid_to_face_index(reshape_context,
-                                                             grid_coord->grid_index);
-  const int corner = multires_reshape_grid_to_corner(reshape_context, grid_coord->grid_index);
-  multires_reshape_tangent_matrix_for_corner(
-      reshape_context, face_index, corner, dPdu, dPdv, r_tangent_matrix);
+  const int tangent_corner = is_quad ? corner : 0;
+  BKE_multires_construct_tangent_matrix(
+      r_tangent_matrix, dPdu, dPdv, tangent_corner);
 }
-
 /** \} */
 
 /* -------------------------------------------------------------------- */

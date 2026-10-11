@@ -7,6 +7,15 @@
  * Implements the Sculpt Mode Brushes.
  */
 
+#ifdef _WIN32
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  include <psapi.h>
+#endif
+#include <cstdint>
+#include <cstdio>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +24,7 @@
 
 #include "CLG_log.h"
 
+#include "BLI_time.h"
 #include "BLI_array_utils.hh"
 #include "BLI_atomic_disjoint_set.hh"
 #include "BLI_dial_2d.h"
@@ -57,6 +67,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -1202,8 +1213,9 @@ void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object)
         Vector<float3> translations;
       };
 
+      MultiresSculptLayer *base_layer = bke::multires_layers::base_recording_layer(object);
       std::optional<ShapeKeyData> shape_key_data = ShapeKeyData::from_object(object);
-      const bool need_translations = !ss.deform_imats.is_empty() || shape_key_data.has_value();
+      const bool need_translations = base_layer || !ss.deform_imats.is_empty() || shape_key_data.has_value();
 
       threading::EnumerableThreadSpecific<LocalData> all_tls;
       node_mask.foreach_index(
@@ -1231,6 +1243,10 @@ void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object)
                 apply_crazyspace_to_translations(ss.deform_imats, verts, translations);
               }
 
+              if (base_layer) {
+                bke::multires_layers::base_deltas_record(*base_layer, verts, translations);
+                return;
+              }
               if (shape_key_data) {
                 for (MutableSpan<float3> data : shape_key_data->dependent_keys) {
                   apply_translations(translations, verts, data);
@@ -2340,7 +2356,10 @@ static float brush_strength(const Sculpt &sd,
   const float pressure = BKE_brush_use_alpha_pressure(&brush) ?
                              BKE_curvemapping_evaluateF(brush.curve_strength, 0, cache.pressure) :
                              1.0f;
-  float overlap = paint_runtime.overlap_factor;
+  /* SCULPT_ADAPTIVE_STROKE_V1: distance weight is applied once, after
+   * brush-specific strength. Avoid combining it with legacy overlap attenuation. */
+  float overlap = sculpt_uniform_accumulation_enabled(brush) ?
+                      1.0f : paint_runtime.overlap_factor;
   /* Spacing is integer percentage of radius, divide by 50 to get
    * normalized diameter. */
 
@@ -3402,6 +3421,60 @@ static const char *sculpt_brush_type_name(const Brush &brush)
   return "Sculpting";
 }
 
+/* Sculpt Mesh V3 memory pressure probe.
+ *
+ * Diagnostic only. On Windows this samples process working-set/private bytes,
+ * cumulative page faults and currently available physical memory. The API is
+ * resolved dynamically so no Psapi import library change is required. */
+struct SculptMeshV3MemorySample {
+  uint64_t page_faults = 0;
+  uint64_t working_set = 0;
+  uint64_t private_bytes = 0;
+  uint64_t avail_phys = 0;
+  bool valid = false;
+};
+
+static SculptMeshV3MemorySample sculpt_mesh_v3_memory_sample()
+{
+  SculptMeshV3MemorySample result;
+#ifdef _WIN32
+  PROCESS_MEMORY_COUNTERS_EX counters{};
+  counters.cb = sizeof(counters);
+
+  using GetProcessMemoryInfoFn = BOOL(WINAPI *)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+  static GetProcessMemoryInfoFn get_process_memory_info = []() -> GetProcessMemoryInfoFn {
+    if (HMODULE kernel = GetModuleHandleW(L"kernel32.dll")) {
+      if (FARPROC fn = GetProcAddress(kernel, "K32GetProcessMemoryInfo")) {
+        return reinterpret_cast<GetProcessMemoryInfoFn>(fn);
+      }
+    }
+    if (HMODULE psapi = LoadLibraryW(L"psapi.dll")) {
+      if (FARPROC fn = GetProcAddress(psapi, "GetProcessMemoryInfo")) {
+        return reinterpret_cast<GetProcessMemoryInfoFn>(fn);
+      }
+    }
+    return nullptr;
+  }();
+
+  if (get_process_memory_info &&
+      get_process_memory_info(GetCurrentProcess(),
+                              reinterpret_cast<PPROCESS_MEMORY_COUNTERS>(&counters),
+                              sizeof(counters)))
+  {
+    result.page_faults = counters.PageFaultCount;
+    result.working_set = counters.WorkingSetSize;
+    result.private_bytes = counters.PrivateUsage;
+    result.valid = true;
+  }
+
+  MEMORYSTATUSEX memory_status{};
+  memory_status.dwLength = sizeof(memory_status);
+  if (GlobalMemoryStatusEx(&memory_status)) {
+    result.avail_phys = memory_status.ullAvailPhys;
+  }
+#endif
+  return result;
+}
 static void do_brush_action(const Depsgraph &depsgraph,
                             const Scene & /*scene*/,
                             Sculpt &sd,
@@ -3412,6 +3485,116 @@ static void do_brush_action(const Depsgraph &depsgraph,
   PRF_scope(ProfileCategory::Editor);
   PRF_scope_set_dynamic_name("%s", sculpt_brush_type_name(brush));
   SculptSession &ss = *ob.runtime->sculpt_session;
+  /* Sculpt Mesh V3 timing probe.
+   * Instrumentation only: no sculpt math / PBVH / undo behavior changes. */
+  const Mesh *sculpt_mesh_v3_probe_mesh = BKE_object_get_original_mesh(&ob);
+  const bool sculpt_mesh_v3_probe_enabled =
+      sculpt_mesh_v3_probe_mesh && sculpt_mesh_v3_probe_mesh->verts_num >= 1'000'000;
+  const double sculpt_mesh_v3_probe_total_start = BLI_time_now_seconds();
+  double sculpt_mesh_v3_probe_gather_ms = 0.0;
+  double sculpt_mesh_v3_probe_undo_ms = 0.0;
+  double sculpt_mesh_v3_probe_prebrush_ms = 0.0;
+  int64_t sculpt_mesh_v3_probe_nodes = 0;
+
+  struct SculptMeshV3ProbeScope {
+    bool enabled;
+    const Brush &brush;
+    const int64_t &nodes;
+    const double &gather_ms;
+    const double &undo_ms;
+    const double &prebrush_ms;
+    double start;
+
+    ~SculptMeshV3ProbeScope()
+    {
+      if (!enabled || nodes <= 0) {
+        return;
+      }
+      const double total_ms = (BLI_time_now_seconds() - start) * 1000.0;
+      if (total_ms < 0.10) {
+        return;
+      }
+      const double rest_ms = std::max(
+          0.0, total_ms - gather_ms - undo_ms - prebrush_ms);
+      std::fprintf(stderr,
+                   "[SculptMeshV3] brush=%s nodes=%lld total=%.3f ms "
+                   "gather=%.3f undo=%.3f prebrush=%.3f brush/rest=%.3f\n",
+                   sculpt_brush_type_name(brush),
+                   static_cast<long long>(nodes),
+                   total_ms,
+                   gather_ms,
+                   undo_ms,
+                   prebrush_ms,
+                   rest_ms);
+    }
+  } sculpt_mesh_v3_probe_scope{
+      sculpt_mesh_v3_probe_enabled,
+      brush,
+      sculpt_mesh_v3_probe_nodes,
+      sculpt_mesh_v3_probe_gather_ms,
+      sculpt_mesh_v3_probe_undo_ms,
+      sculpt_mesh_v3_probe_prebrush_ms,
+      sculpt_mesh_v3_probe_total_start};
+  const SculptMeshV3MemorySample sculpt_mesh_v3_mem_start = sculpt_mesh_v3_memory_sample();
+
+  struct SculptMeshV3MemoryProbeScope {
+    bool enabled;
+    const Brush &brush;
+    SculptMeshV3MemorySample start_memory;
+    double start_time;
+
+    ~SculptMeshV3MemoryProbeScope()
+    {
+      if (!enabled) {
+        return;
+      }
+
+      const double total_ms = (BLI_time_now_seconds() - start_time) * 1000.0;
+      const SculptMeshV3MemorySample end_memory = sculpt_mesh_v3_memory_sample();
+
+      const uint64_t page_fault_delta =
+          (start_memory.valid && end_memory.valid &&
+           end_memory.page_faults >= start_memory.page_faults) ?
+              end_memory.page_faults - start_memory.page_faults :
+              0;
+
+      if (total_ms < 0.50 && page_fault_delta == 0) {
+        return;
+      }
+
+      constexpr double mb = 1024.0 * 1024.0;
+      const double ws_mb = end_memory.valid ? double(end_memory.working_set) / mb : 0.0;
+      const double private_mb = end_memory.valid ? double(end_memory.private_bytes) / mb : 0.0;
+      const double avail_mb = end_memory.avail_phys ? double(end_memory.avail_phys) / mb : 0.0;
+      const double ws_delta_mb =
+          (start_memory.valid && end_memory.valid) ?
+              (double(int64_t(end_memory.working_set) -
+                      int64_t(start_memory.working_set)) / mb) :
+              0.0;
+      const double private_delta_mb =
+          (start_memory.valid && end_memory.valid) ?
+              (double(int64_t(end_memory.private_bytes) -
+                      int64_t(start_memory.private_bytes)) / mb) :
+              0.0;
+
+      std::fprintf(stderr,
+                   "[SculptMeshV3Mem] brush=%s total=%.3f ms pf=+%llu "
+                   "ws=%.1f MB dws=%+.2f MB private=%.1f MB dprivate=%+.2f MB "
+                   "avail=%.1f MB\n",
+                   sculpt_brush_type_name(brush),
+                   total_ms,
+                   static_cast<unsigned long long>(page_fault_delta),
+                   ws_mb,
+                   ws_delta_mb,
+                   private_mb,
+                   private_delta_mb,
+                   avail_mb);
+    }
+  } sculpt_mesh_v3_memory_probe_scope{
+      sculpt_mesh_v3_probe_enabled,
+      brush,
+      sculpt_mesh_v3_mem_start,
+      BLI_time_now_seconds()};
   IndexMaskMemory memory;
   IndexMask texnode_mask;
 
@@ -3429,9 +3612,13 @@ static void do_brush_action(const Depsgraph &depsgraph,
     }
   }
 
+  const double sculpt_mesh_v3_probe_gather_start = BLI_time_now_seconds();
   const brushes::CursorSampleResult cursor_sample_result = calc_brush_node_mask(
       depsgraph, ob, brush, memory);
   const IndexMask node_mask = cursor_sample_result.node_mask;
+  sculpt_mesh_v3_probe_gather_ms =
+      (BLI_time_now_seconds() - sculpt_mesh_v3_probe_gather_start) * 1000.0;
+  sculpt_mesh_v3_probe_nodes = node_mask.size();
 
   /* Only act if some verts are inside the brush area. */
   if (node_mask.is_empty()) {
@@ -3445,8 +3632,12 @@ static void do_brush_action(const Depsgraph &depsgraph,
     }
   }
 
+  const double sculpt_mesh_v3_probe_after_gather = BLI_time_now_seconds();
   if (!use_pixels) {
+    const double sculpt_mesh_v3_probe_undo_start = BLI_time_now_seconds();
     push_undo_nodes(depsgraph, ob, brush, node_mask);
+    sculpt_mesh_v3_probe_undo_ms =
+        (BLI_time_now_seconds() - sculpt_mesh_v3_probe_undo_start) * 1000.0;
   }
 
   /* There are issues with the underlying normals cache / mesh data that can cause the data to
@@ -3482,6 +3673,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
                                     std::numeric_limits<float>::max());
   }
 
+  sculpt_mesh_v3_probe_prebrush_ms =
+      (BLI_time_now_seconds() - sculpt_mesh_v3_probe_after_gather) * 1000.0 -
+      sculpt_mesh_v3_probe_undo_ms;
   /* Apply one type of brush action. */
   switch (brush.sculpt_brush_type) {
     case SCULPT_BRUSH_TYPE_DRAW: {
@@ -3857,6 +4051,9 @@ static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
   float feather = calc_symmetry_feather(sd, symm, mesh, *ss.cache);
 
   cache.bstrength = brush_strength(sd, cache, feather, paint_mode_settings);
+  if (sculpt_uniform_accumulation_enabled(brush)) {
+    cache.bstrength *= sd.paint.runtime->overlap_factor;
+  }
 
   /* `symm` is a bit combination of XYZ -
    * 1 is mirror X; 2 is Y; 3 is XY; 4 is Z; 5 is XZ; 6 is YZ; 7 is XYZ */
@@ -5266,6 +5463,48 @@ void flush_update_step(bContext *C, const UpdateType update_type)
 void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_type)
 {
   PRF_scope(ProfileCategory::Editor);
+  /* Sculpt Mesh V3 memory pressure probe: post-brush update / redraw scheduling. */
+  const Mesh *sculpt_mesh_v3_flush_mesh = BKE_object_get_original_mesh(&object);
+  const bool sculpt_mesh_v3_flush_enabled =
+      sculpt_mesh_v3_flush_mesh && sculpt_mesh_v3_flush_mesh->verts_num >= 1'000'000;
+  const SculptMeshV3MemorySample sculpt_mesh_v3_flush_mem_start =
+      sculpt_mesh_v3_memory_sample();
+  const double sculpt_mesh_v3_flush_start = BLI_time_now_seconds();
+
+  struct SculptMeshV3FlushProbeScope {
+    bool enabled;
+    SculptMeshV3MemorySample start_memory;
+    double start_time;
+
+    ~SculptMeshV3FlushProbeScope()
+    {
+      if (!enabled) {
+        return;
+      }
+      const double total_ms = (BLI_time_now_seconds() - start_time) * 1000.0;
+      const SculptMeshV3MemorySample end_memory = sculpt_mesh_v3_memory_sample();
+      const uint64_t page_fault_delta =
+          (start_memory.valid && end_memory.valid &&
+           end_memory.page_faults >= start_memory.page_faults) ?
+              end_memory.page_faults - start_memory.page_faults :
+              0;
+      if (total_ms < 0.50 && page_fault_delta == 0) {
+        return;
+      }
+      constexpr double mb = 1024.0 * 1024.0;
+      std::fprintf(stderr,
+                   "[SculptMeshV3Flush] total=%.3f ms pf=+%llu ws=%.1f MB "
+                   "private=%.1f MB avail=%.1f MB\n",
+                   total_ms,
+                   static_cast<unsigned long long>(page_fault_delta),
+                   end_memory.valid ? double(end_memory.working_set) / mb : 0.0,
+                   end_memory.valid ? double(end_memory.private_bytes) / mb : 0.0,
+                   end_memory.avail_phys ? double(end_memory.avail_phys) / mb : 0.0);
+    }
+  } sculpt_mesh_v3_flush_probe_scope{
+      sculpt_mesh_v3_flush_enabled,
+      sculpt_mesh_v3_flush_mem_start,
+      sculpt_mesh_v3_flush_start};
   if (vc.rv3d) {
     /* Mark for faster 3D viewport redraws. */
     vc.rv3d->rflag |= RV3D_PAINTING;
@@ -6055,11 +6294,59 @@ bool SculptPaintStroke::test_cancel()
   return ret_val;
 }
 
+bool sculpt_layers_editable(bContext *C, ReportList *reports)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!ob) {
+    return false;
+  }
+  MultiresModifierData *mmd = bke::multires_layers::base_modifier(*ob);
+  if (!mmd) {
+    mmd = get_multires_modifier(CTX_data_scene(C), ob, false);
+  }
+  if (!mmd || mmd->sculpt_layers.is_empty()) {
+    return true;
+  }
+  if (mmd->sculptlvl == 0 && !(mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh)) {
+    Mesh &mesh = *id_cast<Mesh *>(ob->data);
+    if (!bke::multires_layers::base_remap_after_topology_edit(*mmd, mesh)) {
+      BKE_report(reports, RPT_ERROR, "Cannot identify surviving base vertices for L0 layers");
+      return false;
+    }
+    if (!bke::multires_layers::base_has_visible_layers(*mmd)) {
+      return true;
+    }
+    if (!mmd->sculpt_layer_recording || !bke::multires_layers::can_record(*mmd, mesh)) {
+      BKE_report(reports, RPT_ERROR, "Enable REC on a visible layer, or disable all layers to sculpt the base");
+      return false;
+    }
+    return bke::multires_layers::base_deltas_ensure(*bke::multires_layers::active(*mmd), mesh.verts_num);
+  }
+  /* Base-mesh sculpting changes coarse coordinates through the native mesh
+   * path. It must not depend on REC or a visible layer; layer deltas stay in
+   * their own Multires grids. Do not treat an evaluated CCG as the base. */
+  const SculptSession *ss = ob->runtime->sculpt_session;
+  if (ss && ss->subdiv_ccg == nullptr && ss->bm == nullptr &&
+      (mmd->sculptlvl == 0 || (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh)))
+  {
+    return true;
+  }
+  if (!mmd->sculpt_layer_recording ||
+      !bke::multires_layers::can_record(*mmd, *id_cast<Mesh *>(ob->data))) {
+    BKE_report(reports, RPT_ERROR,
+               "Enable REC on a visible layer with non-zero strength and a valid sculpt "
+               "level; disable Sculpt Base Mesh");
+    return false;
+  }
+  return true;
+}
+
 static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
                                                    wmOperator *op,
                                                    const wmEvent *event)
 {
   SculptPaintStroke *stroke;
+  if (!sculpt_layers_editable(C, op->reports)) return OPERATOR_CANCELLED;
   int ignore_background_click;
   Object &ob = *CTX_data_active_object(C);
   Scene &scene = *CTX_data_scene(C);
@@ -6082,7 +6369,25 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   Brush &brush = *BKE_paint_brush(&sd.paint);
 
-  if (brush_type_is_paint(brush.sculpt_brush_type) &&
+  if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
+      BKE_sculpt_multires_active(&scene, &ob) != nullptr)
+  {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               "Paint brush is disabled in Multires for this stable build");
+    stroke->cancel(C);
+    MEM_delete(stroke);
+    return OPERATOR_CANCELLED;
+  }
+
+  /* Paint and Smear have dedicated Multires color-grid implementations.
+   * Other color operators still require the mesh-attribute support check. */
+  const bke::pbvh::Tree *paint_pbvh = bke::object::pbvh_get(ob);
+  const bool multires_polypaint_stroke =
+      ELEM(brush.sculpt_brush_type, SCULPT_BRUSH_TYPE_PAINT, SCULPT_BRUSH_TYPE_SMEAR) &&
+      BKE_sculpt_multires_active(&scene, &ob) && paint_pbvh &&
+      paint_pbvh->type() == bke::pbvh::Type::Grids;
+  if (brush_type_is_paint(brush.sculpt_brush_type) && !multires_polypaint_stroke &&
       !color_supported_check(scene, ob, op->reports))
   {
     stroke->cancel(C);
@@ -6155,6 +6460,7 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
 
 static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
 {
+  if (!sculpt_layers_editable(C, op->reports)) return OPERATOR_CANCELLED;
   brush_stroke_init(C, op);
 
   SculptPaintStroke *stroke = MEM_new<SculptPaintStroke>(__func__, C, op, nullptr);
@@ -7688,11 +7994,75 @@ void apply_translations(const Span<float3> translations,
   BLI_assert(grids.size() * key.grid_area == translations.size());
   BLI_assert(!contains_nan(translations.cast<float>()));
 
+  /* SCULPT_EXACT_DIRTY_GRIDS_WRITER_V1
+   *
+   * PBVH dirty nodes are conservative. Record which CCG grids actually receive
+   * a non-zero translation so Multires layer commit can avoid solving every
+   * grid owned by the touched PBVH nodes. */
+  Vector<int, 32> exact_dirty_grids;
+
+
+  /* SCULPT_EXACT_DIRTY_SAMPLES_WRITER_V1_1
+   * Collect sample IDs locally; merge under the same mutex used by
+   * the exact-grid journal so parallel brush tasks remain safe. */
+  Vector<int64_t, 256> exact_dirty_samples;
   for (const int i : grids.index_range()) {
     const Span<float3> grid_translations = translations.slice(bke::ccg::grid_range(key, i));
     MutableSpan<float3> grid_positions = positions.slice(bke::ccg::grid_range(key, grids[i]));
+    bool grid_changed = false;
+
     for (const int offset : grid_positions.index_range()) {
-      grid_positions[offset] += grid_translations[offset];
+      const float3 delta = grid_translations[offset];
+      if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
+        grid_positions[offset] += delta;
+        grid_changed = true;
+        exact_dirty_samples.append(int64_t(grids[i]) * int64_t(key.grid_area) + offset);
+      }
+    }
+
+    if (grid_changed) {
+      exact_dirty_grids.append(grids[i]);
+    }
+  }
+
+  if (!exact_dirty_grids.is_empty()) {
+    std::lock_guard<std::mutex> lock(subdiv_ccg.sculpt_dirty_position_grids_mutex);
+
+    if (subdiv_ccg.sculpt_dirty_position_grid_flags.size() != subdiv_ccg.grids_num) {
+      subdiv_ccg.sculpt_dirty_position_grid_flags.reinitialize(subdiv_ccg.grids_num);
+      subdiv_ccg.sculpt_dirty_position_grid_flags.fill(false);
+      subdiv_ccg.sculpt_dirty_position_grids.clear();
+    }
+
+    const int64_t position_samples = subdiv_ccg.positions.size();
+
+    if (subdiv_ccg.sculpt_dirty_position_sample_flags.size() != position_samples) {
+
+      subdiv_ccg.sculpt_dirty_position_sample_flags.resize(position_samples, false);
+
+      subdiv_ccg.sculpt_dirty_position_sample_flags.fill(false);
+
+    }
+
+    for (const int64_t sample : exact_dirty_samples) {
+
+      if (sample >= 0 && sample < position_samples) {
+
+        subdiv_ccg.sculpt_dirty_position_sample_flags[sample].set();
+
+      }
+
+    }
+
+
+    for (const int grid : exact_dirty_grids) {
+      if (grid < 0 || grid >= subdiv_ccg.grids_num) {
+        continue;
+      }
+      if (!subdiv_ccg.sculpt_dirty_position_grid_flags[grid]) {
+        subdiv_ccg.sculpt_dirty_position_grid_flags[grid] = true;
+        subdiv_ccg.sculpt_dirty_position_grids.append(grid);
+      }
     }
   }
 }
@@ -7847,27 +8217,110 @@ std::optional<ShapeKeyData> ShapeKeyData::from_object(Object &object)
   return data;
 }
 
+/* Sculpt Mesh V3 Deep Probe: diagnostics only, enabled unless explicitly set to 0. */
+static bool sculpt_mesh_v3deep_enabled()
+{
+  static const bool enabled = []() {
+    const char *value = std::getenv("BLENDER_SCULPT_V3_DEEP_PROBE");
+    return !value || value[0] != '0';
+  }();
+  return enabled;
+}
+
 PositionDeformData::PositionDeformData(const Depsgraph &depsgraph, Object &object_orig)
 {
   Mesh &mesh = *id_cast<Mesh *>(object_orig.data);
+  const bool v3deep = sculpt_mesh_v3deep_enabled() && mesh.verts_num >= 1'000'000;
+  const auto v3deep_mem_start = v3deep ? sculpt_mesh_v3_memory_sample() : SculptMeshV3MemorySample{};
+  const void *v3deep_orig_before = v3deep ? mesh.vert_positions().data() : nullptr;
+  const double v3deep_begin = v3deep ? BLI_time_now_seconds() : 0.0;
   this->eval = bke::pbvh::vert_positions_eval(depsgraph, object_orig);
 
   if (!object_orig.runtime->sculpt_session->deform_imats.is_empty()) {
     deform_imats_ = object_orig.runtime->sculpt_session->deform_imats;
   }
+  base_layer_ = bke::multires_layers::base_recording_layer(object_orig);
+  if (MultiresModifierData *base_mmd = bke::multires_layers::base_modifier(object_orig)) {
+    base_recording_blocked_ =
+        !(base_mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) &&
+        bke::multires_layers::base_has_visible_layers(*base_mmd) && !base_layer_;
+  }
+  if (base_layer_ && !bke::multires_layers::base_deltas_ensure(*base_layer_, mesh.verts_num)) {
+    base_recording_blocked_ = true;
+  }
+  const auto v3deep_mem_before_orig = v3deep ? sculpt_mesh_v3_memory_sample() : SculptMeshV3MemorySample{};
+  const double v3deep_orig_start = v3deep ? BLI_time_now_seconds() : 0.0;
   orig_ = mesh.vert_positions_for_write();
+  const double v3deep_orig_end = v3deep ? BLI_time_now_seconds() : 0.0;
+  const auto v3deep_mem_orig = v3deep ? sculpt_mesh_v3_memory_sample() : SculptMeshV3MemorySample{};
 
+  const double v3deep_eval_start = v3deep ? BLI_time_now_seconds() : 0.0;
   MutableSpan eval_mut = bke::pbvh::vert_positions_eval_for_write(depsgraph, object_orig);
+  /* Sculpt Mesh V3 Local Normals Fix: writable access can detach shared storage.
+   * Keep brush reads and bounds updates on the current evaluated position buffer. */
+  this->eval = eval_mut.as_span();
+  const double v3deep_eval_end = v3deep ? BLI_time_now_seconds() : 0.0;
+  const auto v3deep_mem_eval = v3deep ? sculpt_mesh_v3_memory_sample() : SculptMeshV3MemorySample{};
   if (eval_mut.data() != orig_.data()) {
     eval_mut_ = eval_mut;
   }
 
   shape_key_data_ = ShapeKeyData::from_object(object_orig);
+  if (v3deep) {
+    const double total_ms = (BLI_time_now_seconds() - v3deep_begin) * 1000.0;
+    if (total_ms >= 0.50 || v3deep_orig_before != orig_.data()) {
+      constexpr double mib = 1024.0 * 1024.0;
+      const auto private_delta = [&](const SculptMeshV3MemorySample &a,
+                                     const SculptMeshV3MemorySample &b) {
+        return a.valid && b.valid ?
+                   double(int64_t(b.private_bytes) - int64_t(a.private_bytes)) / mib : 0.0;
+      };
+      const auto faults = [&](const SculptMeshV3MemorySample &a,
+                              const SculptMeshV3MemorySample &b) -> unsigned long long {
+        return a.valid && b.valid && b.page_faults >= a.page_faults ?
+                   static_cast<unsigned long long>(b.page_faults - a.page_faults) : 0;
+      };
+      std::fprintf(stderr,
+                   "[SculptMeshV3Pos] verts=%d total=%.3f ms before_write=%.3f "
+                   "orig_write=%.3f eval_write=%.3f before_private=%+.2f MiB orig_private=%+.2f MiB "
+                   "eval_private=%+.2f MiB before_pf=%llu orig_pf=%llu eval_pf=%llu "
+                   "orig_changed=%d read_matches_orig=%d read_matches_eval=%d\n",
+                   mesh.verts_num, total_ms,
+                   (v3deep_orig_start - v3deep_begin) * 1000.0,
+                   (v3deep_orig_end - v3deep_orig_start) * 1000.0,
+                   (v3deep_eval_end - v3deep_eval_start) * 1000.0,
+                   private_delta(v3deep_mem_start, v3deep_mem_before_orig),
+                   private_delta(v3deep_mem_before_orig, v3deep_mem_orig),
+                   private_delta(v3deep_mem_orig, v3deep_mem_eval),
+                   faults(v3deep_mem_start, v3deep_mem_before_orig),
+                   faults(v3deep_mem_before_orig, v3deep_mem_orig),
+                   faults(v3deep_mem_orig, v3deep_mem_eval),
+                   int(v3deep_orig_before != orig_.data()),
+                   int(this->eval.data() == orig_.data()),
+                   int(this->eval.data() == eval_mut.data()));
+    }
+  }
 }
 
 void PositionDeformData::deform(MutableSpan<float3> translations, const Span<int> verts) const
 {
   PRF_scope(ProfileCategory::Editor);
+  if (base_recording_blocked_) {
+    return;
+  }
+  if (base_layer_) {
+    Array<float3> layer_translations(translations.as_span());
+    if (deform_imats_) {
+      apply_crazyspace_to_translations(*deform_imats_, verts, layer_translations);
+    }
+    if (!bke::multires_layers::base_deltas_record(*base_layer_, verts, layer_translations)) {
+      return;
+    }
+    if (eval_mut_) {
+      apply_translations(translations, verts, *eval_mut_);
+    }
+    return;
+  }
   if (eval_mut_) {
     /* Apply translations to the evaluated mesh. This is necessary because multiple brush
      * evaluations can happen in between object reevaluations (otherwise just deforming the

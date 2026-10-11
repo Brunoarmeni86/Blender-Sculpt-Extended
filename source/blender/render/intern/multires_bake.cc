@@ -67,7 +67,10 @@
 
 #include "RE_multires_bake.h"
 
+#include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdint>
 
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
@@ -79,6 +82,7 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.hh"
 #include "BLI_span.hh"
+#include "BLI_path_utils.hh"
 #include "BLI_task.hh"
 #include "BLI_threads.h"
 
@@ -324,12 +328,45 @@ static float4 face_center_uv_tangent_calc(const MeshArrays &mesh_arrays,
 struct ExtraBuffers {
   Array<float> displacement_buffer;
   Array<char> mask_buffer;
+
+  /* MULTIRES_BAKE_COVERAGE_V1: one ownership bit for every 4x4 sub-sample. */
+  Array<uint16_t> displacement_coverage_mask;
+
+  /* MULTIRES_SCALAR_DISPLACEMENT_CENTER_V2
+   * Exact center sample used for fully covered texels. */
+  Array<float> displacement_center_buffer;
+  Array<char> displacement_center_valid;
+};
+
+struct CoverageLockPool {
+  static constexpr int lock_count = 4096;
+  std::array<SpinLock, lock_count> locks;
+
+  CoverageLockPool()
+  {
+    for (SpinLock &lock : locks) {
+      BLI_spin_init(&lock);
+    }
+  }
+
+  ~CoverageLockPool()
+  {
+    for (SpinLock &lock : locks) {
+      BLI_spin_end(&lock);
+    }
+  }
+
+  SpinLock &for_pixel(const int64_t pixel)
+  {
+    return locks[size_t(pixel) & (lock_count - 1)];
+  }
 };
 
 struct RasterizeTile {
   ImBuf *ibuf = nullptr; /* Image buffer of the tile. */
   ExtraBuffers *extra_buffers = nullptr;
   float2 uv_offset; /* UV coordinate of the tile origin. */
+  CoverageLockPool *coverage_locks = nullptr;
 };
 
 struct RasterizeTriangle {
@@ -428,6 +465,37 @@ class MultiresBaker {
                            const int2 &coord,
                            const float3 &value) const = 0;
 
+  virtual bool supports_quality_supersampling() const
+  {
+    return false;
+  }
+
+  virtual bool supports_quality_coverage() const
+  {
+    return false;
+  }
+
+  virtual float3 bake_quality_sample(const RasterizeTriangle &triangle,
+                                     const float2 &bary_uv,
+                                     const float2 &grid_uv,
+                                     RasterizeResult &result) const
+  {
+    return bake_pixel(triangle, bary_uv, grid_uv, result);
+  }
+
+  virtual float3 finalize_quality_samples(const float3 &sum, const int samples) const
+  {
+    return sum / float(samples);
+  }
+
+  virtual float3 finalize_quality_samples_at_pixel(const RasterizeTriangle & /*triangle*/,
+                                                   const float2 & /*center_bary_uv*/,
+                                                   const float3 &sum,
+                                                   const int samples) const
+  {
+    return finalize_quality_samples(sum, samples);
+  }
+
  protected:
   void write_pixel_to_image_buffer(ImBuf &ibuf, const int2 &coord, const float3 &value) const
   {
@@ -522,6 +590,53 @@ static float3x3 get_to_tangent_matrix_tbn(const RasterizeTriangle &triangle, con
   return math::invert(from_tangent);
 }
 
+/* MULTIRES_BAKE_NORMAL_HQ_V2
+ *
+ * HQ normal samples are accumulated in object space and converted only once,
+ * at texel center, using a stable orthonormal TBN.
+ *
+ * UV handedness is preserved for mirrored islands. Degenerate tangent frames
+ * conservatively fall back to the legacy TBN construction. */
+static float3x3 get_to_tangent_matrix_tbn_hq(const RasterizeTriangle &triangle,
+                                             const float2 &bary_uv)
+{
+  if (!triangle.has_uv_tangents) {
+    return float3x3::identity();
+  }
+
+  const float u = bary_uv.x;
+  const float v = bary_uv.y;
+  const float w = 1.0f - u - v;
+
+  const float4 &tang0 = triangle.uv_tangents[0];
+  const float4 &tang1 = triangle.uv_tangents[1];
+  const float4 &tang2 = triangle.uv_tangents[2];
+
+  const float sign = (tang0.w * u + tang1.w * v + tang2.w * w) < 0.0f ? -1.0f : 1.0f;
+
+  const float3 normal = triangle.get_normal(bary_uv);
+  float3 tangent = tang0.xyz() * u + tang1.xyz() * v + tang2.xyz() * w;
+
+  tangent -= normal * math::dot(normal, tangent);
+  if (math::dot(tangent, tangent) <= 1.0e-20f) {
+    return get_to_tangent_matrix_tbn(triangle, bary_uv);
+  }
+  tangent = math::normalize(tangent);
+
+  float3 bitangent = sign * math::cross(normal, tangent);
+  if (math::dot(bitangent, bitangent) <= 1.0e-20f) {
+    return get_to_tangent_matrix_tbn(triangle, bary_uv);
+  }
+  bitangent = math::normalize(bitangent);
+
+  float3x3 from_tangent;
+  from_tangent.x = tangent;
+  from_tangent.y = bitangent;
+  from_tangent.z = normal;
+  return math::invert(from_tangent);
+}
+
+
 /* Get matrix which converts object space to tangent space in the (tangent, normal, bitangent)
  * convention. */
 static float3x3 get_to_tangent_matrix_tnb(const RasterizeTriangle &triangle, const float2 &bary_uv)
@@ -529,6 +644,76 @@ static float3x3 get_to_tangent_matrix_tnb(const RasterizeTriangle &triangle, con
   float3x3 from_tangent = get_from_tangent_matrix_tbn(triangle, bary_uv);
   std::swap(from_tangent.y, from_tangent.z);
   return math::invert(from_tangent);
+}
+
+/** \} */
+
+/* -------------------------------------------------------------------- */
+/** \name Experimental high quality sampling
+ * \{ */
+
+/* MULTIRES_BAKE_HQ_DEFAULT_V1
+ *
+ * High quality Multires bake is now the normal behavior for scalar Displacement
+ * and tangent-space Normal baking.
+ *
+ * Default:
+ *   4x4 supersampling = 16 samples per texel.
+ *
+ * There is intentionally no user-facing bake-mode switch. The legacy one-sample
+ * path is kept only as a hidden diagnostic fallback:
+ *
+ *   BLENDER_MULTIRES_BAKE_SS=1  -> legacy 1x1
+ *   BLENDER_MULTIRES_BAKE_SS=2  -> diagnostic 2x2
+ *   BLENDER_MULTIRES_BAKE_SS=4  -> normal/default HQ path
+ *   BLENDER_MULTIRES_BAKE_SS=8  -> diagnostic 8x8
+ *
+ * Unset or invalid values use the production default, 4x4.
+ *
+ * Vector Displacement and Selected-to-Active/Cycles baking are intentionally
+ * unchanged by this path.
+ */
+static int multires_bake_quality_sample_side()
+{
+  /* Read once per Blender process so environment handling stays entirely out
+   * of the per-pixel hot path. Restart Blender after changing the diagnostic
+   * environment variable. */
+  static const int side = []() {
+    const char *value = BLI_getenv("BLENDER_MULTIRES_BAKE_SS");
+
+    if (value == nullptr || value[0] == '\0') {
+      return 4;
+    }
+    if (value[0] == '1' && value[1] == '\0') {
+      return 1;
+    }
+    if (value[0] == '2' && value[1] == '\0') {
+      return 2;
+    }
+    if (value[0] == '4' && value[1] == '\0') {
+      return 4;
+    }
+    if (value[0] == '8' && value[1] == '\0') {
+      return 8;
+    }
+
+    return 4;
+  }();
+
+  return side;
+}
+
+static bool multires_bake_quality_trace_enabled()
+{
+  const char *value = BLI_getenv("BLENDER_MULTIRES_BAKE_TRACE");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+static bool barycentric_inside_triangle(const float2 &uv)
+{
+  constexpr float epsilon = 1.0e-6f;
+  const float w = 1.0f - uv.x - uv.y;
+  return uv.x >= -epsilon && uv.y >= -epsilon && w >= -epsilon;
 }
 
 /** \} */
@@ -544,14 +729,354 @@ static void flush_pixel(const MultiresBaker &baker,
                         const int y,
                         RasterizeResult &result)
 {
-  const float2 st{(x + 0.5f) / tile.ibuf->x, (y + 0.5f) / tile.ibuf->y};
+  const int quality_side = baker.supports_quality_supersampling() ?
+                               multires_bake_quality_sample_side() :
+                               1;
 
+  if (quality_side <= 1) {
+    const float2 st{(x + 0.5f) / tile.ibuf->x, (y + 0.5f) / tile.ibuf->y};
+
+    const float2 bary_uv = resolve_tri_uv(
+        st, triangle.tex_uvs[0], triangle.tex_uvs[1], triangle.tex_uvs[2]);
+    const float2 grid_uv = interp_barycentric_triangle(triangle.grid_uvs, bary_uv);
+
+    const float3 baked_pixel = baker.bake_pixel(triangle, bary_uv, grid_uv, result);
+    baker.write_pixel(tile, int2(x, y), baked_pixel);
+    return;
+  }
+
+  float3 sum(0.0f, 0.0f, 0.0f);
+  int valid_samples = 0;
+  const float inv_side = 1.0f / float(quality_side);
+
+  for (int sample_y = 0; sample_y < quality_side; sample_y++) {
+    for (int sample_x = 0; sample_x < quality_side; sample_x++) {
+      const float subpixel_x = (float(sample_x) + 0.5f) * inv_side;
+      const float subpixel_y = (float(sample_y) + 0.5f) * inv_side;
+      const float2 st{(x + subpixel_x) / tile.ibuf->x, (y + subpixel_y) / tile.ibuf->y};
+
+      const float2 bary_uv = resolve_tri_uv(
+          st, triangle.tex_uvs[0], triangle.tex_uvs[1], triangle.tex_uvs[2]);
+
+      if (!barycentric_inside_triangle(bary_uv)) {
+        continue;
+      }
+
+      const float2 grid_uv = interp_barycentric_triangle(triangle.grid_uvs, bary_uv);
+      sum += baker.bake_quality_sample(triangle, bary_uv, grid_uv, result);
+      valid_samples++;
+    }
+  }
+
+  if (valid_samples == 0) {
+    const float2 st{(x + 0.5f) / tile.ibuf->x, (y + 0.5f) / tile.ibuf->y};
+    const float2 bary_uv = resolve_tri_uv(
+        st, triangle.tex_uvs[0], triangle.tex_uvs[1], triangle.tex_uvs[2]);
+    const float2 grid_uv = interp_barycentric_triangle(triangle.grid_uvs, bary_uv);
+    sum = baker.bake_quality_sample(triangle, bary_uv, grid_uv, result);
+    valid_samples = 1;
+  }
+
+  const float2 center_st{(x + 0.5f) / tile.ibuf->x, (y + 0.5f) / tile.ibuf->y};
+  const float2 center_bary_uv = resolve_tri_uv(
+      center_st, triangle.tex_uvs[0], triangle.tex_uvs[1], triangle.tex_uvs[2]);
+
+  baker.write_pixel(tile,
+                    int2(x, y),
+                    baker.finalize_quality_samples_at_pixel(
+                        triangle, center_bary_uv, sum, valid_samples));
+}
+
+
+static int coverage_bit_count(uint16_t bits)
+{
+  int count = 0;
+  while (bits != 0) {
+    count += int(bits & 1u);
+    bits >>= 1;
+  }
+  return count;
+}
+
+static void coverage_store_sample(const MultiresBaker &baker,
+                                  const RasterizeTile &tile,
+                                  const RasterizeTriangle &triangle,
+                                  const int x,
+                                  const int y,
+                                  const float2 sample_offset,
+                                  const int sample_index,
+                                  RasterizeResult &result)
+{
+  const int w = tile.ibuf->x;
+  const int h = tile.ibuf->y;
+  if (x < 0 || x >= w || y < 0 || y >= h || tile.coverage_locks == nullptr) {
+    return;
+  }
+
+  const float2 st{(x + sample_offset.x) / w, (y + sample_offset.y) / h};
   const float2 bary_uv = resolve_tri_uv(
       st, triangle.tex_uvs[0], triangle.tex_uvs[1], triangle.tex_uvs[2]);
-  const float2 grid_uv = interp_barycentric_triangle(triangle.grid_uvs, bary_uv);
+  if (!barycentric_inside_triangle(bary_uv)) {
+    return;
+  }
 
-  const float3 baked_pixel = baker.bake_pixel(triangle, bary_uv, grid_uv, result);
-  baker.write_pixel(tile, int2(x, y), baked_pixel);
+  const float2 grid_uv = interp_barycentric_triangle(triangle.grid_uvs, bary_uv);
+  const float3 value = baker.bake_pixel(triangle, bary_uv, grid_uv, result);
+  const int64_t pixel = int64_t(y) * w + x;
+  const uint16_t bit = uint16_t(1u << sample_index);
+
+  SpinLock &lock = tile.coverage_locks->for_pixel(pixel);
+  BLI_spin_lock(&lock);
+  uint16_t &coverage = tile.extra_buffers->displacement_coverage_mask[pixel];
+  if ((coverage & bit) == 0) {
+    coverage |= bit;
+    tile.extra_buffers->displacement_buffer[pixel] += value.x;
+  }
+  BLI_spin_unlock(&lock);
+}
+
+static void coverage_store_center_sample(const MultiresBaker &baker,
+                                         const RasterizeTile &tile,
+                                         const RasterizeTriangle &triangle,
+                                         const int x,
+                                         const int y,
+                                         RasterizeResult &result)
+{
+  const int w = tile.ibuf->x;
+  const int h = tile.ibuf->y;
+  if (x < 0 || x >= w || y < 0 || y >= h || tile.coverage_locks == nullptr) {
+    return;
+  }
+
+  const float2 st{(x + 0.5f) / w, (y + 0.5f) / h};
+  const float2 bary_uv = resolve_tri_uv(
+      st, triangle.tex_uvs[0], triangle.tex_uvs[1], triangle.tex_uvs[2]);
+  if (!barycentric_inside_triangle(bary_uv)) {
+    return;
+  }
+
+  const float2 grid_uv = interp_barycentric_triangle(triangle.grid_uvs, bary_uv);
+  const float3 value = baker.bake_pixel(triangle, bary_uv, grid_uv, result);
+  const int64_t pixel = int64_t(y) * w + x;
+
+  SpinLock &lock = tile.coverage_locks->for_pixel(pixel);
+  BLI_spin_lock(&lock);
+  if (tile.extra_buffers->displacement_center_valid[pixel] == 0) {
+    tile.extra_buffers->displacement_center_buffer[pixel] = value.x;
+    tile.extra_buffers->displacement_center_valid[pixel] = 1;
+  }
+  BLI_spin_unlock(&lock);
+}
+
+static void rasterize_half_center_reference(const MultiresBaker &baker,
+                                            const RasterizeTile &tile,
+                                            const RasterizeTriangle &triangle,
+                                            const float2 &s0,
+                                            const float2 &s1,
+                                            const float2 &l0,
+                                            const float2 &l1,
+                                            const int y0_in,
+                                            const int y1_in,
+                                            const bool is_mid_right,
+                                            RasterizeResult &result)
+{
+  const bool s_stable = fabsf(s1.y - s0.y) > FLT_EPSILON;
+  const bool l_stable = fabsf(l1.y - l0.y) > FLT_EPSILON;
+  const int w = tile.ibuf->x;
+  const int h = tile.ibuf->y;
+
+  if (y1_in <= 0 || y0_in >= h) {
+    return;
+  }
+
+  const int y0 = y0_in < 0 ? 0 : y0_in;
+  const int y1 = y1_in >= h ? h : y1_in;
+
+  for (int y = y0; y < y1; y++) {
+    float xl = s_stable ? s0.x + ((s1.x - s0.x) * (y - s0.y)) / (s1.y - s0.y) : s0.x;
+    float xr = l_stable ? l0.x + ((l1.x - l0.x) * (y - l0.y)) / (l1.y - l0.y) : l0.x;
+    if (is_mid_right) {
+      std::swap(xl, xr);
+    }
+
+    int xb = int(ceilf(xl));
+    int xe = int(ceilf(xr));
+    if (xe <= 0 || xb >= w) {
+      continue;
+    }
+
+    xb = xb < 0 ? 0 : xb;
+    xe = xe >= w ? w : xe;
+
+    for (int x = xb; x < xe; x++) {
+      coverage_store_center_sample(baker, tile, triangle, x, y, result);
+    }
+  }
+}
+
+static void rasterize_triangle_center_reference(const MultiresBaker &baker,
+                                                const RasterizeTile &tile,
+                                                const RasterizeTriangle &triangle,
+                                                RasterizeResult &result)
+{
+  const float2 size(tile.ibuf->x, tile.ibuf->y);
+  const float2 center_offset(0.5f, 0.5f);
+
+  float2 low = triangle.tex_uvs[0] * size - center_offset;
+  float2 mid = triangle.tex_uvs[1] * size - center_offset;
+  float2 high = triangle.tex_uvs[2] * size - center_offset;
+
+  if ((low.x == mid.x && low.y == mid.y) ||
+      (low.x == mid.x && low.y == high.y) ||
+      (mid.x == high.x && mid.y == high.y))
+  {
+    return;
+  }
+
+  if (low.y > mid.y && low.y > high.y) {
+    std::swap(high, low);
+  }
+  else if (mid.y > high.y) {
+    std::swap(high, mid);
+  }
+  if (low.y > mid.y) {
+    std::swap(low, mid);
+  }
+
+  const bool mid_right = math::cross(mid - high, high - low) > 0;
+  const int y0 = int(ceilf(low.y));
+  const int ym = int(ceilf(mid.y));
+  const int y1 = int(ceilf(high.y));
+
+  rasterize_half_center_reference(
+      baker, tile, triangle, low, mid, low, high, y0, ym, mid_right, result);
+  rasterize_half_center_reference(
+      baker, tile, triangle, mid, high, low, high, ym, y1, mid_right, result);
+}
+
+static void rasterize_half_coverage(const MultiresBaker &baker,
+                                    const RasterizeTile &tile,
+                                    const RasterizeTriangle &triangle,
+                                    const float2 &s0,
+                                    const float2 &s1,
+                                    const float2 &l0,
+                                    const float2 &l1,
+                                    const int y0_in,
+                                    const int y1_in,
+                                    const bool is_mid_right,
+                                    const float2 sample_offset,
+                                    const int sample_index,
+                                    RasterizeResult &result)
+{
+  const bool s_stable = fabsf(s1.y - s0.y) > FLT_EPSILON;
+  const bool l_stable = fabsf(l1.y - l0.y) > FLT_EPSILON;
+  const int w = tile.ibuf->x;
+  const int h = tile.ibuf->y;
+  if (y1_in <= 0 || y0_in >= h) {
+    return;
+  }
+
+  const int y0 = y0_in < 0 ? 0 : y0_in;
+  const int y1 = y1_in >= h ? h : y1_in;
+  for (int y = y0; y < y1; y++) {
+    float xl = s_stable ? s0.x + ((s1.x - s0.x) * (y - s0.y)) / (s1.y - s0.y) : s0.x;
+    float xr = l_stable ? l0.x + ((l1.x - l0.x) * (y - l0.y)) / (l1.y - l0.y) : l0.x;
+    if (is_mid_right) {
+      std::swap(xl, xr);
+    }
+
+    int xb = int(ceilf(xl));
+    int xe = int(ceilf(xr));
+    if (xe <= 0 || xb >= w) {
+      continue;
+    }
+    xb = xb < 0 ? 0 : xb;
+    xe = xe >= w ? w : xe;
+
+    for (int x = xb; x < xe; x++) {
+      coverage_store_sample(
+          baker, tile, triangle, x, y, sample_offset, sample_index, result);
+    }
+  }
+}
+
+static void rasterize_triangle_coverage(const MultiresBaker &baker,
+                                        const RasterizeTile &tile,
+                                        const RasterizeTriangle &triangle,
+                                        const float2 sample_offset,
+                                        const int sample_index,
+                                        RasterizeResult &result)
+{
+  const float2 size(tile.ibuf->x, tile.ibuf->y);
+  float2 low = triangle.tex_uvs[0] * size - sample_offset;
+  float2 mid = triangle.tex_uvs[1] * size - sample_offset;
+  float2 high = triangle.tex_uvs[2] * size - sample_offset;
+
+  if ((low.x == mid.x && low.y == mid.y) ||
+      (low.x == mid.x && low.y == high.y) ||
+      (mid.x == high.x && mid.y == high.y))
+  {
+    return;
+  }
+
+  if (low.y > mid.y && low.y > high.y) {
+    std::swap(high, low);
+  }
+  else if (mid.y > high.y) {
+    std::swap(high, mid);
+  }
+  if (low.y > mid.y) {
+    std::swap(low, mid);
+  }
+
+  const bool mid_right = math::cross(mid - high, high - low) > 0;
+  const int y0 = int(ceilf(low.y));
+  const int ym = int(ceilf(mid.y));
+  const int y1 = int(ceilf(high.y));
+
+  rasterize_half_coverage(
+      baker, tile, triangle, low, mid, low, high, y0, ym, mid_right, sample_offset, sample_index, result);
+  rasterize_half_coverage(
+      baker, tile, triangle, mid, high, low, high, ym, y1, mid_right, sample_offset, sample_index, result);
+}
+
+static void finalize_displacement_coverage(const MultiresBaker &baker,
+                                           const RasterizeTile &tile)
+{
+  const int side = multires_bake_quality_sample_side();
+  if (!baker.supports_quality_coverage() || side <= 1 || side > 4 ||
+      tile.extra_buffers->displacement_coverage_mask.is_empty())
+  {
+    return;
+  }
+
+  const int64_t pixels = IMB_get_pixel_count(tile.ibuf);
+  for (int64_t pixel = 0; pixel < pixels; pixel++) {
+    const uint16_t coverage = tile.extra_buffers->displacement_coverage_mask[pixel];
+    if (coverage == 0) {
+      continue;
+    }
+    const int count = coverage_bit_count(coverage);
+    const int full_sample_count = side * side;
+
+    float value;
+    if (count == full_sample_count &&
+        !tile.extra_buffers->displacement_center_valid.is_empty() &&
+        tile.extra_buffers->displacement_center_valid[pixel] != 0)
+    {
+      value = tile.extra_buffers->displacement_center_buffer[pixel];
+    }
+    else {
+      value = tile.extra_buffers->displacement_buffer[pixel] / float(count);
+    }
+
+    tile.extra_buffers->displacement_buffer[pixel] = value;
+    tile.extra_buffers->mask_buffer[pixel] = FILTER_MASK_USED;
+
+    const int x = int(pixel % tile.ibuf->x);
+    const int y = int(pixel / tile.ibuf->x);
+    baker.write_pixel(tile, int2(x, y), float3(value));
+  }
 }
 
 static void set_rast_triangle(const MultiresBaker &baker,
@@ -624,6 +1149,28 @@ static void rasterize_triangle(const MultiresBaker &baker,
                                const RasterizeTriangle &triangle,
                                RasterizeResult &result)
 {
+  const int side = baker.supports_quality_supersampling() ?
+                       multires_bake_quality_sample_side() :
+                       1;
+  if (baker.supports_quality_coverage() && side > 1 && side <= 4 &&
+      tile.coverage_locks != nullptr)
+  {
+    /* Center sample is kept only as the exact interior reference. */
+    rasterize_triangle_center_reference(baker, tile, triangle, result);
+
+    const float inv = 1.0f / float(side);
+    int sample_index = 0;
+    for (int sy = 0; sy < side; sy++) {
+      for (int sx = 0; sx < side; sx++, sample_index++) {
+        const float2 sample_offset((float(sx) + 0.5f) * inv,
+                                   (float(sy) + 0.5f) * inv);
+        rasterize_triangle_coverage(
+            baker, tile, triangle, sample_offset, sample_index, result);
+      }
+    }
+    return;
+  }
+
   const float2 ibuf_size(tile.ibuf->x, tile.ibuf->y);
 
   const float2 &st0_in = triangle.tex_uvs[0];
@@ -743,6 +1290,16 @@ class MultiresDisplacementBaker : public MultiresBaker {
     return {length, length, length};
   }
 
+  bool supports_quality_supersampling() const override
+  {
+    return true;
+  }
+
+  bool supports_quality_coverage() const override
+  {
+    return true;
+  }
+
   void write_pixel(const RasterizeTile &tile,
                    const int2 &coord,
                    const float3 &value) const override
@@ -766,24 +1323,72 @@ class MultiresVectorDisplacementBaker : public MultiresBaker {
   {
   }
 
+  /* MULTIRES_VECTOR_DISPLACEMENT_HQ_V2_CENTER_PRESERVE
+   *
+   * Keep supersampling near partial triangle coverage, but preserve the exact
+   * center displacement for fully covered texels. */
+  bool supports_quality_supersampling() const override
+  {
+    return true;
+  }
+
   float3 bake_pixel(const RasterizeTriangle &triangle,
                     const float2 &bary_uv,
                     const float2 &grid_uv,
                     RasterizeResult & /*result*/) const override
   {
     const float3 bake_level_position = triangle.get_position(bary_uv);
-
     const float3 high_level_position = sample_position_on_subdiv_ccg(
         high_subdiv_ccg_, triangle.grid_index, grid_uv);
-
     const float3 displacement = high_level_position - bake_level_position;
 
-    if (space_ == R_BAKE_SPACE_TANGENT) {
-      const float3x3 to_tangent = get_to_tangent_matrix_tnb(triangle, bary_uv);
-      return to_tangent * displacement;
+    if (space_ != R_BAKE_SPACE_TANGENT) {
+      return displacement;
     }
 
-    return displacement;
+    const float3 tbn = get_to_tangent_matrix_tbn_hq(triangle, bary_uv) * displacement;
+    return float3(tbn.x, tbn.z, tbn.y);
+  }
+
+  float3 bake_quality_sample(const RasterizeTriangle &triangle,
+                             const float2 &bary_uv,
+                             const float2 &grid_uv,
+                             RasterizeResult & /*result*/) const override
+  {
+    const float3 bake_level_position = triangle.get_position(bary_uv);
+    const float3 high_level_position = sample_position_on_subdiv_ccg(
+        high_subdiv_ccg_, triangle.grid_index, grid_uv);
+    return high_level_position - bake_level_position;
+  }
+
+  float3 finalize_quality_samples_at_pixel(const RasterizeTriangle &triangle,
+                                           const float2 &center_bary_uv,
+                                           const float3 &sum,
+                                           const int samples) const override
+  {
+    const int side = multires_bake_quality_sample_side();
+    const int full_sample_count = side * side;
+
+    float3 displacement;
+    if (samples == full_sample_count && side > 1) {
+      const float2 center_grid_uv = interp_barycentric_triangle(
+          triangle.grid_uvs, center_bary_uv);
+      const float3 bake_level_position = triangle.get_position(center_bary_uv);
+      const float3 high_level_position = sample_position_on_subdiv_ccg(
+          high_subdiv_ccg_, triangle.grid_index, center_grid_uv);
+      displacement = high_level_position - bake_level_position;
+    }
+    else {
+      displacement = sum / float(samples);
+    }
+
+    if (space_ != R_BAKE_SPACE_TANGENT) {
+      return displacement;
+    }
+
+    const float3 tbn = get_to_tangent_matrix_tbn_hq(triangle, center_bary_uv) *
+                       displacement;
+    return float3(tbn.x, tbn.z, tbn.y);
   }
 
   void write_pixel(const RasterizeTile &tile,
@@ -806,14 +1411,69 @@ class MultiresNormalsBaker : public MultiresBaker {
  public:
   explicit MultiresNormalsBaker(const SubdivCCG &subdiv_ccg) : subdiv_ccg_(subdiv_ccg) {}
 
+  /* Legacy 1x1 reference path. Keep it unchanged for diagnostics. */
   float3 bake_pixel(const RasterizeTriangle &triangle,
                     const float2 &bary_uv,
                     const float2 &grid_uv,
                     RasterizeResult & /*result*/) const override
   {
     const float3x3 to_tangent = get_to_tangent_matrix_tbn(triangle, bary_uv);
-    const float3 normal = sample_normal_on_subdiv_ccg(subdiv_ccg_, triangle.grid_index, grid_uv);
-    return math::normalize(to_tangent * normal) * 0.5f + float3(0.5f, 0.5f, 0.5f);
+    const float3 normal = sample_normal_on_subdiv_ccg(
+        subdiv_ccg_, triangle.grid_index, grid_uv);
+    return math::normalize(to_tangent * normal) * 0.5f +
+           float3(0.5f, 0.5f, 0.5f);
+  }
+
+  bool supports_quality_supersampling() const override
+  {
+    return true;
+  }
+
+  /* HQ path: accumulate all sub-pixel directions in object space. */
+  float3 bake_quality_sample(const RasterizeTriangle &triangle,
+                             const float2 & /*bary_uv*/,
+                             const float2 &grid_uv,
+                             RasterizeResult & /*result*/) const override
+  {
+    float3 normal = sample_normal_on_subdiv_ccg(
+        subdiv_ccg_, triangle.grid_index, grid_uv);
+
+    if (math::dot(normal, normal) > 1.0e-20f) {
+      return math::normalize(normal);
+    }
+
+    return float3(0.0f, 0.0f, 1.0f);
+  }
+
+  /* Convert the averaged object-space direction once, using one stable TBN at
+   * the texel center. This avoids averaging vectors expressed in different
+   * tangent frames. */
+  float3 finalize_quality_samples_at_pixel(const RasterizeTriangle &triangle,
+                                           const float2 &center_bary_uv,
+                                           const float3 &sum,
+                                           const int /*samples*/) const override
+  {
+    float3 object_normal = sum;
+
+    if (math::dot(object_normal, object_normal) > 1.0e-20f) {
+      object_normal = math::normalize(object_normal);
+    }
+    else {
+      object_normal = triangle.get_normal(center_bary_uv);
+    }
+
+    const float3x3 to_tangent = get_to_tangent_matrix_tbn_hq(
+        triangle, center_bary_uv);
+    float3 tangent_normal = to_tangent * object_normal;
+
+    if (math::dot(tangent_normal, tangent_normal) > 1.0e-20f) {
+      tangent_normal = math::normalize(tangent_normal);
+    }
+    else {
+      tangent_normal = float3(0.0f, 0.0f, 1.0f);
+    }
+
+    return tangent_normal * 0.5f + float3(0.5f, 0.5f, 0.5f);
   }
 
   void write_pixel(const RasterizeTile &tile,
@@ -988,6 +1648,9 @@ static void bake_single_image_to_base_mesh(MultiresBakeRender &bake,
   tile.extra_buffers = &extra_buffers;
   tile.uv_offset = get_tile_uv(image, image_tile);
 
+  CoverageLockPool coverage_locks;
+  tile.coverage_locks = &coverage_locks;
+
   SpinLock spin_lock;
   BLI_spin_init(&spin_lock);
   std::atomic<int> num_baked_faces = 0;
@@ -1022,6 +1685,7 @@ static void bake_single_image_to_base_mesh(MultiresBakeRender &bake,
       BLI_spin_unlock(&spin_lock);
     }
   });
+  finalize_displacement_coverage(*baker, tile);
   BLI_spin_end(&spin_lock);
 }
 
@@ -1175,6 +1839,9 @@ static void bake_single_image_to_subdivided_mesh(MultiresBakeRender &bake,
   tile.extra_buffers = &extra_buffers;
   tile.uv_offset = get_tile_uv(image, image_tile);
 
+  CoverageLockPool coverage_locks;
+  tile.coverage_locks = &coverage_locks;
+
   const Array<GridCoord> corner_grid_coords = get_subdivided_corner_grid_coords(
       *subdiv_ccg.subdiv, *bake.base_mesh, bake.multires_modifier->lvl);
 
@@ -1218,6 +1885,7 @@ static void bake_single_image_to_subdivided_mesh(MultiresBakeRender &bake,
       BLI_spin_unlock(&spin_lock);
     }
   });
+  finalize_displacement_coverage(*baker, tile);
   BLI_spin_end(&spin_lock);
 }
 
@@ -1406,6 +2074,9 @@ static void bake_single_image_displacement(MultiresBakeRender &bake,
   tile.extra_buffers = &extra_buffers;
   tile.uv_offset = get_tile_uv(image, image_tile);
 
+  CoverageLockPool coverage_locks;
+  tile.coverage_locks = &coverage_locks;
+
   SpinLock spin_lock;
   BLI_spin_init(&spin_lock);
   std::atomic<int> num_baked_faces = 0;
@@ -1446,6 +2117,7 @@ static void bake_single_image_displacement(MultiresBakeRender &bake,
       BLI_spin_unlock(&spin_lock);
     }
   });
+  finalize_displacement_coverage(*baker, tile);
   BLI_spin_end(&spin_lock);
 }
 
@@ -1504,8 +2176,25 @@ static void bake_images(MultiresBakeRender &bake,
         baked_ibuf.uv_offset = get_tile_uv(*image, image_tile);
 
         ExtraBuffers &extra_buffers = baked_ibuf.extra_buffers;
-        extra_buffers.mask_buffer.reinitialize(int64_t(ibuf->y) * ibuf->x);
+        const int64_t pixel_count = int64_t(ibuf->y) * ibuf->x;
+        extra_buffers.mask_buffer.reinitialize(pixel_count);
         extra_buffers.mask_buffer.fill(FILTER_MASK_NULL);
+
+        const int quality_side = multires_bake_quality_sample_side();
+        if (bake.type == R_BAKE_DISPLACEMENT && quality_side > 1 && quality_side <= 4) {
+          extra_buffers.displacement_coverage_mask.reinitialize(pixel_count);
+          extra_buffers.displacement_coverage_mask.fill(0);
+
+          extra_buffers.displacement_center_buffer.reinitialize(pixel_count);
+          extra_buffers.displacement_center_buffer.fill(0.0f);
+          extra_buffers.displacement_center_valid.reinitialize(pixel_count);
+          extra_buffers.displacement_center_valid.fill(0);
+        }
+        else {
+          extra_buffers.displacement_coverage_mask = {};
+          extra_buffers.displacement_center_buffer = {};
+          extra_buffers.displacement_center_valid = {};
+        }
 
         bake_single_image(
             bake, bake_level_mesh, subdiv_ccg, *image, image_tile, *ibuf, extra_buffers, result);
@@ -1707,6 +2396,16 @@ static Mesh *create_bake_level_mesh(const Mesh &base_mesh,
 void RE_multires_bake_images(MultiresBakeRender &bake)
 {
   using namespace blender::render;
+
+  if (multires_bake_quality_trace_enabled()) {
+    const int side = multires_bake_quality_sample_side();
+    std::fprintf(stderr,
+                 "[MULTIRES_BAKE_QUALITY] type=%d supersample=%dx%d samples=%d\n",
+                 int(bake.type),
+                 side,
+                 side,
+                 side * side);
+  }
 
   std::unique_ptr<SubdivCCG> subdiv_ccg = create_subdiv_ccg(*bake.base_mesh,
                                                             *bake.multires_modifier);

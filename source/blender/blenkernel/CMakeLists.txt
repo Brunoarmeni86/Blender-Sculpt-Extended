@@ -213,6 +213,7 @@ set(SRC
   intern/movieclip.cc
   intern/multires.cc
   intern/multires_reshape.cc
+  intern/multires_sculpt_layers.cc
   intern/multires_reshape_apply_base.cc
   intern/multires_reshape_ccg.cc
   intern/multires_reshape_smooth.cc

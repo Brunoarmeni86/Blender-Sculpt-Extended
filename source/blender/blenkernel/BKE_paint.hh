@@ -8,6 +8,7 @@
  * \ingroup bke
  */
 
+#include <cstdint>
 #include <variant>
 
 #include "BLI_array.hh"
@@ -372,6 +373,36 @@ struct SculptTopologyIslandCache {
 
 using ActiveVert = std::variant<std::monostate, int, BMVert *>;
 
+/**
+ * Runtime description of the Multires/Sculpt regions modified since the last successful flush.
+ *
+ * The important architectural rule is that a local PBVH edit stays local when it crosses the
+ * Sculpt -> Multires boundary.  The bit-vectors are indexed by CCG grid, not by high-resolution
+ * sample, so the bookkeeping stays tiny even for very dense surfaces.
+ *
+ * A `*_full` flag is a conservative fallback used when a caller only knows that a domain changed
+ * but cannot provide a node/grid subset.  Future consumers must treat a full flag as "all grids".
+ */
+struct SculptChangeSet {
+  /* V4.4b sparse position journal.
+   * Position edits are normally a tiny subset of huge Multires surfaces, so storing the
+   * touched grid indices directly avoids resizing/clearing/scanning a mesh-sized BitVector
+   * on every sculpt flush. */
+  Vector<int> position_grids;
+  BitVector<> mask_grids;
+  BitVector<> visibility_grids;
+  BitVector<> face_set_grids;
+
+  bool positions_full = false;
+  bool masks_full = false;
+  bool visibility_full = false;
+  bool face_sets_full = false;
+  bool topology_changed = false;
+
+  /** Incremented when PBVH changes are synchronized into this set. */
+  uint64_t revision = 0;
+};
+
 /* Helper return struct for associated data. */
 struct PersistentMultiresData {
   Span<float3> positions;
@@ -404,6 +435,12 @@ struct SculptSession : NonCopyable, NonMovable {
 
   /* BVH tree acceleration structure */
   std::unique_ptr<bke::pbvh::Tree> pbvh;
+
+  /**
+   * Persistent local-change description.  Unlike PBVH normal/bounds dirty flags this survives
+   * viewport maintenance until Multires explicitly commits the edit.
+   */
+  SculptChangeSet change_set;
 
   /* Object is deformed with some modifiers. */
   bool deform_modifiers_active = false;

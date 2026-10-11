@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2024 Blender Authors
+﻿/* SPDX-FileCopyrightText: 2024 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -13,6 +13,7 @@
 #include "BKE_context.hh"
 #include "BKE_customdata.hh"
 #include "BKE_main.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_multires.hh"
 #include "BKE_paint.hh"
 #include "BKE_report.hh"
@@ -53,7 +54,6 @@ static wmOperatorStatus multires_higher_levels_delete_exec(bContext *C, wmOperat
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
-
   multiresModifier_del_levels(mmd, scene, ob, 1);
 
   iter_other(CTX_data_main(C), ob, true, multires_update_totlevels, &mmd->totlvl);
@@ -122,10 +122,22 @@ static wmOperatorStatus multires_subdivide_exec(bContext *C, wmOperator *op)
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
+  if (!mmd->sculpt_layers.is_empty() &&
+      ID_REAL_USERS(&id_cast<Mesh *>(object->data)->id) > 1) {
+    BKE_report(op->reports, RPT_ERROR,
+               "Make the mesh single-user before subdividing Sculpt Layers");
+    return OPERATOR_CANCELLED;
+  }
+
 
   const MultiresSubdivideModeType subdivide_mode = MultiresSubdivideModeType(
       RNA_enum_get(op->ptr, "mode"));
+  const int old_level = mmd->totlvl;
   multiresModifier_subdivide(object, mmd, subdivide_mode);
+  if (mmd->totlvl == old_level) {
+    BKE_report(op->reports, RPT_ERROR, "Subdivision failed; check Multires grids and pending sculpt edits");
+    return OPERATOR_CANCELLED;
+  }
 
   iter_other(CTX_data_main(C), object, true, multires_update_totlevels, &mmd->totlvl);
 
@@ -188,6 +200,12 @@ static wmOperatorStatus multires_reshape_exec(bContext *C, wmOperator *op)
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
+  if (!mmd->sculpt_layers.is_empty()) {
+    BKE_report(op->reports, RPT_ERROR,
+               "This operation cannot migrate Sculpt Layers yet; remove the layer stack first");
+    return OPERATOR_CANCELLED;
+  }
+
 
   if (mmd->lvl == 0) {
     BKE_report(op->reports, RPT_ERROR, "Reshape can work only with higher levels of subdivisions");
@@ -380,6 +398,74 @@ void OBJECT_OT_multires_external_pack(wmOperatorType *ot)
 /** \name Multires Apply Base
  * \{ */
 
+static bool multires_conform_layers_poll(bContext *C)
+{
+  Object *object = context_active_object(C);
+  return object && object->mode == OB_MODE_OBJECT && multires_poll(C);
+}
+
+static wmOperatorStatus multires_conform_layers_exec(bContext *C, wmOperator *op)
+{
+  Object *object = context_active_object(C);
+  MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(
+      edit_modifier_property_get(op, object, eModifierType_Multires));
+  if (!mmd) {
+    return OPERATOR_CANCELLED;
+  }
+  ed::sculpt_paint::undo::push_multires_mesh_begin(C, op->type->name);
+
+  printf("[CONFORM_TRACE] AWARE OPERATOR ENTER\n");
+  fflush(stdout);
+
+  const char *error = multiresModifier_conform_layers(
+      object, mmd, RNA_boolean_get(op->ptr, "include_visible_layers"));
+
+  printf("[CONFORM_TRACE] AWARE OPERATOR RETURN error=%s\n",
+         error ? error : "<none>");
+  fflush(stdout);
+
+  ed::sculpt_paint::undo::push_multires_mesh_end(C, op->type->name);
+
+  if (error) {
+    BKE_report(op->reports, RPT_ERROR, error);
+    return OPERATOR_CANCELLED;
+  }
+
+  DEG_id_tag_update(&object->id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, object);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus multires_conform_layers_invoke(bContext *C,
+                                                       wmOperator *op,
+                                                       const wmEvent * /*event*/)
+{
+  if (edit_modifier_invoke_properties(C, op)) {
+    return multires_conform_layers_exec(C, op);
+  }
+  return OPERATOR_CANCELLED;
+}
+
+void OBJECT_OT_multires_conform_layers(wmOperatorType *ot)
+{
+  ot->name = "Conform Base and Preserve Layers";
+  ot->description = "Conform the cage and rebase every sculpt layer; experimental, Object Mode "
+                    "only, single Multires, no shape keys";
+  ot->idname = "OBJECT_OT_multires_conform_layers";
+  ot->poll = multires_conform_layers_poll;
+  ot->invoke = multires_conform_layers_invoke;
+  ot->exec = multires_conform_layers_exec;
+  /* Object Mode uses memfile undo, covering both mesh and modifier layer data. */
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_INTERNAL;
+  edit_modifier_properties(ot);
+  RNA_def_boolean(ot->srna,
+                  "include_visible_layers",
+                  true,
+                  "Conform from Final Result",
+                  "Use visible weighted layers to position the cage; otherwise use only the base "
+                  "displacement. All layers are rebased in either mode");
+}
+
 static wmOperatorStatus multires_base_apply_exec(bContext *C, wmOperator *op)
 {
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
@@ -390,6 +476,12 @@ static wmOperatorStatus multires_base_apply_exec(bContext *C, wmOperator *op)
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
+  if (!mmd->sculpt_layers.is_empty()) {
+    BKE_report(op->reports, RPT_ERROR,
+               "This operation cannot migrate Sculpt Layers yet; remove the layer stack first");
+    return OPERATOR_CANCELLED;
+  }
+
 
   const ApplyBaseMode mode = RNA_boolean_get(op->ptr, "apply_heuristic") ?
                                  ApplyBaseMode::ForSubdivision :
@@ -397,7 +489,17 @@ static wmOperatorStatus multires_base_apply_exec(bContext *C, wmOperator *op)
 
   ed::sculpt_paint::undo::push_multires_mesh_begin(C, op->type->name);
 
-  multiresModifier_base_apply(depsgraph, object, mmd, mode);
+  if (mode == ApplyBaseMode::Base) {
+    const char *error = multiresModifier_conform_layers(object, mmd, false);
+    if (error != nullptr) {
+      BKE_report(op->reports, RPT_ERROR, error);
+      ed::sculpt_paint::undo::push_multires_mesh_end(C, op->type->name);
+      return OPERATOR_CANCELLED;
+    }
+  }
+  else {
+    multiresModifier_base_apply(depsgraph, object, mmd, mode);
+  }
 
   ed::sculpt_paint::undo::push_multires_mesh_end(C, op->type->name);
 
@@ -456,6 +558,12 @@ static wmOperatorStatus multires_unsubdivide_exec(bContext *C, wmOperator *op)
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
+  if (!mmd->sculpt_layers.is_empty()) {
+    BKE_report(op->reports, RPT_ERROR,
+               "This operation cannot migrate Sculpt Layers yet; remove the layer stack first");
+    return OPERATOR_CANCELLED;
+  }
+
 
   MultiresUnsubdivideInfo info = {};
   int new_levels = multiresModifier_rebuild_subdiv(depsgraph, object, mmd, 1, true, info);
@@ -512,6 +620,12 @@ static wmOperatorStatus multires_rebuild_subdiv_exec(bContext *C, wmOperator *op
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
+  if (!mmd->sculpt_layers.is_empty()) {
+    BKE_report(op->reports, RPT_ERROR,
+               "This operation cannot migrate Sculpt Layers yet; remove the layer stack first");
+    return OPERATOR_CANCELLED;
+  }
+
 
   MultiresUnsubdivideInfo info = {};
   int new_levels = multiresModifier_rebuild_subdiv(depsgraph, object, mmd, INT_MAX, false, info);
@@ -558,3 +672,6 @@ void OBJECT_OT_multires_rebuild_subdiv(wmOperatorType *ot)
 /** \} */
 
 }  // namespace blender::ed::object
+
+
+

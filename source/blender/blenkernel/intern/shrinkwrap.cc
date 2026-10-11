@@ -66,6 +66,7 @@ struct ShrinkwrapCalcData {
   const MDeformVert *dvert; /* Pointer to mdeform array */
   int vgroup;               /* Vertex group num */
   bool invert_vgroup;       /* invert vertex group influence */
+  Span<float> sample_weights; /* Optional pre-interpolated Multires weights. */
 
   Mesh *target;                /* mesh we are shrinking to */
   SpaceTransform local2target; /* transform to move between local and target space */
@@ -75,6 +76,13 @@ struct ShrinkwrapCalcData {
 
   float keepDist; /* Distance to keep above target surface (units are in local space) */
 };
+
+static float shrinkwrap_weight(const ShrinkwrapCalcData &calc, const int i)
+{
+  return calc.sample_weights.is_empty() ?
+             BKE_defvert_array_find_weight_safe(calc.dvert, i, calc.vgroup, calc.invert_vgroup) :
+             calc.sample_weights[i];
+}
 
 bool BKE_shrinkwrap_needs_normals(int shrinkType, int shrinkMode)
 {
@@ -301,8 +309,7 @@ static void shrinkwrap_calc_nearest_vertex_cb_ex(ShrinkwrapCalcData *calc,
 {
   float *co = calc->vertexCos[i];
   float tmp_co[3];
-  float weight = BKE_defvert_array_find_weight_safe(
-      calc->dvert, i, calc->vgroup, calc->invert_vgroup);
+  float weight = shrinkwrap_weight(*calc, i);
 
   if (weight == 0.0f) {
     return;
@@ -448,8 +455,7 @@ static void shrinkwrap_calc_normal_projection_cb_ex(ShrinkwrapCalcData *calc,
   const float proj_limit_squared = calc->smd->projLimit * calc->smd->projLimit;
   float *co = calc->vertexCos[i];
   const float *tmp_co, *tmp_no;
-  float weight = BKE_defvert_array_find_weight_safe(
-      calc->dvert, i, calc->vgroup, calc->invert_vgroup);
+  float weight = shrinkwrap_weight(*calc, i);
 
   if (weight == 0.0f) {
     return;
@@ -1042,8 +1048,7 @@ static void shrinkwrap_calc_nearest_surface_point_cb_ex(ShrinkwrapCalcData *calc
 {
   float *co = calc->vertexCos[i];
   float tmp_co[3];
-  float weight = BKE_defvert_array_find_weight_safe(
-      calc->dvert, i, calc->vgroup, calc->invert_vgroup);
+  float weight = shrinkwrap_weight(*calc, i);
 
   if (weight == 0.0f) {
     return;
@@ -1314,6 +1319,66 @@ static Array<float3> shrinkwrap_calc_subdivided_positions(Mesh *mesh, const int 
   }
 
   return positions;
+}
+
+Array<float3> shrinkwrap_subdivided_positions(Mesh &mesh, const int subdivision_level)
+{
+  return shrinkwrap_calc_subdivided_positions(&mesh, subdivision_level);
+}
+
+bool shrinkwrap_samples_deform(const ModifierEvalContext &ctx,
+                               ShrinkwrapModifierData &smd,
+                               MutableSpan<float3> positions,
+                               Span<float3> normals,
+                               Span<float3> projection_positions,
+                               Span<float> weights)
+{
+  if (!smd.target || smd.target == ctx.object || smd.target->type != OB_MESH ||
+      (smd.auxTarget && smd.auxTarget->type != OB_MESH) ||
+      (!weights.is_empty() && weights.size() != positions.size()) ||
+      (smd.shrinkType == MOD_SHRINKWRAP_PROJECT &&
+       smd.projAxis == MOD_SHRINKWRAP_PROJECT_OVER_NORMAL &&
+       (normals.size() != positions.size() || projection_positions.size() != positions.size())))
+  {
+    return false;
+  }
+  Object *target = DEG_get_evaluated(ctx.depsgraph, smd.target);
+  Mesh *target_mesh = BKE_modifier_get_evaluated_mesh_from_evaluated_object(target);
+  ShrinkwrapTreeData tree{};
+  if (!BKE_shrinkwrap_init_tree(&tree, target_mesh, smd.shrinkType, smd.shrinkMode, false)) {
+    return false;
+  }
+  ShrinkwrapCalcData calc{};
+  calc.smd = &smd;
+  calc.ob = ctx.object;
+  calc.numVerts = int(positions.size());
+  calc.vertexCos = reinterpret_cast<float (*)[3]>(positions.data());
+  calc.vert_positions = projection_positions.is_empty() ? nullptr :
+      reinterpret_cast<float (*)[3]>(const_cast<float3 *>(projection_positions.data()));
+  calc.vert_normals = normals;
+  calc.sample_weights = weights;
+  calc.vgroup = -1;
+  calc.target = target_mesh;
+  calc.tree = &tree;
+  calc.keepDist = smd.keepDist;
+  BLI_SPACE_TRANSFORM_SETUP(&calc.local2target, ctx.object, target);
+  if (smd.auxTarget && smd.auxTarget != ctx.object && smd.auxTarget->type == OB_MESH) {
+    calc.aux_target = DEG_get_evaluated(ctx.depsgraph, smd.auxTarget);
+  }
+  switch (smd.shrinkType) {
+    case MOD_SHRINKWRAP_NEAREST_SURFACE:
+    case MOD_SHRINKWRAP_TARGET_PROJECT:
+      shrinkwrap_calc_nearest_surface_point(&calc);
+      break;
+    case MOD_SHRINKWRAP_PROJECT:
+      shrinkwrap_calc_normal_projection(&calc);
+      break;
+    case MOD_SHRINKWRAP_NEAREST_VERTEX:
+      shrinkwrap_calc_nearest_vertex(&calc);
+      break;
+  }
+  BKE_shrinkwrap_free_tree(&tree);
+  return true;
 }
 
 void shrinkwrapModifier_deform(ShrinkwrapModifierData *smd,

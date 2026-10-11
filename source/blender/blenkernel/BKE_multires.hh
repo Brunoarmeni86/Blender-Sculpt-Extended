@@ -25,6 +25,7 @@ struct Scene;
 struct SubdivCCG;
 namespace bke::subdiv {
 struct Settings;
+struct Subdiv;
 struct ToMeshSettings;
 }  // namespace bke::subdiv
 
@@ -34,6 +35,8 @@ enum MultiresModifiedFlags {
   MULTIRES_COORDS_MODIFIED = 1,
   /* indicates elements have been hidden or unhidden */
   MULTIRES_HIDDEN_MODIFIED = 2,
+  /* Mask edits need persistence without reshaping untouched positions. */
+  MULTIRES_MASK_MODIFIED = 4,
 };
 
 /**
@@ -45,9 +48,33 @@ void multires_set_tot_level(Object *ob, MultiresModifierData *mmd, int lvl);
 
 void multires_mark_as_modified(Depsgraph *depsgraph, Object *object, MultiresModifiedFlags flags);
 
-void multires_flush_sculpt_updates(Object *object);
-void multires_force_sculpt_rebuild(Object *object);
+/** False preserves pending sculpt data; callers must not discard the session. */
+bool multires_flush_sculpt_updates(Object *object);
+/** Copy only mask grids from an evaluated CCG to the original mesh. */
+bool multires_flush_mask_updates(const SubdivCCG &ccg, Mesh &mesh, int level);
+bool multires_force_sculpt_rebuild(Object *object);
+
+/**
+ * Re-evaluate the existing Sculpt SubdivCCG after a Sculpt Layer stack
+ * change without destroying the PBVH.
+ */
+bool multires_refresh_sculpt_ccg(Object *object, MultiresModifierData *mmd);
 void multires_force_external_reload(Object *object);
+
+/** Evaluate optional procedural texture displacement in Multires tangent-normal direction. */
+float multires_texture_displacement_sample(const Mesh &mesh,
+                                           bke::subdiv::Subdiv &subdiv,
+                                           const MultiresModifierData &mmd,
+                                           int ptex_face_index,
+                                           float u,
+                                           float v,
+                                           const float4x4 *mapping_matrix = nullptr);
+/** Texture coordinates transform, cached once per evaluation/bake. Mapping:
+ * 0 UV (legacy), 1 local, 2 global, 3 reference object/bone. */
+float4x4 multires_texture_mapping_matrix(const MultiresModifierData &mmd,
+                                        const Object &object,
+                                        const Object *map_object = nullptr);
+
 
 /**
  * Reset the multi-res levels to match the number of mdisps.
@@ -109,6 +136,11 @@ struct MultiresUnsubdivideInfo {
   /** When over zero report that some data was not preserved. */
   int unsupported_grid_count = 0;
 };
+
+/** Object-mode prototype. Returns an error message, or nullptr on success. */
+const char *multiresModifier_conform_layers(Object *object,
+                                           MultiresModifierData *mmd,
+                                           bool include_visible_layers);
 
 void multiresModifier_base_apply(Depsgraph *depsgraph,
                                  Object *object,

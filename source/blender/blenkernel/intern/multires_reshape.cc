@@ -1,4 +1,4 @@
-/* SPDX-FileCopyrightText: 2020 Blender Authors
+﻿/* SPDX-FileCopyrightText: 2020 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -7,17 +7,32 @@
  */
 
 #include "DNA_mesh_types.h"
+#include "DNA_meshdata_types.h"
 #include "DNA_modifier_types.h"
 
 #include "BKE_customdata.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_mesh.h"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object.hh"
+#include "BKE_subdiv.hh"
+
+#include <vector>
+#include <cmath>
+#include "BLI_bitmap.h"
+#include "BLI_listbase.h"
+#include "MEM_guardedalloc.h"
 
 #include "DEG_depsgraph_query.hh"
 
 #include "multires_reshape.hh"
+#include "multires_conform_rebase.hh"
+#include "BLI_memory_utils.hh"
+#include "BKE_mesh.hh"
+#include "BKE_object_types.hh"
+#include "DNA_object_types.h"
 
 namespace blender {
 
@@ -147,10 +162,10 @@ void multiresModifier_subdivide(Object *object,
   multiresModifier_subdivide_to_level(object, mmd, top_level, mode);
 }
 
-void multiresModifier_subdivide_to_level(Object *object,
-                                         MultiresModifierData *mmd,
-                                         const int top_level,
-                                         const MultiresSubdivideModeType mode)
+static void multiresModifier_subdivide_to_level_base(Object *object,
+                                                     MultiresModifierData *mmd,
+                                                     const int top_level,
+                                                     const MultiresSubdivideModeType mode)
 {
   if (top_level <= mmd->totlvl) {
     return;
@@ -192,7 +207,9 @@ void multiresModifier_subdivide_to_level(Object *object,
     return;
   }
 
-  multires_flush_sculpt_updates(object);
+  if (!multires_flush_sculpt_updates(object)) {
+    return;
+  }
 
   if (!multires_reshape_context_create_from_modifier(&reshape_context, object, mmd, top_level)) {
     return;
@@ -220,11 +237,632 @@ void multiresModifier_subdivide_to_level(Object *object,
   multires_set_tot_level(object, mmd, top_level);
 }
 
+/* Apply the same object-space subdivision to the base and to base + each unit
+ * layer. Their difference is the layer at the new resolution. Interpolating
+ * tangent offsets directly bypasses Catmull-Clark smoothing and its frame
+ * conversion, and leaves visible differences compared with a baked surface. */
+static Mesh *multires_subdivide_layer_surface(Object *object,
+                                              const MultiresModifierData &mmd,
+                                              const MultiresSculptLayer *layer,
+                                              const int top_level,
+                                              const MultiresSubdivideModeType mode)
+{
+  const Mesh &source = *id_cast<Mesh *>(object->data);
+  Mesh *work = BKE_mesh_copy_for_eval(source);
+  MDisps *grids = static_cast<MDisps *>(
+      CustomData_get_layer_for_write(&work->corner_data, CD_MDISPS, work->corners_num));
+  for (int corner = 0; corner < work->corners_num; corner++) {
+    for (int i = 0; i < grids[corner].totdisp; i++) {
+      for (int axis = 0; axis < 3; axis++) {
+        if (layer && layer->disps && corner < layer->grids_num &&
+            layer->disps[corner].disps != nullptr)
+        {
+          grids[corner].disps[i][axis] += layer->disps[corner].disps[i][axis];
+        }
+        if (!std::isfinite(grids[corner].disps[i][axis])) {
+          BKE_id_free(nullptr, work);
+          return nullptr;
+        }
+      }
+    }
+  }
+  Object work_object = dna::shallow_copy(*object);
+  work_object.data = &work->id;
+  MultiresModifierData work_mmd = dna::shallow_copy(mmd);
+  work_mmd.sculpt_layers = {};
+  MultiresReshapeContext context;
+  if (!multires_reshape_context_create_from_modifier(
+          &context, &work_object, &work_mmd, top_level)) {
+    BKE_id_free(nullptr, work);
+    return nullptr;
+  }
+  multires_reshape_store_original_grids(&context);
+  multires_reshape_ensure_grids(work, top_level);
+  multires_reshape_assign_final_elements_from_orig_mdisps(&context);
+  multires_reshape_free_original_grids(&context);
+  if (ELEM(mode, MultiresSubdivideModeType::Linear, MultiresSubdivideModeType::Simple)) {
+    multires_reshape_smooth_object_grids(&context, mode);
+  }
+  else {
+    multires_reshape_smooth_object_grids_with_details(&context);
+  }
+  multires_reshape_object_grids_to_tangent_displacement(&context);
+  multires_reshape_context_free(&context);
+
+  /* ensure_grids reallocates displacement, but not the hidden bitmap. */
+  const MDisps *original = static_cast<const MDisps *>(
+      CustomData_get_layer(&source.corner_data, CD_MDISPS));
+  const int new_side = bke::subdiv::grid_size_from_level(top_level);
+  for (int corner = 0; corner < work->corners_num; corner++) {
+    MEM_SAFE_DELETE(grids[corner].hidden);
+    if (!original[corner].hidden) {
+      continue;
+    }
+    const int old_side = bke::subdiv::grid_size_from_level(original[corner].level);
+    grids[corner].hidden = BLI_BITMAP_NEW(new_side * new_side, "subdivided hidden grid");
+    for (int y = 0; y < new_side; y++) {
+      for (int x = 0; x < new_side; x++) {
+        const int sx = int(std::round(float(x) * (old_side - 1) / (new_side - 1)));
+        const int sy = int(std::round(float(y) * (old_side - 1) / (new_side - 1)));
+        BLI_BITMAP_SET(grids[corner].hidden, y * new_side + x,
+                       BLI_BITMAP_TEST_BOOL(original[corner].hidden, sy * old_side + sx));
+      }
+    }
+  }
+  return work;
+}
+
+/* Convert the already-subdivided unit-layer surface into final deltas in
+ * scratch storage. Nothing in the live layer is modified on failure. */
+static bool multires_stage_subdivided_layer(const MultiresSculptLayer &layer,
+                                           const MDisps *base,
+                                           MDisps *result,
+                                           const int grids_num,
+                                           const int new_level)
+{
+  if (!base || !result || !layer.disps || layer.grids_num != grids_num ||
+      layer.level < 1 || new_level <= layer.level || new_level > 13)
+  {
+    return false;
+  }
+  const int old_side = bke::subdiv::grid_size_from_level(layer.level);
+  const int new_side = bke::subdiv::grid_size_from_level(new_level);
+  for (int corner = 0; corner < grids_num; corner++) {
+    const MDisps &old = layer.disps[corner];
+    MDisps &grid = result[corner];
+    if (!old.disps || old.level != layer.level || old.totdisp != old_side * old_side ||
+        !base[corner].disps || base[corner].level != new_level ||
+        base[corner].totdisp != new_side * new_side || !grid.disps ||
+        grid.level != new_level || grid.totdisp != new_side * new_side)
+    {
+      return false;
+    }
+    /* Retain resample_all's validation of the old layer, including hidden layers. */
+    for (int i = 0; i < old.totdisp; i++) {
+      for (int axis = 0; axis < 3; axis++) {
+        if (!std::isfinite(old.disps[i][axis])) {
+          return false;
+        }
+      }
+    }
+    for (int i = 0; i < grid.totdisp; i++) {
+      for (int axis = 0; axis < 3; axis++) {
+        const float delta = grid.disps[i][axis] - base[corner].disps[i][axis];
+        if (!std::isfinite(delta)) {
+          return false;
+        }
+        grid.disps[i][axis] = delta;
+      }
+    }
+    /* The scratch surface carries the BASE hidden bitmap. Replace it with the
+     * layer's own bitmap, using exactly the old resample_all mapping. */
+    MEM_SAFE_DELETE(grid.hidden);
+    if (old.hidden) {
+      grid.hidden = BLI_BITMAP_NEW(grid.totdisp, "subdivided sculpt layer hidden");
+      for (int y = 0; y < new_side; y++) {
+        const float v = float(y) * float(old_side - 1) / float(new_side - 1);
+        const int sy = int(std::round(v));
+        for (int x = 0; x < new_side; x++) {
+          const float u = float(x) * float(old_side - 1) / float(new_side - 1);
+          const int sx = int(std::round(u));
+          BLI_BITMAP_SET(grid.hidden, y * new_side + x,
+                         BLI_BITMAP_TEST_BOOL(old.hidden, sy * old_side + sx));
+        }
+      }
+    }
+  }
+  return true;
+}
+
+/* Called only after every layer has been staged and the sculpt session flushed.
+ * Scratch destruction releases the old grids after ownership is exchanged. */
+static void multires_publish_subdivided_layer(MultiresSculptLayer &layer,
+                                             MDisps *result,
+                                             const int new_level)
+{
+  for (int corner = 0; corner < layer.grids_num; corner++) {
+    std::swap(layer.disps[corner], result[corner]);
+  }
+  layer.level = new_level;
+}
+
+void multiresModifier_subdivide_to_level(Object *object,
+                                         MultiresModifierData *mmd,
+                                         const int top_level,
+                                         const MultiresSubdivideModeType mode)
+{
+  if (top_level <= mmd->totlvl) {
+    return;
+  }
+  Mesh *mesh = id_cast<Mesh *>(object->data);
+
+  /* Capture Face Sets before subdivision. From this point onward the CCG-grid
+   * master survives independently of the coarse face-domain attribute. */
+  if (mmd->totlvl > 0 && mesh->attributes().contains(".sculpt_face_set")) {
+    if (!bke::multires_layers::faceset_ensure_from_mesh(*mmd, *mesh, mmd->totlvl)) {
+      BKE_modifier_set_error(object, &mmd->modifier,
+                             "Cannot initialize high-resolution Multires Face Sets");
+      return;
+    }
+  }
+
+  if (mmd->totlvl == 0 && !mmd->sculpt_layers.is_empty()) {
+    if (!bke::multires_layers::base_remap_after_topology_edit(*mmd, *mesh) ||
+        !bke::multires_layers::commit(*object)) {
+      BKE_modifier_set_error(object, &mmd->modifier, "Cannot preserve L0 layers during subdivision");
+      return;
+    }
+    multiresModifier_subdivide_to_level_base(object, mmd, top_level, mode);
+    if (mmd->totlvl == top_level) {
+      bke::multires_layers::initialize_layer_grids(*mmd, top_level, mesh->corners_num);
+      bke::multires_layers::ensure_corner_ids(*mmd, *mesh);
+    }
+    return;
+  }
+  if (mmd->sculpt_layers.is_empty()) {
+    multiresModifier_subdivide_to_level_base(object, mmd, top_level, mode);
+    if (mmd->sculpt_face_set_grids && mmd->totlvl >= top_level) {
+      bke::multires_layers::faceset_resample_up(*mmd, top_level);
+    }
+    return;
+  }
+  if (!bke::multires_layers::remap_after_topology_edit(*mmd, *mesh)) {
+    BKE_modifier_set_error(object, &mmd->modifier,
+                           "Cannot remap Sculpt Layers after the base topology edit");
+    return;
+  }
+  if (top_level > 13 || ID_REAL_USERS(&mesh->id) > 1 ||
+      !bke::multires_layers::compatible(*mmd, *mesh) ||
+      !bke::multires_layers::commit(*object))
+  {
+    BKE_modifier_set_error(object, &mmd->modifier,
+                           "Cannot subdivide: sculpt layer grids or pending edits are invalid");
+    return;
+  }
+
+  /* V4.5c sparse subdivision safety.
+   *
+   * Sparse Sculpt Layer grids use nullptr as an implicit all-zero payload.
+   * The legacy subdivision pipeline is global, so materialize only existing
+   * positive-level layer grids here. A level-zero layer legitimately has no
+   * grid payload yet: its base_deltas are carried by the cage and the null
+   * high-resolution contribution must remain equivalent to zero. */
+  for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    if (layer.level <= 0) {
+      continue;
+    }
+    if (!layer.disps || layer.grids_num <= 0) {
+      BKE_modifier_set_error(
+          object, &mmd->modifier, "Cannot subdivide: invalid sparse Sculpt Layer descriptors");
+      return;
+    }
+    for (int corner = 0; corner < layer.grids_num; corner++) {
+      if (bke::multires_layers::grid_ensure(layer, corner) == nullptr) {
+        BKE_modifier_set_error(
+            object, &mmd->modifier, "Cannot subdivide: failed to materialize Sculpt Layer grid");
+        return;
+      }
+    }
+  }
+
+  Mesh *base = multires_subdivide_layer_surface(object, *mmd, nullptr, top_level, mode);
+  std::vector<std::pair<MultiresSculptLayer *, Mesh *>> surfaces;
+  bool valid = base != nullptr;
+  for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    if (!valid) {
+      break;
+    }
+    Mesh *surface = multires_subdivide_layer_surface(object, *mmd, &layer, top_level, mode);
+    surfaces.emplace_back(&layer, surface);
+    valid = surface != nullptr;
+  }
+  const MDisps *base_grids = base ? static_cast<const MDisps *>(
+      CustomData_get_layer(&base->corner_data, CD_MDISPS)) : nullptr;
+  for (const auto &[layer, surface] : surfaces) {
+    if (!valid) {
+      break;
+    }
+    MDisps *grids = static_cast<MDisps *>(CustomData_get_layer_for_write(
+        &surface->corner_data, CD_MDISPS, surface->corners_num));
+    valid = multires_stage_subdivided_layer(
+        *layer, base_grids, grids, mesh->corners_num, top_level);
+  }
+  valid = valid && multires_force_sculpt_rebuild(object);
+  if (valid) {
+    for (const auto &[layer, surface] : surfaces) {
+      MDisps *grids = static_cast<MDisps *>(CustomData_get_layer_for_write(
+          &surface->corner_data, CD_MDISPS, surface->corners_num));
+      multires_publish_subdivided_layer(*layer, grids, top_level);
+    }
+    MDisps *destination = static_cast<MDisps *>(
+        CustomData_get_layer_for_write(&mesh->corner_data, CD_MDISPS, mesh->corners_num));
+    MDisps *new_base = static_cast<MDisps *>(
+        CustomData_get_layer_for_write(&base->corner_data, CD_MDISPS, mesh->corners_num));
+    for (int corner = 0; corner < mesh->corners_num; corner++) {
+      std::swap(destination[corner], new_base[corner]);
+    }
+    GridPaintMask *masks = static_cast<GridPaintMask *>(CustomData_get_layer_for_write(
+        &mesh->corner_data, CD_GRID_PAINT_MASK, mesh->corners_num));
+    GridPaintMask *new_masks = static_cast<GridPaintMask *>(CustomData_get_layer_for_write(
+        &base->corner_data, CD_GRID_PAINT_MASK, mesh->corners_num));
+    if (masks && new_masks) {
+      for (int corner = 0; corner < mesh->corners_num; corner++) {
+        std::swap(masks[corner], new_masks[corner]);
+      }
+    }
+    multires_set_tot_level(object, mmd, top_level);
+    if (mmd->sculpt_face_set_grids) {
+      bke::multires_layers::faceset_resample_up(*mmd, top_level);
+    }
+    mmd->sculpt_layer_recording = 0;
+  }
+  else {
+    BKE_modifier_set_error(object, &mmd->modifier,
+                           "Sculpt Layer subdivision failed; original grids retained");
+  }
+  if (base) {
+    BKE_id_free(nullptr, base);
+  }
+  for (const auto &[layer, surface] : surfaces) {
+    if (surface) {
+      BKE_id_free(nullptr, surface);
+    }
+  }
+}
+
 /** \} */
 
 /* -------------------------------------------------------------------- */
 /** \name Apply base
  * \{ */
+
+static bke::multires_layers::conform::Frame multires_conform_frame(
+    const MultiresReshapeContext &context, const GridCoord &coord)
+{
+  float3 position;
+  float3x3 tangent;
+  multires_reshape_evaluate_base_mesh_limit_at_grid(&context, &coord, position, tangent);
+  bke::multires_layers::conform::Frame frame{};
+  for (int r = 0; r < 3; r++) {
+    frame.origin[r] = position[r];
+    for (int c = 0; c < 3; c++) {
+      frame.axes[r][c] = tangent[c][r];
+    }
+  }
+  return frame;
+}
+
+const char *multiresModifier_conform_layers(Object *object,
+                                           MultiresModifierData *mmd,
+                                           const bool include_visible_layers)
+{
+  printf("[CONFORM_TRACE] CORE ENTER layers=%d\n", BLI_listbase_count(&mmd->sculpt_layers));
+  fflush(stdout);
+  using namespace bke::multires_layers::conform;
+  if (!object || !mmd || object->mode != OB_MODE_OBJECT) {
+    return "Layer-aware Conform currently requires Object Mode";
+  }
+  Mesh *mesh = id_cast<Mesh *>(object->data);
+  if (mesh->key || ID_REAL_USERS(&mesh->id) > 1 ||
+      CustomData_external_test(&mesh->corner_data, CD_MDISPS))
+  {
+    return "Conform requires a single-user mesh without shape keys or external displacement";
+  }
+  if (object->modifiers.count() != 1 || object->modifiers.first != &mmd->modifier) {
+    return "Layer-aware Conform currently supports a single Multires modifier only";
+  }
+  /*
+   * Sculpt Layer compatibility is required only when a layer stack exists.
+   * With an empty stack this routine also acts as the standard Multires
+   * Conform path: conform the cage and rebase the base MDisps only.
+   */
+  if (!mmd->sculpt_layers.is_empty() &&
+      !bke::multires_layers::compatible(*mmd, *mesh))
+  {
+    return "Conform requires valid Sculpt Layers at the stored Multires level";
+  }
+  /* Object Mode has no pending brush transaction. Never publish a cage while
+   * a live sculpt session owns uncommitted grid coordinates. */
+  if (object->runtime->sculpt_session) {
+    return "Finish the sculpt session before using layer-aware Conform";
+  }
+
+  MultiresModifierData evaluator_mmd = dna::shallow_copy(*mmd);
+  evaluator_mmd.sculpt_layers = {};
+  MultiresReshapeContext old_context;
+  if (!multires_reshape_context_create_from_modifier(
+          &old_context, object, &evaluator_mmd, mmd->totlvl))
+  {
+    return "Could not evaluate the original Multires surface";
+  }
+  BLI_SCOPED_DEFER([&]() { multires_reshape_context_free(&old_context); });
+
+  Mesh *work = BKE_mesh_copy_for_eval(*mesh);
+  BLI_SCOPED_DEFER([&]() { BKE_id_free(nullptr, work); });
+  const MDisps *base = static_cast<const MDisps *>(
+      CustomData_get_layer(&mesh->corner_data, CD_MDISPS));
+  if (!base) {
+    return "Conform requires valid base Multires displacement grids";
+  }
+  const int side = bke::subdiv::grid_size_from_level(mmd->totlvl);
+  const int area = side * side;
+  /*
+   * CONFORM_HYBRID_RESTORE_FINAL_V1
+   *
+   * "Conform from Final Result" must actually include visible weighted
+   * Sculpt Layers when choosing the new cage. This is the original
+   * layer-aware behavior.
+   *
+   * Without Layers / standard Conform keeps Blender's native cage core.
+   */
+  if (include_visible_layers && !mmd->sculpt_layers.is_empty()) {
+    Array<float3> sums(mesh->verts_num, float3(0.0f));
+    Array<int> counts(mesh->verts_num, 0);
+    const Span<int> corner_verts = mesh->corner_verts();
+
+    for (const int corner : corner_verts.index_range()) {
+      const GridCoord coord{corner, 1.0f, 1.0f};
+      const Frame frame = multires_conform_frame(old_context, coord);
+
+      if (base[corner].disps == nullptr || base[corner].totdisp != area) {
+        return "Conform requires materialized base Multires grids";
+      }
+
+      double displacement[3];
+      for (int axis = 0; axis < 3; axis++) {
+        displacement[axis] = base[corner].disps[area - 1][axis];
+      }
+
+      for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+        if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
+            layer.strength == 0.0f ||
+            layer.disps == nullptr)
+        {
+          continue;
+        }
+
+        const MDisps &layer_grid = layer.disps[corner];
+        if (layer_grid.disps == nullptr) {
+          continue;
+        }
+
+        for (int axis = 0; axis < 3; axis++) {
+          displacement[axis] +=
+              double(layer.strength) * layer_grid.disps[area - 1][axis];
+        }
+      }
+
+      float3 position;
+      for (int r = 0; r < 3; r++) {
+        double value = frame.origin[r];
+
+        for (int axis = 0; axis < 3; axis++) {
+          value += frame.axes[r][axis] * displacement[axis];
+        }
+
+        if (!std::isfinite(value) ||
+            std::abs(value) > std::numeric_limits<float>::max())
+        {
+          return "Non-finite cage coordinates; original data retained";
+        }
+
+        position[r] = float(value);
+      }
+
+      const int vert = corner_verts[corner];
+      sums[vert] += position;
+      counts[vert]++;
+    }
+
+    MutableSpan<float3> positions = work->vert_positions_for_write();
+
+    for (const int vert : positions.index_range()) {
+      if (counts[vert] == 0) {
+        continue;
+      }
+
+      positions[vert] = sums[vert] / float(counts[vert]);
+
+      for (int axis = 0; axis < 3; axis++) {
+        if (!std::isfinite(positions[vert][axis])) {
+          return "Non-finite conformed cage; original data retained";
+        }
+      }
+    }
+
+    work->tag_positions_changed();
+  }
+  else {
+    /*
+     * Base-only target: use Blender's native Conform Base cage fitting.
+     * evaluator_mmd deliberately contains no Sculpt Layers.
+     */
+    Object work_object = dna::shallow_copy(*object);
+    work_object.data = &work->id;
+
+    MultiresReshapeContext cage_context;
+    if (!multires_reshape_context_create_from_modifier(
+            &cage_context, &work_object, &evaluator_mmd, mmd->totlvl))
+    {
+      return "Could not initialize native Conform Base cage; original data retained";
+    }
+
+    BLI_SCOPED_DEFER([&]() {
+      multires_reshape_context_free(&cage_context);
+    });
+
+    multires_reshape_store_original_grids(&cage_context);
+    multires_reshape_assign_final_coords_from_mdisps(&cage_context);
+    multires_reshape_apply_base_refine_from_base(&cage_context);
+    multires_reshape_apply_base_update_mesh_coords(&cage_context);
+
+    work->tag_positions_changed();
+  }
+
+  Object work_object = dna::shallow_copy(*object);
+  work_object.data = &work->id;
+  MultiresReshapeContext new_context;
+  if (!multires_reshape_context_create_from_modifier(
+          &new_context, &work_object, &evaluator_mmd, mmd->totlvl))
+  {
+    return "Could not evaluate the conformed cage; original data retained";
+  }
+  BLI_SCOPED_DEFER([&]() { multires_reshape_context_free(&new_context); });
+
+  MultiresModifierData staged = dna::shallow_copy(*mmd);
+  staged.sculpt_layers = {};
+  bke::multires_layers::copy(staged, *mmd);
+  BLI_SCOPED_DEFER([&]() { bke::multires_layers::clear(staged); });
+  std::vector<std::pair<MultiresSculptLayer *, MultiresSculptLayer *>> layers;
+  auto *dst_layer = static_cast<MultiresSculptLayer *>(staged.sculpt_layers.first);
+  for (MultiresSculptLayer &src_layer : mmd->sculpt_layers) {
+    layers.emplace_back(&src_layer, dst_layer);
+    dst_layer = dst_layer->next;
+  }
+  MDisps *rebased = static_cast<MDisps *>(CustomData_get_layer_for_write(
+      &work->corner_data, CD_MDISPS, work->corners_num));
+  double conform_base_delta_sum = 0.0;
+  double conform_layer_delta_sum = 0.0;
+  double conform_base_delta_max = 0.0;
+  double conform_layer_delta_max = 0.0;
+  uint64_t conform_base_samples = 0;
+  uint64_t conform_layer_samples = 0;
+
+  for (int corner = 0; corner < mesh->corners_num; corner++) {
+    for (int y = 0; y < side; y++) {
+      for (int x = 0; x < side; x++) {
+        const int i = y * side + x;
+        const GridCoord coord{corner, float(x) / (side - 1), float(y) / (side - 1)};
+        const Frame before = multires_conform_frame(old_context, coord);
+        const Frame after = multires_conform_frame(new_context, coord);
+        Mapping mapping;
+        if (!make_mapping(before, after, mapping)) {
+          return "Degenerate tangent frame; original data retained";
+        }
+        if (!rebase(mapping, base[corner].disps[i], true, rebased[corner].disps[i]) ||
+            !preserves(before, after, base[corner].disps[i], rebased[corner].disps[i], true))
+        {
+          return "Base preservation check failed; original data retained";
+        }
+        for (int axis = 0; axis < 3; axis++) {
+          const double d = double(rebased[corner].disps[i][axis]) -
+                           double(base[corner].disps[i][axis]);
+          conform_base_delta_sum += d * d;
+          conform_base_delta_max = std::max(conform_base_delta_max, std::abs(d));
+          conform_base_samples++;
+        }
+
+        for (const auto &[src, dst] : layers) {
+          const MDisps &src_grid = src->disps[corner];
+          MDisps &dst_grid = dst->disps[corner];
+          /* Sparse Sculpt Layer grids use nullptr as an implicit all-zero delta.
+           * Rebasing a zero vector is still zero, so preserve sparsity instead of
+           * dereferencing or materializing the grid. */
+          if (src_grid.disps == nullptr) {
+            continue;
+          }
+          if (dst_grid.disps == nullptr ||
+              !rebase(mapping, src_grid.disps[i], false, dst_grid.disps[i]) ||
+              !preserves(before, after, src_grid.disps[i], dst_grid.disps[i], false))
+          {
+            return "Layer preservation check failed; original data retained";
+          }
+
+          for (int axis = 0; axis < 3; axis++) {
+            const double d = double(dst_grid.disps[i][axis]) -
+                             double(src_grid.disps[i][axis]);
+            conform_layer_delta_sum += d * d;
+            conform_layer_delta_max = std::max(conform_layer_delta_max, std::abs(d));
+            conform_layer_samples++;
+          }
+        }
+        float old_final[3], new_final[3];
+        for (int axis = 0; axis < 3; axis++) {
+          double old_value = base[corner].disps[i][axis];
+          double new_value = rebased[corner].disps[i][axis];
+          for (const auto &[src, dst] : layers) {
+            if (src->flag & MULTIRES_SCULPT_LAYER_VISIBLE) {
+              const MDisps &src_grid = src->disps[corner];
+              const MDisps &dst_grid = dst->disps[corner];
+              if (src_grid.disps != nullptr) {
+                if (dst_grid.disps == nullptr) {
+                  return "Layer preservation check failed; original data retained";
+                }
+                old_value += double(src->strength) * src_grid.disps[i][axis];
+                new_value += double(src->strength) * dst_grid.disps[i][axis];
+              }
+            }
+          }
+          if (!std::isfinite(old_value) || !std::isfinite(new_value) ||
+              std::abs(old_value) > std::numeric_limits<float>::max() ||
+              std::abs(new_value) > std::numeric_limits<float>::max())
+          {
+            return "Non-finite composed surface; original data retained";
+          }
+          old_final[axis] = float(old_value);
+          new_final[axis] = float(new_value);
+        }
+        if (!preserves(before, after, old_final, new_final, true)) {
+          return "Final surface preservation check failed; original data retained";
+        }
+      }
+    }
+  }
+  printf(
+      "[CONFORM_MEASURE] base_rms=%g base_max=%g base_n=%llu "
+      "layer_rms=%g layer_max=%g layer_n=%llu\n",
+      conform_base_samples ?
+          std::sqrt(conform_base_delta_sum / double(conform_base_samples)) : 0.0,
+      conform_base_delta_max,
+      (unsigned long long)conform_base_samples,
+      conform_layer_samples ?
+          std::sqrt(conform_layer_delta_sum / double(conform_layer_samples)) : 0.0,
+      conform_layer_delta_max,
+      (unsigned long long)conform_layer_samples);
+  fflush(stdout);
+
+  printf("[CONFORM_TRACE] VALIDATION PASSED\n");
+  fflush(stdout);
+
+  /* All conversion and validation completed on owned scratch storage. Preserve
+   * layer objects, names, visibility, strength and RNA animation paths. */
+  MDisps *destination = static_cast<MDisps *>(CustomData_get_layer_for_write(
+      &mesh->corner_data, CD_MDISPS, mesh->corners_num));
+  mesh->vert_positions_for_write().copy_from(work->vert_positions());
+
+
+  for (int corner = 0; corner < mesh->corners_num; corner++) {
+    std::swap(destination[corner], rebased[corner]);
+  }
+  for (const auto &[src, dst] : layers) {
+    std::swap(src->disps, dst->disps);
+  }
+  mmd->sculpt_layer_recording = 0;
+  mesh->tag_positions_changed();
+  printf("[CONFORM_TRACE] PUBLISH COMPLETE\n");
+  fflush(stdout);
+  return nullptr;
+}
 
 void multiresModifier_base_apply(Depsgraph *depsgraph,
                                  Object *object,
@@ -278,3 +916,8 @@ void multiresModifier_base_apply(Depsgraph *depsgraph,
 /** \} */
 
 }  // namespace blender
+
+
+
+
+

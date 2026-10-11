@@ -8,8 +8,11 @@
 
 #pragma once
 
+#include <mutex>
+
 #include <memory>
 
+#include "BLI_bit_vector.hh"
 #include "BLI_array.hh"
 #include "BLI_bit_group_vector.hh"
 #include "BLI_bit_span_ops.hh"
@@ -143,6 +146,20 @@ struct SubdivCCG : NonCopyable {
   int grid_area = -1;
   /** The number of grids (face corners) in the geometry (#faces.total_size()). */
   int grids_num = -1;
+  /* SCULPT_EXACT_DIRTY_GRIDS_V1
+   * Exact Multires sculpt position footprint. Translation-based grid writers record
+   * only grids that received a non-zero displacement. PBVH node expansion remains
+   * the conservative fallback for writers that do not participate in this journal. */
+  mutable std::mutex sculpt_dirty_position_grids_mutex;
+  Array<bool> sculpt_dirty_position_grid_flags;
+  Vector<int> sculpt_dirty_position_grids;
+
+
+  /* SCULPT_EXACT_DIRTY_SAMPLES_V1_1
+   * One bit per CCG position sample. The writer sets only samples that
+   * actually receive a non-zero translation. Protected by the existing
+   * sculpt_dirty_position_grids_mutex. */
+  BitVector<> sculpt_dirty_position_sample_flags;
   /**
    * Positions represent limit surface, with displacement applied. The vertices in each grid are
    * stored in contiguous chunks of size #grid_area in the same order.
@@ -196,6 +213,8 @@ struct SubdivCCG : NonCopyable {
     bool coords = false;
     /** Corresponds to MULTIRES_HIDDEN_MODIFIED. */
     bool hidden = false;
+    /** Corresponds to MULTIRES_MASK_MODIFIED. */
+    bool masks = false;
   } dirty;
 
   ~SubdivCCG();
@@ -232,6 +251,22 @@ CCGKey BKE_subdiv_ccg_key(const SubdivCCG &subdiv_ccg, int level);
 CCGKey BKE_subdiv_ccg_key_top_level(const SubdivCCG &subdiv_ccg);
 
 /** Recalculate all normals based on grid element coordinates. */
+/**
+ * Re-evaluate coordinates of an existing CCG using the current Subdiv
+ * displacement evaluator, without reallocating the CCG.
+ */
+bool BKE_subdiv_ccg_evaluate_existing(SubdivCCG &subdiv_ccg,
+                                      blender::bke::subdiv::Subdiv &subdiv,
+                                      SubdivCCGMaskEvaluator *mask_evaluator = nullptr);
+
+/** Re-evaluate only selected coarse faces of an existing CCG.
+ * The caller must have refreshed the Subdiv evaluator control mesh first. */
+bool BKE_subdiv_ccg_evaluate_faces_existing(
+    SubdivCCG &subdiv_ccg,
+    blender::bke::subdiv::Subdiv &subdiv,
+    const IndexMask &face_mask,
+    SubdivCCGMaskEvaluator *mask_evaluator = nullptr);
+
 void BKE_subdiv_ccg_recalc_normals(SubdivCCG &subdiv_ccg);
 
 /** Update normals of affected faces. */
@@ -242,6 +277,12 @@ void BKE_subdiv_ccg_average_grids(SubdivCCG &subdiv_ccg);
 
 /** Similar to above, but only updates given faces. */
 void BKE_subdiv_ccg_average_stitch_faces(SubdivCCG &subdiv_ccg, const IndexMask &face_mask);
+
+/** Stitch positions and update normals while reusing one coarse adjacency build. */
+void BKE_subdiv_ccg_stitch_update_normals_reuse(SubdivCCG &subdiv_ccg,
+                                                const IndexMask &face_mask,
+                                                double &r_stitch_ms,
+                                                double &r_normals_ms);
 
 /** Get geometry counters at the current subdivision level. */
 void BKE_subdiv_ccg_topology_counters(const SubdivCCG &subdiv_ccg,

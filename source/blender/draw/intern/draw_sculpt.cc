@@ -6,6 +6,7 @@
  * \ingroup draw
  */
 
+#include <cstdio>
 #include "draw_sculpt.hh"
 
 #include "DNA_mesh_types.h"
@@ -21,7 +22,9 @@
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
+#include "BKE_subdiv_ccg.hh"
 
+#include "BLI_time.h"
 #include "BLI_math_matrix.hh"
 
 #include "bmesh_class.hh"
@@ -94,7 +97,17 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
     update_only_visible = true;
   }
 
-  bke::pbvh::update_normals_from_eval(*const_cast<Object *>(ob), *pbvh);
+  /* Sculpt Mesh V3 Draw memory probe.
+   * Diagnostic only: identify large-mesh viewport stalls after the brush calculation. */
+  const Mesh *sculpt_mesh_v3_draw_mesh = BKE_object_get_original_mesh(ob);
+  const bool sculpt_mesh_v3_draw_enabled =
+      pbvh->type() == bke::pbvh::Type::Mesh && sculpt_mesh_v3_draw_mesh &&
+      sculpt_mesh_v3_draw_mesh->verts_num >= 1'000'000;
+  const double sculpt_mesh_v3_draw_total_start = BLI_time_now_seconds();
+  const double sculpt_mesh_v3_draw_normals_start = sculpt_mesh_v3_draw_total_start;  bke::pbvh::update_normals_from_eval(*const_cast<Object *>(ob), *pbvh);
+  const double sculpt_mesh_v3_draw_normals_ms =
+      (BLI_time_now_seconds() - sculpt_mesh_v3_draw_normals_start) * 1000.0;
+  const double sculpt_mesh_v3_draw_search_start = BLI_time_now_seconds();
 
   pbvh::DrawCache &draw_data = pbvh::ensure_draw_data(pbvh->draw_data);
 
@@ -104,10 +117,39 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
         return !BKE_pbvh_node_fully_hidden_get(node) &&
                bke::pbvh::node_frustum_contain_aabb(node, draw_frustum_planes);
       });
+  const double sculpt_mesh_v3_draw_search_ms =
+      (BLI_time_now_seconds() - sculpt_mesh_v3_draw_search_start) * 1000.0;
 
-  const IndexMask nodes_to_update = update_only_visible ? visible_nodes :
-                                                          bke::pbvh::all_leaf_nodes(*pbvh, memory);
+  /* V4.4c heavy Multires: avoid forcing VBO creation/upload for every PBVH leaf on
+   * the first sculpt stroke. Large SubdivCCG surfaces keep draw preparation local
+   * to the current frustum, matching Sculpt "Delay Viewport Updates" behavior.
+   * Smaller meshes keep Blender's normal eager update policy. */
+  constexpr int64_t heavy_multires_sample_threshold = 32'000'000;
+  const SculptSession *sculpt_session = ob->runtime->sculpt_session;
+  const bool heavy_multires_visible_only =
+      pbvh->type() == bke::pbvh::Type::Grids && sculpt_session &&
+      sculpt_session->subdiv_ccg &&
+      sculpt_session->subdiv_ccg->positions.size() >= heavy_multires_sample_threshold;
 
+  /* Sculpt Mesh V1: heavy base-mesh visible-only draw cache.
+   *
+   * For very large regular Mesh PBVH sculpting, avoid forcing VBO/batch
+   * preparation for every PBVH leaf on each draw pass. Off-frustum dirty
+   * nodes remain dirty in the DrawCache and are prepared when they become
+   * visible later. This mirrors the proven V4.4c Multires strategy without
+   * changing brush math, geometry, undo, normals or PBVH edit locality. */
+  constexpr int64_t heavy_mesh_vertex_threshold = 15'000'000;
+  const Mesh *source_mesh_for_threshold = BKE_object_get_original_mesh(ob);
+  const bool heavy_mesh_visible_only =
+      pbvh->type() == bke::pbvh::Type::Mesh && source_mesh_for_threshold &&
+      source_mesh_for_threshold->verts_num >= heavy_mesh_vertex_threshold;
+
+  const IndexMask nodes_to_update =
+      (update_only_visible || heavy_multires_visible_only || heavy_mesh_visible_only) ?
+          visible_nodes :
+          bke::pbvh::all_leaf_nodes(*pbvh, memory);
+
+  const double sculpt_mesh_v3_draw_batches_start = BLI_time_now_seconds();
   Span<gpu::Batch *> batches;
   if (use_wire) {
     batches = draw_data.ensure_lines_batches(*ob, {{}, fast_mode}, nodes_to_update);
@@ -116,6 +158,22 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
     batches = draw_data.ensure_tris_batches(*ob, {attrs, fast_mode}, nodes_to_update);
   }
 
+  const double sculpt_mesh_v3_draw_batches_ms =
+      (BLI_time_now_seconds() - sculpt_mesh_v3_draw_batches_start) * 1000.0;
+  const double sculpt_mesh_v3_draw_total_ms =
+      (BLI_time_now_seconds() - sculpt_mesh_v3_draw_total_start) * 1000.0;
+
+  if (sculpt_mesh_v3_draw_enabled && sculpt_mesh_v3_draw_total_ms >= 0.50) {
+    std::fprintf(stderr,
+                 "[SculptMeshV3Draw] visible=%lld update=%lld total=%.3f ms "
+                 "normals=%.3f search=%.3f batches=%.3f\n",
+                 static_cast<long long>(visible_nodes.size()),
+                 static_cast<long long>(nodes_to_update.size()),
+                 sculpt_mesh_v3_draw_total_ms,
+                 sculpt_mesh_v3_draw_normals_ms,
+                 sculpt_mesh_v3_draw_search_ms,
+                 sculpt_mesh_v3_draw_batches_ms);
+  }
   const Span<int> material_indices = draw_data.ensure_material_indices(*ob);
 
   const int max_material = std::max(0, BKE_object_material_count_eval(ob) - 1);
@@ -171,6 +229,28 @@ Vector<SculptBatch> sculpt_batches_per_material_get(const Object *ob,
   VectorSet<std::string> draw_attrs;
   DRW_MeshCDMask cd_needed;
   DRW_mesh_get_attributes(*ob, mesh, materials, &draw_attrs, &cd_needed);
+
+  const bke::pbvh::Tree *tree = ob->runtime->sculpt_session ?
+                                  bke::object::pbvh_get(*ob) :
+                                  nullptr;
+  if (tree && tree->type() == bke::pbvh::Type::Grids) {
+    const Mesh *original_mesh = BKE_object_get_original_mesh(ob);
+    if (original_mesh && original_mesh != &mesh) {
+      /* A first paint stroke can add the color marker to the original mesh
+       * while its evaluated copy is still stale. Only supplement the active
+       * Polypaint request, and only when a material actually requests it. */
+      const StringRef active_color = original_mesh->active_color_attribute;
+      if (!active_color.is_empty()) {
+        VectorSet<std::string> original_attrs;
+        DRW_MeshCDMask original_cd_needed;
+        DRW_mesh_get_attributes(
+            *ob, *original_mesh, materials, &original_attrs, &original_cd_needed);
+        if (original_attrs.contains(std::string(active_color))) {
+          draw_attrs.add(std::string(active_color));
+        }
+      }
+    }
+  }
 
   Vector<pbvh::AttributeRequest, 16> attrs;
 

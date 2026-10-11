@@ -245,6 +245,9 @@ eUndoPushReturn BKE_undosys_step_push_with_type(UndoStack *ustack,
                                                 const UndoType *ut);
 eUndoPushReturn BKE_undosys_step_push(UndoStack *ustack, bContext *C, const char *name);
 
+/* SCULPT_LAYER_UNDO_CONTROLS_V36: preserve redo while pairing the last Sculpt state. */
+bool BKE_undosys_sculpt_step_pair_memfile(UndoStack *ustack, bContext *C);
+
 UndoStep *BKE_undosys_step_find_by_name_with_type(UndoStack *ustack,
                                                   const char *name,
                                                   const UndoType *ut);

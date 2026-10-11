@@ -5,6 +5,7 @@
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
 
 #include "DNA_brush_types.h"
+#include "smooth_preserve_shape.hh"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
@@ -49,6 +50,7 @@ static Vector<float> iteration_strengths(const float strength)
 
 struct LocalData {
   Vector<float3> positions;
+  Vector<float3> normals;
   Vector<float> factors;
   Vector<float> distances;
   Vector<int> neighbor_offsets;
@@ -58,6 +60,8 @@ struct LocalData {
 };
 
 BLI_NOINLINE static void apply_positions_faces(const Sculpt &sd,
+                                               const Brush &brush,
+                                               const Span<float3> vert_normals,
                                                const bke::pbvh::MeshNode &node,
                                                Object &object,
                                                LocalData &tls,
@@ -73,6 +77,12 @@ BLI_NOINLINE static void apply_positions_faces(const Sculpt &sd,
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
   translations_from_new_positions(new_positions, verts, position_data.eval, translations);
+  /* SCULPT_SMOOTH_PRESERVE_SHAPE_V1 */
+  if (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE) {
+    for (const int i : verts.index_range()) {
+      smooth_preserve_shape_translation(translations[i], vert_normals[verts[i]]);
+    }
+  }
   scale_translations(translations, factors);
 
   clip_and_lock_translations(sd, ss, position_data.eval, verts, translations);
@@ -151,6 +161,8 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
         [&](const int i, const int pos) {
           LocalData &tls = all_tls.local();
           apply_positions_faces(sd,
+                                brush,
+                                vert_normals,
                                 nodes[i],
                                 object,
                                 tls,
@@ -198,6 +210,13 @@ static void calc_grids(const Depsgraph &depsgraph,
   tls.translations.resize(positions.size());
   const MutableSpan<float3> translations = tls.translations;
   translations_from_new_positions(new_positions, positions, translations);
+  if (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE) {
+    tls.normals.resize(positions.size());
+    gather_grids_normals(subdiv_ccg, grids, tls.normals.as_mutable_span());
+    for (const int i : translations.index_range()) {
+      smooth_preserve_shape_translation(translations[i], tls.normals[i]);
+    }
+  }
   scale_translations(translations, tls.factors);
 
   clip_and_lock_translations(sd, ss, positions, translations);
@@ -228,6 +247,13 @@ static void calc_bmesh(const Depsgraph &depsgraph,
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
   translations_from_new_positions(new_positions, positions, translations);
+  if (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE) {
+    tls.normals.resize(positions.size());
+    gather_bmesh_normals(verts, tls.normals.as_mutable_span());
+    for (const int i : translations.index_range()) {
+      smooth_preserve_shape_translation(translations[i], tls.normals[i]);
+    }
+  }
   scale_translations(translations, tls.factors);
 
   clip_and_lock_translations(sd, ss, positions, translations);

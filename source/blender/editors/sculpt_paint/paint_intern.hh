@@ -23,6 +23,8 @@
 
 #include <optional>
 
+#include "adaptive_stroke_sampler.hh"
+
 namespace blender {
 
 enum class PaintMode : int8_t;
@@ -165,6 +167,13 @@ struct PaintStroke : NonCopyable, NonMovable {
   float cached_size_pressure_ = 0.0f;
   /* last pressure will store last pressure value for use in interpolation for space strokes */
   float last_pressure_ = 0.0f;
+  /* SCULPT_ADAPTIVE_STROKE_V1: per-stroke state, no mesh-sized allocations. */
+  AdaptiveStrokeSampler adaptive_sampler_;
+  double adaptive_spacing_ = 0.0;
+  double adaptive_reference_spacing_ = 0.0;
+  bool adaptive_emitting_ = false;
+  bool adaptive_finishing_ = false;
+  AdaptiveStrokeFilter adaptive_filter_;
   BrushStrokeMode stroke_mode_ = BrushStrokeMode::Normal;
   BrushSwitchMode brush_switch_mode_ = BrushSwitchMode::None;
 
@@ -311,6 +320,9 @@ float2 paint_stroke_jitter_pos(Paint *paint,
  * Returns zero if the stroke dots should not be spaced, non-zero otherwise.
  */
 bool paint_space_stroke_enabled(const Brush &br, PaintMode mode);
+/* V1 supports depositing brushes with Space stroke and screen-space distance. */
+bool sculpt_adaptive_stroke_supported(const Brush &brush);
+bool sculpt_uniform_accumulation_enabled(const Brush &brush);
 /**
  * Return true if the brush size can change during paint (normally used for pressure).
  */

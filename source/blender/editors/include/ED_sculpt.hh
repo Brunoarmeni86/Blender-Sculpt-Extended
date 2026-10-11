@@ -34,8 +34,8 @@ void object_sculpt_mode_enter(Main &bmain,
                               bool force_dyntopo,
                               ReportList *reports);
 void object_sculpt_mode_enter(bContext *C, Depsgraph &depsgraph, ReportList *reports);
-void object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Object &ob);
-void object_sculpt_mode_exit(bContext *C, Depsgraph &depsgraph);
+bool object_sculpt_mode_exit(Main &bmain, Depsgraph &depsgraph, Scene &scene, Object &ob);
+bool object_sculpt_mode_exit(bContext *C, Depsgraph &depsgraph);
 
 /* `sculpt.cc` */
 
@@ -48,6 +48,9 @@ void object_sculpt_mode_exit(bContext *C, Depsgraph &depsgraph);
  * \return false if the shape key cannot be modified.
  */
 bool shape_key_check(const Object &ob, ReportList *reports);
+
+/** Shared preflight before modifying a composed sculpt layer surface. */
+bool sculpt_layers_editable(bContext *C, ReportList *reports);
 
 void operatortypes_sculpt();
 

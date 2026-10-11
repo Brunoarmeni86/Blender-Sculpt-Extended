@@ -11,6 +11,7 @@
 #include "BLI_array.hh"
 #include "BLI_compiler_compat.h"
 #include "BLI_math_vector_types.hh"
+#include "BLI_math_matrix_types.hh"
 
 struct OpenSubdiv_Converter;
 struct OpenSubdiv_Evaluator;
@@ -293,7 +294,9 @@ void free(Subdiv *subdiv);
 
 void displacement_attach_from_multires(Subdiv *subdiv,
                                        const Mesh *mesh,
-                                       const MultiresModifierData *mmd);
+                                       const MultiresModifierData *mmd,
+                                       const float4x4 &texture_matrix = float4x4::identity());
+const float4x4 *displacement_multires_texture_matrix(const Subdiv &subdiv);
 
 void displacement_detach(Subdiv *subdiv);
 

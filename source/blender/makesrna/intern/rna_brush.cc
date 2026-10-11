@@ -2755,6 +2755,22 @@ static void rna_def_brush(BlenderRNA *brna)
       prop, "Deformation Target", "How the deformation of the brush will affect the object");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  /* SCULPT_ELASTIC_MODES_UI_V1 */
+  static const EnumPropertyItem sculpt_elastic_engine_items[] = {
+      {0, "STANDARD", 0, "Standard", "Use the original Elastic Grab algorithm"},
+      {BRUSH_SCULPT_ELASTIC_EXACT, "EXACT", 0, "Exact",
+       "Optimized Elastic Grab with a bounded cache during each stroke"},
+      {BRUSH_SCULPT_ELASTIC_ACCELERATED, "ACCELERATED", 0, "Accelerated",
+       "Approximate Elastic Grab on the Multires level-1 lattice; use Exact on other geometry"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_elastic_engine", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_bitflag_sdna(prop, nullptr, "flag2");
+  RNA_def_property_enum_items(prop, sculpt_elastic_engine_items);
+  RNA_def_property_ui_text(prop, "Elastic Engine", "Algorithm for Grab, Bi-scale and Tri-scale");
+  RNA_def_property_translation_context(prop, BLT_I18NCONTEXT_ID_BRUSH);
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   prop = RNA_def_property(srna, "elastic_deform_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, brush_elastic_deform_type_items);
   RNA_def_property_ui_text(prop, "Deformation", "Deformation type that is used in the brush");
@@ -2810,6 +2826,14 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_enum_items(prop, brush_boundary_falloff_type_items);
   RNA_def_property_ui_text(
       prop, "Boundary Falloff", "How the brush falloff is applied across the boundary");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  /* SCULPT_SMOOTH_PRESERVE_SHAPE_V1 */
+  prop = RNA_def_property(srna, "use_smooth_shape_preserve", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE);
+  RNA_def_property_ui_text(prop, "Preserve Shape",
+                          "Reduce Laplacian motion along surface normals by 80 percent; "
+                          "retain more relief and reduce shrinkage without guaranteeing volume preservation");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "smooth_deform_type", PROP_ENUM, PROP_NONE);
@@ -3711,6 +3735,52 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_icon(prop, ICON_STYLUS_PRESSURE, 0);
   RNA_def_property_ui_text(
       prop, "Jitter Pressure", "Enable tablet pressure sensitivity for jitter");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  /* SCULPT_ADAPTIVE_STROKE_V1 */
+  static const EnumPropertyItem sculpt_stroke_engine_items[] = {
+      {0, "STANDARD", 0, "Standard", "Use the original stroke engine"},
+      {BRUSH_SCULPT_ADAPTIVE_STROKE, "ADAPTIVE", 0, "Adaptive",
+       "Distance sampling for Draw, Draw Sharp, Clay and Clay Strips; Space and screen distance"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_stroke_engine", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_bitflag_sdna(prop, nullptr, "flag2");
+  RNA_def_property_enum_items(prop, sculpt_stroke_engine_items);
+  RNA_def_property_ui_text(prop, "Stroke Engine", "Sculpt stroke distribution mode");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_sculpt_pressure_interpolation", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "flag2", BRUSH_SCULPT_NO_PRESSURE_INTERPOLATION);
+  RNA_def_property_ui_text(prop, "Pressure Interpolation", "Interpolate pressure between input events at each dab");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_sculpt_uniform_accumulation", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_negative_sdna(prop, nullptr, "flag2", BRUSH_SCULPT_NO_UNIFORM_ACCUMULATION);
+  RNA_def_property_ui_text(prop, "Uniform Accumulation", "Weight moving dabs by distance, referenced to 10 percent spacing");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  /* SCULPT_ADAPTIVE_STROKE_V2 */
+  prop = RNA_def_property(srna, "use_sculpt_adaptive_spacing", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_SCULPT_ADAPTIVE_SPACING);
+  RNA_def_property_ui_text(prop, "Adaptive Spacing", "Distribute dabs using the pressure-controlled brush radius");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  prop = RNA_def_property(srna, "use_sculpt_adaptive_stabilization", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag2", BRUSH_SCULPT_ADAPTIVE_STABILIZATION);
+  RNA_def_property_ui_text(prop, "Adaptive Stabilization", "Filter small slow movements while following fast strokes more directly");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  static const EnumPropertyItem adaptive_stabilization_items[] = {
+      {BRUSH_SCULPT_STABILIZATION_LIGHT, "LIGHT", 0, "Light", "Less filtering and delay"},
+      {0, "MEDIUM", 0, "Medium", "Balanced filtering and response"},
+      {BRUSH_SCULPT_STABILIZATION_STRONG, "STRONG", 0, "Strong", "More filtering with more delay"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_adaptive_stabilization_strength", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_bitflag_sdna(prop, nullptr, "flag2");
+  RNA_def_property_enum_items(prop, adaptive_stabilization_items);
+  RNA_def_property_ui_text(prop, "Stabilization", "Amount of adaptive stroke filtering");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "use_pressure_spacing", PROP_BOOLEAN, PROP_NONE);

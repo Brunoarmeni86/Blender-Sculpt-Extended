@@ -567,6 +567,28 @@ class StrokePanel(BrushPanel):
         col = layout.column()
 
         col.prop(brush, "stroke_method")
+        # SCULPT_ADAPTIVE_STROKE_V1
+        if mode == 'SCULPT':
+            col.prop(brush, "sculpt_stroke_engine")
+            if brush.sculpt_stroke_engine == 'ADAPTIVE':
+                supported = (brush.sculpt_brush_type in {'DRAW', 'DRAW_SHARP', 'CLAY', 'CLAY_STRIPS'}
+                             and brush.stroke_method == 'SPACE' and brush.use_scene_spacing == 'VIEW')
+                adaptive = col.column()
+                adaptive.enabled = supported
+                adaptive.prop(brush, "use_sculpt_pressure_interpolation")
+                adaptive.prop(brush, "use_sculpt_uniform_accumulation")
+                adaptive.prop(brush, "use_sculpt_adaptive_spacing")
+                stabilization = adaptive.column()
+                stabilization.enabled = not brush.use_smooth_stroke
+                stabilization.prop(brush, "use_sculpt_adaptive_stabilization")
+                if brush.use_sculpt_adaptive_stabilization:
+                    stabilization.prop(brush, "sculpt_adaptive_stabilization_strength")
+                if brush.use_smooth_stroke:
+                    adaptive.label(text="Disable Stabilize Stroke for adaptive filtering", icon='INFO')
+                if not supported:
+                    col.label(text="Requires Draw/Clay, Space and View distance", icon='INFO')
+                elif not brush.use_sculpt_adaptive_spacing:
+                    col.label(text="Fixed spacing during the stroke")
         col.separator()
 
         if brush.stroke_method == 'ANCHORED':
@@ -578,7 +600,10 @@ class StrokePanel(BrushPanel):
         if brush.stroke_method == 'SPACE':
             row = col.row(align=True)
             row.prop(brush, "spacing", text="Spacing")
-            row.prop(brush, "use_pressure_spacing", toggle=True, text="")
+            pressure_spacing = row.row(align=True)
+            pressure_spacing.enabled = (mode != 'SCULPT' or
+                                        brush.sculpt_stroke_engine != 'ADAPTIVE' or not supported)
+            pressure_spacing.prop(brush, "use_pressure_spacing", toggle=True, text="")
 
         if brush.stroke_method in {'LINE', 'CURVE'}:
             row = col.row(align=True)
@@ -936,6 +961,9 @@ def brush_settings(layout, context, brush, popover=False):
         elif sculpt_brush_type == 'ELASTIC_DEFORM':
             layout.separator()
             layout.prop(brush, "elastic_deform_type")
+            # SCULPT_ELASTIC_MODES_UI_V1
+            if brush.elastic_deform_type in {'GRAB', 'GRAB_BISCALE', 'GRAB_TRISCALE'}:
+                layout.prop(brush, "sculpt_elastic_engine")
             layout.prop(brush, "elastic_deform_volume_preservation", slider=True)
             layout.separator()
 
@@ -1058,6 +1086,9 @@ def brush_settings(layout, context, brush, popover=False):
         elif sculpt_brush_type == 'SMOOTH':
             col = layout.column()
             col.prop(brush, "smooth_deform_type")
+            # SCULPT_SMOOTH_PRESERVE_SHAPE_V1
+            if brush.smooth_deform_type == 'LAPLACIAN':
+                col.prop(brush, "use_smooth_shape_preserve")
             if brush.smooth_deform_type == 'SURFACE':
                 col.prop(brush, "surface_smooth_shape_preservation")
                 col.prop(brush, "surface_smooth_current_vertex")

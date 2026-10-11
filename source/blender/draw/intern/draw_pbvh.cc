@@ -9,6 +9,11 @@
  * Embeds GPU meshes inside of bke::pbvh::Tree nodes, used by mesh sculpt mode.
  */
 
+#include <memory>
+#include "BLI_vector_set.hh"
+#include "BLI_time.h"
+#include <cstdlib>
+#include <cstdio>
 #include "BLI_map.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector_types.hh"
@@ -16,14 +21,18 @@
 #include "BLI_vector.hh"
 
 #include "DNA_object_types.h"
+#include "DNA_modifier_types.h"
 
 #include "BKE_attribute.hh"
 #include "BKE_attribute_legacy_convert.hh"
 #include "BKE_attribute_math.hh"
 #include "BKE_customdata.hh"
 #include "BKE_mesh.hh"
+#include "BKE_modifier.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_subdiv.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph_query.hh"
@@ -33,6 +42,9 @@
 #include "DRW_engine.hh"
 #include "DRW_pbvh.hh"
 #include "DRW_render.hh"
+
+#include <cmath>
+#include <string>
 
 #include "attribute_convert.hh"
 #include "bmesh.hh"
@@ -91,6 +103,13 @@ class DrawCacheImpl : public DrawCache {
   struct AttributeData {
     /** A vertex buffer for each BVH node. If null, the draw data for the node must be created. */
     Vector<gpu::VertBufPtr> vbos;
+    /* Grid attributes can change from the unsupported-attribute fallback to
+     * Polypaint. Values alone are not enough to describe the cached VBO: its
+     * format and shader aliases depend on the active/render color roles too. */
+    bool grids_format_initialized = false;
+    bool grids_is_polypaint = false;
+    std::string grids_active_color;
+    std::string grids_default_color;
     /**
      * A separate "dirty" bit per node. We track the dirty value separately from deleting the VBO
      * for a node in order to avoid recreating batches with new VBOs. It's also a necessary
@@ -105,6 +124,32 @@ class DrawCacheImpl : public DrawCache {
      */
     void tag_dirty(const IndexMask &node_mask);
   };
+
+  /* Sculpt Mesh V4 Compact Draw: independent caches, never mixed with legacy VBO layouts. */
+  struct CompactMeshNodeData {
+    gpu::VertBufPtr positions;
+    gpu::VertBufPtr normals;
+    gpu::IndexBufPtr triangles;
+    gpu::Batch *batch = nullptr;
+    const int *verts_identity = nullptr;
+    const int *faces_identity = nullptr;
+    int verts_num = 0;
+    int faces_num = 0;
+    int corners_num = 0;
+    bool supported = false;
+    bool layout_dirty = false;
+    bool positions_dirty = true;
+    bool normals_dirty = true;
+    bool indices_dirty = true;
+    ~CompactMeshNodeData()
+    {
+      /* Batches borrow buffers. Destroy the batch before member buffers are released. */
+      GPU_BATCH_DISCARD_SAFE(batch);
+    }
+  };
+  Vector<std::unique_ptr<CompactMeshNodeData>> compact_mesh_nodes_;
+  /* Borrowed batch pointers; the compact entries and legacy tris_batches_ own the batches. */
+  Vector<gpu::Batch *> compact_mesh_draw_batches_;
 
   /** Used to determine whether to use indexed VBO layouts for multires grids. */
   BitVector<> use_flat_layout_;
@@ -167,11 +212,27 @@ class DrawCacheImpl : public DrawCache {
   Span<int> ensure_material_indices(const Object &object) override;
 
  private:
+  void tag_compact_mesh_positions(const IndexMask &node_mask);
+  void tag_compact_mesh_indices(const IndexMask &node_mask);
+  void tag_compact_mesh_layout(const IndexMask &node_mask);
+
+  Span<gpu::Batch *> ensure_compact_mesh_tris_batches(const Object &object,
+                                                     const ViewportRequest &request,
+                                                     const IndexMask &nodes_to_update);
+  Span<gpu::Batch *> ensure_tris_batches_legacy(const Object &object,
+                                               const ViewportRequest &request,
+                                               const IndexMask &nodes_to_update);
+
   /**
    * Free all GPU data for nodes with a changed visible triangle count. The next time the data is
    * requested it will be rebuilt.
    */
   void free_nodes_with_changed_topology(const bke::pbvh::Tree &pbvh);
+
+  void ensure_grids_attribute_format(const OrigMeshData &orig_mesh_data,
+                                     const AttributeRequest &attr,
+                                     bool use_polypaint,
+                                     AttributeData &data);
 
   BitSpan ensure_use_flat_layout(const Object &object, const OrigMeshData &orig_mesh_data);
 
@@ -199,6 +260,7 @@ void DrawCacheImpl::AttributeData::tag_dirty(const IndexMask &node_mask)
 
 void DrawCacheImpl::tag_positions_changed(const IndexMask &node_mask)
 {
+  this->tag_compact_mesh_positions(node_mask);
   if (DrawCacheImpl::AttributeData *data = attribute_vbos_.lookup_ptr(CustomRequest::Position)) {
     data->tag_dirty(node_mask);
   }
@@ -209,12 +271,14 @@ void DrawCacheImpl::tag_positions_changed(const IndexMask &node_mask)
 
 void DrawCacheImpl::tag_visibility_changed(const IndexMask &node_mask)
 {
+  this->tag_compact_mesh_indices(node_mask);
   dirty_topology_.resize(std::max(dirty_topology_.size(), node_mask.min_array_size()), false);
   node_mask.set_bits(dirty_topology_);
 }
 
 void DrawCacheImpl::tag_topology_changed(const IndexMask &node_mask)
 {
+  this->tag_compact_mesh_layout(node_mask);
   /** Currently the only times where topology changes are for BMesh dynamic topology, where tagging
    * a visibility update deletes all the GPU data anyway. */
   this->tag_visibility_changed(node_mask);
@@ -236,6 +300,14 @@ void DrawCacheImpl::tag_masks_changed(const IndexMask &node_mask)
 
 void DrawCacheImpl::tag_attribute_changed(const IndexMask &node_mask, StringRef attribute_name)
 {
+  this->tag_compact_mesh_layout(node_mask);
+  if (!compact_mesh_nodes_.is_empty() && attribute_name == "sharp_face") {
+    /* Flat nodes return to legacy normal buffers; invalidate them on the transition. */
+    if (AttributeData *data = attribute_vbos_.lookup_ptr(CustomRequest::Normal)) {
+      data->tag_dirty(node_mask);
+    }
+  }
+
   for (const auto &[data_request, data] : attribute_vbos_.items()) {
     if (const GenericRequest *request = std::get_if<GenericRequest>(&data_request)) {
       if (*request == attribute_name) {
@@ -275,6 +347,36 @@ BLI_NOINLINE static void free_batches(const MutableSpan<gpu::Batch *> batches,
   IndexMaskMemory memory;
   const IndexMask mask = IndexMask::from_intersection(node_mask, batches.index_range(), memory);
   mask.foreach_index([&](const int i) { GPU_BATCH_DISCARD_SAFE(batches[i]); });
+}
+
+void DrawCacheImpl::ensure_grids_attribute_format(const OrigMeshData &orig_mesh_data,
+                                                 const AttributeRequest &attr,
+                                                 const bool use_polypaint,
+                                                 AttributeData &data)
+{
+  if (data.grids_format_initialized && data.grids_is_polypaint == use_polypaint &&
+      StringRef(data.grids_active_color) == orig_mesh_data.active_color &&
+      StringRef(data.grids_default_color) == orig_mesh_data.default_color)
+  {
+    return;
+  }
+
+  if (!data.vbos.is_empty()) {
+    /* Batches borrow these VBOs. Discard every dependent batch before releasing
+     * a VBO, including nodes outside the current stroke/visible-node mask.
+     * Index buffers and unrelated attribute buffers can remain cached. */
+    for (auto &&[request, batches] : tris_batches_.items()) {
+      if (request.attributes.contains(attr)) {
+        free_batches(batches, batches.index_range());
+      }
+    }
+    free_vbos(data.vbos, data.vbos.index_range());
+  }
+
+  data.grids_format_initialized = true;
+  data.grids_is_polypaint = use_polypaint;
+  data.grids_active_color = std::string(orig_mesh_data.active_color);
+  data.grids_default_color = std::string(orig_mesh_data.default_color);
 }
 
 static const GPUVertFormat &position_format()
@@ -604,7 +706,9 @@ static void update_normals_mesh(const Object &object,
   const Span<float3> vert_normals = bke::pbvh::vert_normals_eval_from_eval(object);
   const Span<float3> face_normals = bke::pbvh::face_normals_eval_from_eval(object);
   const bke::AttributeAccessor attributes = mesh.attributes();
-  const VArraySpan sharp_faces = *attributes.lookup<bool>("sharp_face", bke::AttrDomain::Face);
+  /* Sculpt Mesh V3 Local Normals Fix: read only faces in the actual update mask.
+   * A VArraySpan may materialize the entire face attribute, including untouched nodes. */
+  const VArray<bool> sharp_faces = *attributes.lookup<bool>("sharp_face", bke::AttrDomain::Face);
   ensure_vbos_allocated_mesh(object, normal_format(), node_mask, vbos);
   node_mask.foreach_index(
       [&](const int i) {
@@ -916,6 +1020,7 @@ BLI_NOINLINE static void fill_face_sets_grids(const Object &object,
   const int color_seed = orig_mesh_data.face_set_seed;
   const Span<int> grid_to_face_map = subdiv_ccg.grid_to_face_map;
   const bke::AttributeAccessor attributes = orig_mesh_data.attributes;
+  const MultiresModifierData *mmd = object.runtime->sculpt_session->multires_modifier;
   ensure_vbos_allocated_grids(object, face_set_format(), use_flat_layout, node_mask, vbos);
   if (const VArray<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
                                                             bke::AttrDomain::Face))
@@ -924,18 +1029,40 @@ BLI_NOINLINE static void fill_face_sets_grids(const Object &object,
     node_mask.foreach_index(
         [&](const int i) {
           const Span<int> grids = nodes[i].grids();
-          const int verts_per_grid = use_flat_layout[i] ? square_i(key.grid_size - 1) * 4 :
-                                                          square_i(key.grid_size);
           uchar4 *data = vbos[i]->data<uchar4>().data();
-          for (const int i : grids.index_range()) {
-            uchar4 color{UCHAR_MAX};
-            const int fset = face_sets[grid_to_face_map[grids[i]]];
-            if (fset != color_default) {
-              BKE_paint_face_set_overlay_color_get(fset, color_seed, color);
-            }
+          for (const int grid : grids) {
+            const int fallback = face_sets[grid_to_face_map[grid]];
+            auto color_for_xy = [&](const int x, const int y) {
+              const float u = key.grid_size > 1 ? float(x) / float(key.grid_size - 1) : 0.0f;
+              const float v = key.grid_size > 1 ? float(y) / float(key.grid_size - 1) : 0.0f;
+              const int fset = (mmd && mmd->sculpt_face_set_grids) ?
+                                   bke::multires_layers::faceset_sample(
+                                       *mmd, grid, u, v, fallback) :
+                                   fallback;
+              uchar4 color{UCHAR_MAX};
+              if (fset != color_default) {
+                BKE_paint_face_set_overlay_color_get(fset, color_seed, color);
+              }
+              return color;
+            };
 
-            std::fill_n(data, verts_per_grid, color);
-            data += verts_per_grid;
+            if (use_flat_layout[i]) {
+              for (int y = 0; y < key.grid_size - 1; y++) {
+                for (int x = 0; x < key.grid_size - 1; x++) {
+                  *data++ = color_for_xy(x, y);
+                  *data++ = color_for_xy(x + 1, y);
+                  *data++ = color_for_xy(x + 1, y + 1);
+                  *data++ = color_for_xy(x, y + 1);
+                }
+              }
+            }
+            else {
+              for (int y = 0; y < key.grid_size; y++) {
+                for (int x = 0; x < key.grid_size; x++) {
+                  *data++ = color_for_xy(x, y);
+                }
+              }
+            }
           }
         },
         exec_mode::grain_size(1));
@@ -944,6 +1071,116 @@ BLI_NOINLINE static void fill_face_sets_grids(const Object &object,
     node_mask.foreach_index([&](const int i) { vbos[i]->data<uchar4>().fill(uchar4{UCHAR_MAX}); },
                             exec_mode::grain_size(1));
   }
+}
+
+static const MultiresModifierData *polypaint_source_modifier(const Object &object)
+{
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const MultiresModifierData *mmd = ss.multires_modifier;
+  if (!mmd) {
+    return nullptr;
+  }
+
+  /* The PBVH draw object is evaluated, while Multires Polypaint is edited and stored on the
+   * original modifier. The evaluated Multires copy intentionally doesn't own the persistent color
+   * grids, so resolve the corresponding original modifier before reading them for drawing. */
+  if (!mmd->sculpt_color_grids) {
+    ModifierData *orig_md = BKE_modifier_get_original(
+        &object, const_cast<ModifierData *>(&mmd->modifier));
+    if (orig_md && orig_md->type == eModifierType_Multires) {
+      mmd = reinterpret_cast<MultiresModifierData *>(orig_md);
+    }
+  }
+  return mmd;
+}
+
+static float4 sample_polypaint_grid_color(const MultiresColorGrid *grid,
+                                           const int grid_size,
+                                           const int index)
+{
+  if (!grid || !grid->colors || grid->level < 1 || grid->level > 13 || grid_size < 2 ||
+      grid_size > bke::subdiv::grid_size_from_level(13) || index < 0 || index >= grid_size * grid_size)
+  {
+    return float4(1.0f);
+  }
+  const int stored_size = bke::subdiv::grid_size_from_level(grid->level);
+  if (grid->totcolor != stored_size * stored_size) {
+    return float4(1.0f);
+  }
+  if (stored_size == grid_size) {
+    return float4(grid->colors[index]);
+  }
+
+  /* Display a stored color grid at another sculpt level without reading past
+   * its allocation or destructively resampling the persistent colors. */
+  const float x = float(index % grid_size) * float(stored_size - 1) / float(grid_size - 1);
+  const float y = float(index / grid_size) * float(stored_size - 1) / float(grid_size - 1);
+  const int x0 = int(x), y0 = int(y);
+  const int x1 = std::min(x0 + 1, stored_size - 1);
+  const int y1 = std::min(y0 + 1, stored_size - 1);
+  const float tx = x - x0, ty = y - y0;
+  float4 result;
+  for (int c = 0; c < 4; c++) {
+    const float a = std::lerp(grid->colors[y0 * stored_size + x0][c],
+                              grid->colors[y0 * stored_size + x1][c],
+                              tx);
+    const float b = std::lerp(grid->colors[y1 * stored_size + x0][c],
+                              grid->colors[y1 * stored_size + x1][c],
+                              tx);
+    result[c] = std::lerp(a, b, ty);
+  }
+  return result;
+}
+
+BLI_NOINLINE static void fill_polypaint_grids(const Object &object,
+                                              const OrigMeshData &orig_mesh_data,
+                                              const GenericRequest &request,
+                                              const BitSpan use_flat_layout,
+                                              const IndexMask &node_mask,
+                                              const MutableSpan<gpu::VertBufPtr> vbos)
+{
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const MultiresModifierData *mmd = polypaint_source_modifier(object);
+  const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  ensure_vbos_allocated_grids(object,
+                              attribute_format(orig_mesh_data, request, bke::AttrType::ColorFloat),
+                              use_flat_layout,
+                              node_mask,
+                              vbos);
+  node_mask.foreach_index(
+      [&](const int node_index) {
+        float4 *data = vbos[node_index]->data<float4>().data();
+        for (const int grid : nodes[node_index].grids()) {
+          const MultiresColorGrid *color_grid =
+              mmd && mmd->sculpt_color_grids && grid >= 0 &&
+                      grid < mmd->sculpt_color_grids_num ?
+                  &mmd->sculpt_color_grids[grid] :
+                  nullptr;
+          if (use_flat_layout[node_index]) {
+            for (int y = 0; y < key.grid_size - 1; y++) {
+              for (int x = 0; x < key.grid_size - 1; x++) {
+                const int indices[4] = {CCG_grid_xy_to_index(key.grid_size, x, y),
+                                        CCG_grid_xy_to_index(key.grid_size, x + 1, y),
+                                        CCG_grid_xy_to_index(key.grid_size, x + 1, y + 1),
+                                        CCG_grid_xy_to_index(key.grid_size, x, y + 1)};
+                for (const int index : indices) {
+                  *data++ = sample_polypaint_grid_color(color_grid, key.grid_size, index);
+                }
+              }
+            }
+          }
+          else {
+            const int area = key.grid_size * key.grid_size;
+            for (int i = 0; i < area; i++) {
+              *data++ = sample_polypaint_grid_color(color_grid, key.grid_size, i);
+            }
+          }
+        }
+      },
+      exec_mode::grain_size(1));
 }
 
 BLI_NOINLINE static void update_positions_bmesh(const Object &object,
@@ -1701,13 +1938,35 @@ BLI_NOINLINE static void flush_vbo_data(const Span<gpu::VertBufPtr> vbos,
   node_mask.foreach_index([&](const int i) { GPU_vertbuf_use(vbos[i].get()); });
 }
 
+/* Sculpt Mesh V3 Deep Probe: diagnostics only, enabled unless explicitly set to 0. */
+static bool sculpt_mesh_v3deep_enabled()
+{
+  static const bool enabled = []() {
+    const char *value = std::getenv("BLENDER_SCULPT_V3_DEEP_PROBE");
+    return !value || value[0] != '0';
+  }();
+  return enabled;
+}
+
 Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
                                                            const OrigMeshData &orig_mesh_data,
                                                            const AttributeRequest &attr,
                                                            const IndexMask &node_mask)
 {
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const bool v3deep = sculpt_mesh_v3deep_enabled() && pbvh.type() == bke::pbvh::Type::Mesh;
+  const double v3deep_start = v3deep ? BLI_time_now_seconds() : 0.0;
   AttributeData &data = attribute_vbos_.lookup_or_add_default(attr);
+  bool use_polypaint = false;
+  if (pbvh.type() == bke::pbvh::Type::Grids) {
+    if (const GenericRequest *request = std::get_if<GenericRequest>(&attr)) {
+      const MultiresModifierData *mmd = polypaint_source_modifier(object);
+      /* Choose the RGBA format before the first stroke allocates color grids.
+       * Missing grids use the same white fallback as Polypaint initialization. */
+      use_polypaint = mmd && *request == orig_mesh_data.active_color;
+      this->ensure_grids_attribute_format(orig_mesh_data, attr, use_polypaint, data);
+    }
+  }
   Vector<gpu::VertBufPtr> &vbos = data.vbos;
   vbos.resize(pbvh.nodes_num());
 
@@ -1724,6 +1983,13 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
       node_mask.slice_content(data.dirty_nodes.index_range()), data.dirty_nodes, memory);
   const IndexMask mask = IndexMask::from_union(empty_mask, dirty_mask, memory);
 
+  /* Sculpt Mesh V3 Local Normals Fix: avoid attribute setup and materialization
+   * when no visible Mesh VBO is missing or dirty. Other nodes retain their dirty bits. */
+  if (pbvh.type() == bke::pbvh::Type::Mesh && mask.is_empty()) {
+    return vbos;
+  }
+
+  const double v3deep_fill_start = v3deep ? BLI_time_now_seconds() : 0.0;
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
       if (const CustomRequest *request_type = std::get_if<CustomRequest>(&attr)) {
@@ -1766,14 +2032,21 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
         }
       }
       else {
-        ensure_vbos_allocated_grids(
-            object,
-            attribute_format(orig_mesh_data, "Dummy", bke::AttrType::Float3),
-            use_flat_layout_,
-            mask,
-            vbos);
-        mask.foreach_index([&](const int i) { vbos[i]->data<float3>().fill(float3(0.0f)); },
-                           exec_mode::grain_size(1));
+        const GenericRequest &request = std::get<GenericRequest>(attr);
+        if (use_polypaint) {
+          fill_polypaint_grids(
+              object, orig_mesh_data, request, use_flat_layout_, mask, vbos);
+        }
+        else {
+          ensure_vbos_allocated_grids(
+              object,
+              attribute_format(orig_mesh_data, "Dummy", bke::AttrType::Float3),
+              use_flat_layout_,
+              mask,
+              vbos);
+          mask.foreach_index([&](const int i) { vbos[i]->data<float3>().fill(float3(0.0f)); },
+                             exec_mode::grain_size(1));
+        }
       }
       break;
     }
@@ -1806,7 +2079,37 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
    * avoid unnecessary processing in subsequent redraws. */
   dirty_mask.foreach_index_optimized<int>([&](const int i) { data.dirty_nodes[i].reset(); });
 
+  const double v3deep_upload_start = v3deep ? BLI_time_now_seconds() : 0.0;
   flush_vbo_data(vbos, mask);
+  const double v3deep_end = v3deep ? BLI_time_now_seconds() : 0.0;
+  if (v3deep && (v3deep_end - v3deep_start) * 1000.0 >= 0.50) {
+    const char *kind = "generic";
+    int bytes_per_element = 0;
+    if (const CustomRequest *request_type = std::get_if<CustomRequest>(&attr)) {
+      switch (*request_type) {
+        case CustomRequest::Position: kind = "position"; bytes_per_element = 12; break;
+        case CustomRequest::Normal: kind = "normal"; bytes_per_element = 8; break;
+        case CustomRequest::Mask: kind = "mask"; bytes_per_element = 4; break;
+        case CustomRequest::FaceSet: kind = "faceset"; bytes_per_element = 4; break;
+      }
+    }
+    long long elements = 0;
+    const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+    mask.foreach_index([&](const int i) { elements += nodes[i].corners_num(); });
+    std::fprintf(stderr,
+                 "[SculptMeshV3Attr] kind=%s requested=%lld empty=%lld dirty=%lld actual=%lld "
+                 "elements=%lld payload_est=%.3f MiB total=%.3f ms select=%.3f "
+                 "fill=%.3f upload_call=%.3f\n",
+                 kind, static_cast<long long>(node_mask.size()),
+                 static_cast<long long>(empty_mask.size()),
+                 static_cast<long long>(dirty_mask.size()),
+                 static_cast<long long>(mask.size()), elements,
+                 double(elements) * bytes_per_element / (1024.0 * 1024.0),
+                 (v3deep_end - v3deep_start) * 1000.0,
+                 (v3deep_fill_start - v3deep_start) * 1000.0,
+                 (v3deep_upload_start - v3deep_fill_start) * 1000.0,
+                 (v3deep_end - v3deep_upload_start) * 1000.0);
+  }
 
   return vbos;
 }
@@ -1881,7 +2184,300 @@ Span<gpu::IndexBufPtr> DrawCacheImpl::ensure_tri_indices(const Object &object,
   return {};
 }
 
+/* Sculpt Mesh V4 Compact Draw: experimental, enabled only by an explicit environment switch. */
+static bool sculpt_mesh_v4_compact_enabled()
+{
+  static const bool enabled = []() {
+    const char *value = std::getenv("BLENDER_SCULPT_V4_COMPACT");
+    return value && value[0] == '1' && value[1] == '\0';
+  }();
+  return enabled;
+}
+
+static bool sculpt_mesh_v4_compact_request_supported(const ViewportRequest &request)
+{
+  if (request.attributes.size() != 2) {
+    return false;
+  }
+  bool position = false;
+  bool normal = false;
+  for (const AttributeRequest &attr : request.attributes) {
+    const CustomRequest *type = std::get_if<CustomRequest>(&attr);
+    if (!type) {
+      return false;
+    }
+    position |= *type == CustomRequest::Position;
+    normal |= *type == CustomRequest::Normal;
+  }
+  return position && normal;
+}
+
+void DrawCacheImpl::tag_compact_mesh_positions(const IndexMask &node_mask)
+{
+  if (compact_mesh_nodes_.is_empty()) {
+    return;
+  }
+  node_mask.foreach_index([&](const int i) {
+    if (i < compact_mesh_nodes_.size() && compact_mesh_nodes_[i]) {
+      compact_mesh_nodes_[i]->positions_dirty = true;
+      compact_mesh_nodes_[i]->normals_dirty = true;
+    }
+  });
+}
+
+void DrawCacheImpl::tag_compact_mesh_indices(const IndexMask &node_mask)
+{
+  if (compact_mesh_nodes_.is_empty()) {
+    return;
+  }
+  node_mask.foreach_index([&](const int i) {
+    if (i < compact_mesh_nodes_.size() && compact_mesh_nodes_[i]) {
+      compact_mesh_nodes_[i]->indices_dirty = true;
+    }
+  });
+}
+
+void DrawCacheImpl::tag_compact_mesh_layout(const IndexMask &node_mask)
+{
+  if (compact_mesh_nodes_.is_empty()) {
+    return;
+  }
+  node_mask.foreach_index([&](const int i) {
+    if (i < compact_mesh_nodes_.size() && compact_mesh_nodes_[i]) {
+      compact_mesh_nodes_[i]->layout_dirty = true;
+    }
+  });
+}
+
+/* Reuse PBVH vertex order, including shared boundary vertices. The lookup is temporary
+ * and only built when triangle indices change; no per-corner map is retained. */
+static gpu::IndexBufPtr create_tri_index_compact_mesh(const OffsetIndices<int> faces,
+                                                      const Span<int> corner_verts,
+                                                      const Span<int3> corner_tris,
+                                                      const VArray<bool> &hide_poly,
+                                                      const bke::pbvh::MeshNode &node)
+{
+  VectorSet<int> local_verts;
+  local_verts.add_multiple(node.all_verts());
+  BLI_assert(local_verts.size() == node.all_verts().size());
+  int triangles_num = 0;
+  for (const int face : node.faces()) {
+    if (hide_poly.is_empty() || !hide_poly[face]) {
+      triangles_num += bke::mesh::face_triangles_num(faces[face].size());
+    }
+  }
+  GPUIndexBufBuilder builder;
+  GPU_indexbuf_init(&builder, GPU_PRIM_TRIS, triangles_num, INT_MAX);
+  MutableSpan<uint3> data = GPU_indexbuf_get_data(&builder).cast<uint3>();
+  int triangle = 0;
+  for (const int face : node.faces()) {
+    if (!hide_poly.is_empty() && hide_poly[face]) {
+      continue;
+    }
+    for (const int3 &tri : corner_tris.slice(bke::mesh::face_triangles_range(faces, face))) {
+      for (const int j : IndexRange(3)) {
+        const int local_vertex = local_verts.index_of(corner_verts[tri[j]]);
+        BLI_assert(local_vertex >= 0 && local_vertex < node.all_verts().size());
+        data[triangle][j] = local_vertex;
+      }
+      triangle++;
+    }
+  }
+  BLI_assert(triangle == triangles_num);
+  return gpu::IndexBufPtr(
+      GPU_indexbuf_build_ex(&builder, 0, node.all_verts().size(), false));
+}
+
+Span<gpu::Batch *> DrawCacheImpl::ensure_compact_mesh_tris_batches(
+    const Object &object, const ViewportRequest &request, const IndexMask &nodes_to_update)
+{
+  const double start = BLI_time_now_seconds();
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  BLI_assert(pbvh.type() == bke::pbvh::Type::Mesh);
+  const Span<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(object);
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const VArray<bool> sharp_faces = *attributes.lookup<bool>("sharp_face", bke::AttrDomain::Face);
+  const Object &object_orig = *DEG_get_original(&object);
+  const bke::AttributeAccessor orig_attributes = id_cast<const Mesh *>(object_orig.data)->attributes();
+  const VArray<bool> hide_poly = *orig_attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face);
+
+  compact_mesh_nodes_.resize(nodes.size());
+  compact_mesh_draw_batches_.resize(nodes.size(), nullptr);
+
+  /* Independent owners prevent mixing compact and per-corner VBOs between viewport requests.
+   * Layout changes discard the dependent batch before its borrowed buffers are released. */
+  nodes_to_update.foreach_index(
+      [&](const int i) {
+        std::unique_ptr<CompactMeshNodeData> &entry = compact_mesh_nodes_[i];
+        const bke::pbvh::MeshNode &node = nodes[i];
+        const Span<int> verts = node.all_verts();
+        const Span<int> node_faces = node.faces();
+        if (entry && (entry->layout_dirty || entry->verts_identity != verts.data() ||
+                      entry->faces_identity != node_faces.data() ||
+                      entry->verts_num != verts.size() || entry->faces_num != node_faces.size() ||
+                      entry->corners_num != node.corners_num()))
+        {
+          entry.reset();
+          compact_mesh_draw_batches_[i] = nullptr;
+        }
+        if (!entry) {
+          entry = std::make_unique<CompactMeshNodeData>();
+          entry->verts_identity = verts.data();
+          entry->faces_identity = node_faces.data();
+          entry->verts_num = verts.size();
+          entry->faces_num = node_faces.size();
+          entry->corners_num = node.corners_num();
+          entry->supported = !verts.is_empty();
+          for (const int face : node_faces) {
+            if (!sharp_faces.is_empty() && sharp_faces[face]) {
+              entry->supported = false;
+              break;
+            }
+          }
+        }
+      },
+      exec_mode::grain_size(64));
+
+  IndexMaskMemory memory;
+  const IndexMask compact_mask = IndexMask::from_predicate(
+      nodes_to_update, memory, [&](const int i) { return compact_mesh_nodes_[i]->supported; });
+  const IndexMask fallback_mask = IndexMask::from_predicate(
+      nodes_to_update, memory, [&](const int i) { return !compact_mesh_nodes_[i]->supported; });
+  const IndexMask position_mask = IndexMask::from_predicate(
+      compact_mask, memory, [&](const int i) { return compact_mesh_nodes_[i]->positions_dirty; });
+  const IndexMask normal_mask = IndexMask::from_predicate(
+      compact_mask, memory, [&](const int i) { return compact_mesh_nodes_[i]->normals_dirty; });
+  const IndexMask index_mask = IndexMask::from_predicate(
+      compact_mask, memory, [&](const int i) { return compact_mesh_nodes_[i]->indices_dirty; });
+  const double select_end = BLI_time_now_seconds();
+
+  if (!index_mask.is_empty()) {
+    const Span<int3> corner_tris = mesh.corner_tris();
+    index_mask.foreach_index(
+        [&](const int i) {
+          CompactMeshNodeData &entry = *compact_mesh_nodes_[i];
+          GPU_BATCH_DISCARD_SAFE(entry.batch);
+          entry.triangles = create_tri_index_compact_mesh(
+              faces, corner_verts, corner_tris, hide_poly, nodes[i]);
+          entry.indices_dirty = false;
+        },
+        exec_mode::grain_size(1));
+  }
+  const double indices_end = BLI_time_now_seconds();
+  if (!position_mask.is_empty()) {
+    const Span<float3> positions = bke::pbvh::vert_positions_eval_from_eval(object);
+    position_mask.foreach_index(
+        [&](const int i) {
+          CompactMeshNodeData &entry = *compact_mesh_nodes_[i];
+          if (!entry.positions) {
+            entry.positions = gpu::VertBufPtr(GPU_vertbuf_create_with_format(position_format()));
+          }
+          const Span<int> verts = nodes[i].all_verts();
+          GPU_vertbuf_data_alloc(*entry.positions, verts.size());
+          float3 *data = entry.positions->data<float3>().data();
+          for (const int j : verts.index_range()) {
+            data[j] = positions[verts[j]];
+          }
+        },
+        exec_mode::grain_size(1));
+  }
+  if (!normal_mask.is_empty()) {
+    const Span<float3> normals = bke::pbvh::vert_normals_eval_from_eval(object);
+    normal_mask.foreach_index(
+        [&](const int i) {
+          CompactMeshNodeData &entry = *compact_mesh_nodes_[i];
+          if (!entry.normals) {
+            entry.normals = gpu::VertBufPtr(GPU_vertbuf_create_with_format(normal_format()));
+          }
+          const Span<int> verts = nodes[i].all_verts();
+          GPU_vertbuf_data_alloc(*entry.normals, verts.size());
+          short4 *data = entry.normals->data<short4>().data();
+          for (const int j : verts.index_range()) {
+            data[j] = normal_float_to_short(normals[verts[j]]);
+          }
+        },
+        exec_mode::grain_size(1));
+  }
+  const double fill_end = BLI_time_now_seconds();
+  /* GPU calls stay on the draw thread, as in flush_vbo_data(). */
+  position_mask.foreach_index([&](const int i) {
+    CompactMeshNodeData &entry = *compact_mesh_nodes_[i];
+    GPU_vertbuf_use(entry.positions.get());
+    entry.positions_dirty = false;
+  });
+  normal_mask.foreach_index([&](const int i) {
+    CompactMeshNodeData &entry = *compact_mesh_nodes_[i];
+    GPU_vertbuf_use(entry.normals.get());
+    entry.normals_dirty = false;
+  });
+  const double upload_end = BLI_time_now_seconds();
+  compact_mask.foreach_index(
+      [&](const int i) {
+        CompactMeshNodeData &entry = *compact_mesh_nodes_[i];
+        if (!entry.batch) {
+          entry.batch = GPU_batch_create(GPU_PRIM_TRIS, nullptr, entry.triangles.get());
+          GPU_batch_vertbuf_add(entry.batch, entry.positions.get(), false);
+          GPU_batch_vertbuf_add(entry.batch, entry.normals.get(), false);
+        }
+        compact_mesh_draw_batches_[i] = entry.batch;
+      },
+      exec_mode::grain_size(64));
+  if (!fallback_mask.is_empty()) {
+    const Span<gpu::Batch *> legacy = this->ensure_tris_batches_legacy(
+        object, request, fallback_mask);
+    fallback_mask.foreach_index([&](const int i) { compact_mesh_draw_batches_[i] = legacy[i]; });
+  }
+  const double end = BLI_time_now_seconds();
+  /* Report compact uploads separately; estimates exclude IBOs and legacy fallback nodes. */
+  if (!position_mask.is_empty() || !normal_mask.is_empty() || !index_mask.is_empty()) {
+    int64_t position_elements = 0, normal_elements = 0, legacy_elements = 0;
+    position_mask.foreach_index([&](const int i) {
+      position_elements += nodes[i].all_verts().size();
+      legacy_elements += int64_t(nodes[i].corners_num()) * 12;
+    });
+    normal_mask.foreach_index([&](const int i) {
+      normal_elements += nodes[i].all_verts().size();
+      legacy_elements += int64_t(nodes[i].corners_num()) * 8;
+    });
+    const double payload = double(position_elements) * 12 + double(normal_elements) * 8;
+    std::fprintf(stderr,
+                 "[SculptMeshV4Compact] requested=%lld compact=%lld fallback=%lld "
+                 "pos_nodes=%lld normal_nodes=%lld index_nodes=%lld pos_elements=%lld "
+                 "normal_elements=%lld payload_est=%.3f MiB legacy_payload_est=%.3f MiB "
+                 "total=%.3f ms select=%.3f indices=%.3f fill=%.3f upload_call=%.3f rest=%.3f\n",
+                 static_cast<long long>(nodes_to_update.size()),
+                 static_cast<long long>(compact_mask.size()),
+                 static_cast<long long>(fallback_mask.size()),
+                 static_cast<long long>(position_mask.size()),
+                 static_cast<long long>(normal_mask.size()),
+                 static_cast<long long>(index_mask.size()),
+                 static_cast<long long>(position_elements),
+                 static_cast<long long>(normal_elements), payload / (1024.0 * 1024.0),
+                 double(legacy_elements) / (1024.0 * 1024.0),
+                 (end - start) * 1000.0, (select_end - start) * 1000.0,
+                 (indices_end - select_end) * 1000.0, (fill_end - indices_end) * 1000.0,
+                 (upload_end - fill_end) * 1000.0, (end - upload_end) * 1000.0);
+  }
+  return compact_mesh_draw_batches_;
+}
+
 Span<gpu::Batch *> DrawCacheImpl::ensure_tris_batches(const Object &object,
+                                                      const ViewportRequest &request,
+                                                      const IndexMask &nodes_to_update)
+{
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  if (sculpt_mesh_v4_compact_enabled() && pbvh.type() == bke::pbvh::Type::Mesh &&
+      sculpt_mesh_v4_compact_request_supported(request))
+  {
+    return this->ensure_compact_mesh_tris_batches(object, request, nodes_to_update);
+  }
+  return this->ensure_tris_batches_legacy(object, request, nodes_to_update);
+}
+
+Span<gpu::Batch *> DrawCacheImpl::ensure_tris_batches_legacy(const Object &object,
                                                       const ViewportRequest &request,
                                                       const IndexMask &nodes_to_update)
 {
@@ -1889,16 +2485,21 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_tris_batches(const Object &object,
   const OrigMeshData orig_mesh_data{*id_cast<const Mesh *>(object_orig.data)};
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 
+  const bool v3deep = sculpt_mesh_v3deep_enabled() && pbvh.type() == bke::pbvh::Type::Mesh;
+  const double v3deep_start = v3deep ? BLI_time_now_seconds() : 0.0;
   this->ensure_use_flat_layout(object, orig_mesh_data);
   this->free_nodes_with_changed_topology(pbvh);
 
+  const double v3deep_indices_start = v3deep ? BLI_time_now_seconds() : 0.0;
   const Span<gpu::IndexBufPtr> ibos = this->ensure_tri_indices(
       object, orig_mesh_data, nodes_to_update, request.use_coarse_grids);
 
+  const double v3deep_attrs_start = v3deep ? BLI_time_now_seconds() : 0.0;
   for (const AttributeRequest &attr : request.attributes) {
     this->ensure_attribute_data(object, orig_mesh_data, attr, nodes_to_update);
   }
 
+  const double v3deep_batches_start = v3deep ? BLI_time_now_seconds() : 0.0;
   /* Collect VBO spans in a different loop because #ensure_attribute_data invalidates the allocated
    * arrays when its map is changed. */
   Vector<Span<gpu::VertBufPtr>> attr_vbos;
@@ -1924,6 +2525,21 @@ Span<gpu::Batch *> DrawCacheImpl::ensure_tris_batches(const Object &object,
       },
       exec_mode::grain_size(64));
 
+  if (v3deep) {
+    const double end = BLI_time_now_seconds();
+    if ((end - v3deep_start) * 1000.0 >= 1.0) {
+      std::fprintf(stderr,
+                   "[SculptMeshV3Cache] requested=%lld attrs=%lld total=%.3f ms "
+                   "layout_topology=%.3f indices=%.3f attributes=%.3f batches=%.3f\n",
+                   static_cast<long long>(nodes_to_update.size()),
+                   static_cast<long long>(request.attributes.size()),
+                   (end - v3deep_start) * 1000.0,
+                   (v3deep_indices_start - v3deep_start) * 1000.0,
+                   (v3deep_attrs_start - v3deep_indices_start) * 1000.0,
+                   (v3deep_batches_start - v3deep_attrs_start) * 1000.0,
+                   (end - v3deep_batches_start) * 1000.0);
+    }
+  }
   return batches;
 }
 

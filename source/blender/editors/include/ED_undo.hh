@@ -36,6 +36,8 @@ bool ED_undo_is_state_valid(bContext *C);
 void ED_undo_group_begin(bContext *C);
 void ED_undo_group_end(bContext *C);
 void ED_undo_push(bContext *C, const char *str);
+/* SCULPT_LAYER_UNDO_CONTROLS_V36: capture native state before a control/global action. */
+bool ED_undo_sculpt_controls_begin(bContext *C);
 void ED_undo_push_op(bContext *C, wmOperator *op);
 void ED_undo_grouped_push(bContext *C, const char *str);
 void ED_undo_grouped_push_op(bContext *C, wmOperator *op);

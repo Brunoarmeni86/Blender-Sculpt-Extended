@@ -9,6 +9,8 @@
 #include <cfloat>
 #include <climits>
 #include <cstdlib>
+#include <chrono>
+#include <cstdio>
 
 #include "DNA_armature_types.h"
 #include "DNA_gpencil_modifier_types.h"
@@ -18,6 +20,7 @@
 #include "DNA_scene_types.h"
 
 #include "BLI_math_rotation.h"
+#include "BLI_string_utils.hh"
 
 #include "BLT_translation.hh"
 
@@ -838,6 +841,16 @@ static const EnumPropertyItem grease_pencil_build_time_mode_items[] = {
 }  // namespace blender
 
 #ifdef RNA_RUNTIME
+#  include "BKE_subdiv_ccg.hh"
+#  include "BKE_subdiv.hh"
+#  include "BKE_paint_bvh.hh"
+#  include "BKE_paint.hh"
+#  include "BKE_mesh.hh"
+#  include "BLI_time.h"
+#  include "BLI_index_mask.hh"
+#  include "BLI_bit_vector.hh"
+#  include <cstdio>
+#  include <cmath>
 
 #  include <algorithm>
 #  include <fmt/format.h>
@@ -866,6 +879,7 @@ static const EnumPropertyItem grease_pencil_build_time_mode_items[] = {
 #  include "BKE_mesh_runtime.hh"
 #  include "BKE_modifier.hh"
 #  include "BKE_multires.hh"
+#  include "BKE_multires_sculpt_layers.hh"
 #  include "BKE_object.hh"
 #  include "BKE_ocean.h"
 #  include "BKE_particle.h"
@@ -952,6 +966,12 @@ static void rna_Modifier_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA 
   WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
 }
 
+static void rna_MultiresModifier_recording_update(
+    Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  /* REC changes recording state only. Do not trigger geometry evaluation. */
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
+}
 static void rna_Modifier_dependency_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   rna_Modifier_update(bmain, scene, ptr);
@@ -1032,6 +1052,7 @@ RNA_MOD_VGROUP_NAME_SET(MeshCache, defgrp_name);
 RNA_MOD_VGROUP_NAME_SET(MeshDeform, defgrp_name);
 RNA_MOD_VGROUP_NAME_SET(NormalEdit, defgrp_name);
 RNA_MOD_VGROUP_NAME_SET(Shrinkwrap, vgroup_name);
+RNA_MOD_VGROUP_NAME_SET(Multires, sculpt_shrinkwrap_vgroup);
 RNA_MOD_VGROUP_NAME_SET(SimpleDeform, vgroup_name);
 RNA_MOD_VGROUP_NAME_SET(Smooth, defgrp_name);
 RNA_MOD_VGROUP_NAME_SET(Solidify, defgrp_name);
@@ -1129,6 +1150,8 @@ RNA_MOD_OBJECT_SET(Mask, ob_arm, OB_ARMATURE);
 RNA_MOD_OBJECT_SET(MeshDeform, object, OB_MESH);
 RNA_MOD_OBJECT_SET(NormalEdit, target, OB_EMPTY);
 RNA_MOD_OBJECT_SET(Shrinkwrap, target, OB_MESH);
+RNA_MOD_OBJECT_SET(Multires, sculpt_shrinkwrap_target, OB_MESH);
+RNA_MOD_OBJECT_SET(Multires, sculpt_shrinkwrap_aux_target, OB_MESH);
 RNA_MOD_OBJECT_SET(Shrinkwrap, auxTarget, OB_MESH);
 RNA_MOD_OBJECT_SET(SurfaceDeform, target, OB_MESH);
 RNA_MOD_OBJECT_SET(GreasePencilMirror, object, OB_EMPTY);
@@ -1309,6 +1332,627 @@ static void rna_fluid_set_type(Main *bmain, Scene *scene, PointerRNA *ptr)
   rna_Modifier_dependency_update(bmain, scene, ptr);
 }
 
+/* Property setters must flush BEFORE the value changes, otherwise pending CCG
+ * strokes are reconstructed using the new strength, visibility or active index. */
+static bool rna_multires_layer_prepare(PointerRNA *ptr)
+{
+  /* LAYER_VISIBLE_TRACE_V1: diagnostic only, preserves the original flow. */
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+  const auto start = std::chrono::steady_clock::now();
+  double commit_ms = 0.0, release_ms = 0.0;
+  const auto report = [&](const char *status) {
+    if (trace) {
+      const double total = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - start).count();
+      std::printf("[LAYER_PREPARE] status=%s commit=%.3fms pbvh_release=%.3fms total=%.3fms\n",
+                  status, commit_ms, release_ms, total);
+    }
+  };
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  if (!ob) {
+    report("NO_OBJECT");
+    return false;
+  }
+
+  const auto commit_start = std::chrono::steady_clock::now();
+  const bool committed = bke::multires_layers::commit(*ob);
+  commit_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - commit_start).count();
+  if (!committed) {
+    report("COMMIT_FAILED");
+    return false;
+  }
+  const auto release_start = std::chrono::steady_clock::now();
+  const bool released = multires_force_sculpt_rebuild(ob);
+  release_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - release_start).count();
+  if (!released) {
+    report("REBUILD_PREPARE_FAILED");
+    return false;
+  }
+
+  for (ModifierData &md : ob->modifiers) {
+    if (md.type == eModifierType_Multires) {
+      reinterpret_cast<MultiresModifierData *>(&md)->sculpt_layer_recording = 0;
+    }
+  }
+
+  report("OK");
+  return true;
+}
+/* A layer is a ListBase element, not an ID. Give animation a path relative to
+ * its owning Object so keyframes on strength resolve after saving and loading. */
+static std::optional<std::string> rna_MultiresSculptLayer_path(const PointerRNA *ptr)
+{
+  const Object *ob = id_cast<Object *>(ptr->owner_id);
+  const auto *layer = static_cast<const MultiresSculptLayer *>(ptr->data);
+  if (!ob || !layer) {
+    return std::nullopt;
+  }
+  for (const ModifierData &md : ob->modifiers) {
+    if (md.type != eModifierType_Multires) {
+      continue;
+    }
+    const auto *mmd = reinterpret_cast<const MultiresModifierData *>(&md);
+    const int index = BLI_findindex(&mmd->sculpt_layers, layer);
+    if (index < 0) {
+      continue;
+    }
+    char name_esc[sizeof(md.name) * 2];
+    char layer_esc[sizeof(layer->name) * 2];
+    BLI_str_escape(name_esc, md.name, sizeof(name_esc));
+    for (const MultiresSculptLayer &other : mmd->sculpt_layers) {
+      if (&other != layer && STREQ(other.name, layer->name)) {
+        /* Older files may contain duplicate names. Their index is unambiguous
+         * until the user renames them. */
+        return fmt::format("modifiers[\"{}\"].sculpt_layers[{}]", name_esc, index);
+      }
+    }
+    BLI_str_escape(layer_esc, layer->name, sizeof(layer_esc));
+    return fmt::format("modifiers[\"{}\"].sculpt_layers[\"{}\"]", name_esc, layer_esc);
+  }
+  return std::nullopt;
+}
+
+static void rna_MultiresSculptLayer_name_set(PointerRNA *ptr, const char *value)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  auto *layer = static_cast<MultiresSculptLayer *>(ptr->data);
+  if (!ob || !layer) {
+    return;
+  }
+  for (ModifierData &md : ob->modifiers) {
+    if (md.type != eModifierType_Multires) {
+      continue;
+    }
+    auto *mmd = reinterpret_cast<MultiresModifierData *>(&md);
+    if (BLI_findindex(&mmd->sculpt_layers, layer) < 0) {
+      continue;
+    }
+    const std::string oldname = layer->name;
+    BLI_strncpy(layer->name, value, sizeof(layer->name));
+    BLI_uniquename(&mmd->sculpt_layers,
+                   layer,
+                   "Layer",
+                   '.',
+                   offsetof(MultiresSculptLayer, name),
+                   sizeof(layer->name));
+    char name_esc[sizeof(md.name) * 2];
+    BLI_str_escape(name_esc, md.name, sizeof(name_esc));
+    const std::string prefix = fmt::format("modifiers[\"{}\"].sculpt_layers", name_esc);
+    BKE_animdata_fix_paths_rename_all(nullptr, prefix.c_str(), oldname.c_str(), layer->name);
+    return;
+  }
+}
+
+/* LAYER_WEIGHT_PROFILE_V2_3_FIX */
+static bool rna_multires_visible_fast_refresh(Object &ob,
+                                               const MultiresSculptLayer &layer,
+                                               float direct_weight_delta,
+                                               int &r_support_faces,
+                                               int &r_updated_faces,
+                                               int &r_changed_nodes,
+                                               double &r_eval_ms,
+                                               double &r_bounds_ms,
+                                               const char *&r_reason);
+
+static bool rna_multires_visible_trace_enabled();
+
+static void rna_MultiresSculptLayer_strength_set(PointerRNA *ptr, float value)
+{
+  Object *ob=id_cast<Object *>(ptr->owner_id);
+  auto *layer=static_cast<MultiresSculptLayer *>(ptr->data);
+  if (ob==nullptr || layer==nullptr || !std::isfinite(value)) return;
+
+  const float old_value=layer->strength;
+  if (old_value==value) return;
+
+  bool prepared=bke::multires_layers::commit(*ob);
+  if (!prepared) {
+    multires_force_sculpt_rebuild(ob);
+    DEG_id_tag_update(ptr->owner_id,ID_RECALC_GEOMETRY);
+    return;
+  }
+  for (ModifierData &md : ob->modifiers) {
+    if (md.type==eModifierType_Multires) {
+      reinterpret_cast<MultiresModifierData *>(&md)->sculpt_layer_recording=0;
+    }
+  }
+
+  layer->strength=value;
+  const bool visible=(layer->flag & MULTIRES_SCULPT_LAYER_VISIBLE)!=0;
+  if (!visible) {
+    DEG_id_tag_update(&ob->id,ID_RECALC_SYNC_TO_EVAL);
+    if (rna_multires_visible_trace_enabled()) {
+      std::printf("[LAYER_STRENGTH_LOCAL] mode=METADATA old=%.6f new=%.6f delta=%.6f total=0\n",
+                  old_value,value,value-old_value);
+    }
+    return;
+  }
+
+  int support_faces=0,updated_faces=0,changed_nodes=0;
+  double eval_ms=0.0,bounds_ms=0.0;
+  const char *reason="NO_OBJECT";
+  const double start=BLI_time_now_seconds();
+  const bool local_ok=rna_multires_visible_fast_refresh(
+      *ob,*layer,value-old_value,support_faces,updated_faces,changed_nodes,
+      eval_ms,bounds_ms,reason);
+
+  if (local_ok) {
+    DEG_id_tag_update(&ob->id,ID_RECALC_SYNC_TO_EVAL);
+  }
+  else {
+    multires_force_sculpt_rebuild(ob);
+    DEG_id_tag_update(ptr->owner_id,ID_RECALC_GEOMETRY);
+  }
+
+  if (rna_multires_visible_trace_enabled()) {
+    std::printf(
+        "[LAYER_STRENGTH_LOCAL] mode=%s reason=%s old=%.6f new=%.6f delta=%.6f "
+        "support_faces=%d updated_faces=%d pbvh_nodes=%d eval=%.3fms bounds=%.3fms total=%.3fms\n",
+        local_ok ? "LOCAL" : "GLOBAL_FALLBACK",reason,old_value,value,value-old_value,
+        support_faces,updated_faces,changed_nodes,eval_ms,bounds_ms,
+        (BLI_time_now_seconds()-start)*1000.0);
+  }
+}
+
+/* LAYER_VISIBLE_INCREMENTAL_V1
+ *
+ * A visibility toggle is a displacement-stack change, not a sculpt stroke.
+ * Commit the old stroke before changing the flag, then evaluate only coarse
+ * faces touched by the toggled layer into the live CCG. Keep PBVH and the
+ * Subdiv descriptor alive. The original full depsgraph rebuild is the fallback.
+ *
+ * Requires the partial face evaluator already used by Shape Key / Delete.
+ * The evaluator performs seam stitching and partial normal updates.
+ *
+ * Disable for A/B or troubleshooting:
+ *   BLENDER_SCULPT_VISIBLE_INCREMENTAL=0
+ */
+static bool rna_multires_visible_trace_enabled()
+{
+  const char *value = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+static bool rna_multires_visible_base_contribution(const MultiresSculptLayer &layer)
+{
+  if (layer.base_deltas == nullptr || layer.base_verts_num <= 0) {
+    return false;
+  }
+  for (int i = 0; i < layer.base_verts_num; i++) {
+    const float *delta = layer.base_deltas[i];
+    if (delta[0] != 0.0f || delta[1] != 0.0f || delta[2] != 0.0f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool rna_multires_visible_fast_refresh(Object &ob,
+                                               const MultiresSculptLayer &layer,
+                                               const float direct_weight_delta,
+                                               int &r_support_faces,
+                                               int &r_updated_faces,
+                                               int &r_changed_nodes,
+                                               double &r_eval_ms,
+                                               double &r_bounds_ms,
+                                               const char *&r_reason)
+{
+  r_reason = "UNSUPPORTED";
+  const char *enabled = std::getenv("BLENDER_SCULPT_VISIBLE_INCREMENTAL");
+  if (enabled != nullptr && enabled[0] == '0') {
+    r_reason = "DISABLED";
+    return false;
+  }
+  if (ob.type != OB_MESH || (ob.mode & OB_MODE_SCULPT) == 0 ||
+      ob.runtime == nullptr || ob.runtime->sculpt_session == nullptr)
+  {
+    r_reason = "NOT_SCULPT";
+    return false;
+  }
+
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  SubdivCCG *ccg = ss.subdiv_ccg;
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  if (ccg == nullptr || ccg->subdiv == nullptr || pbvh == nullptr ||
+      pbvh->type() != bke::pbvh::Type::Grids || ss.cache != nullptr ||
+      ss.filter_cache != nullptr || ccg->dirty.coords || ccg->dirty.hidden ||
+      ccg->dirty.masks)
+  {
+    r_reason = "RUNTIME_UNSAFE";
+    return false;
+  }
+
+  Mesh *mesh = id_cast<Mesh *>(ob.data);
+  if (mesh == nullptr || mesh->faces_num <= 0 ||
+      ccg->grids_num != mesh->corners_num || ccg->level <= 0)
+  {
+    r_reason = "LAYOUT";
+    return false;
+  }
+
+  /* Only the first enabled modifier can safely use the original base cage
+   * as the control mesh of the live Subdiv evaluator. */
+  MultiresModifierData *mmd = nullptr;
+  for (ModifierData &md : ob.modifiers) {
+    if ((md.mode & eModifierMode_Realtime) == 0) {
+      continue;
+    }
+    if (mmd != nullptr || md.type != eModifierType_Multires) {
+      r_reason = "MODIFIER_STACK";
+      return false;
+    }
+    auto *candidate = reinterpret_cast<MultiresModifierData *>(&md);
+    if (BLI_findindex(&candidate->sculpt_layers, &layer) < 0) {
+      r_reason = "OTHER_MULTIRES";
+      return false;
+    }
+    mmd = candidate;
+  }
+  if (mmd == nullptr || ss.multires_modifier == nullptr ||
+      mmd->totlvl <= 0 || ccg->level != mmd->sculptlvl ||
+      mmd->sculpt_shrinkwrap_enabled)
+  {
+    r_reason = "MODIFIER_OR_SHRINKWRAP";
+    return false;
+  }
+
+  /* L0 changes the subdivision control cage: it is not a grid-only update. */
+  if (rna_multires_visible_base_contribution(layer)) {
+    r_reason = "L0_BASE";
+    return false;
+  }
+
+  /* Zero-strength/invalid-strength layers cannot contribute. */
+  if (!std::isfinite(layer.strength) || std::abs(layer.strength) < 1e-6f) {
+    r_reason = "METADATA_ONLY";
+    return true;
+  }
+
+  if (layer.level > mmd->totlvl ||
+      (layer.level > 0 && (layer.disps == nullptr || layer.grids_num != ccg->grids_num)))
+  {
+    r_reason = "LAYER_LAYOUT";
+    return false;
+  }
+  if (layer.disps == nullptr || layer.grids_num == 0) {
+    r_reason = "METADATA_ONLY";
+    return true;
+  }
+
+  /* Sparse storage: null grid payload means exactly zero layer displacement.
+   * Include a one-vertex-adjacent coarse-face ring for shared seams/normals. */
+  const OffsetIndices faces = mesh->faces();
+  BitVector<> support(mesh->faces_num, false);
+  for (const int face : faces.index_range()) {
+    for (const int corner : faces[face]) {
+      if (layer.disps[corner].disps != nullptr) {
+        support[face].set();
+        r_support_faces++;
+        break;
+      }
+    }
+  }
+  if (r_support_faces == 0) {
+    r_reason = "METADATA_ONLY";
+    return true;
+  }
+
+  BitVector<> affected(mesh->faces_num, false);
+  const GroupedSpan<int> vert_to_face = mesh->vert_to_face_map();
+  const Span<int> corner_verts = mesh->corner_verts();
+  for (const int face : faces.index_range()) {
+    if (!support[face]) {
+      continue;
+    }
+    affected[face].set();
+    for (const int corner : faces[face]) {
+      for (const int adjacent : vert_to_face[corner_verts[corner]]) {
+        affected[adjacent].set();
+      }
+    }
+  }
+  for (const int face : faces.index_range()) {
+    if (affected[face]) {
+      r_updated_faces++;
+    }
+  }
+
+  /* First validate PBVH coverage; after evaluation no failure should leave
+   * an untracked region without forcing the global fallback. */
+  BitVector<> affected_grids(ccg->grids_num, false);
+  for (const int face : faces.index_range()) {
+    if (affected[face]) {
+      for (const int grid : faces[face]) {
+        affected_grids[grid].set();
+      }
+    }
+  }
+  const Span<bke::pbvh::GridsNode> nodes = pbvh->nodes<bke::pbvh::GridsNode>();
+  IndexMaskMemory node_memory;
+  const IndexMask changed_nodes = IndexMask::from_predicate(
+      nodes.index_range(),
+      node_memory,
+      [&](const int node_i) {
+        for (const int grid : nodes[node_i].grids()) {
+          if (grid >= 0 && grid < affected_grids.size() && affected_grids[grid]) {
+            return true;
+          }
+        }
+        return false;
+      },
+      exec_mode::grain_size(1));
+  if (changed_nodes.is_empty()) {
+    r_reason = "NO_PBVH_NODES";
+    return false;
+  }
+  r_changed_nodes = int(changed_nodes.size());
+
+  IndexMaskMemory face_memory;
+  const IndexMask face_mask = IndexMask::from_predicate(
+      IndexRange(mesh->faces_num),
+      face_memory,
+      [&](const int face) { return affected[face]; },
+      exec_mode::grain_size(64));
+
+  const double eval_start = BLI_time_now_seconds();
+  BitVector<> direct_faces;
+  const double direct_start = BLI_time_now_seconds();
+  bool hot_delta_hit = false;
+  const bool direct_ok = bke::multires_layers::weight_direct_delta(
+      ob, *mmd, layer, direct_weight_delta, direct_faces, &hot_delta_hit);
+  const double direct_ms = (BLI_time_now_seconds() - direct_start) * 1000.0;
+
+  if (rna_multires_visible_trace_enabled()) {
+    std::printf("[LAYER_WEIGHT_PROFILE] stage=DELTA mode=%s ms=%.3f\n",
+                direct_ok ? "DIRECT" : "FALLBACK",
+                direct_ms);
+  }
+
+  if (direct_ok)
+  {
+    /* LAYER_WEIGHT_HOT_SKIP_STITCH_EXP_V1_1_FIX
+     * Exact hot-cache HITs apply the cached object-space displacement to all
+     * payload samples. Test whether positional stitching is redundant there.
+     * BUILD/fallback remains conservative.
+     *
+     * Opt-in:
+     *   BLENDER_SCULPT_WEIGHT_HOT_SKIP_STITCH=1
+     */
+    const char *skip_env = BLI_getenv("BLENDER_SCULPT_WEIGHT_HOT_SKIP_STITCH");
+    const bool hot_skip_stitch =
+        hot_delta_hit && skip_env != nullptr && skip_env[0] != '\0' && skip_env[0] != '0';
+
+    const double surface_start = BLI_time_now_seconds();
+    double stitch_ms = 0.0;
+    double normals_ms = 0.0;
+    if (hot_skip_stitch) {
+      const double normals_start = BLI_time_now_seconds();
+      BKE_subdiv_ccg_update_normals(*ccg, face_mask);
+      normals_ms = (BLI_time_now_seconds() - normals_start) * 1000.0;
+    }
+    else {
+      BKE_subdiv_ccg_stitch_update_normals_reuse(
+          *ccg, face_mask, stitch_ms, normals_ms);
+    }
+    const double surface_ms = (BLI_time_now_seconds() - surface_start) * 1000.0;
+    if (rna_multires_visible_trace_enabled()) {
+      std::printf(
+          "[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=%s stitch=%.3fms normals=%.3fms total=%.3fms\n",
+          hot_skip_stitch ? "HOT_NORMALS_ONLY" : "EXACT_STITCH_NORMALS",
+          stitch_ms,
+          normals_ms,
+          surface_ms);
+    }
+    r_eval_ms=(BLI_time_now_seconds()-eval_start)*1000.0;
+    r_reason="DIRECT_DELTA";
+  }
+  else {
+    bke::subdiv::Subdiv *subdiv=ccg->subdiv;
+    bke::subdiv::displacement_attach_from_multires(
+        subdiv,mesh,mmd,multires_texture_mapping_matrix(*mmd,ob));
+    SubdivCCGMaskEvaluator mask_evaluator{};
+    const bool has_mask=!ccg->masks.is_empty() &&
+        BKE_subdiv_ccg_mask_init_from_paint(&mask_evaluator,mesh);
+    const bool evaluated=BKE_subdiv_ccg_evaluate_faces_existing(
+        *ccg,*subdiv,face_mask,has_mask ? &mask_evaluator : nullptr);
+    if (has_mask) mask_evaluator.free(&mask_evaluator);
+    r_eval_ms=(BLI_time_now_seconds()-eval_start)*1000.0;
+    if (!evaluated) {
+      r_reason="CCG_EVAL_FAILED";
+      return false;
+    }
+    r_reason="V1_FALLBACK";
+  }
+
+  const double bounds_start = BLI_time_now_seconds();
+  pbvh->tag_positions_changed(changed_nodes);
+  pbvh->update_bounds_grids(ccg->positions, ccg->grid_area);
+  pbvh->flush_bounds_to_parents();
+  pbvh->clear_changes();
+  ccg->dirty.coords = false;
+  r_bounds_ms = (BLI_time_now_seconds() - bounds_start) * 1000.0;
+  return true;
+}
+
+static void rna_MultiresSculptLayer_strength_update(
+    Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
+}
+
+static void rna_MultiresSculptLayer_visible_update(
+    Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  const auto *layer = static_cast<const MultiresSculptLayer *>(ptr->data);
+  int support_faces = 0, updated_faces = 0, changed_nodes = 0;
+  double eval_ms = 0.0, bounds_ms = 0.0;
+  const char *reason = "NO_OBJECT";
+  const double start = BLI_time_now_seconds();
+  const bool local_ok = ob != nullptr && layer != nullptr &&
+      rna_multires_visible_fast_refresh(*ob,
+                                        *layer,
+                                        ((layer->flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0 ?
+                                             layer->strength : -layer->strength),
+                                        support_faces,
+                                        updated_faces,
+                                        changed_nodes,
+                                        eval_ms,
+                                        bounds_ms,
+                                        reason);
+  if (local_ok) {
+    /* Sync the property to evaluated state without a geometry rebuild. */
+    DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  else {
+    /* The original path, including PBVH release, remains the safety fallback. */
+    if (ob != nullptr) {
+      multires_force_sculpt_rebuild(ob);
+    }
+    DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
+  }
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
+  if (rna_multires_visible_trace_enabled()) {
+    std::printf(
+        "[LAYER_VISIBLE_LOCAL] mode=%s reason=%s support_faces=%d updated_faces=%d "
+        "pbvh_nodes=%d eval=%.3fms bounds=%.3fms total=%.3fms\n",
+        local_ok ? "LOCAL" : "GLOBAL_FALLBACK",
+        reason,
+        support_faces,
+        updated_faces,
+        changed_nodes,
+        eval_ms,
+        bounds_ms,
+        (BLI_time_now_seconds() - start) * 1000.0);
+  }
+}
+
+/* LAYER_VISIBLE_INCREMENTAL_V2
+ * Conservative V2 checkpoint on top of the validated V1 local CCG/PBVH path.
+ * This marker is used to keep the next direct-delta optimization isolated.
+ */
+static void rna_MultiresSculptLayer_visible_set(PointerRNA *ptr, bool value)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  auto *layer = static_cast<MultiresSculptLayer *>(ptr->data);
+  bool prepared = ob != nullptr && layer != nullptr;
+  if (prepared) {
+    /* Commit using OLD visibility. Do not release PBVH here: the RNA update
+     * callback will try the in-place CCG refresh first. */
+    prepared = bke::multires_layers::commit(*ob);
+  }
+  if (prepared) {
+    for (ModifierData &md : ob->modifiers) {
+      if (md.type == eModifierType_Multires) {
+        reinterpret_cast<MultiresModifierData *>(&md)->sculpt_layer_recording = 0;
+      }
+    }
+    bke::multires_layers::set_visible(*layer, value);
+  }
+  if (!prepared && ob != nullptr) {
+    /* A failed old-state Commit must never be silently treated as local success. */
+    multires_force_sculpt_rebuild(ob);
+  }
+  if (rna_multires_visible_trace_enabled()) {
+    std::printf("[LAYER_VISIBLE] requested=%d applied=%d update=CALLBACK_PENDING\n",
+                int(value), int(prepared));
+  }
+}
+
+static void rna_MultiresModifier_active_layer_set(PointerRNA *ptr, int value)
+{
+  if (rna_multires_layer_prepare(ptr)) {
+    bke::multires_layers::set_active(*static_cast<MultiresModifierData *>(ptr->data), value);
+  }
+}
+
+/* REC only changes recording state. Flush pending layer edits, but keep the
+ * existing Sculpt PBVH/SubdivCCG alive. Destroying the PBVH here temporarily
+ * exposes the base mesh until a later viewport event rebuilds Multires. */
+static bool rna_multires_recording_prepare(Object *ob)
+{
+  if (!ob) {
+    return false;
+  }
+
+  if (!bke::multires_layers::commit(*ob)) {
+    return false;
+  }
+
+  for (ModifierData &md : ob->modifiers) {
+    if (md.type == eModifierType_Multires) {
+      reinterpret_cast<MultiresModifierData *>(&md)->sculpt_layer_recording = 0;
+    }
+  }
+
+  return true;
+}
+
+static void rna_MultiresModifier_recording_set(PointerRNA *ptr, bool value)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  auto *mmd = static_cast<MultiresModifierData *>(ptr->data);
+
+  if (!ob) {
+    return;
+  }
+
+  if (!rna_multires_recording_prepare(ob)) {
+    return;
+  }
+
+  Mesh *mesh = id_cast<Mesh *>(ob->data);
+
+  /* REC only toggles recording state. It is not a topology-edit boundary.
+   * Real topology-changing operations own remapping while old/new mapping
+   * information is still valid. Calling the remapper here can consume stale
+   * corner IDs and falsely reject an otherwise compatible Multires mesh. */
+  if (value && !bke::multires_layers::can_record(*mmd, *mesh)) {
+    BKE_modifier_set_error(
+        ob,
+        &mmd->modifier,
+        "REC requires a visible layer, non-zero strength and valid Multires grids");
+    return;
+  }
+
+  mmd->sculpt_layer_recording = value;
+}
+/* Flush the CCG while its level still matches the strokes. Otherwise switching
+ * Sculpt from a lower level to a higher one can strand pending edits. */
+static void rna_MultiresModifier_sculpt_levels_set(PointerRNA *ptr, int value)
+{
+  auto *mmd = static_cast<MultiresModifierData *>(ptr->data);
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  if (ob && (!bke::multires_layers::commit(*ob) || !multires_force_sculpt_rebuild(ob))) {
+    BKE_modifier_set_error(ob, &mmd->modifier, "Commit sculpt edits before changing Sculpt Levels");
+    return;
+  }
+  mmd->sculptlvl = std::clamp(value, 0, int(mmd->totlvl));
+}
+
 static void rna_MultiresModifier_level_range(
     PointerRNA *ptr, int *min, int *max, int * /*softmin*/, int * /*softmax*/)
 {
@@ -1351,6 +1995,19 @@ static int rna_MultiresModifier_filepath_length(PointerRNA *ptr)
   CustomDataExternal *external = (id_cast<Mesh *>(ob->data))->corner_data.external;
 
   return strlen((external) ? external->filepath : "");
+}
+
+static int rna_MultiresModifier_shrinkwrap_face_cull_get(PointerRNA *ptr)
+{
+  return static_cast<MultiresModifierData *>(ptr->data)->sculpt_shrinkwrap_options &
+         MOD_SHRINKWRAP_CULL_TARGET_MASK;
+}
+
+static void rna_MultiresModifier_shrinkwrap_face_cull_set(PointerRNA *ptr, int value)
+{
+  auto *mmd = static_cast<MultiresModifierData *>(ptr->data);
+  mmd->sculpt_shrinkwrap_options =
+      (mmd->sculpt_shrinkwrap_options & ~MOD_SHRINKWRAP_CULL_TARGET_MASK) | value;
 }
 
 static int rna_ShrinkwrapModifier_face_cull_get(PointerRNA *ptr)
@@ -2947,43 +3604,71 @@ static void rna_def_modifier_warp(BlenderRNA *brna)
   RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
   RNA_def_property_ui_range(prop, -100, 100, 10, 2);
   RNA_def_property_ui_text(prop, "Strength", "");
-  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_strength_update");
 
   prop = RNA_def_property(srna, "falloff_type", PROP_ENUM, PROP_NONE);
   RNA_def_property_enum_items(prop, modifier_warp_falloff_items);
   RNA_def_property_ui_text(prop, "Falloff Type", "");
   RNA_def_property_translation_context(prop,
                                        BLT_I18NCONTEXT_ID_CURVE_LEGACY); /* Abusing id_curve :/ */
-  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_strength_update");
 
   prop = RNA_def_property(srna, "falloff_radius", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_ui_text(prop, "Radius", "Radius to apply");
-  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_strength_update");
 
   prop = RNA_def_property(srna, "falloff_curve", PROP_POINTER, PROP_NONE);
   RNA_def_property_pointer_sdna(prop, nullptr, "curfalloff");
   RNA_def_property_ui_text(prop, "Falloff Curve", "Custom falloff curve");
-  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_strength_update");
 
   prop = RNA_def_property(srna, "use_volume_preserve", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_WARP_VOLUME_PRESERVE);
   RNA_def_property_ui_text(prop, "Preserve Volume", "Preserve volume when rotations are used");
-  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_strength_update");
 
   prop = RNA_def_property(srna, "vertex_group", PROP_STRING, PROP_NONE);
   RNA_def_property_string_sdna(prop, nullptr, "defgrp_name");
   RNA_def_property_ui_text(prop, "Vertex Group", "Vertex group name for modulating the deform");
   RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_WarpModifier_defgrp_name_set");
-  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_strength_update");
 
   prop = RNA_def_property(srna, "invert_vertex_group", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_WARP_INVERT_VGROUP);
   RNA_def_property_ui_text(prop, "Invert", "Invert vertex group influence");
-  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_strength_update");
 
   RNA_define_lib_overridable(false);
 
   rna_def_modifier_generic_map_info(srna);
+}
+
+static void rna_def_modifier_multires_sculpt_layer(BlenderRNA *brna)
+{
+  StructRNA *srna = RNA_def_struct(brna, "MultiresSculptLayer", nullptr);
+  RNA_def_struct_ui_text(srna, "Multires Sculpt Layer", "Persistent additive sculpt displacement layer");
+  RNA_def_struct_sdna(srna, "MultiresSculptLayer");
+  RNA_def_struct_path_func(srna, "rna_MultiresSculptLayer_path");
+
+  PropertyRNA *prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_MultiresSculptLayer_name_set");
+  RNA_def_struct_name_property(srna, prop);
+  RNA_def_property_ui_text(prop, "Name", "Layer name");
+  RNA_def_property_update(prop, NC_OBJECT | ND_MODIFIER | NA_RENAME, "rna_Modifier_dependency_update");
+
+  prop = RNA_def_property(srna, "strength", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "strength");
+  RNA_def_property_float_funcs(prop, nullptr, "rna_MultiresSculptLayer_strength_set", nullptr);
+  RNA_def_property_range(prop, -10.0f, 10.0f);
+  RNA_def_property_ui_text(prop, "Strength", "Multiplier for the layer displacement");
+  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_strength_update");
+
+  prop = RNA_def_property(srna, "visible", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MULTIRES_SCULPT_LAYER_VISIBLE);
+  RNA_def_property_boolean_funcs(prop, nullptr, "rna_MultiresSculptLayer_visible_set");
+  RNA_def_property_ui_text(prop, "Visible", "Include this layer in the evaluated surface");
+  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_visible_update");
 }
 
 static void rna_def_modifier_multires(BlenderRNA *brna)
@@ -2995,6 +3680,203 @@ static void rna_def_modifier_multires(BlenderRNA *brna)
   RNA_def_struct_ui_text(srna, "Multires Modifier", "Multiresolution mesh modifier");
   RNA_def_struct_sdna(srna, "MultiresModifierData");
   RNA_def_struct_ui_icon(srna, ICON_MOD_MULTIRES);
+
+  prop = RNA_def_property(srna, "sculpt_layers", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "sculpt_layers", nullptr);
+  RNA_def_property_struct_type(prop, "MultiresSculptLayer");
+  RNA_def_property_ui_text(prop, "Sculpt Layers", "Persistent additive sculpt displacement layers");
+  RNA_def_property_srna(prop, "MultiresSculptLayer");
+
+  prop = RNA_def_property(srna, "sculpt_layer_recording", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_layer_recording", 0);
+  RNA_def_property_boolean_funcs(prop, nullptr, "rna_MultiresModifier_recording_set");
+  RNA_def_property_ui_text(prop, "REC", "Record sculpt edits on the active visible layer with non-zero strength");
+  RNA_def_property_update(prop, 0, "rna_MultiresModifier_recording_update");
+
+  prop = RNA_def_property(srna, "active_sculpt_layer_index", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sculpt_layer_active");
+  RNA_def_property_int_funcs(prop, nullptr, "rna_MultiresModifier_active_layer_set", nullptr);
+  RNA_def_property_range(prop, 0, INT_MAX);
+  RNA_def_property_ui_text(prop, "Active Sculpt Layer", "Index of the active sculpt layer");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "use_sculpt_displacement", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_displacement_enabled", 0);
+  RNA_def_property_ui_text(
+      prop, "Texture Displacement", "Evaluate texture displacement directly in Multires and Sculpt Mode");
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  prop = RNA_def_property(srna, "sculpt_displacement_texture", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "sculpt_displacement_texture");
+  RNA_def_property_struct_type(prop, "Texture");
+  RNA_def_property_ui_text(prop, "Texture", "Texture used for procedural Multires displacement");
+  RNA_def_property_flag(prop, PROP_EDITABLE);
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  static const EnumPropertyItem multires_coords[] = {
+      {1, "LOCAL", 0, "Local", "Use the sculpt object's local coordinates"},
+      {2, "GLOBAL", 0, "Global", "Use world coordinates"},
+      {3, "OBJECT", 0, "Object", "Use the reference object's or bone's coordinates"},
+      {0, "UV", 0, "UV", "Use UV coordinates"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_displacement_coords", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_displacement_mapping");
+  RNA_def_property_enum_items(prop, multires_coords);
+  RNA_def_property_ui_text(prop, "Texture Coordinates", "Mapping used by live displacement and Bake to Active Sculpt Layer");
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  prop = RNA_def_property(srna, "sculpt_displacement_coords_object", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "sculpt_displacement_map_object");
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_SELF_CHECK);
+  RNA_def_property_ui_text(prop, "Object", "Reference object for texture coordinates");
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  prop = RNA_def_property(srna, "sculpt_displacement_coords_bone", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "sculpt_displacement_map_bone");
+  RNA_def_property_ui_text(prop, "Bone", "Optional bone in the reference object");
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  prop = RNA_def_property(srna, "sculpt_displacement_uv_layer", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "sculpt_displacement_uv_layer");
+  RNA_def_property_ui_text(prop, "UV Map", "UV map used by the Multires displacement texture; empty uses the active UV map");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_displacement_strength", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_displacement_strength");
+  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
+  RNA_def_property_ui_range(prop, -10.0f, 10.0f, 0.1f, 4);
+  RNA_def_property_ui_text(prop, "Strength", "Strength of procedural Multires displacement");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_displacement_midlevel", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_displacement_midlevel");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop, "Midlevel", "Texture value treated as zero displacement");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "use_sculpt_shrinkwrap", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_shrinkwrap_enabled", 0);
+  RNA_def_property_ui_text(prop, "Shrinkwrap", "Project the evaluated Multires surface onto a target");
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_target", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "sculpt_shrinkwrap_target");
+  RNA_def_property_struct_type(prop, "Object");
+  RNA_def_property_ui_text(prop, "Target", "Mesh onto which the Multires surface is projected");
+  RNA_def_property_pointer_funcs(prop, nullptr, "rna_MultiresModifier_sculpt_shrinkwrap_target_set", nullptr, "rna_Mesh_object_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_SELF_CHECK);
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_offset", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_shrinkwrap_offset");
+  RNA_def_property_range(prop, -FLT_MAX, FLT_MAX);
+  RNA_def_property_ui_text(prop, "Offset", "Distance from the target surface");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_wrap_method", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_shrinkwrap_method");
+  RNA_def_property_enum_items(prop, rna_enum_shrinkwrap_type_items);
+  RNA_def_property_ui_text(prop, "Wrap Method", "");
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_wrap_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_shrinkwrap_mode");
+  RNA_def_property_enum_items(prop, rna_enum_modifier_shrinkwrap_mode_items);
+  RNA_def_property_ui_text(
+      prop, "Snap Mode", "Select how vertices are constrained to the target surface");
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_cull_face", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_shrinkwrap_options");
+  RNA_def_property_enum_items(prop, rna_enum_shrinkwrap_face_cull_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_MultiresModifier_shrinkwrap_face_cull_get",
+                              "rna_MultiresModifier_shrinkwrap_face_cull_set",
+                              nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Face Cull",
+      "Stop vertices from projecting to a face on the target when facing towards/away");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_auxiliary_target", PROP_POINTER, PROP_NONE);
+  RNA_def_property_pointer_sdna(prop, nullptr, "sculpt_shrinkwrap_aux_target");
+  RNA_def_property_ui_text(prop, "Auxiliary Target", "Additional mesh target to shrink to");
+  RNA_def_property_pointer_funcs(
+      prop, nullptr, "rna_MultiresModifier_sculpt_shrinkwrap_aux_target_set", nullptr, "rna_Mesh_object_poll");
+  RNA_def_property_flag(prop, PROP_EDITABLE | PROP_ID_SELF_CHECK);
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_vertex_group", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "sculpt_shrinkwrap_vgroup");
+  RNA_def_property_ui_text(prop, "Vertex Group", "Vertex group name");
+  RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_MultiresModifier_sculpt_shrinkwrap_vgroup_set");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_project_limit", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_shrinkwrap_project_limit");
+  RNA_def_property_range(prop, 0.0, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0, 100, 1, 2);
+  RNA_def_property_ui_text(
+      prop, "Project Limit", "Limit the distance used for projection (zero disables)");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_use_project_x", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_shrinkwrap_axis", MOD_SHRINKWRAP_PROJECT_OVER_X_AXIS);
+  RNA_def_property_ui_text(prop, "X", "");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_use_project_y", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_shrinkwrap_axis", MOD_SHRINKWRAP_PROJECT_OVER_Y_AXIS);
+  RNA_def_property_ui_text(prop, "Y", "");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_use_project_z", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_shrinkwrap_axis", MOD_SHRINKWRAP_PROJECT_OVER_Z_AXIS);
+  RNA_def_property_ui_text(prop, "Z", "");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_subsurf_levels", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sculpt_shrinkwrap_subsurf_levels");
+  RNA_def_property_range(prop, 0, 6);
+  RNA_def_property_ui_range(prop, 0, 6, 1, -1);
+  RNA_def_property_ui_text(
+      prop,
+      "Subdivision Levels",
+      "Number of subdivisions that must be performed before extracting vertices' "
+      "positions and normals");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_use_negative_direction", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_shrinkwrap_options", MOD_SHRINKWRAP_PROJECT_ALLOW_NEG_DIR);
+  RNA_def_property_ui_text(
+      prop, "Negative", "Allow vertices to move in the negative direction of axis");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_use_positive_direction", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_shrinkwrap_options", MOD_SHRINKWRAP_PROJECT_ALLOW_POS_DIR);
+  RNA_def_property_ui_text(
+      prop, "Positive", "Allow vertices to move in the positive direction of axis");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_use_invert_cull", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_shrinkwrap_options", MOD_SHRINKWRAP_INVERT_CULL_TARGET);
+  RNA_def_property_ui_text(
+      prop, "Invert Cull", "When projecting in the negative direction invert the face cull mode");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_invert_vertex_group", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_shrinkwrap_options", MOD_SHRINKWRAP_INVERT_VGROUP);
+  RNA_def_property_ui_text(prop, "Invert", "Invert vertex group influence");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+
+  prop = RNA_def_property(srna, "sculpt_shrinkwrap_strength", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_shrinkwrap_strength");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_text(prop, "Strength", "Influence of Shrinkwrap projection");
+  RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
   RNA_define_lib_overridable(true);
 
@@ -3009,7 +3891,14 @@ static void rna_def_modifier_multires(BlenderRNA *brna)
   prop = RNA_def_property(srna, "sculpt_levels", PROP_INT, PROP_UNSIGNED);
   RNA_def_property_int_sdna(prop, nullptr, "sculptlvl");
   RNA_def_property_ui_text(prop, "Sculpt Levels", "Number of subdivisions to use in sculpt mode");
-  RNA_def_property_int_funcs(prop, nullptr, nullptr, "rna_MultiresModifier_level_range");
+  /* SCULPT_LAYER_UNDO_CROSS_LEVEL_V2: keep the custom setter installed.
+   * A second RNA_def_property_int_funcs() call with a null setter silently
+   * replaced rna_MultiresModifier_sculpt_levels_set, allowing level changes
+   * to bypass the pending Sculpt Layer commit. */
+  RNA_def_property_int_funcs(prop,
+                             nullptr,
+                             "rna_MultiresModifier_sculpt_levels_set",
+                             "rna_MultiresModifier_level_range");
   RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
   prop = RNA_def_property(srna, "render_levels", PROP_INT, PROP_UNSIGNED);
@@ -11692,6 +12581,7 @@ void RNA_def_modifier(BlenderRNA *brna)
   rna_def_modifier_mask(brna);
   rna_def_modifier_simpledeform(brna);
   rna_def_modifier_warp(brna);
+  rna_def_modifier_multires_sculpt_layer(brna);
   rna_def_modifier_multires(brna);
   rna_def_modifier_surface(brna);
   rna_def_modifier_fluid(brna);
@@ -11753,3 +12643,5 @@ void RNA_def_modifier(BlenderRNA *brna)
 }  // namespace blender
 
 #endif
+
+

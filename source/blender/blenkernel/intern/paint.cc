@@ -62,6 +62,7 @@
 #include "BKE_mesh_runtime.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
@@ -2334,6 +2335,10 @@ static bool sculpt_modifiers_active(const Scene *scene, const Sculpt *sd, Object
       continue;
     }
     if (md->type == eModifierType_Multires && (ob->mode & OB_MODE_SCULPT)) {
+      auto *base_mmd = reinterpret_cast<MultiresModifierData *>(md);
+      if (base_mmd->sculptlvl == 0 && bke::multires_layers::base_has_visible_layers(*base_mmd)) {
+        return true;
+      }
       MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
       if (!(mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh)) {
         continue;
@@ -2422,6 +2427,14 @@ static void sculpt_update_object(Depsgraph *depsgraph,
       BKE_sculptsession_free_deformMats(&ss);
 
       BKE_crazyspace_build_sculpt(depsgraph, scene, ob, ss.deform_imats, ss.deform_cos);
+      if (MultiresModifierData *base_mmd = bke::multires_layers::base_modifier(*ob)) {
+        if (base_mmd->sculptlvl == 0 &&
+            bke::multires_layers::base_has_visible_layers(*base_mmd) &&
+            mesh_eval->verts_num == mesh_orig->verts_num)
+        {
+          ss.deform_cos = Array<float3, 0>(mesh_eval->vert_positions());
+        }
+      }
       BKE_pbvh_vert_coords_apply(pbvh, ss.deform_cos);
 
       for (float3x3 &matrix : ss.deform_imats) {
