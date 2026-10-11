@@ -800,20 +800,24 @@ static void shape_panel_draw(const bContext * /*C*/, Panel *panel)
   row = &layout.row(false);
   op_ptr = row->op("OBJECT_OT_multires_base_apply", IFACE_("Apply Base"), ICON_NONE);
   RNA_boolean_set(&op_ptr, "apply_heuristic", true);
-  op_ptr = row->op("OBJECT_OT_multires_base_apply", IFACE_("Conform Base"), ICON_NONE);
-  RNA_boolean_set(&op_ptr, "apply_heuristic", false);
-
-  if (!mmd->sculpt_layers.is_empty()) {
+  if (mmd->sculpt_layers.is_empty()) {
+    op_ptr = row->op("OBJECT_OT_multires_base_apply", IFACE_("Conform Base"), ICON_NONE);
+    RNA_boolean_set(&op_ptr, "apply_heuristic", false);
+  }
+  else {
+    /* Both targets share the layer-preserving rebase. Keep their fitting choices explicit,
+     * and route Base through that rebase instead of the layer-rejecting legacy operator. */
     ui::Layout &col = layout.column(false);
     col.enabled_set(RNA_enum_get(&ob_ptr, "mode") == OB_MODE_OBJECT);
-    col.label(IFACE_("Conform Base — Preserve Layers (Experimental)"), ICON_NONE);
-    op_ptr = col.op("OBJECT_OT_multires_conform_layers", IFACE_("From Final Result"), ICON_NONE);
-    if (op_ptr.type != nullptr && op_ptr.data != nullptr) {
-      RNA_boolean_set(&op_ptr, "include_visible_layers", true);
-    }
-    op_ptr = col.op("OBJECT_OT_multires_conform_layers", IFACE_("Without Layers"), ICON_NONE);
+    col.label(IFACE_("Conform — Preserve Layers (Experimental)"), ICON_NONE);
+    op_ptr = col.op("OBJECT_OT_multires_conform_layers", IFACE_("Conform Base"), ICON_NONE);
     if (op_ptr.type != nullptr && op_ptr.data != nullptr) {
       RNA_boolean_set(&op_ptr, "include_visible_layers", false);
+    }
+    op_ptr = col.op(
+        "OBJECT_OT_multires_conform_layers", IFACE_("Conform Layer-Aware"), ICON_NONE);
+    if (op_ptr.type != nullptr && op_ptr.data != nullptr) {
+      RNA_boolean_set(&op_ptr, "include_visible_layers", true);
     }
   }
 }
