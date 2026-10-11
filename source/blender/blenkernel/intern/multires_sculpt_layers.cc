@@ -1277,6 +1277,21 @@ void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh)
   sizes.finish();
 }
 
+/* BMesh owns native Multires interpolation. Keep valid results, even when no Sculpt Layer
+ * identity can be recovered. New layer deltas and native base displacement are independent. */
+static bool initialize_missing_base_grid(MDisps &grid, const int level, const int area)
+{
+  if (grid.disps && grid.level == level && grid.totdisp == area) {
+    return false;
+  }
+  MEM_SAFE_DELETE(grid.disps);
+  MEM_SAFE_DELETE(grid.hidden);
+  grid.level = level;
+  grid.totdisp = area;
+  grid.disps = MEM_new_array_zeroed<float[3]>(area, "new multires base corner");
+  return true;
+}
+
 bool remap_after_topology_edit(MultiresModifierData &mmd,
                               Mesh &mesh,
                               BitVector<> *r_reset_corners)
@@ -1390,12 +1405,8 @@ bool remap_after_topology_edit(MultiresModifierData &mmd,
       continue;
     }
     MDisps &grid = base[new_corner];
-    MEM_SAFE_DELETE(grid.disps);
-    MEM_SAFE_DELETE(grid.hidden);
-    grid.level = mmd.totlvl;
-    grid.totdisp = area;
-    grid.disps = MEM_new_array_zeroed<float[3]>(area, "new multires base corner");
-    if (r_reset_corners) {
+    const bool initialized = initialize_missing_base_grid(grid, mmd.totlvl, area);
+    if (r_reset_corners && initialized) {
       (*r_reset_corners)[new_corner].set();
     }
   }

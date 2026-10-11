@@ -99,9 +99,40 @@ tests = tests.replace('namespace blender::bke::multires_layers::tests {', '')
 tests = tests.replace('}  // namespace blender::bke::multires_layers::tests', '')
 temp = tempfile.TemporaryDirectory(prefix='multires-layer-remap-')
 out = Path(temp.name) / 'remap_harness.cc'
-out.write_text(stub + function('static void free_layer(') + '\n' +
+base_tests = r'''
+void base_grid_tests(){
+ MDisps valid{}; valid.level=1;valid.totdisp=4;
+ valid.disps=MEM_new_array_zeroed<float[3]>(4,"");valid.disps[0][0]=2.5f;
+ valid.hidden=MEM_new_array_zeroed<unsigned int>(1,"");valid.hidden[0]=5;
+ auto *payload=valid.disps; auto *hidden=valid.hidden;
+ CHECK(!initialize_missing_base_grid(valid,1,4));
+ CHECK(valid.disps==payload && valid.hidden==hidden && valid.disps[0][0]==2.5f);
+ MEM_delete(valid.disps);MEM_delete(valid.hidden);
+ MDisps empty{};
+ CHECK(initialize_missing_base_grid(empty,1,4));
+ CHECK(empty.level==1 && empty.totdisp==4 && empty.disps && !empty.hidden);
+ for(int i=0;i<4;i++)for(int a=0;a<3;a++)CHECK(empty.disps[i][a]==0);
+ MEM_delete(empty.disps);
+ MDisps wrong_level{};wrong_level.level=2;wrong_level.totdisp=9;
+ wrong_level.disps=MEM_new_array_zeroed<float[3]>(9,"");
+ CHECK(initialize_missing_base_grid(wrong_level,1,4));
+ CHECK(wrong_level.level==1 && wrong_level.totdisp==4 && wrong_level.disps[0][0]==0);
+ MEM_delete(wrong_level.disps);
+ MDisps wrong_area{};wrong_area.level=1;wrong_area.totdisp=9;
+ wrong_area.disps=MEM_new_array_zeroed<float[3]>(9,"");
+ CHECK(initialize_missing_base_grid(wrong_area,1,4));
+ CHECK(wrong_area.totdisp==4 && wrong_area.disps[0][0]==0);
+ MEM_delete(wrong_area.disps);
+ std::puts("BaseInterpolation: 4 cases PASS");
+}
+'''
+has_base_helper = 'static bool initialize_missing_base_grid(' in source
+helper = function('static bool initialize_missing_base_grid(') if has_base_helper else ''
+out.write_text(stub + function('static void free_layer(') + '\n' + helper + '\n' +
                function('bool remap_surviving_corners(') + support + tests +
-               '\nint main(){for(auto run:runners)run();}\n')
+               (base_tests if has_base_helper else '') +
+               '\nint main(){for(auto run:runners)run();' +
+               ('base_grid_tests();' if has_base_helper else '') + '}\n')
 subprocess.run(['g++','-std=c++17','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer',
                 str(out),'-o',str(out.with_suffix(''))],check=True)
 env = os.environ.copy()
