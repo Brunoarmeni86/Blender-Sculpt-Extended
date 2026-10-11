@@ -81,7 +81,7 @@ TEST_F(MultiresLayerRemap, InvalidColorStorageDoesNotPublishLayers)
 
 TEST_F(MultiresLayerRemap, InvalidFaceSetStorageDoesNotPublishLayers)
 {
-  mmd.sculpt_face_set_grids = MEM_new_array_zeroed<MultiresFaceSetGrid>(3, "test face sets");
+  mmd.sculpt_face_set_grids = MEM_new_array<MultiresFaceSetGrid>(3, "test face sets");
   mmd.sculpt_face_set_grids_num = 3;
   mmd.sculpt_face_set_level = 2;
   const MDisps *original = layer->disps;
@@ -92,7 +92,7 @@ TEST_F(MultiresLayerRemap, InvalidFaceSetStorageDoesNotPublishLayers)
 
 TEST_F(MultiresLayerRemap, NewFaceSetsStayUniformWithoutDensePayload)
 {
-  mmd.sculpt_face_set_grids = MEM_new_array_zeroed<MultiresFaceSetGrid>(3, "test face sets");
+  mmd.sculpt_face_set_grids = MEM_new_array<MultiresFaceSetGrid>(3, "test face sets");
   mmd.sculpt_face_set_grids_num = 3;
   mmd.sculpt_face_set_level = 1;
   mmd.sculpt_face_set_grids[2].level = 1;

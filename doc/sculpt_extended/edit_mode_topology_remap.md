@@ -35,6 +35,11 @@ preflight failures for color/Face Sets, initialized new Face Sets, and recording
 Against the original baseline source, the sparse-survivor regression fails before any
 payload duplication. The optional `--source` argument reproduces that comparison.
 
+Windows compilation exposed an invalid zeroed allocation of non-trivial Face Set grid
+objects. The follow-up uses constructor-aware `MEM_new_array`, whose in-class defaults
+initialize new grids. The standalone allocator adapter now enforces the same trivial-type
+restriction to catch this class of error. Full Windows compilation remains pending.
+
 The same seven native GTests are registered in blenkernel CMake. They have **not** been
 compiled against Blender here. The standalone adapters do not validate Blender API/ABI,
 BMesh conversion, dependency-graph rebuilds, undo, or visual results.

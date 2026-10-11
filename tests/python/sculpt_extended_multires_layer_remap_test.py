@@ -31,6 +31,7 @@ stub = r'''
 #include <cstdlib>
 #include <cstdio>
 #include <cstddef>
+#include <type_traits>
 template<class T> using Array = std::vector<T>;
 template<class T> struct Span {
  const T *p; size_t n;
@@ -43,17 +44,19 @@ template<class T> struct Span {
  It begin()const{return {0};} It end()const{return {n};}};
  Range index_range()const{return {n};}
 };
-template<class T> T* MEM_new_array_zeroed(size_t n,const char*){return new T[n]();}
+template<class T> T* MEM_new_array_zeroed(size_t n,const char*){
+ static_assert(std::is_trivial_v<T>, "For non-trivial types, MEM_new must be used.");
+ return new T[n]();}
 template<class T> T* MEM_new_array(size_t n,const char*){return new T[n];}
 template<class T> void MEM_delete(T*p){delete[] p;}
 // Only needed to compile the original implementation for the sparse-grid regression.
 // The baseline aborts on that test before it reaches payload duplication.
 template<class T> T* MEM_dupalloc(T*){return nullptr;}
 #define MEM_SAFE_DELETE(p) do {MEM_delete(p);p=nullptr;} while(0)
-struct MDisps {float (*disps)[3]=nullptr; unsigned int *hidden=nullptr; int level=0,totdisp=0;};
+struct MDisps {float (*disps)[3]; unsigned int *hidden; int level,totdisp;};
 struct MultiresSculptLayer {MDisps*disps=nullptr; int grids_num=0,level=1;
  float (*base_deltas)[3]=nullptr; int base_verts_num=0;};
-struct MultiresColorGrid {float (*colors)[4]=nullptr;int totcolor=0,level=0;};
+struct MultiresColorGrid {float (*colors)[4];int totcolor,level;};
 struct MultiresFaceSetGrid {int *ids=nullptr;int totid=0,level=0,uniform_id=1;};
 struct MultiresModifierData {int totlvl=1;std::deque<MultiresSculptLayer> sculpt_layers;
  MultiresColorGrid *sculpt_color_grids=nullptr;int sculpt_color_grids_num=0,sculpt_color_level=0;

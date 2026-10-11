@@ -1205,7 +1205,7 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
   }
   if (mmd.sculpt_face_set_grids) {
     MultiresFaceSetGrid *remapped = new_to_old.is_empty() ? nullptr :
-        MEM_new_array_zeroed<MultiresFaceSetGrid>(new_to_old.size(),
+        MEM_new_array<MultiresFaceSetGrid>(new_to_old.size(),
                                                    "remapped multires face set grids");
     for (const int new_corner : new_to_old.index_range()) {
       const int old_corner = new_to_old[new_corner];
