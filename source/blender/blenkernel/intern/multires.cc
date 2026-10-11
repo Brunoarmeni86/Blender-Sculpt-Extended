@@ -2011,10 +2011,14 @@ bool multires_flush_sculpt_updates(Object *object)
   if (ccg->dirty.coords && layer != nullptr) {
     bke::multires_layers::weight_hot_delta_cache_invalidate(layer);
   }
-  if (mmd->sculpt_layers.is_empty()) {
+  /* Hidden layers contribute neither grid nor L0 deltas to the CCG. Use native
+   * reshape for that base surface without touching any stored layer payload. */
+  if (!bke::multires_layers::base_has_visible_layers(*mmd)) {
     if (!multiresModifier_reshapeFromCCG(mmd->totlvl, mesh, ccg)) {
       return false;
     }
+    /* Cached layer evaluation was built against the previous native base. */
+    bke::multires_layers::weight_hot_delta_cache_invalidate();
   }
   else {
     const auto fail = [&]() {

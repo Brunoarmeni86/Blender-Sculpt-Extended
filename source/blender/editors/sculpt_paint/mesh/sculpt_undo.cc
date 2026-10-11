@@ -278,6 +278,8 @@ struct StepData {
   int layer_frame_active = -1;
   int layer_frame_level = 0;
   int layer_frame_top_level = 0;
+  /* The stroke edits native base MDisps while every stored layer is hidden. */
+  bool native_multires_base_undo = false;
   std::string layer_metadata_modifier;
   Vector<SculptLayerUndoMetadata> layer_metadata;
 
@@ -1563,7 +1565,8 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
                                            Object &object,
                                            StepData &step_data)
 {
-  if (!sculpt_layer_undo_frame_enabled() || step_data.type != Type::Position ||
+  if ((!sculpt_layer_undo_frame_enabled() && !step_data.native_multires_base_undo) ||
+      step_data.type != Type::Position ||
       step_data.layer_frame.is_empty())
   {
     return false;
@@ -1664,7 +1667,8 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
                     (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0});
   }
   const auto &recorded_active = step_data.layer_frame[step_data.layer_frame_active];
-  if (!recorded_active.visible || std::abs(recorded_active.strength) < 1e-6f) {
+  if (!step_data.native_multires_base_undo &&
+      (!recorded_active.visible || std::abs(recorded_active.strength) < 1e-6f)) {
     return reject("INVALID_RECORDED_WEIGHT");
   }
   if (cross_level && !rebuild_level(step_data.layer_frame_level)) {
@@ -1709,7 +1713,9 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
    */
   const int current_active = mmd->sculpt_layer_active;
   const char *same_frame_env = std::getenv("BLENDER_SCULPT_LAYER_UNDO_SAME_FRAME");
-  bool same_frame = !cross_level && same_frame_env && same_frame_env[0] == '1' &&
+  bool same_frame = !cross_level &&
+                    (step_data.native_multires_base_undo ||
+                     (same_frame_env && same_frame_env[0] == '1')) &&
                     current_active == step_data.layer_frame_active;
   for (const int i : current.index_range()) {
     same_frame &= current[i].strength == step_data.layer_frame[i].strength &&
@@ -2512,7 +2518,7 @@ static void store_sculpt_layer_disps(const Object &object, Node &unode)
     return;
   }
   const MultiresModifierData &mmd = *ss.multires_modifier;
-  if (mmd.totlvl <= 0) {
+  if (mmd.totlvl <= 0 || !bke::multires_layers::base_has_visible_layers(mmd)) {
     return;
   }
   const MultiresSculptLayer *layer = bke::multires_layers::active(mmd);
@@ -2894,9 +2900,11 @@ static void save_active_attribute(Object &object, SculptAttrRef *attr)
 static void save_common_data(Object &ob, SculptUndoStep *us)
 {
   us->data.object_name = ob.id.name;
-  if ((sculpt_layer_undo_frame_enabled() || sculpt_layer_undo_persistent_enabled()) &&
-      ob.runtime->sculpt_session && ob.runtime->sculpt_session->subdiv_ccg &&
-      ob.runtime->sculpt_session->multires_modifier)
+  if (ob.runtime->sculpt_session && ob.runtime->sculpt_session->subdiv_ccg &&
+      ob.runtime->sculpt_session->multires_modifier &&
+      (sculpt_layer_undo_frame_enabled() || sculpt_layer_undo_persistent_enabled() ||
+       !bke::multires_layers::base_has_visible_layers(
+           *ob.runtime->sculpt_session->multires_modifier)))
   {
     for (ModifierData &md : ob.modifiers) {
       if (md.type != eModifierType_Multires ||
@@ -2908,6 +2916,8 @@ static void save_common_data(Object &ob, SculptUndoStep *us)
       if (mmd.sculpt_layers.is_empty()) {
         break;
       }
+      us->data.native_multires_base_undo =
+          !bke::multires_layers::base_has_visible_layers(mmd);
       us->data.layer_frame_modifier = md.name;
       us->data.layer_frame_active = mmd.sculpt_layer_active;
       us->data.layer_frame_level = mmd.sculptlvl;
@@ -3232,7 +3242,8 @@ static void sculpt_layer_restore_position_boundary_frame(bContext *C,
                                                          Depsgraph *depsgraph,
                                                          const StepData &step_data)
 {
-  if (step_data.type != Type::Position || step_data.layer_frame.is_empty()) {
+  if (step_data.type != Type::Position || step_data.layer_frame.is_empty() ||
+      step_data.native_multires_base_undo) {
     return;
   }
 

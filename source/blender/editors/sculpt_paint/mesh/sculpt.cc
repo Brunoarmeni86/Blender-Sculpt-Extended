@@ -6331,6 +6331,11 @@ bool sculpt_layers_editable(bContext *C, ReportList *reports)
   {
     return true;
   }
+  /* With every layer hidden, the evaluated CCG is the native Multires base.
+   * Record into base MDisps through native reshape, independently of REC. */
+  if (!bke::multires_layers::base_has_visible_layers(*mmd)) {
+    return true;
+  }
   if (!mmd->sculpt_layer_recording ||
       !bke::multires_layers::can_record(*mmd, *id_cast<Mesh *>(ob->data))) {
     BKE_report(reports, RPT_ERROR,

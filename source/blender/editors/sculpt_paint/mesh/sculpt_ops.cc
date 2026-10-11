@@ -133,7 +133,11 @@ static wmOperatorStatus sculpt_multires_layer_commit_exec(bContext *C, wmOperato
   if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
   DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
   WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
-  BKE_report(op->reports, RPT_INFO, "Layer recorded in memory. Save the .blend to keep it on disk");
+  BKE_report(op->reports,
+             RPT_INFO,
+             bke::multires_layers::base_has_visible_layers(*mmd) ?
+                 "Layer recorded in memory. Save the .blend to keep it on disk" :
+                 "Native Multires base recorded. Hidden layer deltas preserved");
   return OPERATOR_FINISHED;
 }
 
