@@ -927,7 +927,7 @@ static void rasterize_triangle_center_reference(const MultiresBaker &baker,
   float2 high = triangle.tex_uvs[2] * size - center_offset;
 
   if ((low.x == mid.x && low.y == mid.y) ||
-      (low.x == mid.x && low.y == high.y) ||
+      (low.x == high.x && low.y == high.y) ||
       (mid.x == high.x && mid.y == high.y))
   {
     return;
@@ -1013,7 +1013,7 @@ static void rasterize_triangle_coverage(const MultiresBaker &baker,
   float2 high = triangle.tex_uvs[2] * size - sample_offset;
 
   if ((low.x == mid.x && low.y == mid.y) ||
-      (low.x == mid.x && low.y == high.y) ||
+      (low.x == high.x && low.y == high.y) ||
       (mid.x == high.x && mid.y == high.y))
   {
     return;
@@ -1182,7 +1182,7 @@ static void rasterize_triangle(const MultiresBaker &baker,
   float2 p_high = st2_in * ibuf_size - 0.5f;
 
   /* Skip degenerates. */
-  if ((p_low.x == p_mid.x && p_low.y == p_mid.y) || (p_low.x == p_mid.x && p_low.y == p_high.y) ||
+  if ((p_low.x == p_mid.x && p_low.y == p_mid.y) || (p_low.x == p_high.x && p_low.y == p_high.y) ||
       (p_mid.x == p_high.x && p_mid.y == p_high.y))
   {
     return;
@@ -2431,3 +2431,4 @@ void RE_multires_bake_images(MultiresBakeRender &bake)
 }
 
 }  // namespace blender
+
