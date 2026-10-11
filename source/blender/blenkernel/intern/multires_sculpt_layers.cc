@@ -64,10 +64,6 @@
 
 namespace blender::bke::multires_layers {
 
-static constexpr char corner_id_attribute[] = ".sculpt_layer_corner_id";
-
-static constexpr char vertex_id_attribute[] = ".sculpt_layer_vertex_id";
-
 bool is_effective(const MultiresSculptLayer &layer)
 {
   return (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0 && std::isfinite(layer.strength) &&
@@ -137,6 +133,9 @@ bool base_remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh)
     }
   }
   if (stored_count == -1) {
+    /* No cage deltas depend on the old IDs. Reindex even if the attribute survived an edit,
+     * so later creation of L0 deltas starts from the current vertex order. */
+    mesh.attributes_for_write().remove(vertex_id_attribute);
     base_ensure_vertex_ids(mesh);
     return true;
   }
@@ -1133,6 +1132,19 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
   }
   const int side = subdiv::grid_size_from_level(mmd.totlvl);
   const int area = side * side;
+  /* Validate all companion storage before publishing any layer changes. */
+  if (mmd.sculpt_color_grids &&
+      (mmd.sculpt_color_grids_num != old_corners_num ||
+       mmd.sculpt_color_level != mmd.totlvl))
+  {
+    return false;
+  }
+  if (mmd.sculpt_face_set_grids &&
+      (mmd.sculpt_face_set_grids_num != old_corners_num ||
+       mmd.sculpt_face_set_level < 1 || mmd.sculpt_face_set_level > mmd.totlvl))
+  {
+    return false;
+  }
   for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
     if (layer.level != mmd.totlvl || layer.grids_num != old_corners_num ||
         (old_corners_num > 0 && layer.disps == nullptr))
@@ -1144,7 +1156,7 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
         continue;
       }
       const MDisps &grid = layer.disps[old_corner];
-      if (grid.level != layer.level || grid.totdisp != area || grid.disps == nullptr) {
+      if (grid.level != layer.level || grid.totdisp != area) {
         return false;
       }
     }
@@ -1159,27 +1171,24 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
       dst.level = layer.level;
       dst.totdisp = area;
       const int old_corner = new_to_old[new_corner];
-      if (old_corner == -1) {
-        dst.disps = MEM_new_array_zeroed<float[3]>(area, "new sculpt layer corner");
-      }
-      else {
-        const MDisps &src = layer.disps[old_corner];
-        dst.disps = MEM_dupalloc(src.disps);
-        if (src.hidden != nullptr) {
-          dst.hidden = MEM_dupalloc(src.hidden);
-        }
+      if (old_corner >= 0) {
+        /* Transfer ownership, including implicit zero grids, without duplicating high-res
+         * payloads. The one-to-one map above ensures each payload is moved only once. */
+        dst = layer.disps[old_corner];
+        layer.disps[old_corner] = {};
       }
     }
+    /* free_layer() also frees L0 deltas; those were remapped separately and must survive. */
+    float (*base_deltas)[3] = layer.base_deltas;
+    const int base_verts_num = layer.base_verts_num;
+    layer.base_deltas = nullptr;
     free_layer(layer);
+    layer.base_deltas = base_deltas;
+    layer.base_verts_num = base_verts_num;
     layer.disps = remapped;
     layer.grids_num = int(new_to_old.size());
   }
   if (mmd.sculpt_color_grids) {
-    if (mmd.sculpt_color_grids_num != old_corners_num ||
-        mmd.sculpt_color_level != mmd.totlvl)
-    {
-      return false;
-    }
     MultiresColorGrid *remapped = new_to_old.is_empty() ? nullptr :
         MEM_new_array_zeroed<MultiresColorGrid>(new_to_old.size(), "remapped polypaint grids");
     for (const int new_corner : new_to_old.index_range()) {
@@ -1195,13 +1204,8 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
     mmd.sculpt_color_level = mmd.totlvl;
   }
   if (mmd.sculpt_face_set_grids) {
-    if (mmd.sculpt_face_set_grids_num != old_corners_num ||
-        mmd.sculpt_face_set_level < 1 || mmd.sculpt_face_set_level > mmd.totlvl)
-    {
-      return false;
-    }
     MultiresFaceSetGrid *remapped = new_to_old.is_empty() ? nullptr :
-        MEM_new_array<MultiresFaceSetGrid>(new_to_old.size(),
+        MEM_new_array_zeroed<MultiresFaceSetGrid>(new_to_old.size(),
                                                    "remapped multires face set grids");
     for (const int new_corner : new_to_old.index_range()) {
       const int old_corner = new_to_old[new_corner];
@@ -1250,14 +1254,36 @@ void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh)
   SpanAttributeWriter<int> ids = mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
       corner_id_attribute, AttrDomain::Corner);
   for (const int corner : ids.span.index_range()) {
-    ids.span[corner] = corner;
+    ids.span[corner] = corner + 1;
   }
   ids.finish();
+  SpanAttributeWriter<int> previous = mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+      corner_prev_attribute, AttrDomain::Corner);
+  SpanAttributeWriter<int> next = mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+      corner_next_attribute, AttrDomain::Corner);
+  SpanAttributeWriter<int> sizes = mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+      corner_face_size_attribute, AttrDomain::Corner);
+  const OffsetIndices faces = mesh.faces();
+  for (const int face_i : faces.index_range()) {
+    const IndexRange face = faces[face_i];
+    for (const int corner : face) {
+      previous.span[corner] = (corner == face.start() ? face.last() : corner - 1) + 1;
+      next.span[corner] = (corner == face.last() ? face.start() : corner + 1) + 1;
+      sizes.span[corner] = face.size();
+    }
+  }
+  previous.finish();
+  next.finish();
+  sizes.finish();
 }
 
-bool remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh)
+bool remap_after_topology_edit(MultiresModifierData &mmd,
+                              Mesh &mesh,
+                              BitVector<> *r_reset_corners)
 {
-  weight_hot_delta_cache_invalidate();
+  if (r_reset_corners) {
+    r_reset_corners->clear();
+  }
   if (!base_remap_after_topology_edit(mmd, mesh)) {
     return false;
   }
@@ -1287,30 +1313,47 @@ bool remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh)
   if (ids.size() != mesh.corners_num) {
     return false;
   }
-  if (old_corners_num == mesh.corners_num) {
-    bool identity = true;
-    for (const int corner : ids.index_range()) {
-      if (ids[corner] != corner) {
-        identity = false;
-        break;
-      }
-    }
-    if (identity) {
-      return true;
-    }
+  const AttributeReader<int> previous_reader = mesh.attributes().lookup<int>(
+      corner_prev_attribute, AttrDomain::Corner);
+  const AttributeReader<int> next_reader = mesh.attributes().lookup<int>(
+      corner_next_attribute, AttrDomain::Corner);
+  const AttributeReader<int> size_reader = mesh.attributes().lookup<int>(
+      corner_face_size_attribute, AttrDomain::Corner);
+  if (!previous_reader || !next_reader || !size_reader) {
+    return false;
   }
+  const VArraySpan<int> previous(previous_reader.varray);
+  const VArraySpan<int> next(next_reader.varray);
+  const VArraySpan<int> sizes(size_reader.varray);
   Array<int> counts(old_corners_num, 0);
-  for (const int id : ids) {
+  for (const int stored_id : ids) {
+    const int id = stored_id - 1;
     if (id >= 0 && id < old_corners_num) {
       counts[id]++;
     }
   }
   Array<int> new_to_old(mesh.corners_num, -1);
-  for (const int corner : ids.index_range()) {
-    const int id = ids[corner];
-    if (id >= 0 && id < old_corners_num && counts[id] == 1) {
-      new_to_old[corner] = id;
+  const OffsetIndices faces = mesh.faces();
+  bool identity = old_corners_num == mesh.corners_num;
+  for (const int face_i : faces.index_range()) {
+    const IndexRange face = faces[face_i];
+    for (const int corner : face) {
+      const int id = ids[corner] - 1;
+      const int prev_corner = corner == face.start() ? face.last() : corner - 1;
+      const int next_corner = corner == face.last() ? face.start() : corner + 1;
+      /* A retained loop ID alone cannot establish grid orientation after Dissolve, Flip
+       * or rebuilding a face. Preserve only an unchanged cyclic neighborhood. */
+      if (id >= 0 && id < old_corners_num && counts[id] == 1 &&
+          sizes[corner] == face.size() && previous[corner] == ids[prev_corner] &&
+          next[corner] == ids[next_corner])
+      {
+        new_to_old[corner] = id;
+      }
+      identity &= new_to_old[corner] == corner;
     }
+  }
+  if (identity) {
+    return true;
   }
 
   /* Native Multires displacement is stored directly on the current mesh
@@ -1339,6 +1382,9 @@ bool remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh)
     return false;
   }
 
+  if (r_reset_corners) {
+    r_reset_corners->resize(mesh.corners_num, false);
+  }
   for (const int new_corner : new_to_old.index_range()) {
     if (new_to_old[new_corner] >= 0) {
       continue;
@@ -1349,10 +1395,16 @@ bool remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh)
     grid.level = mmd.totlvl;
     grid.totdisp = area;
     grid.disps = MEM_new_array_zeroed<float[3]>(area, "new multires base corner");
+    if (r_reset_corners) {
+      (*r_reset_corners)[new_corner].set();
+    }
   }
 
   MutableAttributeAccessor attributes = mesh.attributes_for_write();
   attributes.remove(corner_id_attribute);
+  attributes.remove(corner_prev_attribute);
+  attributes.remove(corner_next_attribute);
+  attributes.remove(corner_face_size_attribute);
   ensure_corner_ids(mmd, mesh);
   return true;
 }
@@ -3146,3 +3198,4 @@ bool shape_key_fast_update(Object &object, Key &key, KeyBlock &key_block)
 }
 
 }  // namespace blender::bke::multires_layers
+

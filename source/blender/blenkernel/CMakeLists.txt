@@ -777,6 +777,7 @@ if(WITH_GTESTS)
     intern/lib_remap_test.cc
     intern/main_test.cc
     intern/main_namemap_test.cc
+    intern/multires_sculpt_layers_test.cc
     intern/nla_test.cc
     intern/node_socket_value_iter_test.cc
     intern/path_templates_test.cc
@@ -796,3 +797,4 @@ if(WITH_GTESTS)
   )
   blender_add_test_suite_lib(blenkernel "${TEST_SRC}" "${INC};${TEST_INC}" "${INC_SYS}" "${TEST_LIB}")
 endif()
+
