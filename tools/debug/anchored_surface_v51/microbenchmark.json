@@ -1,0 +1,71 @@
+{
+  "median": {
+    "v5": {
+      "build_ms_median": 2.068,
+      "sample_ms_median": 55.635,
+      "checksum": 173199.846983
+    },
+    "v51": {
+      "build_ms_median": 2.158,
+      "sample_ms_median": 54.322,
+      "checksum": 173199.846983
+    }
+  },
+  "runs": {
+    "v5": [
+      {
+        "build_ms": 1.992,
+        "sample_ms": 64.701,
+        "checksum": 173199.846983
+      },
+      {
+        "build_ms": 2.38,
+        "sample_ms": 55.635,
+        "checksum": 173199.846983
+      },
+      {
+        "build_ms": 7.203,
+        "sample_ms": 72.228,
+        "checksum": 173199.846983
+      },
+      {
+        "build_ms": 2.068,
+        "sample_ms": 53.414,
+        "checksum": 173199.846983
+      },
+      {
+        "build_ms": 2.031,
+        "sample_ms": 51.667,
+        "checksum": 173199.846983
+      }
+    ],
+    "v51": [
+      {
+        "build_ms": 2.158,
+        "sample_ms": 60.025,
+        "checksum": 173199.846983
+      },
+      {
+        "build_ms": 2.006,
+        "sample_ms": 54.322,
+        "checksum": 173199.846983
+      },
+      {
+        "build_ms": 1.961,
+        "sample_ms": 54.306,
+        "checksum": 173199.846983
+      },
+      {
+        "build_ms": 2.254,
+        "sample_ms": 52.715,
+        "checksum": 173199.846983
+      },
+      {
+        "build_ms": 2.185,
+        "sample_ms": 60.973,
+        "checksum": 173199.846983
+      }
+    ]
+  },
+  "note": "2 million samples per run, synthetic plane, mocked Blender APIs; not a Blender benchmark."
+}

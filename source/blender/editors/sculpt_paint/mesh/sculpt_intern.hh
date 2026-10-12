@@ -227,6 +227,7 @@ struct StrokeCache {
   std::shared_ptr<AnchorSurfacePathCache> anchor_surface_path;
   /* V5: independent local footprint per symmetry/radial/tile pass, freed with stroke. */
   Vector<std::shared_ptr<AnchorSurfacePathCache>, 8> anchor_surface_passes;
+  bool anchor_surface_allocation_failed = false;
   std::shared_ptr<AnchorProjectionDiagnostics> anchor_projection_diagnostics;
   /* SCULPT_ELASTIC_GRAB_EXACT_V2: freed with this stroke, never stored in DNA. */
   std::shared_ptr<brushes::ElasticGrabWeightCache> elastic_grab_weight_cache;
