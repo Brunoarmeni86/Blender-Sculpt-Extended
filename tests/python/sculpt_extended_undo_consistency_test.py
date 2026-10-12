@@ -14,12 +14,18 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def compile_guards():
     source = (ROOT / "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc").read_text()
+    helper = ""
+    helper_start = source.find("static bool sculpt_layer_undo_ccg_enabled()")
+    if helper_start >= 0:
+        helper = source[helper_start:source.index("\n}\n", helper_start)+2]
     start = source.index("      us->data.layer_persistent_snapshot_valid =")
     expression = source[start:source.index(";", start)+1]
     start = source.index("    if (mmd->sculptlvl < mmd->totlvl || !step_data.layer_position_buffers_match_payload)")
     refresh = source[start:source.index(" {", start)]
     cpp = r'''
 #include <cassert>
+#include <cstdlib>
+HELPER
 struct Data { bool native_multires_base_undo=false; bool layer_persistent_snapshot_valid=false;
               bool layer_position_buffers_match_payload=true; };
 struct Step { Data data; };
@@ -34,6 +40,7 @@ REFRESH return true;
   return false;
 }
 int main() {
+  setenv("BLENDER_SCULPT_LAYER_UNDO_CCG", "0", 1);
   for (int bits=0; bits<32; ++bits) {
     Step step; Modifier modifier; CCG ccg;
     step.data.native_multires_base_undo = bits & 1;
@@ -51,7 +58,7 @@ int main() {
   data.layer_position_buffers_match_payload=true; modifier.sculptlvl=2;
   assert(requires_refresh(&modifier,data));
 }
-'''.replace("EXPRESSION",expression).replace("REFRESH",refresh)
+'''.replace("EXPRESSION",expression).replace("REFRESH",refresh).replace("HELPER",helper)
     with tempfile.TemporaryDirectory() as temp:
         src=Path(temp)/"guards.cc"; exe=Path(temp)/"guards"
         src.write_text(cpp)

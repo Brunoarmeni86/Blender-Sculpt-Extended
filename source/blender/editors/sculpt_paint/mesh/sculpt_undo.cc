@@ -242,6 +242,15 @@ static bool sculpt_layer_undo_frame_enabled()
 }
 
 
+/* CCG coordinates are the sole stroke undo payload. Persistent deltas are written by the
+ * normal pending flush; the captured composition frame handles weight/level transitions.
+ * Set BLENDER_SCULPT_LAYER_UNDO_CCG=0 to compare the previous persistent implementation. */
+static bool sculpt_layer_undo_ccg_enabled()
+{
+  const char *value = std::getenv("BLENDER_SCULPT_LAYER_UNDO_CCG");
+  return value == nullptr || value[0] == '\0' || value[0] != '0';
+}
+
 /* SCULPT_LAYER_UNDO_PERSISTENT_V3
  *
  * Position undo for Sculpt Layers must exchange the persistent, unweighted layer payload,
@@ -1419,7 +1428,8 @@ static bool sculpt_layer_undo_persistent_frame_matches(const MultiresModifierDat
 static SculptLayerPersistentRestoreResult sculpt_layer_undo_persistent_restore(
     Depsgraph *depsgraph, Object &object, StepData &step_data)
 {
-  if (!sculpt_layer_undo_persistent_enabled() || step_data.type != Type::Position ||
+  if (sculpt_layer_undo_ccg_enabled() || !sculpt_layer_undo_persistent_enabled() ||
+      step_data.type != Type::Position ||
       !step_data.position_step_storage || !step_data.position_step_storage->sculpt_layer_undo ||
       step_data.layer_frame.is_empty() || step_data.layer_frame_active < 0 ||
       step_data.layer_frame_active >= step_data.layer_frame.size())
@@ -1576,7 +1586,8 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
   /* This function is reached only when persistent restore did not handle the step.
    * Native coordinates are still tied to their captured composition, regardless of why
    * persistent restore declined (pending capture, invalid payload, or failed commit). */
-  const bool coordinate_frame_fallback = sculpt_layer_undo_persistent_enabled();
+  const bool coordinate_frame_fallback = sculpt_layer_undo_ccg_enabled() ||
+                                         sculpt_layer_undo_persistent_enabled();
   if ((!sculpt_layer_undo_frame_enabled() && !step_data.native_multires_base_undo &&
        !coordinate_frame_fallback) ||
       step_data.type != Type::Position ||
@@ -2525,7 +2536,8 @@ static void store_sculpt_layer_disps(const Object &object,
                                      Node &unode,
                                      const bool persistent_snapshot_valid)
 {
-  if (!sculpt_layer_undo_persistent_enabled() || !persistent_snapshot_valid)
+  if (sculpt_layer_undo_ccg_enabled() || !sculpt_layer_undo_persistent_enabled() ||
+      !persistent_snapshot_valid)
   {
     return;
   }
@@ -2924,7 +2936,8 @@ static void save_common_data(Object &ob, SculptUndoStep *us)
   us->data.object_name = ob.id.name;
   if (ob.runtime->sculpt_session && ob.runtime->sculpt_session->subdiv_ccg &&
       ob.runtime->sculpt_session->multires_modifier &&
-      (sculpt_layer_undo_frame_enabled() || sculpt_layer_undo_persistent_enabled() ||
+      (sculpt_layer_undo_ccg_enabled() || sculpt_layer_undo_frame_enabled() ||
+       sculpt_layer_undo_persistent_enabled() ||
        !bke::multires_layers::base_has_visible_layers(
            *ob.runtime->sculpt_session->multires_modifier)))
   {
@@ -2946,7 +2959,8 @@ static void save_common_data(Object &ob, SculptUndoStep *us)
       us->data.layer_frame_top_level = mmd.totlvl;
       const SubdivCCG &ccg = *ob.runtime->sculpt_session->subdiv_ccg;
       us->data.layer_persistent_snapshot_valid =
-          !us->data.native_multires_base_undo && mmd.sculptlvl == mmd.totlvl &&
+          !sculpt_layer_undo_ccg_enabled() && !us->data.native_multires_base_undo &&
+          mmd.sculptlvl == mmd.totlvl &&
           ccg.level == mmd.totlvl && !ccg.dirty.coords && !ccg.dirty.hidden &&
           !ccg.dirty.masks;
       for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
@@ -3747,6 +3761,7 @@ std::optional<Span<float>> orig_mask_data_lookup_grids(const Object & /*object*/
 }  // namespace ed::sculpt_paint
 
 }  // namespace blender
+
 
 
 
