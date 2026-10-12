@@ -3254,11 +3254,79 @@ static bool step_encode(bContext * /*C*/, Main *bmain, UndoStep *us_p)
   return true;
 }
 
+/* Opt-in sampled state trace. It observes live state and never commits or edits data. */
+static void sculpt_layer_undo_trace_state(bContext *C,
+                                          const SculptUndoStep &us,
+                                          const char *event)
+{
+  const char *trace = std::getenv("BLENDER_SCULPT_LAYER_UNDO_TRACE");
+  if (!trace || trace[0] != '1') {
+    return;
+  }
+  const Object *object = CTX_data_active_object(C);
+  if (!object || object->type != OB_MESH) {
+    return;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(object->data);
+  const SculptSession *ss = object->runtime->sculpt_session;
+  const SubdivCCG *ccg = ss ? ss->subdiv_ccg : nullptr;
+  std::printf(
+      "[UNDO_STATE] event=%s step=%s type=%d mode=%d mesh=%d/%d/%d "
+      "saved_grids=%d saved_side=%d live_grids=%d live_side=%d pending=%d/%d/%d\n",
+      event, us.step.name, int(us.data.type), int(object->mode),
+      mesh.verts_num, mesh.faces_num, mesh.corners_num,
+      us.data.grids.grids_num, us.data.grids.grid_size,
+      ccg ? ccg->grids_num : 0, ccg ? ccg->grid_size : 0,
+      ccg ? int(ccg->dirty.coords) : 0,
+      ccg ? int(ccg->dirty.hidden) : 0,
+      ccg ? int(ccg->dirty.masks) : 0);
+  for (const ModifierData &md : object->modifiers) {
+    if (md.type != eModifierType_Multires) {
+      continue;
+    }
+    const auto &mmd = reinterpret_cast<const MultiresModifierData &>(md);
+    int layer_index = 0;
+    for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+      /* Bound the cost to 256 grids and three samples per grid. This is a sampled
+       * signature: zero energy does not prove the complete layer is empty. */
+      double energy = 0.0;
+      double signature = 0.0;
+      int samples = 0;
+      const int grids = std::min(layer.grids_num, 256);
+      for (int sample_grid = 0; layer.disps && sample_grid < grids; sample_grid++) {
+        const int corner = int(int64_t(sample_grid) * layer.grids_num / grids);
+        const MDisps &grid = layer.disps[corner];
+        if (!grid.disps || grid.totdisp <= 0) {
+          continue;
+        }
+        const int indices[3] = {0, grid.totdisp / 2, grid.totdisp - 1};
+        for (const int index : indices) {
+          for (int axis = 0; axis < 3; axis++) {
+            const double value = grid.disps[index][axis];
+            energy += value * value;
+            signature += value * double(1 + corner * 3 + axis);
+          }
+          samples++;
+        }
+      }
+      std::printf(
+          "[UNDO_LAYER_STATE] event=%s modifier=%s sculpt=%d top=%d layer=%d name=%s "
+          "visible=%d strength=%.9g grids=%d sampled=%d energy=%.17g signature=%.17g\n",
+          event, md.name, mmd.sculptlvl, mmd.totlvl, layer_index++, layer.name,
+          int((layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0),
+          double(layer.strength), layer.grids_num, samples, energy, signature);
+    }
+  }
+  fflush(stdout);
+}
+
 static void step_decode_undo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoStep *us)
 {
   BLI_assert(us->step.is_applied == true);
 
+  sculpt_layer_undo_trace_state(C, *us, "UNDO_BEFORE");
   restore_list(C, depsgraph, us->data);
+  sculpt_layer_undo_trace_state(C, *us, "UNDO_AFTER");
   us->step.is_applied = false;
 }
 
@@ -3266,7 +3334,9 @@ static void step_decode_redo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoS
 {
   BLI_assert(us->step.is_applied == false);
 
+  sculpt_layer_undo_trace_state(C, *us, "REDO_BEFORE");
   restore_list(C, depsgraph, us->data);
+  sculpt_layer_undo_trace_state(C, *us, "REDO_AFTER");
   us->step.is_applied = true;
 }
 
@@ -3329,6 +3399,14 @@ static void sculpt_layer_restore_position_boundary_frame(bContext *C,
     return;
   }
 
+  /* Native CCG undo can leave restored coordinates pending. Flush/release the CCG
+   * while its level and weights still match the current modifier. Changing those
+   * first can make the flush reject the level or solve deltas against wrong weights. */
+  if (!multires_force_sculpt_rebuild(object)) {
+    std::printf("[LAYER_UNDO_BOUNDARY] mode=SKIP reason=OLD_FRAME_FLUSH_FAILED pending_retained=1\n");
+    return;
+  }
+
   mmd->sculptlvl = wanted_level;
   mmd->sculpt_layer_active = step_data.layer_frame_active;
 
@@ -3346,11 +3424,8 @@ static void sculpt_layer_restore_position_boundary_frame(bContext *C,
 
   bke::multires_layers::weight_hot_delta_cache_invalidate();
 
-  /* This path only runs on the first Position step at the Sculpt entry
-   * boundary. V3 has already synchronized the persistent layer payload, so a
-   * rebuild here is a state/display correction rather than another undo
-   * commit. */
-  multires_force_sculpt_rebuild(object);
+  /* The old-frame CCG was already flushed/released before metadata changed.
+   * Evaluate the captured frame from that now-coherent persistent state. */
   DEG_id_tag_update(&object->id, ID_RECALC_GEOMETRY);
   BKE_scene_graph_evaluated_ensure(depsgraph, CTX_data_main(C));
   WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, object);
@@ -3391,7 +3466,9 @@ static void step_decode_undo(bContext *C,
       if (us_iter->step.prev && us_iter->step.prev->type == BKE_UNDOSYS_TYPE_SCULPT) {
         SculptUndoStep *prev = reinterpret_cast<SculptUndoStep *>(us_iter->step.prev);
         if (us_iter->data.type == Type::Position && prev->data.type == Type::None) {
+          sculpt_layer_undo_trace_state(C, *us_iter, "BOUNDARY_BEFORE");
           sculpt_layer_restore_position_boundary_frame(C, depsgraph, us_iter->data);
+          sculpt_layer_undo_trace_state(C, *us_iter, "BOUNDARY_AFTER");
         }
         set_active_layer(C, &prev->active_color_end);
       }
@@ -3434,6 +3511,8 @@ static void step_decode(
 {
   /* NOTE: behavior for undo/redo closely matches image undo. */
   BLI_assert(dir != STEP_INVALID);
+  sculpt_layer_undo_trace_state(
+      C, *reinterpret_cast<const SculptUndoStep *>(us_p), "DECODE_ENTER");
 
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
 
@@ -3474,6 +3553,7 @@ static void step_decode(
   }
 
   SculptUndoStep *us = reinterpret_cast<SculptUndoStep *>(us_p);
+  sculpt_layer_undo_trace_state(C, *us, "DECODE_READY");
   if (dir == STEP_UNDO) {
     step_decode_undo(C, depsgraph, us, is_final);
   }
@@ -3761,6 +3841,7 @@ std::optional<Span<float>> orig_mask_data_lookup_grids(const Object & /*object*/
 }  // namespace ed::sculpt_paint
 
 }  // namespace blender
+
 
 
 
