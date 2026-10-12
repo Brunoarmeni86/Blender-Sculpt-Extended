@@ -1,0 +1,57 @@
+--- a/source/blender/blenkernel/intern/multires.cc
++++ b/source/blender/blenkernel/intern/multires.cc
+@@ -2084,6 +2084,21 @@
+       return true;
+     }
+ 
++    const bool live_displacement_active = mmd->sculpt_displacement_enabled != 0 &&
++                                          mmd->sculpt_displacement_texture != nullptr &&
++                                          mmd->sculpt_displacement_strength != 0.0f;
++    const char *compose_env = BLI_getenv("BLENDER_SCULPT_COMMIT_SKIP_COMPOSE");
++    /* Equal-level reshape overwrites every displacement from CCG before
++     * converting to tangent space. Lower-level propagation still needs the
++     * composed reference. Keep live procedural displacement on its legacy path. */
++    const bool skip_reference_compose = compose_env != nullptr && compose_env[0] == '1' &&
++                                        compose_env[1] == '\0' &&
++                                        ccg->level == mmd->totlvl &&
++                                        !live_displacement_active;
++    const bool compose_trace = multires_layer_commit_trace_enabled();
++    const double compose_start = compose_trace ? BLI_time_now_seconds() : 0.0;
++    int64_t skipped_reference_samples = 0;
++
+     /* Reshape writes displacement AND masks. Isolate both on a temporary mesh;
+      * never use the live base as conversion scratch storage. The CCG being
+      * reshaped already contains the visible layer stack, so make that same
+@@ -2129,6 +2144,10 @@
+         if (layer_grid == nullptr) {
+           continue;
+         }
++        if (skip_reference_compose) {
++          skipped_reference_samples += scratch_base[corner].totdisp;
++          continue;
++        }
+ 
+         for (int i = 0; i < scratch_base[corner].totdisp; i++) {
+           for (int axis = 0; axis < 3; axis++) {
+@@ -2140,9 +2159,18 @@
+     }
+     /* Live procedural displacement belongs to the evaluated reference, not to
+      * recorded layer offsets. Include it during reshape and remove it below. */
+-    const bool live_displacement_active = mmd->sculpt_displacement_enabled != 0 &&
+-                                          mmd->sculpt_displacement_texture != nullptr &&
+-                                          mmd->sculpt_displacement_strength != 0.0f;
++    if (compose_trace) {
++      std::fprintf(stdout,
++                   "[LAYER_COMMIT_REFERENCE] mode=%s reshape=%d top=%d live=%d "
++                   "skipped_samples=%lld prepare=%.3fms\n",
++                   skip_reference_compose ? "SKIP_EQUAL_LEVEL" : "COMPOSE",
++                   ccg->level,
++                   mmd->totlvl,
++                   int(live_displacement_active),
++                   static_cast<long long>(skipped_reference_samples),
++                   (BLI_time_now_seconds() - compose_start) * 1000.0);
++      std::fflush(stdout);
++    }
+     MultiresReshapeContext live_context{};
+     bool live_context_created = false;
+     if (live_displacement_active) {
