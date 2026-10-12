@@ -1,0 +1,16 @@
+{
+  "0": {
+    "advanced": 0,
+    "center_distance": 6.94260788,
+    "fold_stride": 8,
+    "growth_stride": 2,
+    "large_stride": 4
+  },
+  "1": {
+    "advanced": 1,
+    "center_distance": 0,
+    "fold_stride": 1,
+    "growth_stride": 1,
+    "large_stride": 4
+  }
+}
