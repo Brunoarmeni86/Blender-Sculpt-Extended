@@ -1,3 +1,8 @@
+> Windows result after this document was first written: the user tested candidate
+> af4582a2 and reports no fix ("NIENTE"). Do not merge or keep layering guessed fixes.
+> Preserve 3db7a10 as the no-corruption intermediate checkpoint; see
+> edit_mode_undo_checkpoint_status.md for the verified limits and resume plan.
+
 # Sculpt Layers: checkpoint before a mode change
 
 Parent: `3db7a1077faa7c9257d141d668273743d8bb2bf6`.
