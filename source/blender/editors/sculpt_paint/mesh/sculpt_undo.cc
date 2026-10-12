@@ -278,6 +278,12 @@ struct StepData {
   int layer_frame_active = -1;
   int layer_frame_level = 0;
   int layer_frame_top_level = 0;
+  /* Per-step decision made before the stroke: never pair pending CCG coordinates with
+   * stale persistent deltas, or a lower-level surface with a partial top-level snapshot. */
+  bool layer_persistent_snapshot_valid = false;
+  /* A refresh restores persistent data without exchanging compressed_positions. Once that
+   * happens, those coordinates must no longer be used as the paired redo representation. */
+  bool layer_position_buffers_match_payload = true;
   /* The stroke edits native base MDisps while every stored layer is hidden. */
   bool native_multires_base_undo = false;
   std::string layer_metadata_modifier;
@@ -1496,7 +1502,7 @@ static SculptLayerPersistentRestoreResult sculpt_layer_undo_persistent_restore(
      * persistent payload and the lower-level CCG leaves two independent undo representations in
      * play. Recompose the current lower-level CCG directly from the restored persistent payload
      * instead, without changing sculptlvl or rebuilding Multires. */
-    if (mmd->sculptlvl < mmd->totlvl) {
+    if (mmd->sculptlvl < mmd->totlvl || !step_data.layer_position_buffers_match_payload) {
       if (!multires_refresh_sculpt_ccg(&object, mmd)) {
         /* Keep the operation transactional: put the persistent payload back so the legacy path can
          * still handle the step. */
@@ -1514,11 +1520,12 @@ static SculptLayerPersistentRestoreResult sculpt_layer_undo_persistent_restore(
       DEG_id_tag_update(&object.id, ID_RECALC_SYNC_TO_EVAL);
       WM_main_add_notifier(NC_OBJECT | ND_DRAW, &object);
       std::printf(
-          "[LAYER_UNDO_V33] mode=LOWER_LEVEL_REFRESH level=%d top=%d strength=%.6f "
+          "[LAYER_UNDO_V35] mode=PAYLOAD_REFRESH level=%d top=%d strength=%.6f "
           "position_swap=0\n",
           mmd->sculptlvl,
           mmd->totlvl,
           recorded_layer->strength);
+      step_data.layer_position_buffers_match_payload = false;
       return SculptLayerPersistentRestoreResult::Refreshed;
     }
 
@@ -1551,6 +1558,7 @@ static SculptLayerPersistentRestoreResult sculpt_layer_undo_persistent_restore(
       step_data.layer_frame_level,
       mmd->sculptlvl,
       recorded_layer->strength);
+  step_data.layer_position_buffers_match_payload = false;
   return SculptLayerPersistentRestoreResult::Refreshed;
 }
 
@@ -1565,7 +1573,12 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
                                            Object &object,
                                            StepData &step_data)
 {
-  if ((!sculpt_layer_undo_frame_enabled() && !step_data.native_multires_base_undo) ||
+  /* This function is reached only when persistent restore did not handle the step.
+   * Native coordinates are still tied to their captured composition, regardless of why
+   * persistent restore declined (pending capture, invalid payload, or failed commit). */
+  const bool coordinate_frame_fallback = sculpt_layer_undo_persistent_enabled();
+  if ((!sculpt_layer_undo_frame_enabled() && !step_data.native_multires_base_undo &&
+       !coordinate_frame_fallback) ||
       step_data.type != Type::Position ||
       step_data.layer_frame.is_empty())
   {
@@ -1714,7 +1727,7 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
   const int current_active = mmd->sculpt_layer_active;
   const char *same_frame_env = std::getenv("BLENDER_SCULPT_LAYER_UNDO_SAME_FRAME");
   bool same_frame = !cross_level &&
-                    (step_data.native_multires_base_undo ||
+                    (step_data.native_multires_base_undo || coordinate_frame_fallback ||
                      (same_frame_env && same_frame_env[0] == '1')) &&
                     current_active == step_data.layer_frame_active;
   for (const int i : current.index_range()) {
@@ -2508,9 +2521,12 @@ static void fill_node_data_mesh(const Depsgraph &depsgraph,
   }
 }
 
-static void store_sculpt_layer_disps(const Object &object, Node &unode)
+static void store_sculpt_layer_disps(const Object &object,
+                                     Node &unode,
+                                     const bool persistent_snapshot_valid)
 {
-  if (!sculpt_layer_undo_persistent_enabled()) {
+  if (!sculpt_layer_undo_persistent_enabled() || !persistent_snapshot_valid)
+  {
     return;
   }
   const SculptSession &ss = *object.runtime->sculpt_session;
@@ -2564,7 +2580,8 @@ static void store_sculpt_layer_disps(const Object &object, Node &unode)
 static void fill_node_data_grids(const Object &object,
                                  const bke::pbvh::GridsNode &node,
                                  const Type type,
-                                 Node &unode)
+                                 Node &unode,
+                                 const bool persistent_snapshot_valid)
 {
   const SculptSession &ss = *object.runtime->sculpt_session;
   const Mesh &base_mesh = *id_cast<const Mesh *>(object.data);
@@ -2587,7 +2604,7 @@ static void fill_node_data_grids(const Object &object,
       unode.position.reinitialize(verts_num);
       /* Needed for original data lookup. */
       unode.normal.reinitialize(verts_num);
-      store_sculpt_layer_disps(object, unode);
+      store_sculpt_layer_disps(object, unode, persistent_snapshot_valid);
       store_positions_grids(subdiv_ccg, unode);
       break;
     }
@@ -2802,7 +2819,11 @@ void push_node(const Depsgraph &depsgraph,
           depsgraph, object, static_cast<const bke::pbvh::MeshNode &>(*node), type, *unode);
       break;
     case bke::pbvh::Type::Grids:
-      fill_node_data_grids(object, static_cast<const bke::pbvh::GridsNode &>(*node), type, *unode);
+      fill_node_data_grids(object,
+                           static_cast<const bke::pbvh::GridsNode &>(*node),
+                           type,
+                           *unode,
+                           step_data->layer_persistent_snapshot_valid);
       break;
     case bke::pbvh::Type::BMesh:
       BLI_assert_unreachable();
@@ -2861,7 +2882,8 @@ void push_nodes(const Depsgraph &depsgraph,
       });
       threading::parallel_for(nodes_to_fill.index_range(), 1, [&](const IndexRange range) {
         for (const auto &[node, unode] : nodes_to_fill.as_span().slice(range)) {
-          fill_node_data_grids(object, *node, type, *unode);
+          fill_node_data_grids(
+              object, *node, type, *unode, step_data->layer_persistent_snapshot_valid);
         }
       });
       break;
@@ -2922,6 +2944,11 @@ static void save_common_data(Object &ob, SculptUndoStep *us)
       us->data.layer_frame_active = mmd.sculpt_layer_active;
       us->data.layer_frame_level = mmd.sculptlvl;
       us->data.layer_frame_top_level = mmd.totlvl;
+      const SubdivCCG &ccg = *ob.runtime->sculpt_session->subdiv_ccg;
+      us->data.layer_persistent_snapshot_valid =
+          !us->data.native_multires_base_undo && mmd.sculptlvl == mmd.totlvl &&
+          ccg.level == mmd.totlvl && !ccg.dirty.coords && !ccg.dirty.hidden &&
+          !ccg.dirty.masks;
       for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
         us->data.layer_frame.append({layer.name, layer.strength,
                                     (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0});
@@ -3720,4 +3747,6 @@ std::optional<Span<float>> orig_mask_data_lookup_grids(const Object & /*object*/
 }  // namespace ed::sculpt_paint
 
 }  // namespace blender
+
+
 
