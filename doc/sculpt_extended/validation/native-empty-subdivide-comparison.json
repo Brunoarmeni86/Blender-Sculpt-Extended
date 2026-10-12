@@ -1,0 +1,9 @@
+{
+  "vertices": 386,
+  "layers": 3,
+  "levels": 3,
+  "max_coordinate_difference": 1.7881393432617188e-7,
+  "seconds_previous": 0.008559500000046683,
+  "seconds_sparse": 0.0025972000003093854,
+  "scope": "Small empty-layer fixture and persistence only; timings are descriptive. Does not validate Commit, populated layers, Undo or peak RSS."
+}
