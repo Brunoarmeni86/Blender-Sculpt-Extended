@@ -3890,7 +3890,18 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop,
                            "Surface-Adaptive Projection",
                            "Reduce planar texture compression on gently curved surfaces when "
-                           "using Anchored stroke and Area Plane mask mapping");
+                           "using Anchored stroke and Area Plane texture mapping");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  /* ANCHORED_NORMAL_GUIDED_V2: on Multires use true CCG normals for directional scale. */
+  prop = RNA_def_property(srna, "use_anchor_normal_guided_projection", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "flag2", BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED);
+  RNA_def_property_ui_text(
+      prop,
+      "Normal-Guided Projection",
+      "Use evaluated Multires surface normals to improve the Anchored texture mapping; "
+      "falls back to the V1 height estimate where normals are unavailable");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   /* only for projection paint & vertex paint, TODO: other paint modes. */
