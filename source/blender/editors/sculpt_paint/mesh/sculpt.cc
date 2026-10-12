@@ -3566,6 +3566,162 @@ static SculptMeshV3MemorySample sculpt_mesh_v3_memory_sample()
 #endif
   return result;
 }
+/* ANCHORED_GEODESIC_V3: bounded Dijkstra over the actual Multires CCG surface.
+ * This cache is built before worker threads and accessed read-only by them.
+ * Radial distance follows grid edges and cross-face seams; angular coordinates
+ * still follow the brush tangent plane (this is not a complete 2D unwrap). */
+static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
+{
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  StrokeCache &cache = *ss.cache;
+  const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
+  if (!ss.subdiv_ccg || !mtex->tex || mtex->brush_map_mode != MTEX_MAP_MODE_AREA ||
+      brush.stroke_method != BRUSH_STROKE_ANCHORED ||
+      !(brush.flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT) ||
+      !(brush.flag2 & BRUSH_SCULPT_ANCHOR_GEODESIC) || cache.radius <= 1.0e-6f)
+  {
+    cache.anchor_surface_path.reset();
+    return;
+  }
+
+  const SubdivCCG &ccg = *ss.subdiv_ccg;
+  const float cutoff = cache.radius * 1.20f;
+  if (cache.anchor_surface_path && cache.anchor_surface_path->ready &&
+      cache.anchor_surface_path->geometry == &ccg &&
+      cache.anchor_surface_path->coverage_radius >= cutoff &&
+      cache.anchor_surface_path->mirror_pass == int(cache.mirror_symmetry_pass) &&
+      cache.anchor_surface_path->radial_pass == cache.radial_symmetry_pass &&
+      cache.anchor_surface_path->tile_pass == cache.tile_pass &&
+      math::distance_squared(cache.anchor_surface_path->origin, cache.location_symm) <
+          1.0e-12f)
+  {
+    return;
+  }
+
+  cache.anchor_surface_path.reset();
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
+  const Span<float3> positions = ccg.positions.as_span();
+  if (key.grid_size <= 1 || key.grid_area <= 0 || ccg.grids_num <= 0 ||
+      positions.size() != int64_t(ccg.grids_num) * key.grid_area)
+  {
+    return;
+  }
+  const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  const std::optional<SubdivCCGCoord> seed = nearest_vert_calc_grids(
+      pbvh, ccg, cache.location_symm, std::max(cache.radius, 1.0e-4f), false);
+  if (!seed || !BKE_subdiv_ccg_check_coord_valid(ccg, *seed)) {
+    return;
+  }
+
+  auto path = std::make_shared<AnchorSurfacePathCache>();
+  path->geometry = &ccg;
+  path->origin = cache.location_symm;
+  path->coverage_radius = cutoff;
+  path->mirror_pass = int(cache.mirror_symmetry_pass);
+  path->radial_pass = cache.radial_symmetry_pass;
+  path->tile_pass = cache.tile_pass;
+
+  struct Candidate {
+    float distance;
+    int index;
+    bool operator>(const Candidate &other) const { return distance > other.distance; }
+  };
+  std::priority_queue<Candidate, std::vector<Candidate>, std::greater<Candidate>> queue;
+  constexpr size_t max_visited = 300'000;
+  path->distances.reserve(4096);
+  const int seed_index = seed->to_index(key);
+  path->distances.emplace(seed_index, 0.0f);
+  queue.push({0.0f, seed_index});
+  const auto &hidden = ccg.grid_hidden;
+  bool overflow = false;
+
+  while (!queue.empty() && !overflow) {
+    const Candidate item = queue.top();
+    queue.pop();
+    const auto best = path->distances.find(item.index);
+    if (best == path->distances.end() || item.distance > best->second) {
+      continue;
+    }
+    if (item.distance > cutoff) {
+      break;
+    }
+    const int grid = item.index / key.grid_area;
+    const int in_grid = item.index % key.grid_area;
+    const int x = in_grid % key.grid_size;
+    const int y = in_grid / key.grid_size;
+
+    const auto try_neighbor = [&](const int next) {
+      if (next < 0 || next >= positions.size()) {
+        return;
+      }
+      const int next_grid = next / key.grid_area;
+      const int next_local = next % key.grid_area;
+      if (!hidden.is_empty() && hidden[next_grid][next_local]) {
+        return;
+      }
+      const float edge = math::distance(positions[item.index], positions[next]);
+      if (!std::isfinite(edge)) {
+        return;
+      }
+      const float cost = item.distance + edge;
+      if (cost > cutoff) {
+        return;
+      }
+      const auto it = path->distances.find(next);
+      if (it != path->distances.end()) {
+        if (cost < it->second) {
+          it->second = cost;
+          queue.push({cost, next});
+        }
+      }
+      else {
+        if (path->distances.size() >= max_visited) {
+          overflow = true;
+          return;
+        }
+        path->distances.emplace(next, cost);
+        queue.push({cost, next});
+      }
+    };
+
+    /* Eight connected samples inside each quad grid reduce Manhattan artifacts. */
+    for (int dy = -1; dy <= 1 && !overflow; ++dy) {
+      for (int dx = -1; dx <= 1 && !overflow; ++dx) {
+        if (dx == 0 && dy == 0) {
+          continue;
+        }
+        const int nx = x + dx;
+        const int ny = y + dy;
+        if (nx >= 0 && ny >= 0 && nx < key.grid_size && ny < key.grid_size) {
+          try_neighbor(grid * key.grid_area + ny * key.grid_size + nx);
+        }
+      }
+    }
+
+    /* Follow Blender's cross-grid topology and duplicate CCG seam samples. */
+    if (!overflow && (x == 0 || y == 0 || x == key.grid_size - 1 ||
+                      y == key.grid_size - 1))
+    {
+      const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, item.index);
+      SubdivCCGNeighbors neighbors;
+      BKE_subdiv_ccg_neighbor_coords_get(ccg, coord, true, neighbors);
+      for (const SubdivCCGCoord &neighbor : neighbors.coords) {
+        try_neighbor(neighbor.to_index(key));
+        if (overflow) {
+          break;
+        }
+      }
+    }
+  }
+
+  if (overflow) {
+    /* Oversize stamp: release partial cache and revert to V1/V2 sampling. */
+    return;
+  }
+  path->ready = true;
+  cache.anchor_surface_path = std::move(path);
+}
+
 static void do_brush_action(const Depsgraph &depsgraph,
                             const Scene & /*scene*/,
                             Sculpt &sd,
@@ -3749,6 +3905,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
   }
 
   update_brush_local_mat(sd, ob);
+  anchor_surface_path_prepare(brush, ob);
 
   if (brush.deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM) {
     if (!ss.cache->cloth_sim) {
