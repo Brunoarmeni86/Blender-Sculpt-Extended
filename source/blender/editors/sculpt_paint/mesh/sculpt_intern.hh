@@ -39,6 +39,7 @@ struct MultiresSculptLayer;
 
 namespace ed::sculpt_paint {
 struct AnchorSurfacePathCache;
+struct AnchorProjectionDiagnostics;
 namespace brushes {
 struct ElasticGrabWeightCache;
 }
@@ -224,6 +225,7 @@ struct StrokeToggleSettings {
 struct StrokeCache {
   /* ANCHORED_GEODESIC_V3: read-only surface-path cache during parallel brush sampling. */
   std::shared_ptr<AnchorSurfacePathCache> anchor_surface_path;
+  std::shared_ptr<AnchorProjectionDiagnostics> anchor_projection_diagnostics;
   /* SCULPT_ELASTIC_GRAB_EXACT_V2: freed with this stroke, never stored in DNA. */
   std::shared_ptr<brushes::ElasticGrabWeightCache> elastic_grab_weight_cache;
   /* SCULPT_ELASTIC_ACCELERATED_V2: approximate weights must never share Exact entries. */
@@ -1045,3 +1047,4 @@ void SCULPT_OT_dynamic_topology_toggle(wmOperatorType *ot);
 /** \} */
 
 }  // namespace blender
+

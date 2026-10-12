@@ -14,6 +14,7 @@
 #  include <windows.h>
 #  include <psapi.h>
 #endif
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
@@ -129,6 +130,75 @@ namespace ed::sculpt_paint {
 
 /* ANCHORED_GEODESIC_V3: use memory proportional to the stamp, never the complete mesh.
  * Allocated and updated before parallel brush execution, then only read by workers. */
+/* ANCHORED_DIAGNOSTICS_V41: opt-in, stroke-owned; no DNA or geometry writes.
+ * Sample counters deliberately measure texture calls, not unique vertices. */
+struct AnchorProjectionDiagnostics {
+  int level = 0;
+  const char *reason = "ineligible";
+  const char *transport_reason = "disabled";
+  const char *cache_event = "new";
+  float seed_normal_dot = 0.0f, seed_y_dot = 0.0f;
+  double prepare_ms = 0.0, search_ms = 0.0, audit_ms = 0.0;
+  size_t visited = 0, frames = 0, cap = 0, popped = 0, relaxed = 0;
+  size_t failed_transport = 0, nonfinite_uv = 0, seam_edges = 0;
+  size_t seam_pairs = 0, seam_missing = 0;
+  float seam_uv_max = 0.0f, tangent_error_max = 0.0f;
+  bool requested = false, built_transport = false;
+  std::atomic<uint64_t> samples[6]{}; /* planar, V1, V2, V3, V4, rejected. */
+  std::atomic<uint64_t> missing_ccg{0};
+};
+
+static int anchor_diagnostic_level()
+{
+  /* Read once per process; disabled path has no sample atomics or audit traversal. */
+  static const int level = []() {
+    const char *value = std::getenv("BLENDER_ANCHOR_DIAGNOSTICS");
+    return value && value[0] == '2' ? 2 : (value && value[0] == '1' ? 1 : 0);
+  }();
+  return level;
+}
+
+struct AnchorDiagnosticTimer {
+  AnchorProjectionDiagnostics *diag;
+  double start;
+  ~AnchorDiagnosticTimer()
+  {
+    if (diag) {
+      diag->prepare_ms = (BLI_time_now_seconds() - start) * 1000.0;
+    }
+  }
+};
+
+static void anchor_diagnostic_report(const StrokeCache &cache)
+{
+  const auto *d = cache.anchor_projection_diagnostics.get();
+  if (!d) {
+    return;
+  }
+  std::printf("[ANCHOR_DIAG] reason=%s transport=%s cache=%s requested=%d built=%d "
+              "pass=%d/%d/%d radius=%.9g prepare_ms=%.3f search_ms=%.3f audit_ms=%.3f "
+              "visited=%zu frames=%zu cap=%zu popped=%zu relaxed=%zu "
+              "transport_fail=%zu uv_nonfinite=%zu seam_edges=%zu "
+              "seam_pairs=%zu seam_missing=%zu seam_uv_max=%.9g tangent_error=%.9g "
+              "seed_normal_dot=%.6g seed_y_dot=%.6g "
+              "planar=%llu v1=%llu v2=%llu v3=%llu v4=%llu rejected=%llu missing_ccg=%llu\n",
+              d->reason, d->transport_reason, d->cache_event,
+              int(d->requested), int(d->built_transport),
+              int(cache.mirror_symmetry_pass), cache.radial_symmetry_pass, cache.tile_pass,
+              double(cache.radius), d->prepare_ms, d->search_ms, d->audit_ms,
+              d->visited, d->frames, d->cap, d->popped, d->relaxed,
+              d->failed_transport, d->nonfinite_uv, d->seam_edges,
+              d->seam_pairs, d->seam_missing, double(d->seam_uv_max),
+              double(d->tangent_error_max), double(d->seed_normal_dot), double(d->seed_y_dot),
+              (unsigned long long)d->samples[0].load(std::memory_order_relaxed),
+              (unsigned long long)d->samples[1].load(std::memory_order_relaxed),
+              (unsigned long long)d->samples[2].load(std::memory_order_relaxed),
+              (unsigned long long)d->samples[3].load(std::memory_order_relaxed),
+              (unsigned long long)d->samples[4].load(std::memory_order_relaxed),
+              (unsigned long long)d->samples[5].load(std::memory_order_relaxed),
+              (unsigned long long)d->missing_ccg.load(std::memory_order_relaxed));
+}
+
 struct AnchorSurfacePathFrame {
   float2 uv = float2(0.0f);
   float3 tangent_x = float3(0.0f);
@@ -2564,6 +2634,11 @@ void sculpt_apply_texture(const SculptSession &ss,
 
       mul_m4_v3(cache.brush_local_mat.ptr(), symm_point);
 
+      auto *anchor_diag = cache.anchor_projection_diagnostics.get();
+      int anchor_mode = 0;
+      if (anchor_diag && ccg_index < 0) {
+        anchor_diag->missing_ccg.fetch_add(1, std::memory_order_relaxed);
+      }
       float x = symm_point[0];
       float y = symm_point[1];
 
@@ -2578,8 +2653,12 @@ void sculpt_apply_texture(const SculptSession &ss,
           (brush.flag2 & BRUSH_SCULPT_ANCHOR_GEODESIC) && surface_path &&
           surface_path->ready && ccg_index >= 0;
       if (use_surface_path) {
+        anchor_mode = 3;
         const auto found = surface_path->distances.find(ccg_index);
         if (found == surface_path->distances.end() || found->second > cache.radius) {
+          if (anchor_diag) {
+            anchor_diag->samples[5].fetch_add(1, std::memory_order_relaxed);
+          }
           *r_value = 0.0f;
           r_rgba = float4(0.0f);
           return;
@@ -2595,6 +2674,7 @@ void sculpt_apply_texture(const SculptSession &ss,
             x = frame->second.uv.x / cache.radius;
             y = frame->second.uv.y / cache.radius;
             transported = true;
+            anchor_mode = 4;
           }
         }
         if (!transported) {
@@ -2618,6 +2698,7 @@ void sculpt_apply_texture(const SculptSession &ss,
           (brush.flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT))
       {
         const float planar_radius = sqrtf(x * x + y * y);
+        anchor_mode = 1;
         const float normal_offset = fabsf(symm_point[2]);
         if (planar_radius > 1.0e-5f && normal_offset > 1.0e-6f) {
           /* Circular arc estimate: s / r = (1 + t^2) * atan(t) / t,
@@ -2644,6 +2725,7 @@ void sculpt_apply_texture(const SculptSession &ss,
                 const float theta = min_ff(atan2f(fabsf(radial_tilt), n.z), 1.15f);
                 if (theta > 1.0e-4f) {
                   arc_scale = min_ff(theta / sinf(theta), 1.30f);
+                  anchor_mode = 2;
                 }
               }
             }
@@ -2654,6 +2736,9 @@ void sculpt_apply_texture(const SculptSession &ss,
         }
       }
 
+      if (anchor_diag) {
+        anchor_diag->samples[anchor_mode].fetch_add(1, std::memory_order_relaxed);
+      }
       x *= mtex->size[0];
       y *= mtex->size[1];
 
@@ -3629,11 +3714,26 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
   const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
+  cache.anchor_projection_diagnostics.reset();
+  if (anchor_diagnostic_level() && brush.stroke_method == BRUSH_STROKE_ANCHORED) {
+    cache.anchor_projection_diagnostics = std::make_shared<AnchorProjectionDiagnostics>();
+    cache.anchor_projection_diagnostics->level = anchor_diagnostic_level();
+    cache.anchor_projection_diagnostics->requested =
+        bool(brush.flag2 & BRUSH_SCULPT_ANCHOR_TRANSPORT);
+  }
+  auto *diag = cache.anchor_projection_diagnostics.get();
+  const AnchorDiagnosticTimer timer{diag, diag ? BLI_time_now_seconds() : 0.0};
   if (!ss.subdiv_ccg || !mtex->tex || mtex->brush_map_mode != MTEX_MAP_MODE_AREA ||
       brush.stroke_method != BRUSH_STROKE_ANCHORED ||
       !(brush.flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT) ||
       !(brush.flag2 & BRUSH_SCULPT_ANCHOR_GEODESIC) || cache.radius <= 1.0e-6f)
   {
+    if (diag) {
+      diag->reason = !ss.subdiv_ccg ? "no_ccg" : !mtex->tex ? "no_texture" :
+          mtex->brush_map_mode != MTEX_MAP_MODE_AREA ? "non_area_mapping" :
+          !(brush.flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT) ? "surface_disabled" :
+          !(brush.flag2 & BRUSH_SCULPT_ANCHOR_GEODESIC) ? "geodesic_disabled" : "tiny_radius";
+    }
     cache.anchor_surface_path.reset();
     return;
   }
@@ -3646,10 +3746,28 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
       (brush.flag2 & BRUSH_SCULPT_ANCHOR_TRANSPORT) &&
       cache.mirror_symmetry_pass == 0 && cache.radial_symmetry_pass == 0 &&
       cache.tile_pass == 0;
+  if (diag) {
+    diag->transport_reason = !diag->requested ? "disabled" :
+        !transport_requested ? "symmetry_or_tile" : "eligible";
+  }
   float3 reference_axis = {cache.brush_local_mat_inv[0][0],
                            cache.brush_local_mat_inv[0][1],
                            cache.brush_local_mat_inv[0][2]};
   const bool reference_valid = normalize_v3(reference_axis) > 1.0e-6f;
+  if (diag && cache.anchor_surface_path) {
+    const auto &previous = *cache.anchor_surface_path;
+    diag->cache_event = previous.geometry != &ccg ? "geometry_changed" :
+        previous.coverage_radius < cache.radius * 1.05f ? "radius_growth" :
+        previous.mirror_pass != int(cache.mirror_symmetry_pass) ||
+        previous.radial_pass != cache.radial_symmetry_pass ||
+        previous.tile_pass != cache.tile_pass ? "pass_changed" :
+        math::distance_squared(previous.origin, cache.location_symm) >= 1.0e-12f ?
+            "origin_changed" :
+        transport_requested && !previous.transport_ready ? "transport_not_ready" :
+        transport_requested && (!reference_valid ||
+            math::dot(previous.reference_axis, reference_axis) <= 0.9999f) ?
+            "axis_changed" : "reusable";
+  }
   if (cache.anchor_surface_path && cache.anchor_surface_path->ready &&
       cache.anchor_surface_path->geometry == &ccg &&
       cache.anchor_surface_path->coverage_radius >= cache.radius * 1.05f &&
@@ -3662,6 +3780,13 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
       math::distance_squared(cache.anchor_surface_path->origin, cache.location_symm) <
           1.0e-12f)
   {
+    if (diag) {
+      diag->reason = "reuse";
+      diag->visited = cache.anchor_surface_path->distances.size();
+      diag->frames = cache.anchor_surface_path->frames.size();
+      diag->built_transport = cache.anchor_surface_path->transport_ready;
+      diag->cap = diag->built_transport ? 100'000 : 300'000;
+    }
     return;
   }
 
@@ -3671,12 +3796,14 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
   if (key.grid_size <= 1 || key.grid_area <= 0 || ccg.grids_num <= 0 ||
       positions.size() != int64_t(ccg.grids_num) * key.grid_area)
   {
+    if (diag) { diag->reason = "invalid_ccg"; }
     return;
   }
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   const std::optional<SubdivCCGCoord> seed = nearest_vert_calc_grids(
       pbvh, ccg, cache.location_symm, std::max(cache.radius, 1.0e-4f), false);
   if (!seed || !BKE_subdiv_ccg_check_coord_valid(ccg, *seed)) {
+    if (diag) { diag->reason = "no_seed"; }
     return;
   }
 
@@ -3691,19 +3818,35 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
   const Span<float3> normals = ccg.normals.as_span();
   bool build_transport = transport_requested && reference_valid &&
                          normals.size() == positions.size();
+  if (diag && transport_requested) {
+    diag->transport_reason = !reference_valid ? "invalid_reference_axis" :
+        normals.size() != positions.size() ? "missing_normals" : "eligible";
+  }
   if (build_transport) {
     const float3 &seed_normal = normals[seed->to_index(key)];
     float3 n = seed_normal;
     if (normalize_v3(n) < 1.0e-6f) {
+      if (diag) { diag->transport_reason = "invalid_seed_normal"; }
       build_transport = false;
     }
     else {
       float3 seed_axis = reference_axis - math::dot(reference_axis, n) * n;
       if (normalize_v3(seed_axis) < 1.0e-6f) {
+        if (diag) { diag->transport_reason = "degenerate_seed_axis"; }
         build_transport = false;
       }
       else {
         const float3 tangent_y = math::cross(n, seed_axis);
+        if (diag) {
+          float3 expected_y = {cache.brush_local_mat_inv[1][0],
+                               cache.brush_local_mat_inv[1][1],
+                               cache.brush_local_mat_inv[1][2]};
+          float3 expected_normal = cache.sculpt_normal_symm;
+          normalize_v3(expected_y);
+          normalize_v3(expected_normal);
+          diag->seed_normal_dot = math::dot(n, expected_normal);
+          diag->seed_y_dot = math::dot(tangent_y, expected_y);
+        }
         const float3 origin_offset = positions[seed->to_index(key)] - cache.location_symm;
         AnchorSurfacePathFrame initial_frame;
         initial_frame.tangent_x = seed_axis;
@@ -3715,6 +3858,10 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
     }
   }
   path->transport_ready = build_transport;
+  if (diag) {
+    diag->built_transport = build_transport;
+    if (build_transport) { diag->transport_reason = "built"; }
+  }
 
   struct Candidate {
     float distance;
@@ -3730,10 +3877,13 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
   queue.push({0.0f, seed_index});
   const auto &hidden = ccg.grid_hidden;
   bool overflow = false;
+  const double search_start = diag ? BLI_time_now_seconds() : 0.0;
+  if (diag) { diag->cap = max_visited; }
 
   while (!queue.empty() && !overflow) {
     const Candidate item = queue.top();
     queue.pop();
+    if (diag) { ++diag->popped; }
     const auto best = path->distances.find(item.index);
     if (best == path->distances.end() || item.distance > best->second) {
       continue;
@@ -3772,6 +3922,10 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
         return;
       }
 
+      if (diag) {
+        ++diag->relaxed;
+        diag->seam_edges += size_t(next_grid != grid);
+      }
       if (build_transport) {
         const auto parent = path->frames.find(item.index);
         float3 transported_axis;
@@ -3798,10 +3952,12 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
             path->frames.insert_or_assign(next, frame);
           }
           else {
+            if (diag) { ++diag->nonfinite_uv; }
             path->frames.erase(next);
           }
         }
         else {
+          if (diag) { ++diag->failed_transport; }
           /* Discontinuous normals fall back to the V3 angular projection. */
           path->frames.erase(next);
         }
@@ -3846,6 +4002,42 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
     }
   }
 
+  if (diag) {
+    diag->search_ms = (BLI_time_now_seconds() - search_start) * 1000.0;
+    diag->visited = path->distances.size();
+    diag->frames = path->frames.size();
+    diag->reason = overflow ? "sample_cap_v1_v2" : "built";
+  }
+  /* Level 2 audits final duplicate seam coordinates. It never changes the cache. */
+  if (diag && diag->level >= 2 && !overflow && build_transport) {
+    const double audit_start = BLI_time_now_seconds();
+    for (const auto &entry : path->frames) {
+      const int index = entry.first;
+      float3 n = normals[index];
+      if (normalize_v3(n) > 1.0e-6f) {
+        diag->tangent_error_max = std::max(diag->tangent_error_max,
+            fabsf(math::dot(n, entry.second.tangent_x)));
+      }
+      const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, index);
+      if (coord.x != 0 && coord.y != 0 && coord.x != key.grid_size - 1 &&
+          coord.y != key.grid_size - 1) { continue; }
+      SubdivCCGNeighbors neighbors;
+      BKE_subdiv_ccg_neighbor_coords_get(ccg, coord, true, neighbors);
+      for (const SubdivCCGCoord &neighbor : neighbors.coords) {
+        const int next = neighbor.to_index(key);
+        if (next <= index || neighbor.grid_index == coord.grid_index ||
+            !path->distances.count(next) ||
+            math::distance_squared(positions[index], positions[next]) > 1.0e-16f)
+        { continue; }
+        const auto frame = path->frames.find(next);
+        if (frame == path->frames.end()) { ++diag->seam_missing; continue; }
+        ++diag->seam_pairs;
+        diag->seam_uv_max = std::max(diag->seam_uv_max,
+            math::length(entry.second.uv - frame->second.uv));
+      }
+    }
+    diag->audit_ms = (BLI_time_now_seconds() - audit_start) * 1000.0;
+  }
   if (overflow) {
     /* Oversize stamp: release partial cache and revert to V1/V2 sampling. */
     return;
@@ -4236,6 +4428,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
       cloth::do_simulation_step(depsgraph, sd, ob, *ss.cache->cloth_sim, node_mask);
     }
   }
+
+  anchor_diagnostic_report(*ss.cache);
 
   /* Update average stroke position. */
   const float3 world_location = math::project_point(ob.object_to_world(), ss.cache->location);
@@ -9316,3 +9510,4 @@ void face_set_overlay_check(bContext &C, wmOperator &op)
 }  // namespace ed::sculpt_paint
 
 }  // namespace blender
+
