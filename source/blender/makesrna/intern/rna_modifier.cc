@@ -1646,13 +1646,16 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
    * Include a one-vertex-adjacent coarse-face ring for shared seams/normals. */
   const OffsetIndices faces = mesh->faces();
   BitVector<> support(mesh->faces_num, false);
-  for (const int face : faces.index_range()) {
-    for (const int corner : faces[face]) {
-      if (layer.disps[corner].disps != nullptr) {
-        support[face].set();
-        r_support_faces++;
-        break;
-      }
+  Vector<int> payload_grids;
+  if (!bke::multires_layers::payload_grids(layer, ccg->grids_num, payload_grids)) {
+    r_reason = "LAYER_SUPPORT_LAYOUT";
+    return false;
+  }
+  for (const int grid : payload_grids) {
+    const int face = int(std::upper_bound(faces.data().begin(), faces.data().end(), grid) - faces.data().begin() - 1);
+    if (!support[face]) {
+      support[face].set();
+      r_support_faces++;
     }
   }
   if (r_support_faces == 0) {

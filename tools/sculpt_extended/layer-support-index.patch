@@ -1,0 +1,211 @@
+--- a/source/blender/blenkernel/intern/multires.cc
++++ b/source/blender/blenkernel/intern/multires.cc
+@@ -1138,6 +1138,7 @@
+ void bke::multires_layers::weight_hot_delta_cache_invalidate(
+     const MultiresSculptLayer *layer)
+ {
++  payload_index_invalidate(layer);
+   std::unique_lock<std::mutex> lock(multires_weight_hot_delta_cache_mutex());
+   MultiresWeightHotDeltaCache &hot = multires_weight_hot_delta_cache();
+   if (layer != nullptr && hot.layer != layer) {
+@@ -1189,16 +1190,13 @@
+   r_affected_faces.fill(false);
+   BitVector<> affected_grids(ccg->grids_num,false);
+   Vector<int> payload_grids;
+-  const OffsetIndices faces=mesh->faces();
+-  for (const int face: faces.index_range()) {
+-    for (const int grid: faces[face]) {
+-      const MDisps &g=layer.disps[grid];
+-      if (g.disps==nullptr) continue;
+-      if (g.level!=mmd.totlvl || g.totdisp!=area) return false;
+-      if (!affected_grids[grid]) payload_grids.append(grid);
+-      affected_grids[grid].set();
+-      r_affected_faces[face].set();
+-    }
++  if (!bke::multires_layers::payload_grids(layer, ccg->grids_num, payload_grids)) {
++    return false;
++  }
++  const OffsetIndices faces = mesh->faces();
++  for (const int grid : payload_grids) {
++    affected_grids[grid].set();
++    r_affected_faces[int(std::upper_bound(faces.data().begin(), faces.data().end(), grid) - faces.data().begin() - 1)].set();
+   }
+   if (payload_grids.is_empty() || std::abs(weight_delta)<1.0e-12f) return true;
+ 
+--- a/source/blender/blenkernel/intern/multires_sculpt_layers.cc
++++ b/source/blender/blenkernel/intern/multires_sculpt_layers.cc
+@@ -43,6 +43,8 @@
+ #include "DNA_modifier_types.h"
+ #include "DNA_meshdata_types.h"
+ 
++#include <mutex>
++
+ #include "BLI_listbase.h"
+ #include "BLI_array.hh"
+ #include "BLI_bit_vector.hh"
+@@ -65,6 +67,101 @@
+ #include "MEM_guardedalloc.h"
+ 
+ namespace blender::bke::multires_layers {
++
++struct LayerPayloadIndex {
++  const MultiresSculptLayer *layer = nullptr;
++  const MDisps *descriptors = nullptr;
++  int grids_num = 0;
++  int level = 0;
++  Vector<int> grids;
++
++  void clear()
++  {
++    layer = nullptr;
++    descriptors = nullptr;
++    grids_num = level = 0;
++    grids.clear();
++  }
++};
++
++static LayerPayloadIndex &payload_index()
++{
++  static LayerPayloadIndex cache;
++  return cache;
++}
++
++static std::mutex &payload_index_mutex()
++{
++  static std::mutex mutex;
++  return mutex;
++}
++
++void payload_index_invalidate(const MultiresSculptLayer *layer)
++{
++  std::lock_guard<std::mutex> lock(payload_index_mutex());
++  LayerPayloadIndex &cache = payload_index();
++  if (layer == nullptr || cache.layer == layer) {
++    cache.clear();
++  }
++}
++
++bool payload_grids(const MultiresSculptLayer &layer,
++                   const int expected_grids,
++                   Vector<int> &r_grids)
++{
++  r_grids.clear();
++  if (layer.disps == nullptr || layer.grids_num != expected_grids ||
++      layer.level <= 0 || layer.level > 13)
++  {
++    return false;
++  }
++  const int side = subdiv::grid_size_from_level(layer.level);
++  const int area = side * side;
++  const char *value = BLI_getenv("BLENDER_SCULPT_LAYER_SUPPORT_CACHE");
++  const bool enabled = value != nullptr && value[0] == '1' && value[1] == '\0';
++  std::lock_guard<std::mutex> lock(payload_index_mutex());
++  LayerPayloadIndex &cache = payload_index();
++  const bool hit = enabled && cache.layer == &layer && cache.descriptors == layer.disps &&
++                   cache.grids_num == expected_grids && cache.level == layer.level;
++  if (hit) {
++    /* Validate occupied descriptors; zero-payload allocation changes invalidate
++     * the index via grid_ensure before the next property transaction. */
++    for (const int grid : cache.grids) {
++      const MDisps &data = layer.disps[grid];
++      if (data.disps == nullptr || data.level != layer.level || data.totdisp != area) {
++        cache.clear();
++        return false;
++      }
++    }
++    r_grids.extend(cache.grids.as_span());
++  }
++  else {
++    cache.clear();
++    for (int grid = 0; grid < expected_grids; grid++) {
++      const MDisps &data = layer.disps[grid];
++      if (data.disps == nullptr) {
++        continue;
++      }
++      if (data.level != layer.level || data.totdisp != area) {
++        return false;
++      }
++      r_grids.append(grid);
++    }
++    if (enabled) {
++      cache.layer = &layer;
++      cache.descriptors = layer.disps;
++      cache.grids_num = expected_grids;
++      cache.level = layer.level;
++      cache.grids.extend(r_grids.as_span());
++    }
++  }
++  if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
++    std::printf("[LAYER_SUPPORT_INDEX] mode=%s grids=%d/%d\n",
++                enabled ? (hit ? "HIT" : "BUILD") : "OFF",
++                int(r_grids.size()), expected_grids);
++  }
++  return true;
++}
+ 
+ bool is_effective(const MultiresSculptLayer &layer)
+ {
+@@ -1059,6 +1156,7 @@
+ 
+ static void free_layer(MultiresSculptLayer &layer)
+ {
++  weight_hot_delta_cache_invalidate(&layer);
+   MEM_SAFE_DELETE(layer.base_deltas);
+   layer.base_verts_num = 0;
+   if (layer.disps != nullptr) {
+@@ -2580,6 +2678,7 @@
+ 
+   if (grid.disps == nullptr) {
+     grid.disps = MEM_new_array_zeroed<float[3]>(area, "multires sparse sculpt layer grid");
++    weight_hot_delta_cache_invalidate(&layer);
+   }
+ 
+   return grid.disps;
+--- a/source/blender/blenkernel/BKE_multires_sculpt_layers.hh
++++ b/source/blender/blenkernel/BKE_multires_sculpt_layers.hh
+@@ -3,6 +3,7 @@
+ #pragma once
+ 
+ #include "BLI_span.hh"
++#include "BLI_vector.hh"
+ #include "BLI_math_vector_types.hh"
+ 
+ /** \file
+@@ -31,6 +32,11 @@
+ inline constexpr char corner_next_attribute[] = ".sculpt_layer_corner_next_v2";
+ inline constexpr char corner_face_size_attribute[] = ".sculpt_layer_face_size_v2";
+ inline constexpr char vertex_id_attribute[] = ".sculpt_layer_vertex_id";
++
++/** Runtime sparse-grid support index. Opt-in cache; output is an owned copy.
++ * Invalidation accompanies payload allocation, free and existing layer edits. */
++bool payload_grids(const MultiresSculptLayer &layer, int expected_grids, Vector<int> &r_grids);
++void payload_index_invalidate(const MultiresSculptLayer *layer = nullptr);
+ 
+ /** True when a layer contributes to evaluation at all: visible, finite and non-zero strength.
+  * This is useful for performance-sensitive callers which want to pre-filter layers before
+--- a/source/blender/makesrna/intern/rna_modifier.cc
++++ b/source/blender/makesrna/intern/rna_modifier.cc
+@@ -1646,13 +1646,16 @@
+    * Include a one-vertex-adjacent coarse-face ring for shared seams/normals. */
+   const OffsetIndices faces = mesh->faces();
+   BitVector<> support(mesh->faces_num, false);
+-  for (const int face : faces.index_range()) {
+-    for (const int corner : faces[face]) {
+-      if (layer.disps[corner].disps != nullptr) {
+-        support[face].set();
+-        r_support_faces++;
+-        break;
+-      }
++  Vector<int> payload_grids;
++  if (!bke::multires_layers::payload_grids(layer, ccg->grids_num, payload_grids)) {
++    r_reason = "LAYER_SUPPORT_LAYOUT";
++    return false;
++  }
++  for (const int grid : payload_grids) {
++    const int face = int(std::upper_bound(faces.data().begin(), faces.data().end(), grid) - faces.data().begin() - 1);
++    if (!support[face]) {
++      support[face].set();
++      r_support_faces++;
+     }
+   }
+   if (r_support_faces == 0) {

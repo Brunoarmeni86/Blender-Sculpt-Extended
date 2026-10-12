@@ -43,6 +43,8 @@
 #include "DNA_modifier_types.h"
 #include "DNA_meshdata_types.h"
 
+#include <mutex>
+
 #include "BLI_listbase.h"
 #include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
@@ -65,6 +67,101 @@
 #include "MEM_guardedalloc.h"
 
 namespace blender::bke::multires_layers {
+
+struct LayerPayloadIndex {
+  const MultiresSculptLayer *layer = nullptr;
+  const MDisps *descriptors = nullptr;
+  int grids_num = 0;
+  int level = 0;
+  Vector<int> grids;
+
+  void clear()
+  {
+    layer = nullptr;
+    descriptors = nullptr;
+    grids_num = level = 0;
+    grids.clear();
+  }
+};
+
+static LayerPayloadIndex &payload_index()
+{
+  static LayerPayloadIndex cache;
+  return cache;
+}
+
+static std::mutex &payload_index_mutex()
+{
+  static std::mutex mutex;
+  return mutex;
+}
+
+void payload_index_invalidate(const MultiresSculptLayer *layer)
+{
+  std::lock_guard<std::mutex> lock(payload_index_mutex());
+  LayerPayloadIndex &cache = payload_index();
+  if (layer == nullptr || cache.layer == layer) {
+    cache.clear();
+  }
+}
+
+bool payload_grids(const MultiresSculptLayer &layer,
+                   const int expected_grids,
+                   Vector<int> &r_grids)
+{
+  r_grids.clear();
+  if (layer.disps == nullptr || layer.grids_num != expected_grids ||
+      layer.level <= 0 || layer.level > 13)
+  {
+    return false;
+  }
+  const int side = subdiv::grid_size_from_level(layer.level);
+  const int area = side * side;
+  const char *value = BLI_getenv("BLENDER_SCULPT_LAYER_SUPPORT_CACHE");
+  const bool enabled = value != nullptr && value[0] == '1' && value[1] == '\0';
+  std::lock_guard<std::mutex> lock(payload_index_mutex());
+  LayerPayloadIndex &cache = payload_index();
+  const bool hit = enabled && cache.layer == &layer && cache.descriptors == layer.disps &&
+                   cache.grids_num == expected_grids && cache.level == layer.level;
+  if (hit) {
+    /* Validate occupied descriptors; zero-payload allocation changes invalidate
+     * the index via grid_ensure before the next property transaction. */
+    for (const int grid : cache.grids) {
+      const MDisps &data = layer.disps[grid];
+      if (data.disps == nullptr || data.level != layer.level || data.totdisp != area) {
+        cache.clear();
+        return false;
+      }
+    }
+    r_grids.extend(cache.grids.as_span());
+  }
+  else {
+    cache.clear();
+    for (int grid = 0; grid < expected_grids; grid++) {
+      const MDisps &data = layer.disps[grid];
+      if (data.disps == nullptr) {
+        continue;
+      }
+      if (data.level != layer.level || data.totdisp != area) {
+        return false;
+      }
+      r_grids.append(grid);
+    }
+    if (enabled) {
+      cache.layer = &layer;
+      cache.descriptors = layer.disps;
+      cache.grids_num = expected_grids;
+      cache.level = layer.level;
+      cache.grids.extend(r_grids.as_span());
+    }
+  }
+  if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+    std::printf("[LAYER_SUPPORT_INDEX] mode=%s grids=%d/%d\n",
+                enabled ? (hit ? "HIT" : "BUILD") : "OFF",
+                int(r_grids.size()), expected_grids);
+  }
+  return true;
+}
 
 bool is_effective(const MultiresSculptLayer &layer)
 {
@@ -1059,6 +1156,7 @@ bool bake_visible_to_base(MultiresModifierData &mmd, Mesh &mesh)
 
 static void free_layer(MultiresSculptLayer &layer)
 {
+  weight_hot_delta_cache_invalidate(&layer);
   MEM_SAFE_DELETE(layer.base_deltas);
   layer.base_verts_num = 0;
   if (layer.disps != nullptr) {
@@ -2580,6 +2678,7 @@ float (*grid_ensure(MultiresSculptLayer &layer, const int corner))[3]
 
   if (grid.disps == nullptr) {
     grid.disps = MEM_new_array_zeroed<float[3]>(area, "multires sparse sculpt layer grid");
+    weight_hot_delta_cache_invalidate(&layer);
   }
 
   return grid.disps;
@@ -3307,5 +3406,6 @@ bool shape_key_fast_update(Object &object, Key &key, KeyBlock &key_block)
 }
 
 }  // namespace blender::bke::multires_layers
+
 
 

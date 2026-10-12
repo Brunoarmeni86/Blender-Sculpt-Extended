@@ -1,0 +1,160 @@
+--- a/source/blender/blenkernel/intern/multires.cc
++++ b/source/blender/blenkernel/intern/multires.cc
+@@ -40,6 +40,7 @@
+ #include "BKE_mesh_types.hh"
+ #include "BKE_modifier.hh"
+ #include "BKE_multires.hh"
++#include "multires_layer_cache_budget.hh"
+ #include "BKE_multires_sculpt_layers.hh"
+ #include "BKE_paint.hh"
+ #include "BKE_paint_bvh.hh"
+@@ -951,7 +952,7 @@
+                              slot_ready && (new_capacity_grids == 0 || frames);
+ 
+     if (!same_layout) {
+-      grid_slots.reset(new int[new_grids_num]);
++      grid_slots.reset(new_capacity_grids > 0 ? new int[new_grids_num] : nullptr);
+       slot_grids.reset(new_capacity_grids > 0 ? new int[new_capacity_grids] : nullptr);
+       slot_ready.reset(new_capacity_grids > 0 ? new uint8_t[new_capacity_grids] : nullptr);
+       frames.reset(new_capacity_grids > 0 ?
+@@ -959,7 +960,9 @@
+                        nullptr);
+     }
+ 
+-    std::fill_n(grid_slots.get(), new_grids_num, -1);
++    if (new_capacity_grids > 0) {
++      std::fill_n(grid_slots.get(), new_grids_num, -1);
++    }
+     if (new_capacity_grids > 0) {
+       std::fill_n(slot_grids.get(), new_capacity_grids, -1);
+       std::fill_n(slot_ready.get(), new_capacity_grids, uint8_t(0));
+@@ -999,6 +1002,25 @@
+ {
+   const char *value = BLI_getenv("BLENDER_SCULPT_COMMIT_FRAME_CACHE");
+   return value != nullptr && value[0] != '\0' && value[0] != '0';
++}
++
++/* Opt-in total budget. Absent preserves the validated legacy policy.
++ * Read once per process; restart Blender after changing the budget. */
++static int64_t multires_layer_cache_budget_bytes()
++{
++  static const int64_t bytes = []() -> int64_t {
++    const char *value = BLI_getenv("BLENDER_SCULPT_LAYER_CACHE_MB");
++    if (value == nullptr || value[0] == '\0') {
++      return -1;
++    }
++    char *end = nullptr;
++    const long parsed = std::strtol(value, &end, 10);
++    if (end == value || *end != '\0' || parsed < 0) {
++      return -1;
++    }
++    return int64_t(std::min<long>(parsed, 32768)) * 1024 * 1024;
++  }();
++  return bytes;
+ }
+ 
+ static int multires_sculpt_commit_base_frame_cache_capacity()
+@@ -1187,7 +1209,10 @@
+   BLI_SCOPED_DEFER([&](){ multires_reshape_context_free(&context); });
+ 
+   const uint64_t fingerprint=multires_sculpt_commit_base_fingerprint(context,mmd.totlvl);
+-  const bool hot_enabled=multires_weight_hot_delta_cache_enabled();
++  const int64_t budget = multires_layer_cache_budget_bytes();
++  const bool budget_fits = bke::multires_layers::cache_budget::weight_fits(
++      int(payload_grids.size()), area, ccg->grids_num, budget);
++  const bool hot_enabled = multires_weight_hot_delta_cache_enabled() && budget_fits;
+   std::unique_lock<std::mutex> hot_lock(multires_weight_hot_delta_cache_mutex());
+   MultiresWeightHotDeltaCache &hot=multires_weight_hot_delta_cache();
+ 
+@@ -1205,6 +1230,13 @@
+     *r_hot_cache_hit = exact_hit;
+   }
+ 
++  if (!hot_enabled && budget >= 0) {
++    hot.clear();
++    if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
++      std::printf("[LAYER_CACHE_BUDGET] weight=BYPASS budget=%.1fMiB grids=%d\n",
++                  double(budget) / (1024.0 * 1024.0), int(payload_grids.size()));
++    }
++  }
+   const double hot_start=BLI_time_now_seconds();
+   if (!exact_hit && hot_enabled) {
+     hot.clear();
+@@ -1485,7 +1517,17 @@
+         std::unique_lock<std::mutex>(multires_sculpt_commit_base_frame_cache_mutex());
+     MultiresCommitBaseFrameCache &frame_cache = multires_sculpt_commit_base_frame_cache();
+     const uint64_t fingerprint = multires_sculpt_commit_base_fingerprint(context, mmd.totlvl);
+-    commit_frame_capacity = multires_sculpt_commit_base_frame_cache_capacity();
++    commit_frame_capacity = bke::multires_layers::cache_budget::frame_capacity(
++        multires_sculpt_commit_base_frame_cache_capacity(),
++        area,
++        ccg.grids_num,
++        multires_layer_cache_budget_bytes(),
++        sizeof(MultiresCommitBaseFrame));
++    if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
++      std::printf("[LAYER_CACHE_BUDGET] frame_capacity=%d budget=%.1fMiB\n",
++                  commit_frame_capacity,
++                  double(multires_layer_cache_budget_bytes()) / (1024.0 * 1024.0));
++    }
+ 
+     const bool cache_matches = frame_cache.mesh == &mesh && frame_cache.mmd == &mmd &&
+                                frame_cache.fingerprint == fingerprint &&
+@@ -1525,7 +1567,7 @@
+     /* Pass 1: resolve and pin all hits before any eviction is allowed. */
+     for (const int dirty_i : grids.index_range()) {
+       const int grid = grids[dirty_i];
+-      const int slot = frame_cache.grid_slots[grid];
++      const int slot = frame_cache.capacity_grids > 0 ? frame_cache.grid_slots[grid] : -1;
+ 
+       if (slot < 0) {
+         commit_frame_misses.append(dirty_i);
+--- /dev/null
++++ b/source/blender/blenkernel/intern/multires_layer_cache_budget.hh
+@@ -0,0 +1,47 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++
++namespace blender::bke::multires_layers::cache_budget {
++
++/* Each cache receives half of the optional total payload/lookup budget.
++ * A negative budget selects the pre-existing allocation policy. */
++inline int frame_capacity(const int requested,
++                          const int area,
++                          const int grids_num,
++                          const int64_t budget,
++                          const int frame_bytes)
++{
++  if (budget < 0) {
++    return requested;
++  }
++  if (area <= 0 || grids_num < 0 || frame_bytes <= 0) {
++    return 0;
++  }
++  const int64_t lookup_bytes = int64_t(grids_num) * sizeof(int);
++  const int64_t available = budget / 2 - lookup_bytes;
++  const int64_t per_grid = int64_t(area) * frame_bytes + sizeof(int) + sizeof(uint8_t);
++  if (available < per_grid) {
++    return 0;
++  }
++  return int(std::min<int64_t>(std::clamp(requested, 0, grids_num), available / per_grid));
++}
++
++inline bool weight_fits(const int payload_grids,
++                        const int area,
++                        const int grids_num,
++                        const int64_t budget)
++{
++  if (budget < 0) {
++    return true;
++  }
++  if (payload_grids < 0 || area <= 0 || grids_num < 0) {
++    return false;
++  }
++  const int64_t bytes = int64_t(payload_grids) * area * 3 * sizeof(float) +
++                        int64_t(grids_num) * sizeof(int) + int64_t(payload_grids) * sizeof(int);
++  return bytes <= budget / 2;
++}
++}  // namespace blender::bke::multires_layers::cache_budget

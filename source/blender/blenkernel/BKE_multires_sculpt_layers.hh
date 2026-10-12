@@ -3,6 +3,7 @@
 #pragma once
 
 #include "BLI_span.hh"
+#include "BLI_vector.hh"
 #include "BLI_math_vector_types.hh"
 
 /** \file
@@ -31,6 +32,11 @@ inline constexpr char corner_prev_attribute[] = ".sculpt_layer_corner_prev_v2";
 inline constexpr char corner_next_attribute[] = ".sculpt_layer_corner_next_v2";
 inline constexpr char corner_face_size_attribute[] = ".sculpt_layer_face_size_v2";
 inline constexpr char vertex_id_attribute[] = ".sculpt_layer_vertex_id";
+
+/** Runtime sparse-grid support index. Opt-in cache; output is an owned copy.
+ * Invalidation accompanies payload allocation, free and existing layer edits. */
+bool payload_grids(const MultiresSculptLayer &layer, int expected_grids, Vector<int> &r_grids);
+void payload_index_invalidate(const MultiresSculptLayer *layer = nullptr);
 
 /** True when a layer contributes to evaluation at all: visible, finite and non-zero strength.
  * This is useful for performance-sensitive callers which want to pre-filter layers before
@@ -202,5 +208,6 @@ bool visible_direct_delta(Object &object,
 
 }  // namespace bke::multires_layers
 }  // namespace blender
+
 
 

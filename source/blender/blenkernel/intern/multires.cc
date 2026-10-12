@@ -1138,6 +1138,7 @@ static std::mutex &multires_weight_hot_delta_cache_mutex()
 void bke::multires_layers::weight_hot_delta_cache_invalidate(
     const MultiresSculptLayer *layer)
 {
+  payload_index_invalidate(layer);
   std::unique_lock<std::mutex> lock(multires_weight_hot_delta_cache_mutex());
   MultiresWeightHotDeltaCache &hot = multires_weight_hot_delta_cache();
   if (layer != nullptr && hot.layer != layer) {
@@ -1189,16 +1190,13 @@ bool bke::multires_layers::weight_direct_delta(Object &object,
   r_affected_faces.fill(false);
   BitVector<> affected_grids(ccg->grids_num,false);
   Vector<int> payload_grids;
-  const OffsetIndices faces=mesh->faces();
-  for (const int face: faces.index_range()) {
-    for (const int grid: faces[face]) {
-      const MDisps &g=layer.disps[grid];
-      if (g.disps==nullptr) continue;
-      if (g.level!=mmd.totlvl || g.totdisp!=area) return false;
-      if (!affected_grids[grid]) payload_grids.append(grid);
-      affected_grids[grid].set();
-      r_affected_faces[face].set();
-    }
+  if (!bke::multires_layers::payload_grids(layer, ccg->grids_num, payload_grids)) {
+    return false;
+  }
+  const OffsetIndices faces = mesh->faces();
+  for (const int grid : payload_grids) {
+    affected_grids[grid].set();
+    r_affected_faces[int(std::upper_bound(faces.data().begin(), faces.data().end(), grid) - faces.data().begin() - 1)].set();
   }
   if (payload_grids.is_empty() || std::abs(weight_delta)<1.0e-12f) return true;
 
