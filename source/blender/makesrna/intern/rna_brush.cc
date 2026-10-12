@@ -3904,6 +3904,17 @@ static void rna_def_brush(BlenderRNA *brna)
       "falls back to the V1 height estimate where normals are unavailable");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  /* ANCHORED_GEODESIC_V3: opt-in discrete surface-path radius on Multires. */
+  prop = RNA_def_property(srna, "use_anchor_geodesic_projection", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "flag2", BRUSH_SCULPT_ANCHOR_GEODESIC);
+  RNA_def_property_ui_text(
+      prop,
+      "Surface Path Projection",
+      "Sample a bounded shortest-path distance over Multires grids to limit alpha "
+      "distortion on folded or curved surfaces; falls back to V2 on oversized stamps");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   /* only for projection paint & vertex paint, TODO: other paint modes. */
   prop = RNA_def_property(srna, "use_alpha", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_negative_sdna(prop, nullptr, "flag", BRUSH_LOCK_ALPHA);
