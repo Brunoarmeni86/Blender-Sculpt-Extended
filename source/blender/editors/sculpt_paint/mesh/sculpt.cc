@@ -8028,7 +8028,7 @@ void calc_brush_texture_factors(const SculptSession &ss,
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
   const Span<float3> normals = subdiv_ccg.normals.as_span();
   if (key.grid_area <= 0 || grids.size() * key.grid_area != positions.size() ||
-      normals.size() < subdiv_ccg.grids.size() * key.grid_area)
+      normals.size() < subdiv_ccg.grids_num * key.grid_area)
   {
     calc_brush_texture_factors(ss, brush, positions, factors);
     return;
@@ -8037,7 +8037,7 @@ void calc_brush_texture_factors(const SculptSession &ss,
   const int thread_id = BLI_task_parallel_thread_id(nullptr);
   for (const int grid_i : grids.index_range()) {
     const int global_grid = grids[grid_i];
-    if (global_grid < 0 || global_grid >= subdiv_ccg.grids.size()) {
+    if (global_grid < 0 || global_grid >= subdiv_ccg.grids_num) {
       continue;
     }
     const int local_offset = grid_i * key.grid_area;
