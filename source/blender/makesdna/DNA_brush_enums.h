@@ -424,6 +424,8 @@ enum eBrushFlags2 : int {
   BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT = (1 << 23),
   /* ANCHORED_NORMAL_GUIDED_V2: sample existing CCG normals, never allocate full-resolution arrays. */
   BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED = (1 << 24),
+  /* ANCHORED_GEODESIC_V3: bounded CCG surface shortest-path sampling. */
+  BRUSH_SCULPT_ANCHOR_GEODESIC = (1 << 25),
 };
 ENUM_OPERATORS(eBrushFlags2)
 
