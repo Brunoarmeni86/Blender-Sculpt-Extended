@@ -3915,6 +3915,17 @@ static void rna_def_brush(BlenderRNA *brna)
       "distortion on folded or curved surfaces; falls back to V2 on oversized stamps");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  /* ANCHORED_SURFACE_TRANSPORT_V4: opt-in tangent-frame texture orientation. */
+  prop = RNA_def_property(srna, "use_anchor_surface_transport", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "flag2", BRUSH_SCULPT_ANCHOR_TRANSPORT);
+  RNA_def_property_ui_text(
+      prop,
+      "Surface Tangent Transport",
+      "Transport the alpha orientation along Multires CCG paths instead of keeping "
+      "a fixed tangent-plane angle; requires Surface Path, falls back to V3 if unavailable");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   /* only for projection paint & vertex paint, TODO: other paint modes. */
   prop = RNA_def_property(srna, "use_alpha", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_negative_sdna(prop, nullptr, "flag", BRUSH_LOCK_ALPHA);
