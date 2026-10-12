@@ -648,6 +648,45 @@ static float3x3 get_to_tangent_matrix_tbn_hq(const RasterizeTriangle &triangle,
 }
 
 
+/* Vector Displacement uses normalized N and B, but the interpolated T
+ * remains unnormalized in Cycles. Return a T,B,N inverse; callers retain
+ * the existing T,N,B channel packing. Do not normalize the displacement. */
+static float3x3 get_to_tangent_matrix_vector_tbn(const RasterizeTriangle &triangle,
+                                               const float2 &bary_uv)
+{
+  static const bool enabled = []() {
+    const char *value = BLI_getenv("BLENDER_MULTIRES_BAKE_VECTOR_CYCLES_TBN");
+    return value == nullptr || value[0] != '0' || value[1] != '\0';
+  }();
+  if (!enabled) {
+    return get_to_tangent_matrix_tbn_hq(triangle, bary_uv);
+  }
+  if (!triangle.has_uv_tangents) {
+    return float3x3::identity();
+  }
+
+  const float u = bary_uv.x;
+  const float v = bary_uv.y;
+  const float w = 1.0f - u - v;
+  const float4 &tang0 = triangle.uv_tangents[0];
+  const float4 &tang1 = triangle.uv_tangents[1];
+  const float4 &tang2 = triangle.uv_tangents[2];
+  const float sign = tang0.w * u + tang1.w * v + tang2.w * w;
+  const float3 tangent = tang0.xyz() * u + tang1.xyz() * v + tang2.xyz() * w;
+  const float3 normal = triangle.get_normal(bary_uv);
+  float3 bitangent = math::cross(normal, tangent);
+  if (math::dot(bitangent, bitangent) <= 1.0e-20f || math::abs(sign) <= 1.0e-10f) {
+    return get_to_tangent_matrix_tbn_hq(triangle, bary_uv);
+  }
+  bitangent = math::normalize(bitangent) * sign;
+
+  float3x3 from_tangent;
+  from_tangent.x = tangent;
+  from_tangent.y = bitangent;
+  from_tangent.z = normal;
+  return math::invert(from_tangent);
+}
+
 /* Get matrix which converts object space to tangent space in the (tangent, normal, bitangent)
  * convention. */
 static float3x3 get_to_tangent_matrix_tnb(const RasterizeTriangle &triangle, const float2 &bary_uv)
@@ -1477,7 +1516,7 @@ class MultiresVectorDisplacementBaker : public MultiresBaker {
       return displacement;
     }
 
-    const float3 tbn = get_to_tangent_matrix_tbn_hq(triangle, bary_uv) * displacement;
+    const float3 tbn = get_to_tangent_matrix_vector_tbn(triangle, bary_uv) * displacement;
     return float3(tbn.x, tbn.z, tbn.y);
   }
 
@@ -1517,7 +1556,7 @@ class MultiresVectorDisplacementBaker : public MultiresBaker {
       return displacement;
     }
 
-    const float3 tbn = get_to_tangent_matrix_tbn_hq(triangle, center_bary_uv) *
+    const float3 tbn = get_to_tangent_matrix_vector_tbn(triangle, center_bary_uv) *
                        displacement;
     return float3(tbn.x, tbn.z, tbn.y);
   }

@@ -110,6 +110,7 @@ def main(output):
                              angle_degrees=angle,length_relative_error=(decoded.length-length)/length if length>1e-9 else 0.0,
                              candidate_tangent=list(candidate),candidate_position_error=(candidate_decoded-expected).length))
     report=dict(blender=bpy.app.version_string,ss='4',active_uv=mesh.uv_layers.active.name,
+                vector_cycles_tbn=os.environ.get('BLENDER_MULTIRES_BAKE_VECTOR_CYCLES_TBN','1'),
                 frame_sha256=hashlib.sha256(json.dumps(frames,sort_keys=True).encode()).hexdigest(),
                 summary=stats(rows),regular=stats([r for r in rows if not r['mirrored']]),
                 mirrored=stats([r for r in rows if r['mirrored']]),samples=rows,
