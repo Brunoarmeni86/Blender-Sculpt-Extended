@@ -2539,6 +2539,27 @@ void sculpt_apply_texture(const SculptSession &ss,
       float x = symm_point[0];
       float y = symm_point[1];
 
+      /* ANCHORED_SURFACE_PROJECTION_V1.
+       * Standard uses the unchanged planar Area Plane mapping. With this optional mode,
+       * compensate the tangent-plane chord length using an osculating circular arc estimate.
+       * This is local curvature compensation, NOT a global geodesic unwrap. It keeps the
+       * projected angle, is bounded for folds/high-frequency details, and requires no new
+       * topology traversal or persistent Multires buffers. */
+      if (brush.stroke_method == BRUSH_STROKE_ANCHORED &&
+          (brush.flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT))
+      {
+        const float planar_radius = sqrtf(x * x + y * y);
+        const float normal_offset = fabsf(symm_point[2]);
+        if (planar_radius > 1.0e-5f && normal_offset > 1.0e-6f) {
+          /* Circular arc estimate: s / r = (1 + t^2) * atan(t) / t,
+           * t = abs(height) / radial tangent-plane distance. */
+          const float t = min_ff(normal_offset / planar_radius, 0.65f);
+          const float arc_scale = min_ff((1.0f + t * t) * atanf(t) / t, 1.30f);
+          x *= arc_scale;
+          y *= arc_scale;
+        }
+      }
+
       x *= mtex->size[0];
       y *= mtex->size[1];
 
