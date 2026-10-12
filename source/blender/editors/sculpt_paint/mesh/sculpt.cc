@@ -129,6 +129,11 @@ namespace ed::sculpt_paint {
 
 /* ANCHORED_GEODESIC_V3: use memory proportional to the stamp, never the complete mesh.
  * Allocated and updated before parallel brush execution, then only read by workers. */
+struct AnchorSurfacePathFrame {
+  float2 uv = float2(0.0f);
+  float3 tangent_x = float3(0.0f);
+};
+
 struct AnchorSurfacePathCache {
   const SubdivCCG *geometry = nullptr;
   float3 origin = float3(0.0f);
@@ -137,7 +142,11 @@ struct AnchorSurfacePathCache {
   int radial_pass = -1;
   int tile_pass = -1;
   bool ready = false;
+  bool transport_ready = false;
+  float3 reference_axis = float3(0.0f);
   std::unordered_map<int, float> distances;
+  /* Only populated in V4 and bounded to the current stamp, not the whole CCG. */
+  std::unordered_map<int, AnchorSurfacePathFrame> frames;
 };
 
 /* -------------------------------------------------------------------- */
@@ -2575,12 +2584,27 @@ void sculpt_apply_texture(const SculptSession &ss,
           r_rgba = float4(0.0f);
           return;
         }
-        const float planar_radius = sqrtf(x * x + y * y);
-        if (planar_radius > 0.05f && cache.radius > 1.0e-6f) {
-          const float surface_radius = found->second / cache.radius;
-          const float scale = clamp_f(surface_radius / planar_radius, 1.0f, 2.0f);
-          x *= scale;
-          y *= scale;
+        bool transported = false;
+        if ((brush.flag2 & BRUSH_SCULPT_ANCHOR_TRANSPORT) &&
+            surface_path->transport_ready && cache.radius > 1.0e-6f)
+        {
+          const auto frame = surface_path->frames.find(ccg_index);
+          if (frame != surface_path->frames.end()) {
+            /* Coordinate axes are transported across the CCG surface.
+             * Unlike V3, texture angle is no longer read from a flat tangent projection. */
+            x = frame->second.uv.x / cache.radius;
+            y = frame->second.uv.y / cache.radius;
+            transported = true;
+          }
+        }
+        if (!transported) {
+          const float planar_radius = sqrtf(x * x + y * y);
+          if (planar_radius > 0.05f && cache.radius > 1.0e-6f) {
+            const float surface_radius = found->second / cache.radius;
+            const float scale = clamp_f(surface_radius / planar_radius, 1.0f, 2.0f);
+            x *= scale;
+            y *= scale;
+          }
         }
       }
 
@@ -3566,6 +3590,36 @@ static SculptMeshV3MemorySample sculpt_mesh_v3_memory_sample()
 #endif
   return result;
 }
+/* ANCHORED_SURFACE_TRANSPORT_V4: minimal normal-to-normal rotation of the
+ * tangent basis along each accepted shortest-path edge. This is a discrete
+ * frame transport, not an exact smooth exponential map. */
+static bool anchor_transport_tangent_x(const float3 &parent_axis,
+                                      const float3 &parent_normal,
+                                      const float3 &next_normal,
+                                      float3 &r_axis)
+{
+  float3 n0 = parent_normal;
+  float3 n1 = next_normal;
+  if (normalize_v3(n0) < 1.0e-6f || normalize_v3(n1) < 1.0e-6f) {
+    return false;
+  }
+  const float dot_normals = math::dot(n0, n1);
+  if (dot_normals <= -0.25f) {
+    /* Ambiguous frame near a normal inversion or a hard fold: use V3. */
+    return false;
+  }
+  const float3 cross_normals = math::cross(n0, n1);
+  float3 axis = parent_axis + math::cross(cross_normals, parent_axis) +
+                math::cross(cross_normals, math::cross(cross_normals, parent_axis)) /
+                    (1.0f + dot_normals);
+  axis -= math::dot(axis, n1) * n1;
+  if (normalize_v3(axis) < 1.0e-6f) {
+    return false;
+  }
+  r_axis = axis;
+  return true;
+}
+
 /* ANCHORED_GEODESIC_V3: bounded Dijkstra over the actual Multires CCG surface.
  * This cache is built before worker threads and accessed read-only by them.
  * Radial distance follows grid edges and cross-face seams; angular coordinates
@@ -3586,12 +3640,25 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
 
   const SubdivCCG &ccg = *ss.subdiv_ccg;
   const float cutoff = cache.radius * 1.35f;
+  /* Transport is initially limited to the primary symmetry/tile pass.
+   * Other passes keep fully working V3 rather than risk mirrored UV winding. */
+  const bool transport_requested =
+      (brush.flag2 & BRUSH_SCULPT_ANCHOR_TRANSPORT) &&
+      cache.mirror_symmetry_pass == 0 && cache.radial_symmetry_pass == 0 &&
+      cache.tile_pass == 0;
+  float3 reference_axis = {cache.brush_local_mat_inv[0][0],
+                           cache.brush_local_mat_inv[0][1],
+                           cache.brush_local_mat_inv[0][2]};
+  const bool reference_valid = normalize_v3(reference_axis) > 1.0e-6f;
   if (cache.anchor_surface_path && cache.anchor_surface_path->ready &&
       cache.anchor_surface_path->geometry == &ccg &&
       cache.anchor_surface_path->coverage_radius >= cache.radius * 1.05f &&
       cache.anchor_surface_path->mirror_pass == int(cache.mirror_symmetry_pass) &&
       cache.anchor_surface_path->radial_pass == cache.radial_symmetry_pass &&
       cache.anchor_surface_path->tile_pass == cache.tile_pass &&
+      (!transport_requested ||
+       (reference_valid && cache.anchor_surface_path->transport_ready &&
+        math::dot(cache.anchor_surface_path->reference_axis, reference_axis) > 0.9999f)) &&
       math::distance_squared(cache.anchor_surface_path->origin, cache.location_symm) <
           1.0e-12f)
   {
@@ -3621,13 +3688,42 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
   path->radial_pass = cache.radial_symmetry_pass;
   path->tile_pass = cache.tile_pass;
 
+  const Span<float3> normals = ccg.normals.as_span();
+  bool build_transport = transport_requested && reference_valid &&
+                         normals.size() == positions.size();
+  if (build_transport) {
+    const float3 &seed_normal = normals[seed->to_index(key)];
+    float3 n = seed_normal;
+    if (normalize_v3(n) < 1.0e-6f) {
+      build_transport = false;
+    }
+    else {
+      float3 seed_axis = reference_axis - math::dot(reference_axis, n) * n;
+      if (normalize_v3(seed_axis) < 1.0e-6f) {
+        build_transport = false;
+      }
+      else {
+        const float3 tangent_y = math::cross(n, seed_axis);
+        const float3 origin_offset = positions[seed->to_index(key)] - cache.location_symm;
+        AnchorSurfacePathFrame initial_frame;
+        initial_frame.tangent_x = seed_axis;
+        initial_frame.uv = {math::dot(origin_offset, seed_axis),
+                            math::dot(origin_offset, tangent_y)};
+        path->frames.emplace(seed->to_index(key), initial_frame);
+        path->reference_axis = reference_axis;
+      }
+    }
+  }
+  path->transport_ready = build_transport;
+
   struct Candidate {
     float distance;
     int index;
     bool operator>(const Candidate &other) const { return distance > other.distance; }
   };
   std::priority_queue<Candidate, std::vector<Candidate>, std::greater<Candidate>> queue;
-  constexpr size_t max_visited = 300'000;
+  /* V4 frames cost more than V3 radial distances: use the smaller safe cap. */
+  const size_t max_visited = build_transport ? 100'000 : 300'000;
   path->distances.reserve(4096);
   const int seed_index = seed->to_index(key);
   path->distances.emplace(seed_index, 0.0f);
@@ -3668,20 +3764,56 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
         return;
       }
       const auto it = path->distances.find(next);
-      if (it != path->distances.end()) {
-        if (cost < it->second) {
-          it->second = cost;
-          queue.push({cost, next});
+      if (it != path->distances.end() && cost >= it->second) {
+        return;
+      }
+      if (it == path->distances.end() && path->distances.size() >= max_visited) {
+        overflow = true;
+        return;
+      }
+
+      if (build_transport) {
+        const auto parent = path->frames.find(item.index);
+        float3 transported_axis;
+        float3 normal0 = normals[item.index];
+        float3 normal1 = normals[next];
+        if (parent != path->frames.end() &&
+            anchor_transport_tangent_x(
+                parent->second.tangent_x, normal0, normal1, transported_axis))
+        {
+          normalize_v3(normal0);
+          normalize_v3(normal1);
+          const float3 tangent_y0 = math::cross(normal0, parent->second.tangent_x);
+          const float3 tangent_y1 = math::cross(normal1, transported_axis);
+          const float3 edge_delta = positions[next] - positions[item.index];
+          const float2 uv_delta = {
+              0.5f * (math::dot(edge_delta, parent->second.tangent_x) +
+                      math::dot(edge_delta, transported_axis)),
+              0.5f * (math::dot(edge_delta, tangent_y0) +
+                      math::dot(edge_delta, tangent_y1))};
+          AnchorSurfacePathFrame frame;
+          frame.tangent_x = transported_axis;
+          frame.uv = parent->second.uv + uv_delta;
+          if (std::isfinite(frame.uv.x) && std::isfinite(frame.uv.y)) {
+            path->frames.insert_or_assign(next, frame);
+          }
+          else {
+            path->frames.erase(next);
+          }
         }
+        else {
+          /* Discontinuous normals fall back to the V3 angular projection. */
+          path->frames.erase(next);
+        }
+      }
+
+      if (it != path->distances.end()) {
+        it->second = cost;
       }
       else {
-        if (path->distances.size() >= max_visited) {
-          overflow = true;
-          return;
-        }
         path->distances.emplace(next, cost);
-        queue.push({cost, next});
       }
+      queue.push({cost, next});
     };
 
     /* Eight connected samples inside each quad grid reduce Manhattan artifacts. */
