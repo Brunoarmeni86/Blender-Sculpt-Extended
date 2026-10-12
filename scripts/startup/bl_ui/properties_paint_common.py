@@ -596,11 +596,13 @@ class StrokePanel(BrushPanel):
             if mode == 'SCULPT':
                 # ANCHORED_SURFACE_PROJECTION_V1. Other brush modes remain unchanged.
                 anchor_projection = col.column()
-                anchor_projection.enabled = (brush.mask_texture_slot.mask_map_mode == 'AREA_PLANE')
+                # Sculpt deformation reads brush.mtex (Texture), not mask_mtex.
+                # See BKE_brush_mask_texture_get(..., OB_MODE_SCULPT).
+                anchor_projection.enabled = (brush.texture_slot.map_mode == 'AREA_PLANE')
                 anchor_projection.prop(brush, "use_anchor_surface_projection",
                                        text="Surface-Adaptive Projection")
-                if brush.mask_texture_slot.mask_map_mode != 'AREA_PLANE':
-                    col.label(text="Use Area Plane mask mapping for surface projection", icon='INFO')
+                if brush.texture_slot.map_mode != 'AREA_PLANE':
+                    col.label(text="Set Texture Mapping to Area Plane", icon='INFO')
 
         if brush.stroke_method == 'AIRBRUSH':
             col.prop(brush, "rate", text="Rate", slider=True)
