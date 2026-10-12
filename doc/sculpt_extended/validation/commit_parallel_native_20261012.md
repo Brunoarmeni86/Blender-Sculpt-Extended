@@ -45,3 +45,12 @@ or ignore its significance. The source change only adjusts solve dispatch.
 Keep candidate opt-in and reversible. Limited native execution is positive;
 paired speedup, expanded small-grid parallel coverage, geometry and Undo/Redo
 remain unconfirmed. Main and baking remain unchanged.
+
+## User follow-up
+
+The user clarified that they deliberately removed the Shape Keys. Treat the
+mesh-replacement warning as explained by their workflow, not as evidence of a
+scheduling regression. Asked about shape and Undo/Redo, the user replied
+"dovrebbero" (they should be correct). Record this as a tentative positive
+observation, not an explicit correctness confirmation or formal test pass.
+Keep the candidate opt-in and reversible; no source or default-policy change.
