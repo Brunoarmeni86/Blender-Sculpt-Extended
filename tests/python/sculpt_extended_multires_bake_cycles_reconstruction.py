@@ -186,6 +186,8 @@ def run(folder):
 def load_pixels(path):
     a=array.array('f')
     with path.open('rb') as f:a.fromfile(f,256*256*4)
+    if len(a)!=256*256*4 or not all(math.isfinite(x) for x in a):
+        raise AssertionError('Invalid float image: '+str(path))
     return a
 
 
@@ -203,21 +205,73 @@ def metrics(a,b,mask):
                 angle_max_degrees=max(angles),rgb_rms=math.sqrt(rgb_sq/(3*len(angles))))
 
 
+def saved_reference_fixture(folder):
+    """Audit geometry and camera in already-rendered scenes, without rendering."""
+    try:
+        import bpy
+    except ImportError:
+        return None
+    path=folder/'reconstruction.blend'
+    if not path.exists():return None
+    with bpy.data.libraries.load(str(path),link=False) as (source,target):
+        for name in ('HighReference','ProbeCamera'):
+            if name not in source.objects:raise AssertionError('Missing reference object: '+name)
+        target.objects=['HighReference','ProbeCamera']
+    high,camera=target.objects
+    try:
+        mesh=high.data
+        payload=dict(vertices=[list(v.co) for v in mesh.vertices],
+                     faces=[list(p.vertices) for p in mesh.polygons],
+                     smooth=[p.use_smooth for p in mesh.polygons],
+                     normals=[list(v.normal) for v in mesh.vertices],
+                     high_matrix=[list(row) for row in high.matrix_world],
+                     camera_matrix=[list(row) for row in camera.matrix_world],
+                     camera_type=camera.data.type,ortho_scale=camera.data.ortho_scale,
+                     lens=camera.data.lens)
+        return hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
+    finally:
+        for ob in (high,camera):
+            data=ob.data;bpy.data.objects.remove(ob,do_unlink=True)
+            if data.users==0:
+                if isinstance(data,bpy.types.Mesh):bpy.data.meshes.remove(data)
+                else:bpy.data.cameras.remove(data)
+
+
 def compare(folder):
     old=folder/'previous';new=folder/'corrected'
     reference=load_pixels(new/'high-reference.f32')
     reference_old=load_pixels(old/'high-reference.f32')
-    if max(abs(a-b) for a,b in zip(reference,reference_old))>1e-6:
-        raise AssertionError('Reference render changed between A/B processes')
-    report={}
+    mode_reports={mode:json.loads((folder/mode/'render-report.json').read_text()) for mode in ('previous','corrected')}
+    if [mode_reports[m]['cycles_tbn'] for m in ('previous','corrected')] != ['0','1']:
+        raise AssertionError('Unexpected TBN modes')
+    fixtures={mode:saved_reference_fixture(folder/mode) for mode in ('previous','corrected')}
+    known=all(fixtures.values());matching=(len(set(fixtures.values()))==1) if known else None
+    reference_mask=[i for i in range(256*256) if min(reference[4*i+3],reference_old[4*i+3])>.999]
+    differences=[abs(a-b) for a,b in zip(reference,reference_old)]
+    ref_metrics=metrics(reference_old,reference,reference_mask)
+    ref_metrics.update(max_abs_rgba=max(differences),rgba_rms=math.sqrt(sum(x*x for x in differences)/len(differences)),
+                       channels_over_1e_6=sum(x>1e-6 for x in differences),
+                       alpha_max_abs=max(abs(reference[4*i+3]-reference_old[4*i+3]) for i in range(256*256)),
+                       fixture_hashes=fixtures,geometry_and_camera_match=matching)
+    report={'reference_drift':ref_metrics}
+    if matching is False:
+        report['validation_status']='needs_scene_mismatch_review'
+    elif max(differences)>1e-6:
+        report['validation_status']='needs_reference_drift_review'
+    elif matching is None:
+        report['validation_status']='reference_pixels_match_fixture_not_audited'
+    else:
+        report['validation_status']='reference_control_consistent'
     for name in ('normal-only','paired-object','paired-tangent'):
         a=load_pixels(old/(name+'.f32'));b=load_pixels(new/(name+'.f32'))
-        # Exclude antialiasing silhouettes; keep interior UV seams in the metric.
-        mask=[i for i in range(256*256) if min(reference[4*i+3],a[4*i+3],b[4*i+3])>.999]
-        report[name]=dict(previous_vs_high=metrics(a,reference,mask),corrected_vs_high=metrics(b,reference,mask),
-                          previous_vs_corrected=metrics(a,b,mask))
-    report['seams']={mode:json.loads((folder/mode/'render-report.json').read_text())['seams'] for mode in ('previous','corrected')}
-    report['scope']='Screen-space normal diagnostic; correspondences differ when displacement changes geometry. Does not certify scalar scale, split normals or every UV seam.'
+        # A common mask includes BOTH references and both candidate images.
+        mask=[i for i in range(256*256) if min(reference[4*i+3],reference_old[4*i+3],a[4*i+3],b[4*i+3])>.999]
+        report[name]=dict(previous_vs_high=metrics(a,reference_old,mask),corrected_vs_high=metrics(b,reference,mask),
+                          previous_vs_corrected=metrics(a,b,mask),
+                          previous_vs_corrected_high_control=metrics(a,reference,mask),
+                          corrected_vs_previous_high_control=metrics(b,reference_old,mask))
+    report['seams']={mode:mode_reports[mode]['seams'] for mode in ('previous','corrected')}
+    report['scope']='Diagnostic only. Each mode uses its own high reference; cross-control metrics and reference drift are reported separately. Reference drift must be reviewed before concluding an A/B improvement. Screen-space geometry correspondence and scalar scale remain unvalidated.'
     (folder/'cycles-reconstruction-comparison.json').write_text(json.dumps(report,indent=2))
     print(json.dumps(report,indent=2))
 

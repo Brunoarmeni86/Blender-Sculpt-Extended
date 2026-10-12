@@ -52,3 +52,13 @@ using the existing compiled Blender. No source patch, install or CMake invocatio
 The default engine is CPU Cycles at 256x256, 16 samples, fixed seed, no denoising
 or adaptive sampling. Two processes render four views each. Reports are saved
 under a timestamped cycles-test folder. Review native errors before claiming pass.
+
+## Recover existing renders after strict reference check (2026-10-12)
+
+The native run completed rendering but comparison stopped because reference
+RGBA differed by more than 1e-6. The comparator now reports the full reference
+drift and its status, rather than hiding it or assuming it is numerical noise.
+It audits saved HighReference mesh/camera fingerprints when running in Blender,
+uses both reference alpha masks, compares each candidate to its own reference,
+and supplies both cross-control comparisons. A review status is not a pass.
+No new render, bake, source modification or build is required for recovery.
