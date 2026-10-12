@@ -13,7 +13,9 @@
 
 #include "BKE_multires_sculpt_layers.hh"
 #include "multires_layer_base_math.hh"
+#include "multires_layer_corner_identity.hh"
 #include "BKE_attribute.hh"
+#include "BKE_idprop.hh"
 #include "BKE_subdiv.hh"
 #include "BKE_customdata.hh"
 #include "BKE_key.hh"
@@ -1228,6 +1230,33 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
   return true;
 }
 
+/* A mesh system property survives BMesh replacement, including deleting all vertices.
+ * It is a high-water mark, not a grid index. Older full memfile states restore it
+ * together with their modifier data; Edit snapshots cannot accidentally recycle it. */
+static constexpr char corner_counter_property[] = "sculpt_layer_corner_id_counter";
+
+static int corner_id_counter(Mesh &mesh)
+{
+  IDProperty *property = IDP_GetPropertyFromGroup_null(
+      IDP_ID_system_properties_get(&mesh.id), corner_counter_property);
+  if (!property) {
+    return 0;
+  }
+  return property->type == IDP_INT ? std::max(0, IDP_int_get(property)) : -1;
+}
+
+static void corner_id_counter_set(Mesh &mesh, const int value)
+{
+  IDProperty *group = IDP_ID_system_properties_ensure(&mesh.id);
+  IDProperty *property = IDP_GetPropertyFromGroup_null(group, corner_counter_property);
+  if (!property) {
+    IDP_AddToGroup(group, IDP_NewInt(value, corner_counter_property));
+  }
+  else {
+    IDP_int_set(property, std::max(IDP_int_get(property), value));
+  }
+}
+
 void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh)
 {
   if (mmd.sculpt_layers.is_empty() && !mmd.sculpt_color_grids && !mmd.sculpt_face_set_grids) {
@@ -1251,11 +1280,16 @@ void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh)
   if (stored_corners != mesh.corners_num) {
     return;
   }
+  const int id_base = corner_id_counter(mesh);
+  if (id_base < 0 || id_base > INT_MAX - mesh.corners_num) {
+    return;
+  }
   SpanAttributeWriter<int> ids = mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
       corner_id_attribute, AttrDomain::Corner);
   for (const int corner : ids.span.index_range()) {
-    ids.span[corner] = corner + 1;
+    ids.span[corner] = id_base + corner + 1;
   }
+  corner_id_counter_set(mesh, id_base + mesh.corners_num);
   ids.finish();
   SpanAttributeWriter<int> previous = mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
       corner_prev_attribute, AttrDomain::Corner);
@@ -1267,8 +1301,8 @@ void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh)
   for (const int face_i : faces.index_range()) {
     const IndexRange face = faces[face_i];
     for (const int corner : face) {
-      previous.span[corner] = (corner == face.start() ? face.last() : corner - 1) + 1;
-      next.span[corner] = (corner == face.last() ? face.start() : corner + 1) + 1;
+      previous.span[corner] = id_base + (corner == face.start() ? face.last() : corner - 1) + 1;
+      next.span[corner] = id_base + (corner == face.last() ? face.start() : corner + 1) + 1;
       sizes.span[corner] = face.size();
     }
   }
@@ -1294,7 +1328,8 @@ static bool initialize_missing_base_grid(MDisps &grid, const int level, const in
 
 bool remap_after_topology_edit(MultiresModifierData &mmd,
                               Mesh &mesh,
-                              BitVector<> *r_reset_corners)
+                              BitVector<> *r_reset_corners,
+                              const Span<int> old_corner_ids)
 {
   if (r_reset_corners) {
     r_reset_corners->clear();
@@ -1340,20 +1375,43 @@ bool remap_after_topology_edit(MultiresModifierData &mmd,
   const VArraySpan<int> previous(previous_reader.varray);
   const VArraySpan<int> next(next_reader.varray);
   const VArraySpan<int> sizes(size_reader.varray);
-  Array<int> counts(old_corners_num, 0);
-  for (const int stored_id : ids) {
-    const int id = stored_id - 1;
-    if (id >= 0 && id < old_corners_num) {
-      counts[id]++;
+  /* Grid storage follows the OLD mesh array order, not numeric ID order. */
+  Array<int> canonical_ids;
+  Span<int> storage_ids = old_corner_ids;
+  if (storage_ids.is_empty() && old_corners_num > 0) {
+    canonical_ids.reinitialize(old_corners_num);
+    for (const int i : canonical_ids.index_range()) {
+      canonical_ids[i] = i + 1;
     }
+    storage_ids = canonical_ids.as_span();
   }
+  if (storage_ids.size() != old_corners_num) {
+    return false;
+  }
+  Array<int> counts(old_corners_num, 0);
   Array<int> new_to_old(mesh.corners_num, -1);
+  int max_old_id = 0;
+  const int high_water_mark = corner_id_counter(mesh);
+  if (high_water_mark < 0) {
+    return false;
+  }
+  if (!detail::corner_identity_lookup(storage_ids.data(),
+                                     old_corners_num,
+                                     ids.data(),
+                                     mesh.corners_num,
+                                     new_to_old.data(),
+                                     counts.data(),
+                                     max_old_id))
+  {
+    return false;
+  }
+  max_old_id = std::max(max_old_id, high_water_mark);
   const OffsetIndices faces = mesh.faces();
   bool identity = old_corners_num == mesh.corners_num;
   for (const int face_i : faces.index_range()) {
     const IndexRange face = faces[face_i];
     for (const int corner : face) {
-      const int id = ids[corner] - 1;
+      const int id = new_to_old[corner];
       const int prev_corner = corner == face.start() ? face.last() : corner - 1;
       const int next_corner = corner == face.last() ? face.start() : corner + 1;
       /* A retained loop ID alone cannot establish grid orientation after Dissolve, Flip
@@ -1364,11 +1422,29 @@ bool remap_after_topology_edit(MultiresModifierData &mmd,
       {
         new_to_old[corner] = id;
       }
+      else {
+        new_to_old[corner] = -1;
+      }
       identity &= new_to_old[corner] == corner;
     }
   }
   if (identity) {
     return true;
+  }
+
+  /* Surviving identities stay stable across remaps. Allocate fresh IDs only for
+   * new/ambiguous corners; never recycle old array indices as identities. */
+  int new_ids_num = 0;
+  for (const int old_corner : new_to_old) {
+    new_ids_num += old_corner < 0;
+  }
+  if (max_old_id > INT_MAX - new_ids_num) {
+    return false;
+  }
+  Array<int> stable_ids(mesh.corners_num);
+  int next_id = max_old_id;
+  for (const int corner : new_to_old.index_range()) {
+    stable_ids[corner] = new_to_old[corner] >= 0 ? storage_ids[new_to_old[corner]] : ++next_id;
   }
 
   /* Native Multires displacement is stored directly on the current mesh
@@ -1411,12 +1487,34 @@ bool remap_after_topology_edit(MultiresModifierData &mmd,
     }
   }
 
-  MutableAttributeAccessor attributes = mesh.attributes_for_write();
-  attributes.remove(corner_id_attribute);
-  attributes.remove(corner_prev_attribute);
-  attributes.remove(corner_next_attribute);
-  attributes.remove(corner_face_size_attribute);
-  ensure_corner_ids(mmd, mesh);
+  corner_id_counter_set(mesh, next_id);
+  SpanAttributeWriter<int> published_ids =
+      mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+          corner_id_attribute, AttrDomain::Corner);
+  published_ids.span.copy_from(stable_ids);
+  published_ids.finish();
+  SpanAttributeWriter<int> published_previous =
+      mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+          corner_prev_attribute, AttrDomain::Corner);
+  SpanAttributeWriter<int> published_next =
+      mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+          corner_next_attribute, AttrDomain::Corner);
+  SpanAttributeWriter<int> published_sizes =
+      mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+          corner_face_size_attribute, AttrDomain::Corner);
+  for (const int face_i : faces.index_range()) {
+    const IndexRange face = faces[face_i];
+    for (const int corner : face) {
+      published_previous.span[corner] =
+          stable_ids[corner == face.start() ? face.last() : corner - 1];
+      published_next.span[corner] =
+          stable_ids[corner == face.last() ? face.start() : corner + 1];
+      published_sizes.span[corner] = face.size();
+    }
+  }
+  published_previous.finish();
+  published_next.finish();
+  published_sizes.finish();
   return true;
 }
 
@@ -3209,4 +3307,5 @@ bool shape_key_fast_update(Object &object, Key &key, KeyBlock &key_block)
 }
 
 }  // namespace blender::bke::multires_layers
+
 

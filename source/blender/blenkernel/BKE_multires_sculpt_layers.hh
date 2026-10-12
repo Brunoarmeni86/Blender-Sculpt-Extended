@@ -82,10 +82,13 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
  * layer grids across Edit Mode topology changes. */
 void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh);
 /** Remap layer grids from the hidden identity attribute after a topology edit.
- * Duplicated or invalid identities are treated as new corners with zero delta. */
+ * Duplicated or invalid identities are treated as new corners with zero delta.
+ * old_corner_ids is captured from the mesh BEFORE replacing it from BMesh and
+ * describes the existing modifier grid order. Empty uses the legacy canonical order. */
 bool remap_after_topology_edit(MultiresModifierData &mmd,
                                Mesh &mesh,
-                               BitVector<> *r_reset_corners = nullptr);
+                               BitVector<> *r_reset_corners = nullptr,
+                               Span<int> old_corner_ids = {});
 /** Recording requires a visible layer with finite non-zero strength at a valid sculpt level, including L0. */
 bool can_record(const MultiresModifierData &mmd, const Mesh &mesh);
 /** Bake contributions into the native CD_MDISPS base. Reject hidden variants,
@@ -199,4 +202,5 @@ bool visible_direct_delta(Object &object,
 
 }  // namespace bke::multires_layers
 }  // namespace blender
+
 

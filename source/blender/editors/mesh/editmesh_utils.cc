@@ -23,6 +23,7 @@
 #include "BLI_math_vector.h"
 
 #include "BKE_attribute.h"
+#include "BKE_attribute.hh"
 #include "BKE_context.hh"
 #include "BKE_customdata.hh"
 #include "BKE_editmesh.hh"
@@ -381,6 +382,18 @@ void EDBM_mesh_load_ex(Main *bmain, Object *ob, bool free_data)
   BMeshToMeshParams params{};
   params.calc_object_remap = true;
   params.update_shapekey_indices = !free_data;
+  /* Preserve the grid-to-ID association before BMesh overwrites mesh custom data.
+   * Edit Undo can restore older IDs; modifier grids still follow the previous mesh order. */
+  Array<int> old_corner_ids;
+  {
+    const bke::AttributeReader<int> old_ids_reader = mesh->attributes().lookup<int>(
+        bke::multires_layers::corner_id_attribute, bke::AttrDomain::Corner);
+    if (old_ids_reader) {
+      const VArraySpan<int> old_ids(old_ids_reader.varray);
+      old_corner_ids.reinitialize(old_ids.size());
+      old_corner_ids.as_mutable_span().copy_from(old_ids);
+    }
+  }
   BM_mesh_bm_to_me(bmain, bm, mesh, &params);
   for (ModifierData &md : ob->modifiers) {
     if (md.type == eModifierType_Multires) {
@@ -389,7 +402,8 @@ void EDBM_mesh_load_ex(Main *bmain, Object *ob, bool free_data)
           mmd->sculpt_face_set_grids)
       {
         BitVector<> reset_corners;
-        if (!bke::multires_layers::remap_after_topology_edit(*mmd, *mesh, &reset_corners)) {
+        if (!bke::multires_layers::remap_after_topology_edit(
+                *mmd, *mesh, &reset_corners, old_corner_ids.as_span())) {
           mmd->sculpt_layer_recording = 0;
           BKE_modifier_set_error(ob, &md, "Sculpt layer topology remap failed; REC disabled");
         }
@@ -417,6 +431,9 @@ void EDBM_mesh_load_ex(Main *bmain, Object *ob, bool free_data)
           if (corner_offset != -1) {
             const MDisps *base = static_cast<const MDisps *>(
                 CustomData_get_layer(&mesh->corner_data, CD_MDISPS));
+            const bke::AttributeReader<int> ids_reader = mesh->attributes().lookup<int>(
+                bke::multires_layers::corner_id_attribute, bke::AttrDomain::Corner);
+            const VArraySpan<int> stable_ids(ids_reader.varray);
             BMFace *face;
             BM_ITER_MESH (face, &iter, bm, BM_FACES_OF_MESH) {
               BMLoop *loop = BM_FACE_FIRST_LOOP(face);
@@ -437,10 +454,10 @@ void EDBM_mesh_load_ex(Main *bmain, Object *ob, bool free_data)
                                                               "editmesh new multires corner");
                   }
                 }
-                BM_ELEM_CD_SET_INT(loop, corner_offset, BM_elem_index_get(loop) + 1);
+                BM_ELEM_CD_SET_INT(loop, corner_offset, stable_ids[corner]);
                 if (previous_offset != -1 && next_offset != -1 && size_offset != -1) {
-                  BM_ELEM_CD_SET_INT(loop, previous_offset, BM_elem_index_get(loop->prev) + 1);
-                  BM_ELEM_CD_SET_INT(loop, next_offset, BM_elem_index_get(loop->next) + 1);
+                  BM_ELEM_CD_SET_INT(loop, previous_offset, stable_ids[BM_elem_index_get(loop->prev)]);
+                  BM_ELEM_CD_SET_INT(loop, next_offset, stable_ids[BM_elem_index_get(loop->next)]);
                   BM_ELEM_CD_SET_INT(loop, size_offset, face->len);
                 }
               } while ((loop = loop->next) != first);
@@ -2233,4 +2250,5 @@ bool EDBM_smooth_vert(BMEditMesh *em, wmOperator *op)
 }
 
 }  // namespace blender
+
 
