@@ -45,3 +45,12 @@ two 256x256 bakes/120 probes, with corrected flag enabled. Report is named
 native-vector-frame-candidate.json. Review its actual decoded errors before
 claiming success. Native rendering, seams, split/custom normals, transformed
 objects and full reconstructed geometry remain outside this test.
+
+## Native result
+
+The Windows candidate retest now passes the limited frame-conversion diagnostic:
+relative vector RMS falls from 2.6797% to 0.0000161%, amplitude RMS from 0.9141%
+to 0.0000080%, on 120 matching probes including mirrored UVs. This is actual
+native-baked output, not merely the analytical inverse. See
+validation/multires_bake_native_vector_frame_20261012.md for retained reports
+and limits. Full scene reconstruction remains outside this result.
