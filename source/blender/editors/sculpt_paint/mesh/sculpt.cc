@@ -3585,10 +3585,10 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
   }
 
   const SubdivCCG &ccg = *ss.subdiv_ccg;
-  const float cutoff = cache.radius * 1.20f;
+  const float cutoff = cache.radius * 1.35f;
   if (cache.anchor_surface_path && cache.anchor_surface_path->ready &&
       cache.anchor_surface_path->geometry == &ccg &&
-      cache.anchor_surface_path->coverage_radius >= cutoff &&
+      cache.anchor_surface_path->coverage_radius >= cache.radius * 1.05f &&
       cache.anchor_surface_path->mirror_pass == int(cache.mirror_symmetry_pass) &&
       cache.anchor_surface_path->radial_pass == cache.radial_symmetry_pass &&
       cache.anchor_surface_path->tile_pass == cache.tile_pass &&
