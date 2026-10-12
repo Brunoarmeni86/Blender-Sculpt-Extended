@@ -594,26 +594,23 @@ class StrokePanel(BrushPanel):
         if brush.stroke_method == 'ANCHORED':
             col.prop(brush, "use_edge_to_edge", text="Edge to Edge")
             if mode == 'SCULPT':
-                # ANCHORED_SURFACE_PROJECTION_V1. Other brush modes remain unchanged.
+                # Anchor V5.3: preset uses existing flags and keeps old assets readable.
                 anchor_projection = col.column()
-                # Sculpt deformation reads brush.mtex (Texture), not mask_mtex.
-                # See BKE_brush_mask_texture_get(..., OB_MODE_SCULPT).
                 anchor_projection.enabled = (brush.texture_slot.map_mode == 'AREA_PLANE')
-                anchor_projection.prop(brush, "use_anchor_surface_projection",
-                                       text="Surface-Adaptive Projection")
-                normal_guided = anchor_projection.column()
-                normal_guided.enabled = brush.use_anchor_surface_projection
-                normal_guided.prop(brush, "use_anchor_normal_guided_projection",
-                                   text="Normal-Guided (Multires)")
-                surface_path = anchor_projection.column()
-                surface_path.enabled = brush.use_anchor_surface_projection
-                surface_path.prop(brush, "use_anchor_geodesic_projection",
-                                  text="Surface Path (Multires, Experimental)")
-                transport = anchor_projection.column()
-                transport.enabled = (brush.use_anchor_surface_projection
-                                     and brush.use_anchor_geodesic_projection)
-                transport.prop(brush, "use_anchor_surface_transport",
-                               text="Surface Tangent Transport (V4)")
+                anchor_projection.prop(brush, "anchor_projection_mode", text="Projection")
+                if brush.use_anchor_surface_projection:
+                    anchor_projection.label(text="Extra surface calculation", icon='INFO')
+                    stages = anchor_projection.column(align=True)
+                    stages.prop(brush, "use_anchor_normal_guided_projection", text="Normal Guidance")
+                    stages.prop(brush, "use_anchor_geodesic_projection", text="Surface Paths")
+                    transport = stages.column()
+                    transport.enabled = brush.use_anchor_geodesic_projection
+                    transport.prop(brush, "use_anchor_surface_transport", text="Tangent Mapping")
+                    obj = context.sculpt_object
+                    multires = obj and any(mod.type == 'MULTIRES' and mod.show_viewport
+                                           and mod.sculpt_levels > 0 for mod in obj.modifiers)
+                    if not multires:
+                        anchor_projection.label(text="Multires required for surface paths", icon='INFO')
                 if brush.texture_slot.map_mode != 'AREA_PLANE':
                     col.label(text="Set Texture Mapping to Area Plane", icon='INFO')
 
@@ -2037,3 +2034,4 @@ if __name__ == "__main__":  # only for live edit.
     from bpy.utils import register_class
     for cls in classes:
         register_class(cls)
+

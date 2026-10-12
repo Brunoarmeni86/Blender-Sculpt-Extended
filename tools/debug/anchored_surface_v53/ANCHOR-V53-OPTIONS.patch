@@ -1,0 +1,104 @@
+diff --git a/scripts/startup/bl_ui/properties_paint_common.py b/scripts/startup/bl_ui/properties_paint_common.py
+index 9aef60e..2e4374b 100644
+--- a/scripts/startup/bl_ui/properties_paint_common.py
++++ b/scripts/startup/bl_ui/properties_paint_common.py
+@@ -594,26 +594,23 @@ class StrokePanel(BrushPanel):
+         if brush.stroke_method == 'ANCHORED':
+             col.prop(brush, "use_edge_to_edge", text="Edge to Edge")
+             if mode == 'SCULPT':
+-                # ANCHORED_SURFACE_PROJECTION_V1. Other brush modes remain unchanged.
++                # Anchor V5.3: preset uses existing flags and keeps old assets readable.
+                 anchor_projection = col.column()
+-                # Sculpt deformation reads brush.mtex (Texture), not mask_mtex.
+-                # See BKE_brush_mask_texture_get(..., OB_MODE_SCULPT).
+                 anchor_projection.enabled = (brush.texture_slot.map_mode == 'AREA_PLANE')
+-                anchor_projection.prop(brush, "use_anchor_surface_projection",
+-                                       text="Surface-Adaptive Projection")
+-                normal_guided = anchor_projection.column()
+-                normal_guided.enabled = brush.use_anchor_surface_projection
+-                normal_guided.prop(brush, "use_anchor_normal_guided_projection",
+-                                   text="Normal-Guided (Multires)")
+-                surface_path = anchor_projection.column()
+-                surface_path.enabled = brush.use_anchor_surface_projection
+-                surface_path.prop(brush, "use_anchor_geodesic_projection",
+-                                  text="Surface Path (Multires, Experimental)")
+-                transport = anchor_projection.column()
+-                transport.enabled = (brush.use_anchor_surface_projection
+-                                     and brush.use_anchor_geodesic_projection)
+-                transport.prop(brush, "use_anchor_surface_transport",
+-                               text="Surface Tangent Transport (V4)")
++                anchor_projection.prop(brush, "anchor_projection_mode", text="Projection")
++                if brush.use_anchor_surface_projection:
++                    anchor_projection.label(text="Extra surface calculation", icon='INFO')
++                    stages = anchor_projection.column(align=True)
++                    stages.prop(brush, "use_anchor_normal_guided_projection", text="Normal Guidance")
++                    stages.prop(brush, "use_anchor_geodesic_projection", text="Surface Paths")
++                    transport = stages.column()
++                    transport.enabled = brush.use_anchor_geodesic_projection
++                    transport.prop(brush, "use_anchor_surface_transport", text="Tangent Mapping")
++                    obj = context.sculpt_object
++                    multires = obj and any(mod.type == 'MULTIRES' and mod.show_viewport
++                                           and mod.sculpt_levels > 0 for mod in obj.modifiers)
++                    if not multires:
++                        anchor_projection.label(text="Multires required for surface paths", icon='INFO')
+                 if brush.texture_slot.map_mode != 'AREA_PLANE':
+                     col.label(text="Set Texture Mapping to Area Plane", icon='INFO')
+ 
+diff --git a/source/blender/makesrna/intern/rna_brush.cc b/source/blender/makesrna/intern/rna_brush.cc
+index 689faba..78c3092 100644
+--- a/source/blender/makesrna/intern/rna_brush.cc
++++ b/source/blender/makesrna/intern/rna_brush.cc
+@@ -405,6 +405,28 @@ static EnumPropertyItem rna_enum_gpencil_brush_modes_items[] = {
+ 
+ namespace blender {
+ 
++/* Anchor options V5.3: an RNA view of existing flags, no new DNA storage. */
++static int rna_Brush_anchor_projection_mode_get(PointerRNA *ptr)
++{
++  const Brush *brush = static_cast<const Brush *>(ptr->data);
++  return (brush->flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT) ? 1 : 0;
++}
++
++static void rna_Brush_anchor_projection_mode_set(PointerRNA *ptr, int value)
++{
++  Brush *brush = static_cast<Brush *>(ptr->data);
++  if (value == 1) {
++    brush->flag2 |= BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT |
++                    BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED |
++                    BRUSH_SCULPT_ANCHOR_GEODESIC |
++                    BRUSH_SCULPT_ANCHOR_TRANSPORT;
++  }
++  else if (value == 0) {
++    /* Keep the legacy sub-options for scripts and existing brush assets. */
++    brush->flag2 &= ~BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT;
++  }
++}
++
+ static bool rna_TextureCapabilities_has_random_texture_angle_get(PointerRNA *ptr)
+ {
+   MTex *mtex = static_cast<MTex *>(ptr->data);
+@@ -3883,6 +3905,24 @@ static void rna_def_brush(BlenderRNA *brna)
+   RNA_def_property_ui_text(prop, "Edge-to-Edge", "Drag anchor brush from edge-to-edge");
+   RNA_def_property_update(prop, 0, "rna_Brush_update");
+ 
++  /* Anchor options V5.3: Standard remains the default for new brushes. */
++  static const EnumPropertyItem anchor_projection_items[] = {
++      {0, "STANDARD", 0, "Standard", "Use the original planar Anchored projection"},
++      {1, "SURFACE", 0, "Surface Projection",
++       "Enable surface mapping and its normal, geodesic and tangent stages; "
++       "Multires uses a sparse surface cache with automatic fallbacks and extra calculation"},
++      {0, nullptr, 0, nullptr, nullptr},
++  };
++  prop = RNA_def_property(srna, "anchor_projection_mode", PROP_ENUM, PROP_NONE);
++  RNA_def_property_enum_items(prop, anchor_projection_items);
++  RNA_def_property_enum_funcs(prop,
++                              "rna_Brush_anchor_projection_mode_get",
++                              "rna_Brush_anchor_projection_mode_set",
++                              nullptr);
++  RNA_def_property_enum_default(prop, 0);
++  RNA_def_property_ui_text(prop, "Anchor Projection", "Optional surface mapping for Anchored strokes");
++  RNA_def_property_update(prop, 0, "rna_Brush_update");
++
+   /* ANCHORED_SURFACE_PROJECTION_V1: an optional curvature-compensated stamp mapping. */
+   prop = RNA_def_property(srna, "use_anchor_surface_projection", PROP_BOOLEAN, PROP_NONE);
+   RNA_def_property_boolean_sdna(

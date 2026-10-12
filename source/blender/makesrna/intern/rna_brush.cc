@@ -405,6 +405,28 @@ static EnumPropertyItem rna_enum_gpencil_brush_modes_items[] = {
 
 namespace blender {
 
+/* Anchor options V5.3: an RNA view of existing flags, no new DNA storage. */
+static int rna_Brush_anchor_projection_mode_get(PointerRNA *ptr)
+{
+  const Brush *brush = static_cast<const Brush *>(ptr->data);
+  return (brush->flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT) ? 1 : 0;
+}
+
+static void rna_Brush_anchor_projection_mode_set(PointerRNA *ptr, int value)
+{
+  Brush *brush = static_cast<Brush *>(ptr->data);
+  if (value == 1) {
+    brush->flag2 |= BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT |
+                    BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED |
+                    BRUSH_SCULPT_ANCHOR_GEODESIC |
+                    BRUSH_SCULPT_ANCHOR_TRANSPORT;
+  }
+  else if (value == 0) {
+    /* Keep the legacy sub-options for scripts and existing brush assets. */
+    brush->flag2 &= ~BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT;
+  }
+}
+
 static bool rna_TextureCapabilities_has_random_texture_angle_get(PointerRNA *ptr)
 {
   MTex *mtex = static_cast<MTex *>(ptr->data);
@@ -3883,6 +3905,24 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Edge-to-Edge", "Drag anchor brush from edge-to-edge");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  /* Anchor options V5.3: Standard remains the default for new brushes. */
+  static const EnumPropertyItem anchor_projection_items[] = {
+      {0, "STANDARD", 0, "Standard", "Use the original planar Anchored projection"},
+      {1, "SURFACE", 0, "Surface Projection",
+       "Enable surface mapping and its normal, geodesic and tangent stages; "
+       "Multires uses a sparse surface cache with automatic fallbacks and extra calculation"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "anchor_projection_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_items(prop, anchor_projection_items);
+  RNA_def_property_enum_funcs(prop,
+                              "rna_Brush_anchor_projection_mode_get",
+                              "rna_Brush_anchor_projection_mode_set",
+                              nullptr);
+  RNA_def_property_enum_default(prop, 0);
+  RNA_def_property_ui_text(prop, "Anchor Projection", "Optional surface mapping for Anchored strokes");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   /* ANCHORED_SURFACE_PROJECTION_V1: an optional curvature-compensated stamp mapping. */
   prop = RNA_def_property(srna, "use_anchor_surface_projection", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(
@@ -4230,3 +4270,4 @@ void RNA_def_brush(BlenderRNA *brna)
 }  // namespace blender
 
 #endif
+
