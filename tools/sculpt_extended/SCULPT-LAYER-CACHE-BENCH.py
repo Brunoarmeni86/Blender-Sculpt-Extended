@@ -20,11 +20,12 @@ class SCULPT_OT_layer_cache_benchmark(bpy.types.Operator):
         if mmd is None:
             self.report({'ERROR'},'Serve Multires con un Sculpt Layer contenente una pennellata')
             return {'CANCELLED'}
-        index=mmd.sculpt_layer_active
+        index=mmd.active_sculpt_layer_index
         layer=mmd.sculpt_layers[index]
         if not layer.visible or not math.isfinite(layer.strength):
             self.report({'ERROR'},'Il layer attivo deve essere visibile e avere strength valida')
             return {'CANCELLED'}
+        was_recording=mmd.sculpt_layer_recording
         previous_flag=os.environ.get('BLENDER_SCULPT_LAYER_SUPPORT_CACHE')
         original=layer.strength;timings={}
         try:
@@ -37,6 +38,7 @@ class SCULPT_OT_layer_cache_benchmark(bpy.types.Operator):
                 timings['index_off' if mode=='0' else 'index_on']=durations
         finally:
             layer.strength=original
+            mmd.sculpt_layer_recording=was_recording
             if previous_flag is None:os.environ.pop('BLENDER_SCULPT_LAYER_SUPPORT_CACHE',None)
             else:os.environ['BLENDER_SCULPT_LAYER_SUPPORT_CACHE']=previous_flag
         out=pathlib.Path(__file__).with_name('native-layer-cache-bench.json')
