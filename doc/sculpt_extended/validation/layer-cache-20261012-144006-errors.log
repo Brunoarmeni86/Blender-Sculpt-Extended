@@ -1,0 +1,18 @@
+[SculptMeshV3Attr] kind=position requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=4.500 MiB total=6.489 ms select=0.018 fill=0.244 upload_call=6.228
+[SculptMeshV3Attr] kind=normal requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=3.000 MiB total=2.709 ms select=0.020 fill=0.260 upload_call=2.429
+[SculptMeshV3Cache] requested=57 attrs=2 total=11.266 ms layout_topology=0.007 indices=0.452 attributes=10.793 batches=0.014
+[SculptMeshV3Attr] kind=position requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=4.500 MiB total=2.544 ms select=0.007 fill=0.223 upload_call=2.315
+[SculptMeshV3Attr] kind=normal requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=3.000 MiB total=1.983 ms select=0.008 fill=0.199 upload_call=1.776
+[SculptMeshV3Cache] requested=57 attrs=2 total=5.491 ms layout_topology=0.001 indices=0.208 attributes=5.276 batches=0.006
+[SculptMeshV3Attr] kind=position requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=4.500 MiB total=0.959 ms select=0.010 fill=0.254 upload_call=0.696
+[SculptMeshV3Attr] kind=normal requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=3.000 MiB total=1.089 ms select=0.008 fill=0.192 upload_call=0.889
+[SculptMeshV3Cache] requested=57 attrs=2 total=3.175 ms layout_topology=0.001 indices=0.469 attributes=2.697 batches=0.008
+[SculptMeshV3Attr] kind=position requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=4.500 MiB total=1.028 ms select=0.007 fill=0.261 upload_call=0.759
+[SculptMeshV3Attr] kind=normal requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=3.000 MiB total=0.736 ms select=0.008 fill=0.183 upload_call=0.546
+[SculptMeshV3Cache] requested=57 attrs=2 total=2.336 ms layout_topology=0.001 indices=0.234 attributes=2.094 batches=0.007
+[SculptMeshV3Attr] kind=position requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=4.500 MiB total=1.549 ms select=0.010 fill=0.604 upload_call=0.935
+[SculptMeshV3Attr] kind=normal requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=3.000 MiB total=1.092 ms select=0.009 fill=0.211 upload_call=0.871
+[SculptMeshV3Cache] requested=57 attrs=2 total=3.373 ms layout_topology=0.001 indices=0.419 attributes=2.945 batches=0.007
+[SculptMeshV3Attr] kind=position requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=4.500 MiB total=1.029 ms select=0.008 fill=0.303 upload_call=0.718
+[SculptMeshV3Attr] kind=normal requested=57 empty=57 dirty=0 actual=57 elements=393216 payload_est=3.000 MiB total=1.190 ms select=0.007 fill=0.177 upload_call=1.006
+[SculptMeshV3Cache] requested=57 attrs=2 total=3.191 ms layout_topology=0.001 indices=0.280 attributes=2.903 batches=0.007

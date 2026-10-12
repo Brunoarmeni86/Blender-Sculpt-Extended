@@ -1,0 +1,78 @@
+Apri una scena di test, entra in Sculpt, fai una pennellata sul layer, poi F3: Sculpt Layer Cache Benchmark.
+00:03.469  blend            | Read blend: "C:\Users\olias\Desktop\test pennelli.blend"
+register_class(...):
+Info: Registering operator class: 'SCULPT_OT_layer_cache_benchmark', bl_idname 'sculpt.layer_cache_benchmark' has been registered before, unregistering previous
+Apri una scena di test, entra in Sculpt, fai una pennellata sul layer, poi F3: Sculpt Layer Cache Benchmark.
+register_class(...):
+Info: Registering operator class: 'SCULPT_OT_layer_cache_benchmark', bl_idname 'sculpt.layer_cache_benchmark' has been registered before, unregistering previous
+Apri una scena di test, entra in Sculpt, fai una pennellata sul layer, poi F3: Sculpt Layer Cache Benchmark.
+05:03.469  blend            | Read blend: "C:\Users\olias\Desktop\test pennelli.blend"
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=4 positions=66.087ms normals=29.050ms total=95.138ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.083ms neighbors=12.222ms total=108.189ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=285.406ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=9 positions=120.505ms normals=55.091ms total=175.596ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.068ms neighbors=23.117ms total=198.805ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=355.499ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=262.759ms normals=106.529ms total=369.288ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=1.205ms neighbors=24.881ms total=395.388ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=547.112ms
+[LAYER_COMMIT_OP] ok=1 total=0.001ms
+[LAYER_ADD] mode=METADATA_ONLY level=3 total_level=3 verts=98306 corners=393216 layers=1 commit=0.017ms mesh=0.001ms compatible=1.381ms add=2.587ms vertex_ids=0.072ms l0=0.000ms corner_ids=1.351ms rebuild=0.000ms depsgraph=0.007ms total=5.421ms
+[SCULPT_EXACT_SAMPLES] mode=EXACT solved=2556495/2571275 reduction=0.6%
+[LAYER_COMMIT_LOCAL] grids=102851/393216 samples=2556495/2571275 area=25 sample_mode=EXACT parallel=0 publish_parallel=0 context=0.692ms alloc=0.024ms solve=478.084ms publish=17.794ms total=499.258ms
+[LAYER_COMMIT_FRAME_CACHE] v=4 mode=OFF reset=0 hit=0 build=0 replace=0 bypass=102851 cached=0/0 used=0.0MiB capacity=0.0MiB lookup=0.310ms
+[LAYER_COMMIT_TANGENT] mode=LEGACY_INVERSE
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=290.194ms normals=120.412ms total=410.606ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=1.543ms neighbors=24.899ms total=437.084ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=604.772ms
+[LAYER_UNDO_V2] mode=STANDARD_SWAP level=3 layers=1 pending_preserved=1
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=302.402ms normals=111.124ms total=413.526ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.073ms neighbors=25.324ms total=438.941ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=592.059ms
+[LAYER_UNDO_V2] mode=STANDARD_SWAP level=3 layers=1 pending_preserved=1
+[LAYER_UNDO_V2] mode=STANDARD_SWAP level=3 layers=1 pending_preserved=1
+[LAYER_UNDO_V2] mode=STANDARD_SWAP level=3 layers=1 pending_preserved=1
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=273.053ms normals=112.906ms total=385.959ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.082ms neighbors=27.718ms total=413.779ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=577.077ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=282.171ms normals=111.875ms total=394.045ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.116ms neighbors=22.088ms total=416.268ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=567.602ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=4 positions=69.366ms normals=26.228ms total=95.593ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.088ms neighbors=12.698ms total=108.623ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=261.508ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=9 positions=121.053ms normals=52.896ms total=173.949ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.108ms neighbors=24.408ms total=198.490ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=348.066ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=277.248ms normals=107.844ms total=385.092ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=4.729ms neighbors=23.417ms total=413.261ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=567.862ms
+[LAYER_COMMIT_OP] ok=1 total=0.001ms
+[LAYER_ADD] mode=METADATA_ONLY level=3 total_level=3 verts=98306 corners=393216 layers=1 commit=0.007ms mesh=0.000ms compatible=0.518ms add=1.857ms vertex_ids=0.063ms l0=0.000ms corner_ids=0.883ms rebuild=0.000ms depsgraph=0.005ms total=3.340ms
+[SCULPT_EXACT_SAMPLES] mode=EXACT solved=2056638/2071825 reduction=0.7%
+[LAYER_COMMIT_LOCAL] grids=82873/393216 samples=2056638/2071825 area=25 sample_mode=EXACT parallel=0 publish_parallel=0 context=0.593ms alloc=0.034ms solve=379.953ms publish=13.632ms total=396.274ms
+[LAYER_COMMIT_FRAME_CACHE] v=4 mode=OFF reset=0 hit=0 build=0 replace=0 bypass=82873 cached=0/0 used=0.0MiB capacity=0.0MiB lookup07:26.640  blend            | Read blend: "C:\Users\olias\Desktop\test pennelli.blend"
+07:46.719  operator         | ERROR Invalid operator call 'SCULPT_OT_layer_cache_benchmark'
+09:12.453  blend            | Saved session recovery to "C:\Users\olias\AppData\Local\Temp\quit.blend"
+=0.199ms
+[LAYER_COMMIT_TANGENT] mode=LEGACY_INVERSE
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=286.368ms normals=111.058ms total=397.426ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.083ms neighbors=24.563ms total=422.088ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=576.242ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=4 positions=66.493ms normals=25.216ms total=91.709ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.103ms neighbors=12.832ms total=104.815ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=264.405ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=9 positions=124.142ms normals=51.282ms total=175.424ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.069ms neighbors=19.258ms total=194.775ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=347.297ms
+[LAYER_COMMIT_OP] ok=1 total=0.001ms
+[LAYER_ADD] mode=METADATA_ONLY level=2 total_level=2 verts=98306 corners=393216 layers=1 commit=0.006ms mesh=0.000ms compatible=0.635ms add=1.274ms vertex_ids=0.062ms l0=0.000ms corner_ids=0.902ms rebuild=0.000ms depsgraph=0.006ms total=2.894ms
+[SCULPT_EXACT_SAMPLES] mode=EXACT solved=1433868/1440657 reduction=0.5%
+[LAYER_COMMIT_LOCAL] grids=160073/393216 samples=1433868/1440657 area=9 sample_mode=EXACT parallel=0 publish_parallel=0 context=0.514ms alloc=0.029ms solve=265.219ms publish=14.191ms total=281.980ms
+[LAYER_COMMIT_FRAME_CACHE] v=4 mode=OFF reset=0 hit=0 build=0 replace=0 bypass=160073 cached=0/0 used=0.0MiB capacity=0.0MiB lookup=0.217ms
+[LAYER_COMMIT_TANGENT] mode=LEGACY_INVERSE
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=9 positions=125.485ms normals=52.162ms total=177.647ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.051ms neighbors=19.593ms total=197.308ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=344.818ms
+
+Blender quit

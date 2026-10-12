@@ -9,6 +9,7 @@ import time
 class SCULPT_OT_layer_cache_benchmark(bpy.types.Operator):
     bl_idname = 'sculpt.layer_cache_benchmark'
     bl_label = 'Sculpt Layer Cache Benchmark'
+    bl_options = {'REGISTER'}
     bl_description = 'Compare ten strength updates with support index off/on; use a test scene'
 
     def execute(self, context):
@@ -32,7 +33,7 @@ class SCULPT_OT_layer_cache_benchmark(bpy.types.Operator):
             for mode in ('0','1'):
                 os.environ['BLENDER_SCULPT_LAYER_SUPPORT_CACHE']=mode
                 durations=[]
-                for value in (.25,.5,.75,1.0,original):
+                for value in (.5,0.0,.5,1.0,original):
                     start=time.perf_counter();layer.strength=value;context.view_layer.update()
                     durations.append(1000*(time.perf_counter()-start))
                 timings['index_off' if mode=='0' else 'index_on']=durations

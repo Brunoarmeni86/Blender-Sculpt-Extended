@@ -1,0 +1,43 @@
+Apri una scena di test, entra in Sculpt, fai una pennellata sul layer, poi F3: Sculpt Layer Cache Benchmark.
+[MULTIRES_MODIFIER_EVAL] sculpt=0 total=0.003ms
+[MULTIRES_MODIFIER_EVAL] sculpt=0 total=131.469ms
+[MULTIRES_MODIFIER_EVAL] sculpt=0 total=123.868ms
+[MULTIRES_MODIFIER_EVAL] sculpt=0 total=66.272ms
+[MULTIRES_MODIFIER_EVAL] sculpt=0 total=0.001ms
+[MULTIRES_CCG_EVAL] faces=24576 grids=98304 area=9 positions=33.765ms normals=7.201ms total=40.966ms
+[MULTIRES_CCG_BUILD] grids=98304 alloc=0.041ms neighbors=4.429ms total=45.547ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=49.458ms
+[LAYER_COMMIT_OP] ok=1 total=0.001ms
+[LAYER_ADD] mode=METADATA_ONLY level=2 total_level=2 verts=24578 corners=98304 layers=1 commit=0.014ms mesh=0.000ms compatible=0.172ms add=0.496ms vertex_ids=0.026ms l0=0.000ms corner_ids=0.202ms rebuild=0.000ms depsgraph=0.004ms total=0.922ms
+[LAYER_SUPPORT_INDEX] mode=OFF grids=0/98304
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=METADATA_ONLY old=1.000000 new=0.250000 delta=-0.750000 support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.143ms
+[LAYER_SUPPORT_INDEX] mode=OFF grids=0/98304
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=METADATA_ONLY old=0.250000 new=0.500000 delta=0.250000 support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.055ms
+[LAYER_SUPPORT_INDEX] mode=OFF grids=0/98304
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=METADATA_ONLY old=0.500000 new=0.750000 delta=0.250000 support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.046ms
+[LAYER_SUPPORT_INDEX] mode=OFF grids=0/98304
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=METADATA_ONLY old=0.750000 new=1.000000 delta=0.250000 support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.045ms
+[LAYER_SUPPORT_INDEX] mode=BUILD grids=0/98304
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=METADATA_ONLY old=1.000000 new=0.250000 delta=-0.750000 support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.046ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=0/98304
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=METADATA_ONLY old=0.250000 new=0.500000 delta=0.250000 support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.005ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=0/98304
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=METADATA_ONLY old=0.500000 new=0.750000 delta=0.250000 support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.005ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=0/98304
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=METADATA_ONLY old=0.750000 new=1.000000 delta=0.250000 support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.005ms
+[SCULPT_EXACT_SAMPLES] mode=EXACT solved=431198/434673 reduction=0.8%
+[LAYER_COMMIT_LOCAL] grids=48297/98304 samples=431198/434673 area=9 sample_mode=EXACT parallel=0 publish_parallel=0 context=0.180ms alloc=0.019ms solve=83.497ms publish=4.447ms total=88.827ms
+[LAYER_COMMIT_FRAME_CACHE] v=4 mode=OFF reset=0 hit=0 build=0 replace=0 bypass=48297 cached=0/0 used=0.0MiB capacity=0.0MiB lookup=0.101ms
+[LAYER_COMMIT_TANGENT] mode=LEGACY_INVERSE
+[LAYER_SUPPORT_INDEX] mode=OFF grids=48297/98304
+[LAYER_SUPPORT_INDEX] mode=OFF grids=48297/98304
+[LAYER_WEIGHT_HOT_DELTA] mode=BUILD grids=48297 samples=434673 bytes=5.0MiB ms=8.156
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=14.944
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=1.117ms normals=0.771ms total=2.693ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=1.000000 new=0.250000 delta=-0.750000 support_faces=12171 updated_faces=12555 pbvh_nodes=237 eval=17.650ms bounds=0.177ms total=19.966ms
+[LAYER_SUPPORT_INDEX] mode=OFF grids=48297/98304
+[LAYER_SUPPORT_INDEX] mode=OFF grids=48297/98304
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=48297 samples=434673 bytes=5.0MiB ms=0.446
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=2.234
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=1.084ms normals=0.729ms total=2.501ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=0.250000 new=0.500000 delta=0.250000 support_faces=12171 updated_faces=12555 pbvh_nodes=237 eval=4.748ms bounds=0.191ms to

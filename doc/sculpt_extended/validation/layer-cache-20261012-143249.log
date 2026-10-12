@@ -1,0 +1,140 @@
+Apri una scena di test, entra in Sculpt, fai una pennellata sul layer, poi F3: Sculpt Layer Cache Benchmark.
+00:07.797  blend            | Read blend: "C:\Users\olias\Desktop\test pennelli.blend"
+00:29.266  operator         | Layer recorded in memory. Save the .blend to keep it on disk
+00:32.704  operator         | Layer recorded in memory. Save the .blend to keep it on disk
+00:36.454  operator         | Layer recorded in memory. Save the .blend to keep it on disk
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=4 positions=65.949ms normals=26.857ms total=92.806ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.087ms neighbors=12.406ms total=106.060ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=278.959ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=9 positions=121.298ms normals=50.840ms total=172.138ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.062ms neighbors=22.944ms total=195.157ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=347.475ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=269.677ms normals=109.504ms total=379.180ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.076ms neighbors=23.210ms total=402.483ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=555.685ms
+[LAYER_COMMIT_OP] ok=1 total=0.001ms
+[LAYER_ADD] mode=METADATA_ONLY level=3 total_level=3 verts=98306 corners=393216 layers=1 commit=0.024ms mesh=0.000ms compatible=0.566ms add=2.602ms vertex_ids=0.131ms l0=0.000ms corner_ids=1.218ms rebuild=0.000ms depsgraph=0.006ms total=4.553ms
+[SCULPT_EXACT_SAMPLES] mode=EXACT solved=2967120/2985300 reduction=0.6%
+[LAYER_COMMIT_LOCAL] grids=119412/393216 samples=2967120/2985300 area=25 sample_mode=EXACT parallel=0 publish_parallel=0 context=0.776ms alloc=0.018ms solve=546.192ms publish=17.390ms total=569.065ms
+[LAYER_COMMIT_FRAME_CACHE] v=4 mode=OFF reset=0 hit=0 build=0 replace=0 bypass=119412 cached=0/0 used=0.0MiB capacity=0.0MiB lookup=0.288ms
+[LAYER_COMMIT_TANGENT] mode=LEGACY_INVERSE
+[LAYER_COMMIT_OP] ok=1 total=575.720ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=274.140ms normals=112.937ms total=387.078ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=1.514ms neighbors=27.173ms total=415.797ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=574.796ms
+[SCULPT_EXACT_SAMPLES] mode=EXACT solved=918182/927975 reduction=1.1%
+[LAYER_COMMIT_LOCAL] grids=37119/393216 samples=918182/927975 area=25 sample_mode=EXACT parallel=0 publish_parallel=0 context=0.688ms alloc=0.026ms solve=171.268ms publish=4.161ms total=177.649ms
+[LAYER_COMMIT_FRAME_CACHE] v=4 mode=OFF reset=0 hit=0 build=0 replace=0 bypass=37119 cached=0/0 used=0.0MiB capacity=0.0MiB lookup=0.200ms
+[LAYER_COMMIT_TANGENT] mode=LEGACY_INVERSE
+[LAYER_COMMIT_OP] ok=1 total=180.748ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=271.408ms normals=106.350ms total=377.758ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=1.332ms neighbors=26.313ms total=405.419ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=556.844ms
+[SCULPT_EXACT_SAMPLES] mode=EXACT solved=627572/636225 reduction=1.4%
+[LAYER_COMMIT_LOCAL] grids=25449/393216 samples=627572/636225 area=25 sample_mode=EXACT parallel=0 publish_parallel=0 context=0.588ms alloc=0.028ms solve=116.398ms publish=3.815ms total=121.838ms
+[LAYER_COMMIT_FRAME_CACHE] v=4 mode=OFF reset=0 hit=0 build=0 replace=0 bypass=25449 cached=0/0 used=0.0MiB capacity=0.0MiB lookup=0.059ms
+[LAYER_COMMIT_TANGENT] mode=LEGACY_INVERSE
+[LAYER_COMMIT_OP] ok=1 total=125.183ms
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=271.944ms normals=110.805ms total=382.749ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.086ms neighbors=24.559ms total=407.419ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=560.724ms
+[LAYER_UNDO_V2] mode=STANDARD_SWAP level=3 layers=1 pending_preserved=1
+[LAYER_UNDO_V2] mode=STANDARD_SWAP level=3 layers=1 pending_preserved=1
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=271.578ms normals=105.898ms total=377.476ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.080ms neighbors=22.658ms total=400.236ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=549.522ms
+[LAYER_UNDO_V2] mode=STANDARD_SWAP level=3 layers=1 pending_preserved=1
+[MULTIRES_CCG_EVAL] faces=98304 grids=393216 area=25 positions=282.007ms normals=106.744ms total=388.751ms
+[MULTIRES_CCG_BUILD] grids=393216 alloc=0.072ms neighbors=21.341ms total=410.181ms
+[MULTIRES_MODIFIER_EVAL] sculpt=1 total=563.440ms
+[LAYER_SUPPORT_INDEX] mode=BUILD grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=BUILD grids=119412 samples=2985300 bytes=34.2MiB ms=51.716
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=57.083
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=14.811ms normals=14.624ms total=32.247ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=1.000000 new=0.800000 delta=-0.200000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=89.749ms bounds=2.304ms total=105.552ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.371
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.843
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=14.324ms normals=14.977ms total=32.034ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=0.800000 new=-1.200000 delta=-2.000000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=40.891ms bounds=2.436ms total=48.375ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.390
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.556
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=14.915ms normals=15.177ms total=32.869ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=-1.200000 new=-1.500000 delta=-0.300000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=41.442ms bounds=2.360ms total=48.766ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.313
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.536
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=14.966ms normals=14.806ms total=32.613ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=-1.500000 new=-1.600000 delta=-0.100000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=41.169ms bounds=2.193ms total=51.600ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.380
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.626
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=14.860ms normals=15.055ms total=32.701ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=-1.600000 new=-2.900000 delta=-1.300000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=41.344ms bounds=2.237ms total=48.814ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.346
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.488
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=15.147ms normals=14.982ms total=32.901ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=-2.900000 new=-3.000000 delta=-0.100000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=41.412ms bounds=2.338ms total=48.647ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=METADATA_ONLY old=-3.000000 new=0.000000 delta=3.000000 support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.012ms
+[LAYER_VISIBLE] requested=0 applied=1 update=CALLBACK_PENDING
+[LAYER_VISIBLE_LOCAL] mode=LOCAL reason=METADATA_ONLY support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.028ms
+[LAYER_VISIBLE] requested=1 applied=1 update=CALLBACK_PENDING
+[LAYER_VISIBLE_LOCAL] mode=LOCAL reason=METADATA_ONLY support_faces=0 updated_faces=0 pbvh_nodes=0 eval=0.000ms bounds=0.000ms total=0.013ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.820
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=9.360
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=15.180ms normals=15.229ms total=33.854ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=0.000000 new=0.200000 delta=0.200000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=43.237ms bounds=2.463ms total=56.945ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.391
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.621
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=14.777ms normals=14.893ms total=32.310ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=0.200000 new=2.400000 delta=2.200000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=40.958ms bounds=2.309ms total=48.293ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.910
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=9.221
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=14.563ms normals=14.941ms total=32.296ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=2.400000 new=3.200000 delta=0.800000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=41.547ms bounds=2.296ms total=48.880ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.412
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.923
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=14.911ms normals=14.707ms total=32.706ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=3.200000 new=3.300000 delta=0.100000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=41.665ms bounds=2.239ms total=49.137ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.432
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.903
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=14.766ms normals=15.040ms total=33.032ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=3.300000 new=3.100000 delta=-0.200000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=41.950ms bounds=2.275ms total=49.491ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.461
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.647
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=15.034ms normals=14.750ms total=32.517ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=3.100000 new=2.200000 delta=-0.900000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=41.177ms bounds=2.226ms total=48.419ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.348
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.776
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=15.048ms normals=14.696ms total=32.447ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=2.200000 new=2.100000 delta=-0.100000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=41.245ms bounds=2.433ms total=48.775ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_WEIGHT_HOT_DELTA] mode=HIT grids=119412 samples=2985300 bytes=34.2MiB ms=3.374
+[LAYER_WEIGHT_PROFILE] stage=DELTA mode=DIRECT ms=8.722
+[LAYER_WEIGHT_PROFILE] stage=SURFACE mode=EXACT_STITCH_NORMALS stitch=14.763ms normals=15.038ms total=32.493ms
+[LAYER_STRENGTH_LOCAL] mode=LOCAL reason=DIRECT_DELTA old=2.100000 new=2.000000 delta=-0.100000 support_faces=30033 updated_faces=30763 pbvh_nodes=1472 eval=41.235ms bounds=2.307ms total=48.662ms
+[LAYER_SUPPORT_INDEX] mode=HIT grids=119412/393216
+[LAYER_SUPPORT_INDEX] mode=HIT grids=1194

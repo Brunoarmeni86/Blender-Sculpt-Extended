@@ -1459,6 +1459,13 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
 
 static bool rna_multires_visible_trace_enabled();
 
+/* Match layer composition's zero-contribution threshold. Keep invalid values
+ * invalid so the fast-refresh guard selects a conservative rebuild. */
+static float rna_multires_effective_layer_weight(const float strength)
+{
+  return std::abs(strength) < 1e-6f ? 0.0f : strength;
+}
+
 static void rna_MultiresSculptLayer_strength_set(PointerRNA *ptr, float value)
 {
   Object *ob=id_cast<Object *>(ptr->owner_id);
@@ -1496,8 +1503,9 @@ static void rna_MultiresSculptLayer_strength_set(PointerRNA *ptr, float value)
   const char *reason="NO_OBJECT";
   const double start=BLI_time_now_seconds();
   const bool local_ok=rna_multires_visible_fast_refresh(
-      *ob,*layer,value-old_value,support_faces,updated_faces,changed_nodes,
-      eval_ms,bounds_ms,reason);
+      *ob,*layer,
+      rna_multires_effective_layer_weight(value) - rna_multires_effective_layer_weight(old_value),
+      support_faces,updated_faces,changed_nodes,eval_ms,bounds_ms,reason);
 
   if (local_ok) {
     DEG_id_tag_update(&ob->id,ID_RECALC_SYNC_TO_EVAL);
@@ -1625,8 +1633,13 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
     return false;
   }
 
-  /* Zero-strength/invalid-strength layers cannot contribute. */
-  if (!std::isfinite(layer.strength) || std::abs(layer.strength) < 1e-6f) {
+  /* A new zero strength still needs to remove the OLD visible contribution.
+   * Only a zero effective weight change is metadata-only. */
+  if (!std::isfinite(layer.strength) || !std::isfinite(direct_weight_delta)) {
+    r_reason = "INVALID_WEIGHT";
+    return false;
+  }
+  if (direct_weight_delta == 0.0f) {
     r_reason = "METADATA_ONLY";
     return true;
   }
@@ -1819,7 +1832,8 @@ static void rna_MultiresSculptLayer_visible_update(
       rna_multires_visible_fast_refresh(*ob,
                                         *layer,
                                         ((layer->flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0 ?
-                                             layer->strength : -layer->strength),
+                                             1.0f : -1.0f) *
+                                            rna_multires_effective_layer_weight(layer->strength),
                                         support_faces,
                                         updated_faces,
                                         changed_nodes,
