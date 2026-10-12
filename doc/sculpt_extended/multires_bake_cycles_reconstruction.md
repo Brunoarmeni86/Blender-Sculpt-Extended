@@ -62,3 +62,11 @@ It audits saved HighReference mesh/camera fingerprints when running in Blender,
 uses both reference alpha masks, compares each candidate to its own reference,
 and supplies both cross-control comparisons. A review status is not a pass.
 No new render, bake, source modification or build is required for recovery.
+
+## Native report review
+
+The kit now runs natively, but the two uploaded unique comparison reports do
+not validate full reconstruction: Normal seam RMS improves about 46.6%, while
+all three render-vs-high RMS metrics worsen slightly. Exact reference fingerprints
+differ and pixel drift is tiny. See validation/multires_bake_native_cycles_review_20261012.md
+for preserved reports and the need to isolate same-surface shader conversion.
