@@ -51,3 +51,31 @@ chats. The kit rejects incompatible hunks rather than replacing complete files.
 Use a test scene copy, with a populated layer and Sculpt CCG active. Benchmark
 measures RNA + dependency-graph updates, not viewport draw, includes initial cache
 warmup and is descriptive rather than a required speed threshold.
+
+## User checkpoint: 2026-10-12 17:06 Europe/Rome
+
+User reported an apparent improvement after reversing only the strength-zero
+patch. Keep the cache budget/support-index experiment installed provisionally,
+but explicitly REVERSIBLE and not promoted to stable or main. A cache speedup
+has not been quantified by a complete populated-layer A/B benchmark; the partial
+logs confirm execution, not final performance or Undo correctness.
+
+The strength-zero candidate 16e8166 appeared worse in the native user trial and
+was rolled back on Windows. Its failure cause remains unresolved. Cache-only
+source checkpoint: fa4998d9053cb1e2892bc3fe10e1cdb6cc6211d7. Later branch history
+retains the rejected strength-zero experiment for investigation; it must not be
+confused with the current Windows configuration.
+
+If the previous defect returns, remove the cache experiment too, with Blender
+closed, using the existing reversible installer:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+& "C:\\BlenderDev\\Sculpt-Layer-Cache\\APPLY-LAYER-CACHE.ps1" -Revert
+```
+
+The strength-zero patch must already be reversed before that cache rollback.
+The installer checks applicability, rebuilds INSTALL in the existing shareable
+build and leaves unrelated bake patches in place. Reversibility is a retained
+user requirement, not evidence of an identified cache regression. No code or
+native-test changes are made by this documentation checkpoint.
