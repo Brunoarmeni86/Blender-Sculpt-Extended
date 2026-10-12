@@ -1871,19 +1871,39 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
     }
   };
 
-  /* Avoid thread scheduling overhead on tiny commits. */
+  /* The legacy gate excludes small grids even when millions of samples
+   * need solving. Opt in to a total-work threshold and batch small grids,
+   * without changing per-sample arithmetic or the publication phase. */
+  const char *work_parallel_env = BLI_getenv("BLENDER_SCULPT_COMMIT_WORK_PARALLEL");
+  const bool work_parallel_enabled = work_parallel_env != nullptr &&
+                                     work_parallel_env[0] == '1' &&
+                                     work_parallel_env[1] == '\0';
+  const int64_t solve_work_samples = int64_t(grids.size()) * int64_t(area);
   const bool use_parallel_solve =
-      !live_displacement_active && grids.size() >= 8 && area >= 64;
+      !live_displacement_active && grids.size() >= 8 &&
+      (work_parallel_enabled ? solve_work_samples >= 65536 : area >= 64);
+  const int solve_grain = work_parallel_enabled ? std::max(1, 4096 / area) : 1;
 
   const double commit_solve_start = commit_trace ? BLI_time_now_seconds() : 0.0;
   if (use_parallel_solve) {
-    threading::parallel_for(grids.index_range(), 1, solve_range);
+    threading::parallel_for(grids.index_range(), solve_grain, solve_range);
   }
   else {
     solve_range(grids.index_range());
   }
   const double commit_solve_ms =
       commit_trace ? (BLI_time_now_seconds() - commit_solve_start) * 1000.0 : 0.0;
+  if (commit_trace && work_parallel_enabled) {
+    std::printf("[LAYER_COMMIT_WORK_PARALLEL] parallel=%d grain=%d work_samples=%lld "
+                "exact_samples=%lld live=%d solve=%.3fms\n",
+                int(use_parallel_solve),
+                solve_grain,
+                static_cast<long long>(solve_work_samples),
+                static_cast<long long>(solved_sample_count),
+                int(live_displacement_active),
+                commit_solve_ms);
+    std::fflush(stdout);
+  }
 
   for (const int ok : solve_ok) {
     if (ok == 0) {
