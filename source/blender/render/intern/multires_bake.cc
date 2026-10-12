@@ -720,6 +720,15 @@ static bool multires_bake_quality_trace_enabled()
   return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+static bool multires_bake_normal_cycles_tbn_enabled()
+{
+  static const bool enabled = []() {
+    const char *value = BLI_getenv("BLENDER_MULTIRES_BAKE_NORMAL_CYCLES_TBN");
+    return value == nullptr || value[0] != '0' || value[1] != '\0';
+  }();
+  return enabled;
+}
+
 static bool multires_bake_quality_uv_coverage_enabled()
 {
   static const bool enabled = []() {
@@ -1567,9 +1576,10 @@ class MultiresNormalsBaker : public MultiresBaker {
     return float3(0.0f, 0.0f, 1.0f);
   }
 
-  /* Convert the averaged object-space direction once, using one stable TBN at
-   * the texel center. This avoids averaging vectors expressed in different
-   * tangent frames. */
+  /* Convert the averaged object-space direction once at the selected texel
+   * reference. Cycles reconstructs with unnormalized interpolated N and T,
+   * and B = sign * cross(N, T). Use that exact inverse rather than changing
+   * the frame through orthonormalization. The sampling remains in object space. */
   float3 finalize_quality_samples_at_pixel(const RasterizeTriangle &triangle,
                                            const float2 &center_bary_uv,
                                            const float3 &sum,
@@ -1584,8 +1594,9 @@ class MultiresNormalsBaker : public MultiresBaker {
       object_normal = triangle.get_normal(center_bary_uv);
     }
 
-    const float3x3 to_tangent = get_to_tangent_matrix_tbn_hq(
-        triangle, center_bary_uv);
+    const float3x3 to_tangent = multires_bake_normal_cycles_tbn_enabled() ?
+                                  get_to_tangent_matrix_tbn(triangle, center_bary_uv) :
+                                  get_to_tangent_matrix_tbn_hq(triangle, center_bary_uv);
     float3 tangent_normal = to_tangent * object_normal;
 
     if (math::dot(tangent_normal, tangent_normal) > 1.0e-20f) {
