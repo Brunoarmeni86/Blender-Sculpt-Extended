@@ -22,6 +22,8 @@
 #include <vector>
 #include <cmath>
 #include "BLI_bitmap.h"
+#include "BLI_path_utils.hh"
+#include <cstdio>
 #include "BLI_listbase.h"
 #include "MEM_guardedalloc.h"
 
@@ -136,7 +138,21 @@ bool multiresModifier_reshapeFromCCG(const int tot_level, Mesh *coarse_mesh, Sub
 
   multires_ensure_external_read(coarse_mesh, reshape_context.top.level);
 
-  multires_reshape_store_original_grids(&reshape_context);
+  /* At equal levels, smoothing returns before reading original grids.
+   * Avoid their deep copy only under the opt-in policy. Lower-level reshape
+   * retains the original detail-preserving path. */
+  const char *skip_env = BLI_getenv("BLENDER_SCULPT_COMMIT_SKIP_ORIGINALS");
+  const bool skip_originals = skip_env != nullptr && skip_env[0] == '1' &&
+                              skip_env[1] == '\0' &&
+                              reshape_context.reshape.level == reshape_context.top.level;
+  if (!skip_originals) {
+    multires_reshape_store_original_grids(&reshape_context);
+  }
+  if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+    std::printf("[LAYER_COMMIT_ORIGINAL_GRIDS] mode=%s reshape=%d top=%d\n",
+                skip_originals ? "SKIP_EQUAL_LEVEL" : "COPY",
+                reshape_context.reshape.level, reshape_context.top.level);
+  }
   multires_reshape_ensure_grids(coarse_mesh, reshape_context.top.level);
   if (!multires_reshape_assign_final_coords_from_ccg(&reshape_context, subdiv_ccg)) {
     multires_reshape_context_free(&reshape_context);
@@ -916,6 +932,7 @@ void multiresModifier_base_apply(Depsgraph *depsgraph,
 /** \} */
 
 }  // namespace blender
+
 
 
 
