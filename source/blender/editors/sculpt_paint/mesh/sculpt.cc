@@ -19,6 +19,10 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <queue>
+#include <unordered_map>
+#include <vector>
 
 #include "MEM_guardedalloc.h"
 
@@ -122,6 +126,19 @@ namespace blender {
 static CLG_LogRef LOG = {"sculpt"};
 
 namespace ed::sculpt_paint {
+
+/* ANCHORED_GEODESIC_V3: use memory proportional to the stamp, never the complete mesh.
+ * Allocated and updated before parallel brush execution, then only read by workers. */
+struct AnchorSurfacePathCache {
+  const SubdivCCG *geometry = nullptr;
+  float3 origin = float3(0.0f);
+  float coverage_radius = 0.0f;
+  int mirror_pass = -1;
+  int radial_pass = -1;
+  int tile_pass = -1;
+  bool ready = false;
+  std::unordered_map<int, float> distances;
+};
 
 /* -------------------------------------------------------------------- */
 /** \name Sculpt Brush Utilities
@@ -2501,7 +2518,8 @@ void sculpt_apply_texture(const SculptSession &ss,
                           const int thread_id,
                           float *r_value,
                           float4 &r_rgba,
-                          const float3 *surface_normal)
+                          const float3 *surface_normal,
+                          const int ccg_index)
 {
   const StrokeCache &cache = *ss.cache;
   const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
@@ -2540,13 +2558,39 @@ void sculpt_apply_texture(const SculptSession &ss,
       float x = symm_point[0];
       float y = symm_point[1];
 
+      /* ANCHORED_GEODESIC_V3: cache stores shortest graph paths along the CCG
+       * surface. Radius follows surface distance, texture angle stays in the
+       * brush-local tangent frame. Samples on unreachable topology are masked
+       * rather than painting through nearby disconnected/folded surfaces. */
+      const AnchorSurfacePathCache *surface_path = cache.anchor_surface_path.get();
+      const bool use_surface_path =
+          brush.stroke_method == BRUSH_STROKE_ANCHORED &&
+          (brush.flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT) &&
+          (brush.flag2 & BRUSH_SCULPT_ANCHOR_GEODESIC) && surface_path &&
+          surface_path->ready && ccg_index >= 0;
+      if (use_surface_path) {
+        const auto found = surface_path->distances.find(ccg_index);
+        if (found == surface_path->distances.end() || found->second > cache.radius) {
+          *r_value = 0.0f;
+          r_rgba = float4(0.0f);
+          return;
+        }
+        const float planar_radius = sqrtf(x * x + y * y);
+        if (planar_radius > 0.05f && cache.radius > 1.0e-6f) {
+          const float surface_radius = found->second / cache.radius;
+          const float scale = clamp_f(surface_radius / planar_radius, 1.0f, 2.0f);
+          x *= scale;
+          y *= scale;
+        }
+      }
+
       /* ANCHORED_SURFACE_PROJECTION_V1.
        * Standard uses the unchanged planar Area Plane mapping. With this optional mode,
        * compensate the tangent-plane chord length using an osculating circular arc estimate.
        * This is local curvature compensation, NOT a global geodesic unwrap. It keeps the
        * projected angle, is bounded for folds/high-frequency details, and requires no new
        * topology traversal or persistent Multires buffers. */
-      if (brush.stroke_method == BRUSH_STROKE_ANCHORED &&
+      if (!use_surface_path && brush.stroke_method == BRUSH_STROKE_ANCHORED &&
           (brush.flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT))
       {
         const float planar_radius = sqrtf(x * x + y * y);
@@ -8013,7 +8057,7 @@ void calc_brush_texture_factors(const SculptSession &ss,
 {
   if (brush.stroke_method != BRUSH_STROKE_ANCHORED ||
       !(brush.flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT) ||
-      !(brush.flag2 & BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED))
+      !(brush.flag2 & (BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED | BRUSH_SCULPT_ANCHOR_GEODESIC)))
   {
     calc_brush_texture_factors(ss, brush, positions, factors);
     return;
@@ -8056,7 +8100,8 @@ void calc_brush_texture_factors(const SculptSession &ss,
                            thread_id,
                            &texture_value,
                            texture_rgba,
-                           &normal);
+                           &normal,
+                           normal_offset + j);
       factors[local_i] *= texture_value;
     }
   }
