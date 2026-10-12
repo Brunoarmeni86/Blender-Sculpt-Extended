@@ -71,6 +71,11 @@ shading, ImBuf and spin-lock services. It does not use native CCG/TBN shaders.
 
 Blender is NOT compiled here and native bake images are NOT validated. Keep draft.
 
+The native smoke script uses the fork's BakeSettings RNA (use_multires, type,
+displacement_space, use_lores_mesh) and object.bake_image exec path, verified in
+rna_scene.cc/object_bake.cc. Only Python syntax was checked here. It starts from
+a fresh background scene and checks five Normal/Vector coverage cases ON/OFF.
+
 ## Remaining quality work
 
 This candidate still shades a pixel from one selected triangle: it does not
@@ -100,3 +105,4 @@ accurate reconstruction.
    the prior HQ result, and test both Use Low Resolution Mesh settings.
 5. Compare Normal/Vector reapplication to the source sculpt, not just maps.
 6. Measure bake time and peak memory at 2K/4K/8K before merging.
+
