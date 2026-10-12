@@ -2500,7 +2500,8 @@ void sculpt_apply_texture(const SculptSession &ss,
                           const float brush_point[3],
                           const int thread_id,
                           float *r_value,
-                          float4 &r_rgba)
+                          float4 &r_rgba,
+                          const float3 *surface_normal)
 {
   const StrokeCache &cache = *ss.cache;
   const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
@@ -2554,7 +2555,32 @@ void sculpt_apply_texture(const SculptSession &ss,
           /* Circular arc estimate: s / r = (1 + t^2) * atan(t) / t,
            * t = abs(height) / radial tangent-plane distance. */
           const float t = min_ff(normal_offset / planar_radius, 0.65f);
-          const float arc_scale = min_ff((1.0f + t * t) * atanf(t) / t, 1.30f);
+          float arc_scale = min_ff((1.0f + t * t) * atanf(t) / t, 1.30f);
+
+          /* ANCHORED_NORMAL_GUIDED_V2: use the actual SubdivCCG surface orientation
+           * to estimate local radial arc length more accurately. This is still a
+           * bounded, local approximation and not a geodesic solver. The height-only
+           * estimate above stays as a fallback for all other brush paths. */
+          if ((brush.flag2 & BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED) && surface_normal) {
+            float3 n = *surface_normal;
+            if (cache.radial_symmetry_pass) {
+              mul_mat3_m4_v3(cache.symm_rot_mat_inv.ptr(), n);
+            }
+            n = symmetry_flip(n, cache.mirror_symmetry_pass);
+            mul_mat3_m4_v3(cache.brush_local_mat.ptr(), n);
+            if (normalize_v3(n) > 1.0e-6f && n.z > 0.15f) {
+              const float radial_tilt = (n.x * x + n.y * y) / planar_radius;
+              /* Avoid projecting across an unrelated facing surface or a hard
+               * fold: the surface offset and radial normal must agree. */
+              if (-symm_point[2] * radial_tilt > 0.0f) {
+                const float theta = min_ff(atan2f(fabsf(radial_tilt), n.z), 1.15f);
+                if (theta > 1.0e-4f) {
+                  arc_scale = min_ff(theta / sinf(theta), 1.30f);
+                }
+              }
+            }
+          }
+
           x *= arc_scale;
           y *= arc_scale;
         }
@@ -7341,7 +7367,7 @@ void calc_factors_common_grids(const Depsgraph &depsgraph,
 
   auto_mask::calc_grids_factors(depsgraph, object, cache.automasking.get(), node, grids, factors);
 
-  calc_brush_texture_factors(ss, brush, positions, factors);
+  calc_brush_texture_factors(ss, brush, subdiv_ccg, grids, positions, factors);
 }
 
 void calc_factors_common_bmesh(const Depsgraph &depsgraph,
@@ -7445,7 +7471,7 @@ void calc_factors_common_from_orig_data_grids(const Depsgraph &depsgraph,
 
   auto_mask::calc_grids_factors(depsgraph, object, cache.automasking.get(), node, grids, factors);
 
-  calc_brush_texture_factors(ss, brush, positions, factors);
+  calc_brush_texture_factors(ss, brush, subdiv_ccg, grids, positions, factors);
 }
 
 void calc_factors_common_from_orig_data_bmesh(const Depsgraph &depsgraph,
@@ -7973,6 +7999,66 @@ void calc_brush_texture_factors(const SculptSession &ss,
     sculpt_apply_texture(ss, brush, positions[i], thread_id, &texture_value, texture_rgba);
 
     factors[i] *= texture_value;
+  }
+}
+
+/** ANCHORED_NORMAL_GUIDED_V2: direct per-grid CCG normal lookup; sparse sampling
+ * keeps the normal-driven projection from allocating an extra node-sized array. */
+void calc_brush_texture_factors(const SculptSession &ss,
+                                const Brush &brush,
+                                const SubdivCCG &subdiv_ccg,
+                                const Span<int> grids,
+                                const Span<float3> positions,
+                                const MutableSpan<float> factors)
+{
+  if (brush.stroke_method != BRUSH_STROKE_ANCHORED ||
+      !(brush.flag2 & BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT) ||
+      !(brush.flag2 & BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED))
+  {
+    calc_brush_texture_factors(ss, brush, positions, factors);
+    return;
+  }
+
+  const MTex *mtex = BKE_brush_mask_texture_get(&brush, OB_MODE_SCULPT);
+  if (!mtex->tex || mtex->brush_map_mode != MTEX_MAP_MODE_AREA) {
+    calc_brush_texture_factors(ss, brush, positions, factors);
+    return;
+  }
+
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  const Span<float3> normals = subdiv_ccg.normals.as_span();
+  if (key.grid_area <= 0 || grids.size() * key.grid_area != positions.size() ||
+      normals.size() < subdiv_ccg.grids.size() * key.grid_area)
+  {
+    calc_brush_texture_factors(ss, brush, positions, factors);
+    return;
+  }
+
+  const int thread_id = BLI_task_parallel_thread_id(nullptr);
+  for (const int grid_i : grids.index_range()) {
+    const int global_grid = grids[grid_i];
+    if (global_grid < 0 || global_grid >= subdiv_ccg.grids.size()) {
+      continue;
+    }
+    const int local_offset = grid_i * key.grid_area;
+    const int normal_offset = global_grid * key.grid_area;
+    for (const int j : IndexRange(key.grid_area)) {
+      const int local_i = local_offset + j;
+      if (factors[local_i] == 0.0f) {
+        continue;
+      }
+      float texture_value;
+      float4 texture_rgba;
+      const float3 &normal = normals[normal_offset + j];
+      sculpt_apply_texture(ss,
+                           brush,
+                           positions[local_i],
+                           thread_id,
+                           &texture_value,
+                           texture_rgba,
+                           &normal);
+      factors[local_i] *= texture_value;
+    }
   }
 }
 
