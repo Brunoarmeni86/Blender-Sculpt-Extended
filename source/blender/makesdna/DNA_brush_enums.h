@@ -426,6 +426,8 @@ enum eBrushFlags2 : int {
   BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED = (1 << 24),
   /* ANCHORED_GEODESIC_V3: bounded CCG surface shortest-path sampling. */
   BRUSH_SCULPT_ANCHOR_GEODESIC = (1 << 25),
+  /* ANCHORED_SURFACE_TRANSPORT_V4: tangent frame transported along local CCG shortest paths. */
+  BRUSH_SCULPT_ANCHOR_TRANSPORT = (1 << 26),
 };
 ENUM_OPERATORS(eBrushFlags2)
 
