@@ -64,7 +64,7 @@ def bake(output):
         raise RuntimeError("Run in background Blender")
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
-    bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=1, radius=1)
+    bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=1, radius=1, calc_uvs=False)
     ob = bpy.context.object
     mesh = ob.data
     # Non-spherical curvature makes the frame defect measurable.
@@ -76,6 +76,11 @@ def bake(output):
     for poly in mesh.polygons:
         poly.use_smooth = True
     uv = mesh.uv_layers.new(name="TBNProbe")
+    # Bake reads the active mesh UV map, not the uvmap argument of calc_tangents.
+    uv.active = True
+    uv.active_render = True
+    if mesh.uv_layers.active.name != uv.name:
+        raise AssertionError("Probe UV map is not active")
     flat_uv = [0.0] * (2 * len(mesh.loops))
     triangles = []
     for i, poly in enumerate(mesh.polygons):
@@ -105,6 +110,8 @@ def bake(output):
         bpy.ops.object.multires_subdivide(modifier=mmd.name)
     mmd.levels = 0
     mmd.render_levels = 3
+    if mesh.uv_layers.active.name != uv.name:
+        raise AssertionError("Multires changed the active UV map")
     material = bpy.data.materials.new("NormalProbe")
     material.use_nodes = True
     mesh.materials.append(material)
@@ -152,6 +159,7 @@ def bake(output):
     report = dict(blender=bpy.app.version_string,
                   ss=os.environ.get("BLENDER_MULTIRES_BAKE_SS", "unset"),
                   cycles_tbn=os.environ.get("BLENDER_MULTIRES_BAKE_NORMAL_CYCLES_TBN", "1"),
+                  active_uv=mesh.uv_layers.active.name,
                   frame_hash=hashlib.sha256(json.dumps(frames,sort_keys=True).encode()).hexdigest(),
                   samples=samples)
     output.parent.mkdir(parents=True,exist_ok=True)

@@ -55,3 +55,13 @@ reconfiguring. -Revert removes only this Normal conversion patch.
 TEST-BAKE-NORMAL-TBN.ps1 writes three native-normal-*.json files plus
 native-normal-comparison.json and native-normal-binary.txt. Close Blender before
 installation. Send the comparison and reports back for review before merging.
+
+## Native probe correction (2026-10-12)
+
+The first Windows run stopped in the 1x reference with missing coverage at face 0,
+pixel (13,36). The probe created TBNProbe without activating it, while the
+icosphere already had its generated UV map. Repository RNA confirms new UV maps
+only become active when no map was active; the baker reads active_uv_map_name.
+The corrected probe disables primitive UV generation, explicitly activates
+TBNProbe for editing/rendering and checks it before baking. No C++ changes or
+rebuild required. Native precision validation remains pending.
