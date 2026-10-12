@@ -601,6 +601,10 @@ class StrokePanel(BrushPanel):
                 anchor_projection.enabled = (brush.texture_slot.map_mode == 'AREA_PLANE')
                 anchor_projection.prop(brush, "use_anchor_surface_projection",
                                        text="Surface-Adaptive Projection")
+                normal_guided = anchor_projection.column()
+                normal_guided.enabled = brush.use_anchor_surface_projection
+                normal_guided.prop(brush, "use_anchor_normal_guided_projection",
+                                   text="Normal-Guided (Multires)")
                 if brush.texture_slot.map_mode != 'AREA_PLANE':
                     col.label(text="Set Texture Mapping to Area Plane", icon='INFO')
 
