@@ -1285,6 +1285,18 @@ static bool wm_operator_register_check(wmWindowManager *wm, wmOperatorType *ot)
  * A cancelled invoke leaves the same visible brush entry and its redo tail. */
 static void wm_sculpt_controls_begin(bContext *C, const wmOperatorType *ot)
 {
+  /* Mode-set wrappers have no UNDO flag, and the sculpt toggle is otherwise
+   * excluded below. Capture the last stroke before leaving Sculpt Mode, while
+   * its CCG and layer data are still available. The editor helper checks mode
+   * and stack ownership, including nested calls and already paired steps. */
+  if (std::strcmp(ot->idname, "OBJECT_OT_mode_set") == 0 ||
+      std::strcmp(ot->idname, "OBJECT_OT_mode_set_with_submode") == 0 ||
+      std::strcmp(ot->idname, "OBJECT_OT_editmode_toggle") == 0 ||
+      std::strcmp(ot->idname, "SCULPT_OT_sculptmode_toggle") == 0)
+  {
+    ED_undo_sculpt_controls_begin(C, true);
+    return;
+  }
   if (!(ot->flag & (OPTYPE_UNDO | OPTYPE_UNDO_GROUPED))) {
     return;
   }

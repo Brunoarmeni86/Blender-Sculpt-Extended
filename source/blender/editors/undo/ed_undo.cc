@@ -108,11 +108,11 @@ void ED_undo_group_end(bContext *C)
   BKE_undosys_stack_group_end(wm->runtime->undo_stack);
 }
 
-/* SCULPT_LAYER_UNDO_CONTROLS_V36: main-thread action boundary only. */
-bool ED_undo_sculpt_controls_begin(bContext *C)
+/* Main-thread action boundary: controls opt in; mode changes always checkpoint layers. */
+bool ED_undo_sculpt_controls_begin(bContext *C, const bool is_mode_boundary)
 {
   const char *enabled = std::getenv("BLENDER_SCULPT_LAYER_UNDO_CONTROLS");
-  if (!enabled || enabled[0] != '1' || U.undosteps <= 0 ||
+  if ((!is_mode_boundary && (!enabled || enabled[0] != '1')) || U.undosteps <= 0 ||
       !(U.uiflag & USER_GLOBALUNDO))
   {
     return false;
@@ -132,13 +132,29 @@ bool ED_undo_sculpt_controls_begin(bContext *C)
     }
   }
   UndoStack *ustack = wm->runtime->undo_stack;
-  if (!has_layers || !BKE_undosys_sculpt_step_pair_memfile(ustack, C)) {
+  /* A mode wrapper may call another mode operator. Pair only once, before either
+   * operator changes mode or frees the CCG. These are also the pairing helper's
+   * preconditions, checked before committing any pending sculpt changes. */
+  if (!has_layers || !ustack || ustack->step_init || ustack->group_level != 0 ||
+      !ustack->step_active || ustack->step_active->type != BKE_UNDOSYS_TYPE_SCULPT ||
+      ustack->step_active->skip || ustack->step_active->use_memfile_step)
+  {
+    return false;
+  }
+  if (is_mode_boundary && !bke::multires_layers::commit(*ob)) {
+    CLOG_ERROR(&LOG, "Cannot checkpoint Sculpt Layers before changing mode: commit failed");
+    return false;
+  }
+  if (!BKE_undosys_sculpt_step_pair_memfile(ustack, C)) {
+    CLOG_ERROR(&LOG, "Cannot checkpoint Sculpt Layers: native step pairing failed");
     return false;
   }
   const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
   if (trace && trace[0] && trace[0] != '0') {
-    std::printf("[LAYER_UNDO_CONTROLS] v=36 mode=PAIR action=%s redo_preserved=%d\n",
-                ustack->step_active->name, ustack->step_active->next != nullptr);
+    std::printf("[LAYER_UNDO_CONTROLS] v=37 mode=PAIR boundary=%d action=%s redo_preserved=%d\n",
+                int(is_mode_boundary),
+                ustack->step_active->name,
+                ustack->step_active->next != nullptr);
   }
   return true;
 }
