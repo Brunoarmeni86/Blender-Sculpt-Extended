@@ -1,0 +1,97 @@
+--- a/source/blender/blenkernel/intern/multires_reshape.cc
++++ b/source/blender/blenkernel/intern/multires_reshape.cc
+@@ -20,6 +20,7 @@
+ #include "BKE_subdiv.hh"
+ 
+ #include <vector>
++#include <algorithm>
+ #include <cmath>
+ #include "BLI_bitmap.h"
+ #include "BLI_path_utils.hh"
+@@ -402,6 +403,46 @@
+   layer.level = new_level;
+ }
+ 
++/* The first sparse-subdivide optimization handles structurally empty layers
++ * only. Partial layers keep the existing global algorithm and seam propagation.
++ * L0 contributions and layer hidden bitmaps retain their established path. */
++static bool multires_layer_can_keep_empty_subdivide(const MultiresSculptLayer &layer)
++{
++  if (layer.level <= 0 || layer.level > 13 || layer.disps == nullptr || layer.grids_num <= 0) {
++    return false;
++  }
++  if (layer.base_deltas != nullptr) {
++    for (int vertex = 0; vertex < layer.base_verts_num; vertex++) {
++      const float *delta = layer.base_deltas[vertex];
++      if (delta[0] != 0.0f || delta[1] != 0.0f || delta[2] != 0.0f) {
++        return false;
++      }
++    }
++  }
++  const int side = bke::subdiv::grid_size_from_level(layer.level);
++  for (int grid = 0; grid < layer.grids_num; grid++) {
++    const MDisps &data = layer.disps[grid];
++    if (data.disps != nullptr || data.hidden != nullptr || data.level != layer.level ||
++        data.totdisp != side * side)
++    {
++      return false;
++    }
++  }
++  return true;
++}
++
++static void multires_publish_empty_subdivided_layer(MultiresSculptLayer &layer,
++                                                   const int new_level)
++{
++  const int side = bke::subdiv::grid_size_from_level(new_level);
++  for (int grid = 0; grid < layer.grids_num; grid++) {
++    BLI_assert(layer.disps[grid].disps == nullptr && layer.disps[grid].hidden == nullptr);
++    layer.disps[grid].level = new_level;
++    layer.disps[grid].totdisp = side * side;
++  }
++  layer.level = new_level;
++}
++
+ void multiresModifier_subdivide_to_level(Object *object,
+                                          MultiresModifierData *mmd,
+                                          const int top_level,
+@@ -463,7 +504,14 @@
+    * positive-level layer grids here. A level-zero layer legitimately has no
+    * grid payload yet: its base_deltas are carried by the cage and the null
+    * high-resolution contribution must remain equivalent to zero. */
++  const char *sparse_env = BLI_getenv("BLENDER_SCULPT_EMPTY_LAYER_SUBDIVIDE");
++  const bool keep_empty = sparse_env != nullptr && sparse_env[0] == '1' && sparse_env[1] == '\0';
++  std::vector<MultiresSculptLayer *> empty_layers;
+   for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
++    if (keep_empty && multires_layer_can_keep_empty_subdivide(layer)) {
++      empty_layers.push_back(&layer);
++      continue;
++    }
+     if (layer.level <= 0) {
+       continue;
+     }
+@@ -485,6 +533,9 @@
+   std::vector<std::pair<MultiresSculptLayer *, Mesh *>> surfaces;
+   bool valid = base != nullptr;
+   for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
++    if (std::find(empty_layers.begin(), empty_layers.end(), &layer) != empty_layers.end()) {
++      continue;
++    }
+     if (!valid) {
+       break;
+     }
+@@ -505,6 +556,14 @@
+   }
+   valid = valid && multires_force_sculpt_rebuild(object);
+   if (valid) {
++    for (MultiresSculptLayer *layer : empty_layers) {
++      bke::multires_layers::weight_hot_delta_cache_invalidate(layer);
++      multires_publish_empty_subdivided_layer(*layer, top_level);
++    }
++    if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
++      std::printf("[LAYER_EMPTY_SUBDIVIDE] skipped=%d grids=%d old_level=%d new_level=%d\n",
++                  int(empty_layers.size()), mesh->corners_num, mmd->totlvl, top_level);
++    }
+     for (const auto &[layer, surface] : surfaces) {
+       MDisps *grids = static_cast<MDisps *>(CustomData_get_layer_for_write(
+           &surface->corner_data, CD_MDISPS, surface->corners_num));
