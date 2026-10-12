@@ -609,6 +609,11 @@ class StrokePanel(BrushPanel):
                 surface_path.enabled = brush.use_anchor_surface_projection
                 surface_path.prop(brush, "use_anchor_geodesic_projection",
                                   text="Surface Path (Multires, Experimental)")
+                transport = anchor_projection.column()
+                transport.enabled = (brush.use_anchor_surface_projection
+                                     and brush.use_anchor_geodesic_projection)
+                transport.prop(brush, "use_anchor_surface_transport",
+                               text="Surface Tangent Transport (V4)")
                 if brush.texture_slot.map_mode != 'AREA_PLANE':
                     col.label(text="Set Texture Mapping to Area Plane", icon='INFO')
 
