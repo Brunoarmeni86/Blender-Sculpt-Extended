@@ -422,6 +422,8 @@ enum eBrushFlags2 : int {
   BRUSH_SCULPT_STABILIZATION_STRONG = (1 << 19),
   /* ANCHORED_SURFACE_PROJECTION_V1: opt-in, does not change Brush memory layout. */
   BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT = (1 << 23),
+  /* ANCHORED_NORMAL_GUIDED_V2: sample existing CCG normals, never allocate full-resolution arrays. */
+  BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED = (1 << 24),
 };
 ENUM_OPERATORS(eBrushFlags2)
 
