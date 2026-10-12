@@ -69,11 +69,11 @@ shading, ImBuf and spin-lock services. It does not use native CCG/TBN shaders.
   LeakSanitizer is disabled due executor instrumentation limitations.
 - Prior 27 duplicate-vertex guard tests still pass.
 
-Blender is NOT compiled here and native bake images are NOT validated. Keep draft.
+Windows native coverage smoke test passed on 2026-10-12, based on user-supplied ON/OFF reports from Blender 5.2.1 LTS. All five target texels have alpha 1 with coverage ON and alpha 0 with coverage OFF. Full sculpt reconstruction, seams, worker-count determinism and performance are still pending; keep draft. See validation/multires_bake_native_coverage_20261012.md.
 
 The native smoke script uses the fork's BakeSettings RNA (use_multires, type,
 displacement_space, use_lores_mesh) and object.bake_image exec path, verified in
-rna_scene.cc/object_bake.cc. Only Python syntax was checked here. It starts from
+rna_scene.cc/object_bake.cc. The user has now executed it successfully. It starts from
 a fresh background scene and checks five Normal/Vector coverage cases ON/OFF.
 
 ## Remaining quality work

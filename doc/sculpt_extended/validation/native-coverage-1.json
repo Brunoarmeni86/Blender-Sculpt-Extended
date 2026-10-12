@@ -1,0 +1,61 @@
+{
+  "blender": "5.2.1 LTS",
+  "coverage": "1",
+  "results": [
+    {
+      "type": "NORMALS",
+      "space": "OBJECT",
+      "lores": true,
+      "pixel": [
+        0.5,
+        0.5,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "type": "VECTOR_DISPLACEMENT",
+      "space": "OBJECT",
+      "lores": true,
+      "pixel": [
+        0.06944441795349121,
+        0.06944438815116882,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "type": "VECTOR_DISPLACEMENT",
+      "space": "TANGENT",
+      "lores": true,
+      "pixel": [
+        0.06944441795349121,
+        0.0,
+        0.06944438815116882,
+        1.0
+      ]
+    },
+    {
+      "type": "VECTOR_DISPLACEMENT",
+      "space": "OBJECT",
+      "lores": false,
+      "pixel": [
+        2.9802322387695312e-08,
+        2.9802322387695312e-08,
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "type": "VECTOR_DISPLACEMENT",
+      "space": "TANGENT",
+      "lores": false,
+      "pixel": [
+        2.4675690823983132e-08,
+        0.0,
+        3.416821314772278e-08,
+        1.0
+      ]
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "blender": "5.2.1 LTS",
+  "coverage": "0",
+  "results": [
+    {
+      "type": "NORMALS",
+      "space": "OBJECT",
+      "lores": true,
+      "pixel": [
+        0.5,
+        0.5,
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "type": "VECTOR_DISPLACEMENT",
+      "space": "OBJECT",
+      "lores": true,
+      "pixel": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "type": "VECTOR_DISPLACEMENT",
+      "space": "TANGENT",
+      "lores": true,
+      "pixel": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "type": "VECTOR_DISPLACEMENT",
+      "space": "OBJECT",
+      "lores": false,
+      "pixel": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "type": "VECTOR_DISPLACEMENT",
+      "space": "TANGENT",
+      "lores": false,
+      "pixel": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ]
+}
