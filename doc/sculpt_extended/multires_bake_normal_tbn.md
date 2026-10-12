@@ -65,3 +65,12 @@ only become active when no map was active; the baker reads active_uv_map_name.
 The corrected probe disables primitive UV generation, explicitly activates
 TBNProbe for editing/rendering and checks it before baking. No C++ changes or
 rebuild required. Native precision validation remains pending.
+
+## Native diagnostic result
+
+The corrected Windows probe now passes on Blender 5.2.1 LTS: 120 matching
+finite covered samples. RMS relative to the 1x center reference improves from
+1.083002470 to 0.285127835 degrees, with 114/120 closer samples and improvements
+in both regular and mirrored islands. See validation/multires_bake_native_normal_tbn_20261012.md
+for executable hash, retained reports and limits. Actual Cycles render validation
+and the other listed compatibility cases remain pending.
