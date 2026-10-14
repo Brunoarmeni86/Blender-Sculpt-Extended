@@ -1770,14 +1770,16 @@ static void object_update_from_subsurf_ccg(Object *object)
           effective_layers++;
         }
       }
-      std::printf("[LAYER_CCG_WRITEBACK_V00] path=NATIVE_RESHAPE object=%p orig=%p "
-                  "ccg=%p session=%p dirty=%d/%d/%d ccg_level=%d top=%d "
+      const SculptSession *session = object_orig->runtime->sculpt_session;
+      std::printf("[LAYER_CCG_WRITEBACK_V00] path=NATIVE_RESHAPE_ATTEMPT object=%p orig=%p "
+                  "ccg=%p session=%p same_ccg=%d dirty=%d/%d/%d ccg_level=%d top=%d "
                   "modifier_top=%d sculpt_level=%d layers=%d effective=%d "
                   "active=%d recording=%d\n",
                   static_cast<void *>(object),
                   static_cast<void *>(object_orig),
                   static_cast<void *>(subdiv_ccg),
-                  static_cast<void *>(object_orig->runtime->sculpt_session),
+                  static_cast<const void *>(session),
+                  int(session != nullptr && session->subdiv_ccg == subdiv_ccg),
                   int(subdiv_ccg->dirty.coords),
                   int(subdiv_ccg->dirty.hidden),
                   int(subdiv_ccg->dirty.masks),
