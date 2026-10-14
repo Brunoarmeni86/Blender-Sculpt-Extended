@@ -1029,7 +1029,7 @@ bool bake_visible_to_base(MultiresModifierData &mmd, Mesh &mesh)
       for (int vertex = 0; vertex < layer.base_verts_num; vertex++) {
         for (int axis = 0; axis < 3; axis++) {
           if (layer.base_deltas[vertex][axis] != 0.0f) {
-            std::printf("[LAYER_BAKE] mode=REJECT reason=VISIBLE_L0_CAGE_DEFORMATION\\n");
+            std::printf("[LAYER_BAKE] mode=REJECT reason=VISIBLE_L0_CAGE_DEFORMATION\n");
             return false;
           }
         }
@@ -1102,7 +1102,7 @@ bool bake_visible_to_base(MultiresModifierData &mmd, Mesh &mesh)
   weight_hot_delta_cache_invalidate();
   mesh.tag_positions_changed();
   mmd.sculpt_layer_recording = 0;
-  std::printf("[LAYER_BAKE] mode=VISIBLE_TO_BASE layers=%d hidden_preserved=1 l0_reshape=0\\n",
+  std::printf("[LAYER_BAKE] mode=VISIBLE_TO_BASE layers=%d hidden_preserved=1 l0_reshape=0\n",
               baked_layer_count);
   return true;
 }
