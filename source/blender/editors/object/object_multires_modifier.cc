@@ -54,10 +54,22 @@ static wmOperatorStatus multires_higher_levels_delete_exec(bContext *C, wmOperat
   if (!mmd) {
     return OPERATOR_CANCELLED;
   }
+  const int level = multires_get_level(scene, ob, mmd, false, true);
+  if (level >= mmd->totlvl) {
+    BKE_report(op->reports, RPT_WARNING, "No higher Multires levels to delete");
+    return OPERATOR_CANCELLED;
+  }
   multiresModifier_del_levels(mmd, scene, ob, 1);
+  if (mmd->totlvl != level) {
+    BKE_report(op->reports,
+               RPT_ERROR,
+               mmd->modifier.error ? mmd->modifier.error : "Deleting higher levels failed");
+    return OPERATOR_CANCELLED;
+  }
 
   iter_other(CTX_data_main(C), ob, true, multires_update_totlevels, &mmd->totlvl);
 
+  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
   WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
 
   return OPERATOR_FINISHED;

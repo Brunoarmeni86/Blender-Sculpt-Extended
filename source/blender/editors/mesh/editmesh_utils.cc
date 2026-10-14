@@ -12,6 +12,7 @@
 
 #include "DNA_key_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_meshdata_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 
@@ -22,6 +23,7 @@
 #include "BLI_math_vector.h"
 
 #include "BKE_attribute.h"
+#include "BKE_attribute.hh"
 #include "BKE_context.hh"
 #include "BKE_customdata.hh"
 #include "BKE_editmesh.hh"
@@ -314,6 +316,19 @@ void EDBM_mesh_make_from_mesh(Object *ob,
   AttributeOwner owner = AttributeOwner::from_id(const_cast<ID *>(&mesh->id));
   const std::string attributes_active_name = BKE_attributes_active_name_get(owner).value_or("");
 
+  /* Identities must exist before BMesh copies/interpolates the custom data. */
+  for (ModifierData &md : ob->modifiers) {
+    if (md.type == eModifierType_Multires) {
+      auto *mmd = reinterpret_cast<MultiresModifierData *>(&md);
+      if (!mmd->sculpt_layers.is_empty() || mmd->sculpt_color_grids ||
+          mmd->sculpt_face_set_grids)
+      {
+        bke::multires_layers::base_ensure_vertex_ids(*src_mesh);
+        bke::multires_layers::ensure_corner_ids(*mmd, *src_mesh);
+      }
+    }
+  }
+
   BMesh *bm = BKE_mesh_to_bmesh(src_mesh, shapenr, add_key_index, &create_params);
 
   if (mesh->runtime->edit_mesh) {
@@ -367,13 +382,87 @@ void EDBM_mesh_load_ex(Main *bmain, Object *ob, bool free_data)
   BMeshToMeshParams params{};
   params.calc_object_remap = true;
   params.update_shapekey_indices = !free_data;
+  /* Preserve the grid-to-ID association before BMesh overwrites mesh custom data.
+   * Edit Undo can restore older IDs; modifier grids still follow the previous mesh order. */
+  Array<int> old_corner_ids;
+  {
+    const bke::AttributeReader<int> old_ids_reader = mesh->attributes().lookup<int>(
+        bke::multires_layers::corner_id_attribute, bke::AttrDomain::Corner);
+    if (old_ids_reader) {
+      const VArraySpan<int> old_ids(old_ids_reader.varray);
+      old_corner_ids.reinitialize(old_ids.size());
+      old_corner_ids.as_mutable_span().copy_from(old_ids);
+    }
+  }
   BM_mesh_bm_to_me(bmain, bm, mesh, &params);
   for (ModifierData &md : ob->modifiers) {
     if (md.type == eModifierType_Multires) {
       auto *mmd = reinterpret_cast<MultiresModifierData *>(&md);
-      if (!mmd->sculpt_layers.is_empty()) {
-        if (!bke::multires_layers::base_remap_after_topology_edit(*mmd, *mesh)) {
-          BKE_modifier_set_error(ob, &md, "L0 layer remap failed; layer data retained");
+      if (!mmd->sculpt_layers.is_empty() || mmd->sculpt_color_grids ||
+          mmd->sculpt_face_set_grids)
+      {
+        BitVector<> reset_corners;
+        if (!bke::multires_layers::remap_after_topology_edit(
+                *mmd, *mesh, &reset_corners, old_corner_ids.as_span())) {
+          mmd->sculpt_layer_recording = 0;
+          BKE_modifier_set_error(ob, &md, "Sculpt layer topology remap failed; REC disabled");
+        }
+        else if (!free_data) {
+          /* Saving/rendering can flush without leaving Edit Mode. Keep BMesh identities in
+           * step with the newly indexed layer storage, so the next flush does not replay
+           * the old map. BM_mesh_bm_to_me assigns the mesh indices to vertices and loops. */
+          const int vertex_offset = CustomData_get_offset_named(
+              &bm->vdata, CD_PROP_INT32, bke::multires_layers::vertex_id_attribute);
+          const int corner_offset = CustomData_get_offset_named(
+              &bm->ldata, CD_PROP_INT32, bke::multires_layers::corner_id_attribute);
+          const int previous_offset = CustomData_get_offset_named(
+              &bm->ldata, CD_PROP_INT32, bke::multires_layers::corner_prev_attribute);
+          const int next_offset = CustomData_get_offset_named(
+              &bm->ldata, CD_PROP_INT32, bke::multires_layers::corner_next_attribute);
+          const int size_offset = CustomData_get_offset_named(
+              &bm->ldata, CD_PROP_INT32, bke::multires_layers::corner_face_size_attribute);
+          BMIter iter;
+          if (vertex_offset != -1) {
+            BMVert *vertex;
+            BM_ITER_MESH (vertex, &iter, bm, BM_VERTS_OF_MESH) {
+              BM_ELEM_CD_SET_INT(vertex, vertex_offset, BM_elem_index_get(vertex) + 1);
+            }
+          }
+          if (corner_offset != -1) {
+            const MDisps *base = static_cast<const MDisps *>(
+                CustomData_get_layer(&mesh->corner_data, CD_MDISPS));
+            const bke::AttributeReader<int> ids_reader = mesh->attributes().lookup<int>(
+                bke::multires_layers::corner_id_attribute, bke::AttrDomain::Corner);
+            const VArraySpan<int> stable_ids(ids_reader.varray);
+            BMFace *face;
+            BM_ITER_MESH (face, &iter, bm, BM_FACES_OF_MESH) {
+              BMLoop *loop = BM_FACE_FIRST_LOOP(face);
+              BMLoop *first = loop;
+              do {
+                const int corner = BM_elem_index_get(loop);
+                if (!reset_corners.is_empty() && reset_corners[corner]) {
+                  /* Do not let a later save/exit restore the pre-remap interpolated base
+                   * grids. Only newly reset corners need a payload update in BMesh. */
+                  MDisps *grid = static_cast<MDisps *>(
+                      CustomData_bmesh_get(&bm->ldata, loop->head.data, CD_MDISPS));
+                  if (grid && base) {
+                    MEM_SAFE_DELETE(grid->disps);
+                    MEM_SAFE_DELETE(grid->hidden);
+                    grid->level = base[corner].level;
+                    grid->totdisp = base[corner].totdisp;
+                    grid->disps = MEM_new_array_zeroed<float[3]>(grid->totdisp,
+                                                              "editmesh new multires corner");
+                  }
+                }
+                BM_ELEM_CD_SET_INT(loop, corner_offset, stable_ids[corner]);
+                if (previous_offset != -1 && next_offset != -1 && size_offset != -1) {
+                  BM_ELEM_CD_SET_INT(loop, previous_offset, stable_ids[BM_elem_index_get(loop->prev)]);
+                  BM_ELEM_CD_SET_INT(loop, next_offset, stable_ids[BM_elem_index_get(loop->next)]);
+                  BM_ELEM_CD_SET_INT(loop, size_offset, face->len);
+                }
+              } while ((loop = loop->next) != first);
+            }
+          }
         }
       }
     }
@@ -2161,3 +2250,5 @@ bool EDBM_smooth_vert(BMEditMesh *em, wmOperator *op)
 }
 
 }  // namespace blender
+
+
