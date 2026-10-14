@@ -806,11 +806,12 @@ static wmOperatorStatus sculpt_multires_layer_set_active_exec(bContext *C, wmOpe
   if (!sculpt_multires_layer_commit(*ob, *op)) {
     return OPERATOR_CANCELLED;
   }
+  const int previous_index = mmd->sculpt_layer_active;
   bke::multires_layers::set_active(*mmd, index);
   DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
   WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
-  std::printf("[LAYER_SELECT] from=%d to=%d commit=1 rebuild=0 selection_undo=0\\n",
-              mmd->sculpt_layer_active == index ? -1 : mmd->sculpt_layer_active,
+  std::printf("[LAYER_SELECT] from=%d to=%d commit=1 rebuild=0 selection_undo=0\n",
+              previous_index,
               index);
   return OPERATOR_FINISHED;
 }
