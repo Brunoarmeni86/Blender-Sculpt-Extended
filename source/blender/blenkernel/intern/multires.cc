@@ -2138,7 +2138,8 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
   /* LAYER_CCG_WRITEBACK_TRACE_V00: trace the explicit persistence owner, to
    * compare with the evaluated-cache native reshape path in object.cc. */
   const char *layer_trace_env = BLI_getenv("BLENDER_SCULPT_CCG_WRITEBACK_TRACE");
-  const bool layer_trace_enabled = layer_trace_env && layer_trace_env[0] == '1' &&
+  const bool layer_trace_enabled = layer_trace_env &&
+                                   (layer_trace_env[0] == '1' || layer_trace_env[0] == '2') &&
                                    layer_trace_env[1] == '\0';
   if (layer_trace_enabled && !mmd->sculpt_layers.is_empty()) {
     std::printf("[LAYER_CCG_WRITEBACK_V00] path=EXPLICIT_FLUSH object=%p ccg=%p "
