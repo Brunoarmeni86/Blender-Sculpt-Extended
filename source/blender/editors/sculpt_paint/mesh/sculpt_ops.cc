@@ -186,7 +186,7 @@ static wmOperatorStatus sculpt_multires_base_capture_exec(bContext *C, wmOperato
   if (!mmd || !mesh || mmd->sculpt_layers.is_empty()) return OPERATOR_CANCELLED;
   if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
   if (!bke::multires_layers::bake_visible_to_base(*mmd, *mesh)) {
-    BKE_report(op->reports, RPT_ERROR, "Cannot bake: remove hidden copies, use single-user mesh data and valid finite grids");
+    BKE_report(op->reports, RPT_ERROR, "Cannot bake: requires visible non-zero-strength layers, unchanged L0 cage, single-user mesh and finite compatible grids");
     return OPERATOR_CANCELLED;
   }
   multires_force_sculpt_rebuild(ob);
@@ -199,7 +199,7 @@ static void SCULPT_OT_multires_base_capture(wmOperatorType *ot)
 {
   ot->name = "Bake Visible Layers into Base";
   ot->idname = "SCULPT_OT_multires_base_capture";
-  ot->description = "Merge contributions into the base and clear layer offsets. Hidden layers and shared mesh data are rejected. Save a copy first";
+  ot->description = "Bake effective visible layers into native Multires, clearing only baked offsets and preserving hidden layers. Non-zero L0 cage offsets are rejected";
   ot->exec = sculpt_multires_base_capture_exec;
   ot->invoke = WM_operator_confirm;
   ot->poll = sculpt_mode_poll;
@@ -791,11 +791,27 @@ static wmOperatorStatus sculpt_multires_layer_set_active_exec(bContext *C, wmOpe
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
   const int index = RNA_int_get(op->ptr, "index");
-  if (index >= mmd->sculpt_layers.count()) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (index < 0 || index >= mmd->sculpt_layers.count() ||
+      index == mmd->sculpt_layer_active)
+  {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* LAYER_SELECT_UNDO_BOUNDARY_V1
+   * Selection changes the recording destination, not the composed geometry.
+   * Finish any pending stroke against the OLD active layer before switching.
+   * Do not rebuild the CCG/PBVH and do not add a memfile undo entry merely
+   * for selection: that can make the first Ctrl-Z restore an old base mesh
+   * snapshot instead of undoing the most recent sculpt stroke. */
+  if (!sculpt_multires_layer_commit(*ob, *op)) {
+    return OPERATOR_CANCELLED;
+  }
   bke::multires_layers::set_active(*mmd, index);
-  multires_force_sculpt_rebuild(ob);
-  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  std::printf("[LAYER_SELECT] from=%d to=%d commit=1 rebuild=0 selection_undo=0\\n",
+              mmd->sculpt_layer_active == index ? -1 : mmd->sculpt_layer_active,
+              index);
   return OPERATOR_FINISHED;
 }
 
@@ -803,10 +819,11 @@ static void SCULPT_OT_multires_layer_set_active(wmOperatorType *ot)
 {
   ot->name = "Set Active Sculpt Layer";
   ot->idname = "SCULPT_OT_multires_layer_set_active";
-  ot->description = "Make the selected sculpt layer active";
+  ot->description = "Select the layer used for the next stroke without changing geometry";
   ot->exec = sculpt_multires_layer_set_active_exec;
   ot->poll = sculpt_mode_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* Active-layer selection is metadata, not a separate global-undo operation. */
+  ot->flag = OPTYPE_REGISTER;
   RNA_def_int(ot->srna, "index", 0, 0, INT_MAX, "Layer", "Layer index", 0, 1000);
 }
 
