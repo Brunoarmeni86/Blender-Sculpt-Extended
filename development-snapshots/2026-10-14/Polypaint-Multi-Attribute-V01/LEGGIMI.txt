@@ -1,0 +1,29 @@
+FIX01: il file draw_pbvh.cc allegato differisce dal riferimento solo per una riga vuota finale. Il controllo SHA ora normalizza CRLF/LF e le sole righe vuote alla fine del file. Qualsiasi altra differenza continua a bloccare la patch. Nessuna modifica alla patch C++.
+
+Estrai sovrascrivendo la cartella C:\BlenderDev\Polypaint-Multi-Attribute-V01 e ripeti COMPILA-E-VERIFICA.ps1. La prima prova si e fermata prima dell'applicazione: non serve ripristinare o invertire patch.
+
+POLYPAINT MULTI ATTRIBUTE V01 — CANDIDATA WINDOWS
+
+Base richiesta: Conform/Undo Cache + Bake Visible V01 + Polypaint Lazy Master V02 che hai appena verificato. Non include altre ottimizzazioni sperimentali.
+
+Estrai la cartella Polypaint-Multi-Attribute-V01 in C:\BlenderDev.
+Chiudi Blender. Compila e verifica:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Multi-Attribute-V01\COMPILA-E-VERIFICA.ps1"
+
+Il runner verifica gli hash normalizzati dei dieci sorgenti prima di modificarli, conserva backup sorgenti e Release, applica soltanto questa patch incrementale e compila INSTALL in Release. Se la base differisce si ferma prima della patch; conserva il messaggio con il percorso del sorgente. Dopo compilazione apre quattro test UI sequenziali: regressione lazy con/senza Sculpt Layers, multi-attributo con/senza Sculpt Layers. Non interagire con le finestre. Crea una copia portatile e uno ZIP solo se tutti i controlli passano.
+
+Uso: N > Multires > Polypaint Attributes. Add crea un attributo float CORNER bianco. Premi il nome per selezionarlo; L indica il livello del master, Base indica colore di base non ancora materializzato. Rename e X aggiornano insieme attributo e relativo master. Gestisci nomi e rimozione da questo pannello: modifiche dirette nella lista standard degli attributi non aggiornano i nomi dei master. I master orfani restano conservati, non vengono sovrascritti silenziosamente.
+
+Ogni attributo conserva i propri colori e la propria risoluzione. Paint scrive solo sull'attivo; una promozione non aumenta gli altri master. Shader e viewport risolvono anche master non attivi per nome. Restano supportati attributi esistenti FLOAT_COLOR/BYTE_COLOR su POINT/CORNER; i nuovi attributi sono FLOAT_COLOR/CORNER. Non sono Sculpt Layers colore/compositing: sono Color Attribute indipendenti.
+
+La gestione richiede mesh locale single-user, un modificatore Multires e Global Undo. Non usare Rename/Remove/Add durante una pennellata. La selezione e le modifiche strutturali sono transazioni Memfile Undo; le normali pennellate continuano a usare Color Undo. La prima apertura del vecchio master adotta il nome colore attuale senza ricampionare i colori. Usa questi controlli per la prima selezione di un altro attributo su file precedenti.
+
+I nuovi file contengono dati DNA aggiuntivi. Una build precedente riconosce soltanto il vecchio slot attivo; conserva una copia prima di salvarli da una build precedente. Il ripristino della patch non converte i master aggiuntivi in attributi della base.
+
+Avvio dopo il PASS:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Multi-Attribute-V01\AVVIA-ESPERIMENTO.ps1"
+Oppure usa AVVIA-ESPERIMENTO.ps1 dentro la copia portatile stampata a fine test.
+
+COMPLETA-BUILD.ps1 -RunDir "cartella risultati" ripete copia/test/ZIP senza ricompilare, dopo una compilazione completata. RIPRISTINA.ps1 rimuove soltanto questa patch e ricompila, mantenendo Conform/Undo, bake e lazy master. In caso di errore conserva operation-error.log, ui-*.log e le cartelle ui-*.
+
+Validazione locale: 94 casi isolati su gestione ownership, copia profonda e blocchi reali di serializzazione, con allocatore/ListBase/Blend backend simulati, ASan/UBSan; verifica risultato con 8 errori iniettati; sintassi Python e applicazione/rimozione patch con recupero degli hash. Non e una compilazione Blender/MSVC. I test reali Paint/Undo/Redo, selezione/rinomina/rimozione/aggiunta, promozione isolata, riapertura di tutti gli snapshot e Delete Higher/Subdivide devono passare sul tuo Windows. Aggiornamento visivo GPU e prestazioni su mesh dense richiedono ancora la tua verifica interattiva.

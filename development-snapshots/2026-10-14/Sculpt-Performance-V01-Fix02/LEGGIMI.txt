@@ -1,0 +1,139 @@
+SCULPT PERFORMANCE V01 FIX02 — CARTELLA NUOVA, STESSA PATCH C++
+Estrarre la cartella Sculpt-Performance-V01-Fix02 direttamente in C:\BlenderDev.
+Questo kit è autonomo: non usa Sculpt-Polypaint-Experiment e non legge la vecchia
+cartella Sculpt-Performance-V01. Nuovo comando:
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Performance-V01-Fix02\COMPILA-E-VERIFICA.ps1"
+
+La console deve mostrare [PERFORMANCE_FIX02] prima di preparare Python.
+L'errore di cartella vecchia mancante avveniva prima di patch/compilazione.
+Non eseguire due compilazioni/creazioni portable contemporaneamente.
+
+SCULPT PERFORMANCE V01 — ESPERIMENTO REVERSIBILE
+
+Prerequisiti
+La build attuale con Compact Commit, Undo V4.1, Polypaint display/Undo,
+keyframe Strength, Delete Higher e Subdivide-Precisione-V01 già installati.
+Non è una nuova build pulita e non sostituisce gli ZIP già prodotti.
+Estrarre la cartella Sculpt-Performance-V01 in C:\BlenderDev.
+Chiudere Blender; usare Developer PowerShell di Visual Studio 2022.
+
+COMPILA, VERIFICA E CREA ZIP
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Performance-V01-Fix02\COMPILA-E-VERIFICA.ps1"
+
+Prima delle modifiche: verifica patch per entrambi i sorgenti, poi backup dei
+sorgenti e dell'intera Release. Una patch incompatibile non viene applicata.
+Non copia i sorgenti di riferimento sopra i sorgenti installati.
+Sorgenti già aggiornati o aggiornati solo parzialmente vengono riconosciuti.
+Compila INSTALL/Release nella build esistente; crea una portable separata.
+Non avvia automaticamente Blender. I test usano scene temporanee nuove.
+
+Modifiche
+- Percorso opzionale di suddivisione: una sola mesh temporanea per layer alla
+  volta, oltre alla base, anziché conservarle tutte fino alla pubblicazione.
+- I buffer finali dei layer restano tutti in staging fino al successo: un
+  errore durante il calcolo non pubblica una parte dei layer.
+- Evita di allocare i vecchi payload sparse implicitamente nulli.
+- Salta i layer completamente vuoti o con payload esattamente zero. Non
+  salta un layer solo perché nascosto, con Strength zero o con delte L0 nonzero.
+  Le bitmap hidden restano nel percorso completo esistente.
+- Riutilizza l'evaluatore geometrico e la correzione della precisione esistenti;
+  non riutilizza contesti CCG né cambia smoothing, frame o campioni inseriti.
+- Undo: solo misura dell'attesa della compressione, quando richiesta.
+  Nessuna modifica a snapshot, ripristino, cronologia o protezioni V4.1.
+  La liberazione dei buffer normali prima della compressione era già presente.
+
+Limiti e validazione
+Qui sono passati 79 casi C++ estratti dal codice effettivo con ASan/UBSan:
+confronto bit per bit dei payload con il percorso precedente, livelli 2–5,
+Catmull-Clark/Simple/Linear, sparse/zeri allocati, hidden, delte L0, errori
+intermedi e pulizia di tutte le allocazioni tracciate. L'evaluatore geometrico
+in questi test è uno stub: non sono test della build completa di Blender.
+Sono passati 8 casi del metodo Undo estratto: stessa barriera di completamento,
+misure disattivate per default. Passati anche controllo patch nei quattro stati,
+rifiuto senza modifiche di sorgenti incompatibili, controlli comparatore,
+subprocessi/timeout, backup, copia, CRC/SHA ZIP e percorsi lunghi su Linux.
+Compilazione MSVC, PowerShell e test nativi Blender NON eseguiti da qui.
+
+Il runner Windows deve passare:
+1. Smoke standard (build_type vuoto viene segnalato, non certifica Release).
+2. Strength: geometria, interpolazione, ripetizione frame, driver, REC, reload.
+3. Precisione/Delete Higher in Object/Sculpt e ri-suddivisione.
+4. Due processi Blender A/B: percorso precedente contro quello nuovo;
+   15 casi (5 tipi di stack x 3 modi), geometria al livello mantenuto e nuovo,
+   tutti i layer isolati a Strength 1, Color Attribute, metadati, maschera base,
+   Face Sets base e salvataggio/riapertura. Soglia geometria/colore: 1e-5.
+5. Copia e ZIP verificati, SHA256 e BUILD-INFO.json.
+Se un controllo fallisce: niente ZIP finale, nessun avvio automatico;
+backup/binari/log rimangono nella cartella risultati stampata.
+La Release di lavoro può essere già stata compilata: usa SubdivideOff per
+il percorso precedente o RIPRISTINA.ps1 per rimuovere questa patch.
+
+Le scene native sono piccole: tempi e picco working set dell'intero processo
+sono campioni, non benchmark della tua mesh e non stime di guadagno percentuale.
+Non certificano paint stroke Undo/Redo, render, file enormi o ogni combinazione
+di modificatori. Lo staging dei payload finali richiede ancora memoria per
+vecchi e nuovi dati contemporaneamente; il risparmio riguarda copie temporanee.
+Le ottimizzazioni precedenti rimangono nel profilo di avvio. La nuova funzione
+C++ è disattivata salvo BLENDER_SCULPT_SUBDIVIDE_COMPACT=1; il nuovo avvio
+la abilita esplicitamente. SubdivideOff disattiva solo questa ottimizzazione.
+
+AVVIO DELLA BUILD ATTUALE, DOPO I TEST
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Performance-V01-Fix02\AVVIA-ESPERIMENTO.ps1"
+
+Con scena Polypaint piccola nuova:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Performance-V01-Fix02\AVVIA-ESPERIMENTO.ps1" -TestPolypaint
+
+Confronto percorso precedente (precisione e altri fix rimangono attivi):
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Performance-V01-Fix02\AVVIA-ESPERIMENTO.ps1" -SubdivideOff
+
+Misurare la prima pennellata e Undo:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Performance-V01-Fix02\AVVIA-ESPERIMENTO.ps1" -UndoProfile
+
+Usare una copia della scena: nuovo layer, prima pennellata -> Undo -> Redo,
+seconda pennellata -> Undo -> Redo; poi Paint -> Undo -> Redo, Strength e
+visibilità, livelli giù/su, Edit -> Sculpt, Delete Higher e ri-suddivisione.
+Confrontare la geometria e i colori con la copia originale, salva/riapri.
+La diagnosi Undo mantiene l'ancoraggio della prima pennellata attivo.
+Il percorso dei log viene stampato dall'avvio; nella build attuale è normalmente
+C:\BlenderDev\Sculpt-Performance-V01-Fix02\experiment-tools. Invia i log e
+subdivide-ab-comparison.json per valutare guadagni reali e costo dell'Undo.
+
+PORTABLE
+A fine runner sono stampati il percorso portable, lo ZIP e AVVIA-BLENDER.ps1.
+L'avvio portable usa i suoi strumenti locali; nessuna dipendenza dal kit dopo
+l'esportazione. Configurazione separata, nessuna preferenza utente copiata.
+
+RIPRENDERE SOLO TEST/COPIA/ZIP dopo una compilazione già riuscita
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Performance-V01-Fix02\COMPLETA-BUILD.ps1" -RunDir "PERCORSO_RISULTATI_STAMPATO"
+Verifica patch installata e sorgenti non più recenti del binario. Se non può
+verificarli, richiede COMPILA-E-VERIFICA.ps1; non forza il completamento.
+
+RIMUOVERE SOLO QUESTA PATCH E RICOMPILARE
+Chiudere Blender e usare Developer PowerShell VS2022:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Performance-V01-Fix02\RIPRISTINA.ps1"
+Verifica la patch inversa, fa backup della Release corrente e dei due sorgenti,
+poi rimuove solo questa patch e compila INSTALL/Release. Se il sorgente è stato
+modificato in modo incompatibile, si ferma; non sovrascrive ulteriori modifiche.
+Restano la precisione V01, tutti i fix precedenti e le portable esportate.
+Il vecchio avvio funziona; il nuovo avvio non deve essere usato per affermare
+che l'ottimizzazione sia ancora presente dopo il ripristino.
+
+FILE UTILI IN CASO DI ERRORE
+C:\BlenderDev\Experimental-Builds\Sculpt-Performance-DATA-ID\
+operation-error.log, build.log, patch-check-*.log, precision-test.log,
+keyframe-test.log, ab-legacy.log, ab-compact.log,
+subdivide-ab-comparison.json. In caso di patch incompatibile viene generato
+compatibility-sources.zip per adattamento mirato: non forzare git apply.
+
+Sorgenti di riferimento e test C++ sono inclusi per revisione, non installazione.
+Non è stato effettuato alcun push Git con questo kit.
+
+CORREZIONE PACKAGING V01.1
+Gli strumenti di avvio/prova/diagnosi sono ora inclusi in experiment-tools.
+Non richiede la vecchia cartella Sculpt-Polypaint-Experiment. Python esterno
+alla Release viene avviato con -S: il runner usa solo stdlib e non deve eseguire
+il sitecustomize Blender nella copia temporanea (che cerca blender.shared).
+Stesso codice C++ e stessa patch della V01. Sostituire il kit estratto con
+questa versione e ripetere COMPILA-E-VERIFICA.ps1. Il precedente errore dei
+file mancanti avveniva prima di applicare la patch e compilare.

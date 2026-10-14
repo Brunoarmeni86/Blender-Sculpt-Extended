@@ -20,6 +20,8 @@
 #include "DNA_scene_types.h"
 
 #include "BLI_listbase.h"
+#include "BLI_memory_utils.hh"
+#include "BLI_time.h"
 #include "BLI_vector.hh"
 #include "BLI_utildefines.h"
 
@@ -145,6 +147,20 @@ bool ED_undo_sculpt_controls_begin(bContext *C)
 
 void ED_undo_push(bContext *C, const char *str)
 {
+  /* Trace the cost outside the Commit operator as well: it includes editor
+   * flush, Undo encoding and memory limits. Do not change Undo semantics. */
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace_commit = trace_env && trace_env[0] && trace_env[0] != '0' && str &&
+                            (std::strcmp(str, "Commit Pending Layer Changes") == 0 ||
+                             std::strcmp(str, "Sculpt Commit Refresh Test") == 0);
+  const double trace_start = trace_commit ? BLI_time_now_seconds() : 0.0;
+  BLI_SCOPED_DEFER([&]() {
+    if (trace_commit) {
+      std::printf("[LAYER_COMMIT_UNDO_PUSH] total=%.3fms action=%s\n",
+                  (BLI_time_now_seconds() - trace_start) * 1000.0, str);
+      std::fflush(stdout);
+    }
+  });
   CLOG_INFO(&LOG, "Push '%s'", str);
   WM_file_tag_modified();
 
@@ -477,6 +493,16 @@ static wmOperatorStatus ed_undo_step_direction(bContext *C,
                                                enum eUndoStepDir step,
                                                ReportList *reports)
 {
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+  const double trace_start = trace ? BLI_time_now_seconds() : 0.0;
+  BLI_SCOPED_DEFER([&]() {
+    if (trace) {
+      std::printf("[LAYER_UNDO_ACTION] direction=%d total=%.3fms\n",
+                  int(step), (BLI_time_now_seconds() - trace_start) * 1000.0);
+      std::fflush(stdout);
+    }
+  });
   BLI_assert(ELEM(step, STEP_UNDO, STEP_REDO));
 
   CLOG_INFO(&LOG, "Step direction=%s", (step == STEP_UNDO) ? "STEP_UNDO" : "STEP_REDO");

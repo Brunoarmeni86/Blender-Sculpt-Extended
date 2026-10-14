@@ -1,0 +1,18 @@
+POLYPAINT LAZY MASTER — BASE CONFORM/UNDO + BAKE VERIFICATA
+
+Estrai la cartella Polypaint-Lazy-Master-V02 in C:\BlenderDev.
+Chiudi Blender. Avvio compilazione e test:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Lazy-Master-V02\COMPILA-E-VERIFICA.ps1"
+
+Il kit richiede esattamente i quattro sorgenti della base verificata dopo Bake-Visible-V01. Verifica gli hash normalizzati prima di applicare la patch. Conserva backup sorgenti e Release e compila in modo incrementale. Non modifica object.cc, memfile_undo.cc, multires_reshape.cc o sculpt_ops.cc: mantiene Conform/Undo e Bake.
+
+Subdivide non aumenta piu il master colore. Il primo Paint lo crea al livello Sculpt corrente; Paint a un livello superiore promuove il master prima della cattura Undo della pennellata. Delete Higher mantiene il master colore. La promozione ha propri confini Memfile Undo, oltre alla pennellata. Strength compatto, letture sparse e Paint prepared-grid restano disattivati.
+
+Test automatici: tre processi UI (riferimento, lazy con layer, lazy senza layer). Non interagire con le finestre. Controlla Paint/Undo/Redo, Delete Higher e nuova suddivisione, Paint al livello inferiore e promozione successiva con Undo/Redo attraverso il confine. Verifica colore finito, preservazione, geometria non modificata da Paint, metadati layer e tracce della risoluzione. Le due risoluzioni colore possono produrre interpolazioni differenti; non impone identita fra il risultato Paint legacy e lazy.
+
+Dopo successo avvia la copia portatile con il suo AVVIA-ESPERIMENTO.ps1. Oppure sulla build attuale:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Lazy-Master-V02\AVVIA-ESPERIMENTO.ps1"
+
+Se i test falliscono conserva operation-error.log, ui-*.log e le cartelle ui-*. Puoi ripeterli senza compilare con COMPLETA-BUILD.ps1 -RunDir "percorso stampato dal runner" dopo una compilazione completata. RIPRISTINA.ps1 rimuove soltanto questa patch e ricompila; conserva le fix precedenti.
+
+Validazione locale: 31 casi isolati sul codice reale di staging/editor con ASan/UBSan; API scena/Undo simulate. Non sostituisce compilazione MSVC e test nativi Windows. Non risolve ancora la propagazione degli spike geometrici.

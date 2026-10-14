@@ -10,6 +10,7 @@
 #define DNA_DEPRECATED_ALLOW
 
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <optional>
 
@@ -2061,11 +2062,44 @@ static void sculptsession_bm_to_me_update_data_only(Object *ob)
 void BKE_sculptsession_bm_to_me(Object *ob)
 {
   if (ob && ob->runtime->sculpt_session) {
+    /* MULTIRES_EMPTY_BM_FLUSH_V2
+     * Memfile Undo calls this after multires_flush_sculpt_updates(). A clean
+     * top-level layer CCG without a BMesh has nothing to convert or reallocate.
+     * The unconditional geometry tag below would nevertheless rebuild the
+     * entire evaluated Multires surface after a geometry-neutral Commit.
+     * Keep all real BMesh conversions and dirty/incompatible CCG paths intact. */
+    const SculptSession &ss = *ob->runtime->sculpt_session;
+    const SubdivCCG *ccg = ss.subdiv_ccg;
+    const MultiresModifierData *mmd = ss.multires_modifier;
+    const char *skip_env = std::getenv("BLENDER_SCULPT_SKIP_EMPTY_BM_FLUSH");
+    const bool opt_in = skip_env && skip_env[0] == '1' && skip_env[1] == '\0';
+    const bool skip_empty_flush = opt_in && (ob->mode & OB_MODE_SCULPT) && !ss.bm && ccg &&
+                                  mmd && !mmd->sculpt_layers.is_empty() &&
+                                  mmd->sculptlvl > 0 && mmd->sculptlvl == mmd->totlvl &&
+                                  ccg->level == mmd->sculptlvl &&
+                                  !mmd->sculpt_displacement_enabled &&
+                                  !mmd->sculpt_shrinkwrap_enabled &&
+                                  !ccg->dirty.coords && !ccg->dirty.hidden && !ccg->dirty.masks;
+    const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+    const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+    if (skip_empty_flush) {
+      if (trace) {
+        std::printf("[LAYER_BM_FLUSH] mode=SKIP_EMPTY opt_in=1 existing_geometry=%d object=%s\n",
+                    int((ob->id.recalc & ID_RECALC_GEOMETRY) != 0), ob->id.name + 2);
+        std::fflush(stdout);
+      }
+      return;
+    }
     sculptsession_bm_to_me_update_data_only(ob);
 
     /* Ensure the objects evaluated mesh doesn't hold onto arrays
      * now realloc'd in the mesh #34473. */
     DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+    if (trace && ccg) {
+      std::printf("[LAYER_BM_FLUSH] mode=LEGACY opt_in=%d bmesh=%d object=%s\n",
+                  int(opt_in), int(ss.bm != nullptr), ob->id.name + 2);
+      std::fflush(stdout);
+    }
   }
 }
 

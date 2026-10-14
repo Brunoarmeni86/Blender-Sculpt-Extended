@@ -48,8 +48,11 @@ void multires_set_tot_level(Object *ob, MultiresModifierData *mmd, int lvl);
 
 void multires_mark_as_modified(Depsgraph *depsgraph, Object *object, MultiresModifiedFlags flags);
 
-/** False preserves pending sculpt data; callers must not discard the session. */
-bool multires_flush_sculpt_updates(Object *object);
+/** False preserves pending sculpt data; callers must not discard the session.
+ * r_local_surface_preserved is true only after a successful local top-level
+ * layer publication that leaves the live CCG surface untouched. All other
+ * paths, including no-op, native-base and global commits, leave it false. */
+bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserved = nullptr);
 /** Copy only mask grids from an evaluated CCG to the original mesh. */
 bool multires_flush_mask_updates(const SubdivCCG &ccg, Mesh &mesh, int level);
 bool multires_force_sculpt_rebuild(Object *object);

@@ -1,0 +1,22 @@
+[
+  {
+    "path": "source/blender/blenkernel/BKE_multires_sculpt_layers.hh",
+    "before_sha256": "0635df8348534ebafb29f557eb5c3b137420afe563e91677afb9c8bf434a8c51",
+    "after_sha256": "dfea2aece367545ab1d23647e6039560ad4710401ce6f209b2a02f3d0795a566"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_sculpt_layers.cc",
+    "before_sha256": "b2ef166b01534bb02955c3e64ac0ae8ee43083fbde564d69c2549924a72e2640",
+    "after_sha256": "148cab9ccaf3d69a0c97d4e3201c4613c2390326e0029b00baa723bc39bf48fa"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt.cc",
+    "before_sha256": "1666d48068b75524f6a56811cbcca0650c51ae53961c11137c5327caf71404f5",
+    "after_sha256": "5803b4ffac69811353821ced91191ca4652b3863f5256b7cd78afe35d6f398cc"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc",
+    "before_sha256": "1f3393bc5fc058cac5cc5fc39d031974a4637d0df4081349e69309a4aa5a67f8",
+    "after_sha256": "aa955bac3836ad42ca17b234cbd406e4da900e701531292ee98f38f8c3e133d3"
+  }
+]

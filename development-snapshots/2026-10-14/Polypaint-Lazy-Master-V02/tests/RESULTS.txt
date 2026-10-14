@@ -1,0 +1,1 @@
+31 isolated actual staging/editor cases PASS with AddressSanitizer and UndefinedBehaviorSanitizer. UndoStack, scene and allocation APIs are modeled. Full Blender Windows Undo/Redo is NOT validated here; run COMPILA-E-VERIFICA.ps1.

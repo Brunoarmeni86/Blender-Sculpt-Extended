@@ -1,0 +1,20 @@
+{
+  "native_blender_tested": false,
+  "msvc_tested": false,
+  "asan_ubsan": true,
+  "leaksanitizer_available": false,
+  "paint_cases": 4800,
+  "real_worker_threads_in_model": 2,
+  "undo_restore_cases": 3600,
+  "poisoned_implicit_slots": 960,
+  "redraw_partitions": 2000,
+  "installer_cases": 16,
+  "color_numeric_match": true,
+  "apis_modeled": [
+    "PBVH",
+    "scene",
+    "Array",
+    "allocator",
+    "thread dispatcher"
+  ]
+}

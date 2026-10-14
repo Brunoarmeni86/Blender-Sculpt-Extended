@@ -1,0 +1,52 @@
+[
+  {
+    "path": "source/blender/blenkernel/BKE_multires_sculpt_layers.hh",
+    "before_sha256": "324d0b8ee90b24cb8112648512a4948995de89d60b68965718a07f5890c0757b",
+    "after_sha256": "dd27b69e4c44a11146cd688da7c8c6dc206857d8f594db8da0299ec440bbe365"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires.cc",
+    "before_sha256": "c07250cd642ba521e7f38f72cc2686afbf3ef282dd97251184abe23f7911374b",
+    "after_sha256": "9e09a86cad373d8ec0067440d9119dae774695bcd5ba3ba9256bb450b122baf4"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_sculpt_layers.cc",
+    "before_sha256": "755eabc2a1f48323824cee8484f11d237e43a5ae3438a6202dccdba77746fe16",
+    "after_sha256": "9fa1ad985606a264fec0d65f0a71f6c75b9be189241f708861bf7da5e809a97e"
+  },
+  {
+    "path": "source/blender/draw/intern/draw_pbvh.cc",
+    "before_sha256": "823045e57ac2245432b1becc1ec792b81878ac5f5b2afba56e50e400208b9390",
+    "after_sha256": "107d15045515f6a15c10dd6c604ce1256f667c31e3c7512bae7909577829f6a5"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt.cc",
+    "before_sha256": "5803b4ffac69811353821ced91191ca4652b3863f5256b7cd78afe35d6f398cc",
+    "after_sha256": "4a0d17799ab2bdd25dca68acc471b795be85b48ffc904adc09fc32e05881fdb8"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc",
+    "before_sha256": "78c7663ec444581459cca9c3c5a45562988012cb614cd48e7c7d41b0692d927a",
+    "after_sha256": "7168a3f83cf3920ec4b8fbdd88955ac4872aaa86a7deb9774be685b9d57d3f9e"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc",
+    "before_sha256": "2d98216d9c862087bad36120121e0a5ab1b7207fd6115da163225e6e39c5fdba",
+    "after_sha256": "2f68ada5e629f9a207a6683d0e3599ecfdf5054c40b4d01c23b1fb9977cbab82"
+  },
+  {
+    "path": "source/blender/makesdna/DNA_modifier_types.h",
+    "before_sha256": "d99081169df773041fba3865856c366a74593211cbebd88fa5b98d852e6a35a9",
+    "after_sha256": "0142af44c529c0a0f15333c0892fe184b31e4bc3452d481a90520ca0ce9b08c3"
+  },
+  {
+    "path": "source/blender/makesrna/intern/rna_modifier.cc",
+    "before_sha256": "8671ac65c5a308f0a2ac832ea36fbb24744e2e933887b71ca1147b8708a29bf3",
+    "after_sha256": "8f17ab4747475633b517a76041abf37faf3636aa3e18d9bc27a27fa77ca7326a"
+  },
+  {
+    "path": "source/blender/modifiers/intern/MOD_multires.cc",
+    "before_sha256": "81b74d61d764c16dec7d556f56b1537c2a76b2e234d9aa9aa10558a409e9b1ce",
+    "after_sha256": "acd3ad024ab027b0072de4ceeb944e2e6fd3116d17762152448bcf6a92a606ae"
+  }
+]

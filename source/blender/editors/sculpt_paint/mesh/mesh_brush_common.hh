@@ -371,6 +371,13 @@ void calc_brush_texture_factors(const SculptSession &ss,
                                 const Brush &brush,
                                 Span<float3> positions,
                                 MutableSpan<float> factors);
+/** V2 opt-in: sample SubdivCCG normals directly without constructing per-node normal buffers. */
+void calc_brush_texture_factors(const SculptSession &ss,
+                                const Brush &brush,
+                                const SubdivCCG &subdiv_ccg,
+                                Span<int> grids,
+                                Span<float3> positions,
+                                MutableSpan<float> factors);
 
 /**
  * Many brushes end up calculating translations from the original positions. Instead of applying

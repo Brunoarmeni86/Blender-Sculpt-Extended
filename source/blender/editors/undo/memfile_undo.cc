@@ -12,6 +12,10 @@
 
 #include "BLI_ghash.h"
 #include "BLI_listbase.h"
+#include "BLI_memory_utils.hh"
+#include "BLI_time.h"
+#include <cstdlib>
+#include <cstdio>
 
 #include "DNA_ID.h"
 #include "DNA_collection_types.h"
@@ -24,6 +28,12 @@
 #include "BKE_context.hh"
 #include "BKE_lib_query.hh"
 #include "BKE_main.hh"
+#include "BKE_multires_undo_cache_guard.hh"
+#include "BKE_paint.hh"
+#include "BKE_object_types.hh"
+#include "BKE_subdiv_ccg.hh"
+#include "DNA_modifier_types.h"
+#include <cstdio>
 #include "BKE_node.hh"
 #include "BKE_preview_image.hh"
 #include "BKE_scene.hh"
@@ -141,7 +151,51 @@ static int memfile_undosys_step_id_reused_cb(LibraryIDLinkCallbackData *cb_data)
 static void memfile_undosys_step_decode(
     bContext *C, Main *bmain, UndoStep *us_p, const eUndoStepDir undo_direction, bool /*is_final*/)
 {
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+  const double trace_start = trace ? BLI_time_now_seconds() : 0.0;
+  BLI_SCOPED_DEFER([&]() {
+    if (trace) {
+      std::printf("[LAYER_MEMFILE_DECODE] direction=%d step=%s total=%.3fms\n",
+                  int(undo_direction), us_p->name, (BLI_time_now_seconds() - trace_start) * 1000.0);
+      std::fflush(stdout);
+    }
+  });
   BLI_assert(undo_direction != STEP_INVALID);
+  /* LAYER_CCG_UNDO_CACHE_GUARD_V1: remains active through scene/depsgraph
+   * restoration, including destruction of evaluated meshes on workers. */
+  const bke::multires_layers::undo_cache::ScopedDiscardCacheWrites layer_cache_restore_guard;
+  if (bke::multires_layers::undo_cache::discard_active()) {
+    /* Depsgraphs can be reused and cleaned up lazily AFTER decode returns.
+     * Drop only the pending-write flags of obsolete, live layer CCGs now;
+     * no persistent mesh, mask or layer payload is changed here. */
+    for (Object &object : bmain->objects) {
+      SculptSession *ss = object.runtime->sculpt_session;
+      if (!ss || !ss->subdiv_ccg) {
+        continue;
+      }
+      bool has_layers = false;
+      for (const ModifierData &md : object.modifiers) {
+        if (md.type == eModifierType_Multires &&
+            !reinterpret_cast<const MultiresModifierData &>(md).sculpt_layers.is_empty())
+        {
+          has_layers = true;
+          break;
+        }
+      }
+      SubdivCCG &ccg = *ss->subdiv_ccg;
+      if (!has_layers || (!ccg.dirty.coords && !ccg.dirty.hidden && !ccg.dirty.masks)) {
+        continue;
+      }
+      std::printf("[LAYER_CCG_UNDO_GUARD] mode=DISCARD_PENDING direction=%d level=%d "
+                  "dirty=%d/%d/%d\n", int(undo_direction), ccg.level,
+                  int(ccg.dirty.coords), int(ccg.dirty.hidden), int(ccg.dirty.masks));
+      std::fflush(stdout);
+      ccg.dirty.coords = false;
+      ccg.dirty.hidden = false;
+      ccg.dirty.masks = false;
+    }
+  }
 
   bool use_old_bmain_data = true;
 

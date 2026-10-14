@@ -1,0 +1,19 @@
+LOCAL VALIDATION — NOT A FULL BLENDER BUILD
+
+1080 actual complete brush-loop comparisons PASS with AddressSanitizer/UndefinedBehaviorSanitizer. PBVH/factors/scene/allocator APIs modeled. Includes sparse/implicit grids, no-op and missing attribute, primary/secondary brush colors, repeated dabs, different paint/master resolutions and unchanged redraw notifications. Eliminated 611865 repeated legacy writer calls in those fixtures. Numeric arrays identical; signed-zero bit patterns are not a contract.
+127 direct production-kernel cases PASS, 64800 ordered updates. Same/coarse levels, boundaries, repeated coordinates, HDR/negative values, alpha, invalid dimensions and non-finite neighbors.
+8 installation variants PASS: two known brush versions, LF/CRLF, trailing empty lines, unrelated user code preserved, actual apply/reverse, and rejected unknown brush math.
+Python syntax PASS. Existing multi-attribute verification is reused and native A/B comparison is added.
+
+Blender/MSVC compilation, real Undo/Redo, GPU redraw and dense-mesh end-to-end performance are NOT tested in this environment. COMPILA-E-VERIFICA.ps1 performs the native Windows sequences.
+
+Illustrative isolated math benchmark on this runtime, GCC -O3 with assertions enabled, 150000 samples:
+master129/paint129: reference 7.501ms, prepared 2.304ms (3.26x)
+master129/paint65: reference 11.215ms, prepared 5.274ms (2.13x)
+master129/paint17: reference 62.511ms, prepared 34.616ms (1.81x)
+These figures exclude Blender brush factors, grid initialization, Undo, GPU and dependency-graph evaluation. They are not estimates for the user's machine.
+
+To rebuild isolated tests with GCC, from this tests directory:
+g++ -std=c++17 -O1 -g -fsanitize=address,undefined -I . prepared_kernel_test.cc -o prepared_kernel_test
+g++ -std=c++17 -O1 -g -fsanitize=address,undefined -I . prepared_paint_loop_test.cc -o prepared_paint_loop_test
+Run with ASAN_OPTIONS=detect_leaks=0 if LeakSanitizer is unavailable. Assertions must remain enabled (no -DNDEBUG).

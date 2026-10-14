@@ -1,0 +1,6 @@
+{
+  "SourceDir": "C:\\BlenderDev\\blender",
+  "BuildDir": "C:\\BlenderDev\\build_windows_x64_shareable",
+  "BlenderExe": "C:\\BlenderDev\\build_windows_x64_shareable\\bin\\Release\\blender.exe",
+  "Logs": "C:\\BlenderDev\\Experimental-Builds\\Sculpt-Performance-20261014-072320-e8c858"
+}

@@ -1465,6 +1465,14 @@ static void rna_MultiresSculptLayer_strength_set(PointerRNA *ptr, float value)
   auto *layer=static_cast<MultiresSculptLayer *>(ptr->data);
   if (ob==nullptr || layer==nullptr || !std::isfinite(value)) return;
 
+  /* Animation and drivers write into the evaluated object. Evaluation must
+   * only change its scalar weight, never commit a stroke or edit original REC
+   * state. Geometry is scheduled by PROP_FORCE_GEOMETRY_EVAL below. */
+  if (DEG_is_evaluated_id(ptr->owner_id) || (ob->mode & OB_MODE_SCULPT) == 0) {
+    layer->strength = value;
+    return;
+  }
+
   const float old_value=layer->strength;
   if (old_value==value) return;
 
@@ -1596,11 +1604,21 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
   /* Only the first enabled modifier can safely use the original base cage
    * as the control mesh of the live Subdiv evaluator. */
   MultiresModifierData *mmd = nullptr;
+  const char *stack_env = std::getenv("BLENDER_SCULPT_LAYER_STACK_CHECK_V3");
+  const bool stack_v3 = stack_env && stack_env[0] == '1' && stack_env[1] == '\0';
   for (ModifierData &md : ob.modifiers) {
-    if ((md.mode & eModifierMode_Realtime) == 0) {
+    if ((md.mode & eModifierMode_Realtime) == 0 ||
+        (stack_v3 && (md.mode & eModifierMode_DisableTemporary) != 0)) {
       continue;
     }
     if (mmd != nullptr || md.type != eModifierType_Multires) {
+      if (rna_multires_visible_trace_enabled()) {
+        std::printf("[LAYER_MODIFIER_STACK] object=%s blocker=%s type=%d mode=%u "
+                    "position=%s candidate=%d\n",
+                    ob.id.name + 2, md.name, int(md.type), unsigned(md.mode),
+                    mmd ? "AFTER_MULTIRES" : "BEFORE_MULTIRES", int(stack_v3));
+        std::fflush(stdout);
+      }
       r_reason = "MODIFIER_STACK";
       return false;
     }
@@ -1625,8 +1643,17 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
     return false;
   }
 
-  /* Zero-strength/invalid-strength layers cannot contribute. */
-  if (!std::isfinite(layer.strength) || std::abs(layer.strength) < 1e-6f) {
+  /* Strength is already the NEW value here. A transition to zero still has
+   * a nonzero delta and must remove the old contribution from the live CCG. */
+  if (stack_v3 &&
+      (!std::isfinite(layer.strength) || !std::isfinite(direct_weight_delta)))
+  {
+    r_reason = "INVALID_WEIGHT";
+    return false;
+  }
+  const bool metadata_only = stack_v3 ? direct_weight_delta == 0.0f :
+      (!std::isfinite(layer.strength) || std::abs(layer.strength) < 1e-6f);
+  if (metadata_only) {
     r_reason = "METADATA_ONLY";
     return true;
   }
@@ -1646,13 +1673,16 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
    * Include a one-vertex-adjacent coarse-face ring for shared seams/normals. */
   const OffsetIndices faces = mesh->faces();
   BitVector<> support(mesh->faces_num, false);
-  for (const int face : faces.index_range()) {
-    for (const int corner : faces[face]) {
-      if (layer.disps[corner].disps != nullptr) {
-        support[face].set();
-        r_support_faces++;
-        break;
-      }
+  Vector<int> payload_grids;
+  if (!bke::multires_layers::payload_grids(layer, ccg->grids_num, payload_grids)) {
+    r_reason = "LAYER_SUPPORT_LAYOUT";
+    return false;
+  }
+  for (const int grid : payload_grids) {
+    const int face = int(std::upper_bound(faces.data().begin(), faces.data().end(), grid) - faces.data().begin() - 1);
+    if (!support[face]) {
+      support[face].set();
+      r_support_faces++;
     }
   }
   if (r_support_faces == 0) {
@@ -1795,6 +1825,22 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
   ccg->dirty.coords = false;
   r_bounds_ms = (BLI_time_now_seconds() - bounds_start) * 1000.0;
   return true;
+}
+
+static void rna_MultiresSculptLayer_strength_animation_update(
+    Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  if (DEG_is_evaluated_id(ptr->owner_id)) {
+    return;
+  }
+  /* Interactive edits in Object Mode still request geometry. Animation's
+   * synchronization back to original RNA only uses the setter, so it remains
+   * free of recursive graph updates and Sculpt Commit side effects. */
+  const Object *ob = id_cast<Object *>(ptr->owner_id);
+  if (ob && (ob->mode & OB_MODE_SCULPT) == 0) {
+    DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
+  }
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
 }
 
 static void rna_MultiresSculptLayer_strength_update(
@@ -3660,15 +3706,32 @@ static void rna_def_modifier_multires_sculpt_layer(BlenderRNA *brna)
   prop = RNA_def_property(srna, "strength", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "strength");
   RNA_def_property_float_funcs(prop, nullptr, "rna_MultiresSculptLayer_strength_set", nullptr);
+  /* Nested layer RNA is not itself RNA_Modifier. Explicitly connect its
+   * animated values to geometry through Blender's existing graph routing. */
+  RNA_def_property_flag(prop, PROP_ANIMATABLE | PROP_FORCE_GEOMETRY_EVAL);
   RNA_def_property_range(prop, -10.0f, 10.0f);
   RNA_def_property_ui_text(prop, "Strength", "Multiplier for the layer displacement");
-  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_strength_update");
+  RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_strength_animation_update");
 
   prop = RNA_def_property(srna, "visible", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", MULTIRES_SCULPT_LAYER_VISIBLE);
   RNA_def_property_boolean_funcs(prop, nullptr, "rna_MultiresSculptLayer_visible_set");
   RNA_def_property_ui_text(prop, "Visible", "Include this layer in the evaluated surface");
   RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_visible_update");
+}
+
+static void rna_def_modifier_multires_color_attribute(BlenderRNA *brna)
+{
+  StructRNA *srna = RNA_def_struct(brna, "MultiresColorAttribute", nullptr);
+  RNA_def_struct_sdna(srna, "MultiresColorAttribute");
+  RNA_def_struct_ui_text(srna, "Multires Color Attribute", "Independent stored Polypaint master");
+  PropertyRNA *prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "name");
+  RNA_def_struct_name_property(srna, prop);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  prop = RNA_def_property(srna, "level", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "level");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
 }
 
 static void rna_def_modifier_multires(BlenderRNA *brna)
@@ -3680,6 +3743,19 @@ static void rna_def_modifier_multires(BlenderRNA *brna)
   RNA_def_struct_ui_text(srna, "Multires Modifier", "Multiresolution mesh modifier");
   RNA_def_struct_sdna(srna, "MultiresModifierData");
   RNA_def_struct_ui_icon(srna, ICON_MOD_MULTIRES);
+
+  prop = RNA_def_property(srna, "polypaint_attributes", PROP_COLLECTION, PROP_NONE);
+  RNA_def_property_collection_sdna(prop, nullptr, "sculpt_color_attributes", nullptr);
+  RNA_def_property_struct_type(prop, "MultiresColorAttribute");
+  RNA_def_property_ui_text(prop, "Stored Color Attributes", "Inactive Polypaint masters");
+  prop = RNA_def_property(srna, "polypaint_attribute", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "sculpt_color_attribute");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Paint Master Attribute", "Attribute owning the active master");
+  prop = RNA_def_property(srna, "polypaint_level", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "sculpt_color_level");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Color Resolution", "Active color master level");
 
   prop = RNA_def_property(srna, "sculpt_layers", PROP_COLLECTION, PROP_NONE);
   RNA_def_property_collection_sdna(prop, nullptr, "sculpt_layers", nullptr);
@@ -12582,6 +12658,7 @@ void RNA_def_modifier(BlenderRNA *brna)
   rna_def_modifier_simpledeform(brna);
   rna_def_modifier_warp(brna);
   rna_def_modifier_multires_sculpt_layer(brna);
+  rna_def_modifier_multires_color_attribute(brna);
   rna_def_modifier_multires(brna);
   rna_def_modifier_surface(brna);
   rna_def_modifier_fluid(brna);

@@ -1,0 +1,18 @@
+[
+  {
+    "path": "source/blender/blenkernel/BKE_multires_sculpt_layers.hh",
+    "sha256": "dd27b69e4c44a11146cd688da7c8c6dc206857d8f594db8da0299ec440bbe365"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_sculpt_layers.cc",
+    "sha256": "9fa1ad985606a264fec0d65f0a71f6c75b9be189241f708861bf7da5e809a97e"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc",
+    "sha256": "2f68ada5e629f9a207a6683d0e3599ecfdf5054c40b4d01c23b1fb9977cbab82"
+  },
+  {
+    "path": "source/blender/makesdna/DNA_modifier_types.h",
+    "sha256": "0142af44c529c0a0f15333c0892fe184b31e4bc3452d481a90520ca0ce9b08c3"
+  }
+]

@@ -28,6 +28,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
+#include <cstring>
+#include <cstring>
 
 #include <mutex>
 #include <zstd.h>
@@ -41,6 +44,8 @@
 #include "BLI_listbase.h"
 #include "BLI_map.hh"
 #include "BLI_memory_counter.hh"
+#include "BLI_memory_utils.hh"
+#include "BLI_time.h"
 #include "BLI_string_utf8.h"
 #include "BLI_task.h"
 #include "BLI_utildefines.h"
@@ -145,6 +150,10 @@ struct Node {
   Array<float3, 0> orig_position;
   Array<float3, 0> normal;
   Array<float4, 0> col;
+  /* Persisted COLOR master CCG side, independent of current Sculpt Level. */
+  int grid_color_side = 0;
+  /* Track implicit (base attribute) vs actual master colors for Undo. */
+  BitVector<0> grid_color_present;
   Array<float, 0> mask;
 
   Array<float4, 0> loop_col;
@@ -242,6 +251,15 @@ static bool sculpt_layer_undo_frame_enabled()
 }
 
 
+/* CCG coordinates are the sole stroke undo payload. Persistent deltas are written by the
+ * normal pending flush; the captured composition frame handles weight/level transitions.
+ * Set BLENDER_SCULPT_LAYER_UNDO_CCG=0 to compare the previous persistent implementation. */
+static bool sculpt_layer_undo_ccg_enabled()
+{
+  const char *value = std::getenv("BLENDER_SCULPT_LAYER_UNDO_CCG");
+  return value == nullptr || value[0] == '\0' || value[0] != '0';
+}
+
 /* SCULPT_LAYER_UNDO_PERSISTENT_V3
  *
  * Position undo for Sculpt Layers must exchange the persistent, unweighted layer payload,
@@ -265,6 +283,10 @@ struct StepData {
    */
   Type type = Type::None;
 
+  /* Lightweight post-Add state replacing the visible Memfile history entry.
+   * The preceding Memfile is retained, not decoded for the first stroke undo. */
+  bool layer_add_boundary_anchor = false;
+
   /** Name of the object associated with this undo data (`object.id.name`). */
   std::string object_name;
 
@@ -278,6 +300,14 @@ struct StepData {
   int layer_frame_active = -1;
   int layer_frame_level = 0;
   int layer_frame_top_level = 0;
+  /* Per-step decision made before the stroke: never pair pending CCG coordinates with
+   * stale persistent deltas, or a lower-level surface with a partial top-level snapshot. */
+  bool layer_persistent_snapshot_valid = false;
+  /* A refresh restores persistent data without exchanging compressed_positions. Once that
+   * happens, those coordinates must no longer be used as the paired redo representation. */
+  bool layer_position_buffers_match_payload = true;
+  /* The stroke edits native base MDisps while every stored layer is hidden. */
+  bool native_multires_base_undo = false;
   std::string layer_metadata_modifier;
   Vector<SculptLayerUndoMetadata> layer_metadata;
 
@@ -490,7 +520,15 @@ struct PositionUndoStorage : NonMovable {
   void ensure_compression_complete()
   {
     if (!compression_ready.load(std::memory_order_acquire)) {
+      const char *profile = std::getenv("BLENDER_SCULPT_UNDO_COMPRESSION_PROFILE");
+      const bool trace = profile && profile[0] == '1' && profile[1] == '\0';
+      const double started = trace ? BLI_time_now_seconds() : 0.0;
       BLI_task_pool_work_and_wait(compression_task_pool);
+      if (trace) {
+        std::printf("[UNDO_COMPRESSION_WAIT] elapsed=%.3fms ready=%d\n",
+                    (BLI_time_now_seconds() - started) * 1000.0,
+                    int(compression_ready.load(std::memory_order_acquire)));
+      }
     }
   }
 
@@ -738,6 +776,9 @@ static void restore_position_grids(const MutableSpan<float3> positions,
                                    const MutableSpan<bool> modified_grids)
 {
   PRF_scope(ProfileCategory::Editor);
+  /* Compression publishes indices and positions asynchronously. Wait before reading either
+   * array, including its size, just as restore_position_mesh does. */
+  undo_data.ensure_compression_complete();
   const int nodes_num = undo_data.compressed_indices.size();
 
   struct LocalData {
@@ -873,27 +914,115 @@ static void restore_color_grids(Object &object, StepData &step_data)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
   MultiresModifierData *mmd = ss.multires_modifier;
-  SubdivCCG *subdiv_ccg = ss.subdiv_ccg;
-  if (!mmd || !subdiv_ccg ||
-      !bke::multires_layers::polypaint_ensure(*mmd, mmd->sculptlvl, subdiv_ccg->grids_num))
+  SubdivCCG *ccg = ss.subdiv_ccg;
+  /* POLYPAINT_REDO_MASTER_V1: memfile Undo can remove the entire sparse
+   * master table. Redo still owns the captured colors in its Sculpt nodes.
+   * Recreate the table at the captured master level, never the Sculpt level. */
+  if (!mmd || !ccg) {
+    return;
+  }
+  const Mesh &mesh = *id_cast<Mesh *>(object.data);
+  if (mmd->sculpt_color_attribute[0] && mesh.active_color_attribute &&
+      !STREQ(mmd->sculpt_color_attribute, mesh.active_color_attribute) &&
+      !bke::multires_layers::polypaint_attribute_activate(*mmd, mesh.active_color_attribute)) {
+    return;
+  }
+  if (!mmd->sculpt_color_grids) {
+    int saved_level = 0;
+    bool has_saved_colors = false;
+    for (const std::unique_ptr<Node> &unode : step_data.nodes) {
+      int level = 0;
+      for (int candidate = 1; candidate <= 13; candidate++) {
+        if (bke::subdiv::grid_size_from_level(candidate) == unode->grid_color_side) {
+          level = candidate;
+          break;
+        }
+      }
+      if (level == 0 || (saved_level != 0 && saved_level != level) ||
+          unode->grid_color_present.size() != unode->grids.size() ||
+          unode->col.size() != unode->grids.size() *
+                                   unode->grid_color_side * unode->grid_color_side)
+      {
+        return;
+      }
+      saved_level = level;
+      for (const int i : unode->grids.index_range()) {
+        if (unode->grids[i] < 0 || unode->grids[i] >= ccg->grids_num) {
+          return;
+        }
+        has_saved_colors |= bool(unode->grid_color_present[i]);
+      }
+    }
+    /* Nothing to restore: preserve implicit base-attribute colors. */
+    if (!has_saved_colors) {
+      return;
+    }
+    if (!bke::multires_layers::polypaint_ensure(*mmd, saved_level, ccg->grids_num)) {
+      return;
+    }
+    const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
+    if (trace && trace[0] && trace[0] != '0') {
+      std::printf("[POLYPAINT_UNDO] event=MASTER_RECREATE level=%d grids=%d\n",
+                  saved_level, ccg->grids_num);
+      std::fflush(stdout);
+    }
+  }
+  if (!mmd->sculpt_color_grids || mmd->sculpt_color_level < 1 ||
+      mmd->sculpt_color_level > 13 ||
+      mmd->sculpt_color_grids_num != ccg->grids_num)
   {
     return;
   }
-  const int area = subdiv_ccg->grid_size * subdiv_ccg->grid_size;
   for (std::unique_ptr<Node> &unode : step_data.nodes) {
+    const int side = unode->grid_color_side;
+    if (side < 2 || side != bke::subdiv::grid_size_from_level(mmd->sculpt_color_level) ||
+        unode->grid_color_present.size() != unode->grids.size())
+    {
+      continue;
+    }
+    const int area = side * side;
     if (unode->col.size() != unode->grids.size() * area) {
       continue;
     }
-    int offset = 0;
-    for (const int grid_index : unode->grids) {
-      float (*colors)[4] = bke::multires_layers::polypaint_grid_ensure(*mmd, grid_index);
-      if (!colors) {
-        offset += area;
-        continue;
+    for (const int i : unode->grids.index_range()) {
+      const int grid_index = unode->grids[i];
+      float4 *stored = unode->col.data() + i * area;
+      const float (*current)[4] = bke::multires_layers::polypaint_grid(*mmd, grid_index);
+      const bool had_color = unode->grid_color_present[i];
+      const bool has_color = current != nullptr;
+      if (had_color && has_color) {
+        float (*writable)[4] = bke::multires_layers::polypaint_grid_ensure_master(*mmd,
+                                                                                   grid_index);
+        if (!writable) {
+          continue;
+        }
+        for (int p = 0; p < area; p++) {
+          for (int c = 0; c < 4; c++) {
+            std::swap(writable[p][c], stored[p][c]);
+          }
+        }
       }
-      for (int i = 0; i < area; i++, offset++) {
-        std::swap(*reinterpret_cast<float4 *>(colors[i]), unode->col[offset]);
+      else if (!had_color && has_color) {
+        for (int p = 0; p < area; p++) {
+          stored[p] = float4(current[p]);
+        }
+        if (!bke::multires_layers::polypaint_grid_discard(*mmd, grid_index)) {
+          continue;
+        }
       }
+      else if (had_color && !has_color) {
+        float (*created)[4] = bke::multires_layers::polypaint_grid_ensure_master(*mmd,
+                                                                                  grid_index);
+        if (!created) {
+          continue;
+        }
+        for (int p = 0; p < area; p++) {
+          for (int c = 0; c < 4; c++) {
+            created[p][c] = stored[p][c];
+          }
+        }
+      }
+      unode->grid_color_present[i].set(has_color);
     }
   }
 }
@@ -1302,13 +1431,14 @@ enum class SculptLayerPersistentRestoreResult {
 static bool sculpt_layer_undo_persistent_payload_swap(MultiresSculptLayer &layer,
                                                        PositionUndoStorage &undo_data)
 {
+  /* The worker publishes both compressed arrays together. Inspecting their lengths before the
+   * acquire/wait can select a fallback or an empty transaction while compression is in flight. */
+  undo_data.ensure_compression_complete();
   if (!undo_data.sculpt_layer_undo || undo_data.sculpt_layer_grid_area <= 0 ||
       undo_data.compressed_layer_disps.size() != undo_data.compressed_indices.size())
   {
     return false;
   }
-
-  undo_data.ensure_compression_complete();
 
   const int area = undo_data.sculpt_layer_grid_area;
   const int side = bke::subdiv::grid_size_from_level(layer.level);
@@ -1407,7 +1537,8 @@ static bool sculpt_layer_undo_persistent_frame_matches(const MultiresModifierDat
 static SculptLayerPersistentRestoreResult sculpt_layer_undo_persistent_restore(
     Depsgraph *depsgraph, Object &object, StepData &step_data)
 {
-  if (!sculpt_layer_undo_persistent_enabled() || step_data.type != Type::Position ||
+  if (sculpt_layer_undo_ccg_enabled() || !sculpt_layer_undo_persistent_enabled() ||
+      step_data.type != Type::Position ||
       !step_data.position_step_storage || !step_data.position_step_storage->sculpt_layer_undo ||
       step_data.layer_frame.is_empty() || step_data.layer_frame_active < 0 ||
       step_data.layer_frame_active >= step_data.layer_frame.size())
@@ -1490,7 +1621,7 @@ static SculptLayerPersistentRestoreResult sculpt_layer_undo_persistent_restore(
      * persistent payload and the lower-level CCG leaves two independent undo representations in
      * play. Recompose the current lower-level CCG directly from the restored persistent payload
      * instead, without changing sculptlvl or rebuilding Multires. */
-    if (mmd->sculptlvl < mmd->totlvl) {
+    if (mmd->sculptlvl < mmd->totlvl || !step_data.layer_position_buffers_match_payload) {
       if (!multires_refresh_sculpt_ccg(&object, mmd)) {
         /* Keep the operation transactional: put the persistent payload back so the legacy path can
          * still handle the step. */
@@ -1508,11 +1639,12 @@ static SculptLayerPersistentRestoreResult sculpt_layer_undo_persistent_restore(
       DEG_id_tag_update(&object.id, ID_RECALC_SYNC_TO_EVAL);
       WM_main_add_notifier(NC_OBJECT | ND_DRAW, &object);
       std::printf(
-          "[LAYER_UNDO_V33] mode=LOWER_LEVEL_REFRESH level=%d top=%d strength=%.6f "
+          "[LAYER_UNDO_V35] mode=PAYLOAD_REFRESH level=%d top=%d strength=%.6f "
           "position_swap=0\n",
           mmd->sculptlvl,
           mmd->totlvl,
           recorded_layer->strength);
+      step_data.layer_position_buffers_match_payload = false;
       return SculptLayerPersistentRestoreResult::Refreshed;
     }
 
@@ -1545,6 +1677,7 @@ static SculptLayerPersistentRestoreResult sculpt_layer_undo_persistent_restore(
       step_data.layer_frame_level,
       mmd->sculptlvl,
       recorded_layer->strength);
+  step_data.layer_position_buffers_match_payload = false;
   return SculptLayerPersistentRestoreResult::Refreshed;
 }
 
@@ -1559,7 +1692,14 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
                                            Object &object,
                                            StepData &step_data)
 {
-  if (!sculpt_layer_undo_frame_enabled() || step_data.type != Type::Position ||
+  /* This function is reached only when persistent restore did not handle the step.
+   * Native coordinates are still tied to their captured composition, regardless of why
+   * persistent restore declined (pending capture, invalid payload, or failed commit). */
+  const bool coordinate_frame_fallback = sculpt_layer_undo_ccg_enabled() ||
+                                         sculpt_layer_undo_persistent_enabled();
+  if ((!sculpt_layer_undo_frame_enabled() && !step_data.native_multires_base_undo &&
+       !coordinate_frame_fallback) ||
+      step_data.type != Type::Position ||
       step_data.layer_frame.is_empty())
   {
     return false;
@@ -1660,7 +1800,8 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
                     (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0});
   }
   const auto &recorded_active = step_data.layer_frame[step_data.layer_frame_active];
-  if (!recorded_active.visible || std::abs(recorded_active.strength) < 1e-6f) {
+  if (!step_data.native_multires_base_undo &&
+      (!recorded_active.visible || std::abs(recorded_active.strength) < 1e-6f)) {
     return reject("INVALID_RECORDED_WEIGHT");
   }
   if (cross_level && !rebuild_level(step_data.layer_frame_level)) {
@@ -1677,9 +1818,20 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
   SculptSession *ss = object.runtime->sculpt_session;
   if (!ss || !ss->subdiv_ccg || ss->cache || ss->filter_cache ||
       ss->subdiv_ccg->grids_num != step_data.grids.grids_num ||
-      ss->subdiv_ccg->grid_size != step_data.grids.grid_size ||
-      ss->subdiv_ccg->dirty.hidden || ss->subdiv_ccg->dirty.masks)
+      ss->subdiv_ccg->grid_size != step_data.grids.grid_size)
   {
+    /* Runtime/layout failures remain fatal for this frame. Attribute dirtiness
+     * is checked separately after the exact native coordinate-swap decision. */
+    std::printf("[LAYER_UNDO_SESSION] session=%d ccg=%d cache=%d filter=%d "
+                "grids=%d/%d side=%d/%d hidden_dirty=%d masks_dirty=%d\n",
+                int(ss != nullptr), int(ss && ss->subdiv_ccg), int(ss && ss->cache),
+                int(ss && ss->filter_cache),
+                ss && ss->subdiv_ccg ? ss->subdiv_ccg->grids_num : -1,
+                step_data.grids.grids_num,
+                ss && ss->subdiv_ccg ? ss->subdiv_ccg->grid_size : -1,
+                step_data.grids.grid_size,
+                int(ss && ss->subdiv_ccg && ss->subdiv_ccg->dirty.hidden),
+                int(ss && ss->subdiv_ccg && ss->subdiv_ccg->dirty.masks));
     return reject_runtime("SESSION_MISMATCH");
   }
   /* SCULPT_LAYER_UNDO_FAST_STANDARD_V2
@@ -1705,7 +1857,9 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
    */
   const int current_active = mmd->sculpt_layer_active;
   const char *same_frame_env = std::getenv("BLENDER_SCULPT_LAYER_UNDO_SAME_FRAME");
-  bool same_frame = !cross_level && same_frame_env && same_frame_env[0] == '1' &&
+  bool same_frame = !cross_level &&
+                    (step_data.native_multires_base_undo || coordinate_frame_fallback ||
+                     (same_frame_env && same_frame_env[0] == '1')) &&
                     current_active == step_data.layer_frame_active;
   for (const int i : current.index_range()) {
     same_frame &= current[i].strength == step_data.layer_frame[i].strength &&
@@ -1719,12 +1873,24 @@ static bool sculpt_layer_undo_frame_restore(bContext *C,
 
   if (same_frame && fast_standard) {
     std::printf(
-        "[LAYER_UNDO_V2] mode=STANDARD_SWAP level=%d layers=%d pending_preserved=1\n",
+        "[LAYER_UNDO_V2] mode=STANDARD_SWAP level=%d layers=%d pending_preserved=1 "
+        "pending_masks=%d pending_hidden=%d\n",
         mmd->sculptlvl,
-        int(current.size()));
+        int(current.size()), int(ss->subdiv_ccg->dirty.masks),
+        int(ss->subdiv_ccg->dirty.hidden));
     /* Not handled by Frame-v1: deliberately fall through to Blender's native
      * Position undo below. Do not consume the step here. */
     return false;
+  }
+
+  /* SCULPT_UNDO_MASK_PENDING_V1: native same-frame Position Undo only
+   * exchanges coordinates. Pending mask/hide values are independent and
+   * must retain both their buffers and dirty flags. The compositing/refresh
+   * path below still requires clean attributes before it can change frames. */
+  if (ss->subdiv_ccg->dirty.hidden || ss->subdiv_ccg->dirty.masks) {
+    std::printf("[LAYER_UNDO_FRAME] pending_hidden=%d pending_masks=%d\n",
+                int(ss->subdiv_ccg->dirty.hidden), int(ss->subdiv_ccg->dirty.masks));
+    return reject_runtime("PENDING_MASK_OR_HIDE_FRAME_REFRESH");
   }
 
   bke::pbvh::Tree &pbvh = bke::object::pbvh_ensure(*depsgraph, object);
@@ -2188,7 +2354,44 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
 
       if (pbvh.type() == bke::pbvh::Type::Grids) {
         restore_color_grids(object, step_data);
-        pbvh.tag_attribute_changed(node_mask, "");
+        /* Generic draw requests are invalidated by exact attribute name. An empty
+         * name leaves the painted VBO unchanged even after the master is restored. */
+        const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+        const char *redraw_env = std::getenv("BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3");
+        const bool local_redraw = redraw_env && redraw_env[0] == '1' && redraw_env[1] == '\0';
+        int64_t redraw_nodes = node_mask.size();
+        if (mesh.active_color_attribute && mesh.active_color_attribute[0]) {
+          if (local_redraw) {
+            const SubdivCCG &ccg = *ss.subdiv_ccg;
+            Array<bool> dirty(ccg.grids_num, false);
+            for (const std::unique_ptr<Node> &unode : step_data.nodes) {
+              for (const int grid : unode->grids) {
+                if (grid >= 0 && grid < ccg.grids_num) dirty[grid] = true;
+              }
+            }
+            const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+            const IndexMask redraw = IndexMask::from_predicate(node_mask, memory,
+                [&](const int i) {
+                  for (const int grid : nodes[i].grids()) {
+                    if (grid >= 0 && grid < dirty.size() && dirty[grid]) return true;
+                  }
+                  return false;
+                });
+            pbvh.tag_attribute_changed(redraw, mesh.active_color_attribute);
+            redraw_nodes = redraw.size();
+          }
+          else {
+            pbvh.tag_attribute_changed(node_mask, mesh.active_color_attribute);
+          }
+        }
+        const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
+        if (trace && trace[0] && trace[0] != '0') {
+          std::printf("[POLYPAINT_UNDO] event=DRAW_INVALIDATE nodes=%lld attribute=%s redraw_nodes=%lld local=%d\n",
+                      static_cast<long long>(step_data.nodes.size()),
+                      mesh.active_color_attribute ? mesh.active_color_attribute : "",
+                      static_cast<long long>(redraw_nodes), int(local_redraw));
+          std::fflush(stdout);
+        }
         break;
       }
 
@@ -2498,9 +2701,13 @@ static void fill_node_data_mesh(const Depsgraph &depsgraph,
   }
 }
 
-static void store_sculpt_layer_disps(const Object &object, Node &unode)
+static void store_sculpt_layer_disps(const Object &object,
+                                     Node &unode,
+                                     const bool persistent_snapshot_valid)
 {
-  if (!sculpt_layer_undo_persistent_enabled()) {
+  if (sculpt_layer_undo_ccg_enabled() || !sculpt_layer_undo_persistent_enabled() ||
+      !persistent_snapshot_valid)
+  {
     return;
   }
   const SculptSession &ss = *object.runtime->sculpt_session;
@@ -2508,7 +2715,7 @@ static void store_sculpt_layer_disps(const Object &object, Node &unode)
     return;
   }
   const MultiresModifierData &mmd = *ss.multires_modifier;
-  if (mmd.totlvl <= 0) {
+  if (mmd.totlvl <= 0 || !bke::multires_layers::base_has_visible_layers(mmd)) {
     return;
   }
   const MultiresSculptLayer *layer = bke::multires_layers::active(mmd);
@@ -2554,7 +2761,8 @@ static void store_sculpt_layer_disps(const Object &object, Node &unode)
 static void fill_node_data_grids(const Object &object,
                                  const bke::pbvh::GridsNode &node,
                                  const Type type,
-                                 Node &unode)
+                                 Node &unode,
+                                 const bool persistent_snapshot_valid)
 {
   const SculptSession &ss = *object.runtime->sculpt_session;
   const Mesh &base_mesh = *id_cast<const Mesh *>(object.data);
@@ -2577,7 +2785,7 @@ static void fill_node_data_grids(const Object &object,
       unode.position.reinitialize(verts_num);
       /* Needed for original data lookup. */
       unode.normal.reinitialize(verts_num);
-      store_sculpt_layer_disps(object, unode);
+      store_sculpt_layer_disps(object, unode, persistent_snapshot_valid);
       store_positions_grids(subdiv_ccg, unode);
       break;
     }
@@ -2597,20 +2805,51 @@ static void fill_node_data_grids(const Object &object,
     }
     case Type::Color: {
       MultiresModifierData *mmd = ss.multires_modifier;
-      unode.col.reinitialize(verts_num);
-      unode.col.fill(float4(1.0f));
-      if (mmd && mmd->sculpt_color_grids &&
-          mmd->sculpt_color_grids_num == subdiv_ccg.grids_num)
+      /* The first color stroke may materialize a previously implicit grid.
+       * Capture presence separately, so Undo returns to the base attribute. */
+      if (!mmd || mmd->totlvl < 1 || mmd->totlvl > 13) {
+        break;
+      }
+      if (mmd->sculpt_color_grids &&
+          mmd->sculpt_color_grids_num != subdiv_ccg.grids_num)
       {
-        int offset = 0;
-        for (const int grid_index : unode.grids) {
-          const float (*colors)[4] = bke::multires_layers::polypaint_grid(*mmd, grid_index);
-          if (colors) {
-            for (int i = 0; i < grid_area; i++) {
-              unode.col[offset + i] = float4(colors[i]);
-            }
+        break;
+      }
+      if (mmd->sculpt_color_grids && mmd->sculpt_color_level < mmd->totlvl &&
+          (bke::multires_layers::polypaint_lazy_master_enabled() ?
+               mmd->sculpt_color_level < mmd->sculptlvl :
+               !bke::multires_layers::polypaint_resample(*mmd, mmd->totlvl)))
+      {
+        break;
+      }
+      const int master_level = mmd->sculpt_color_grids ? mmd->sculpt_color_level :
+                                                             mmd->totlvl;
+      unode.grid_color_side = bke::subdiv::grid_size_from_level(master_level);
+      const int master_area = unode.grid_color_side * unode.grid_color_side;
+      unode.col.reinitialize(unode.grids.size() * master_area);
+      const char *fast_env = std::getenv("BLENDER_SCULPT_POLYPAINT_UNDO_COPY_V3");
+      const bool fast_copy = fast_env && fast_env[0] == '1' && fast_env[1] == '\0';
+      /* Absent slots are never read: restore fills them before Redo can read
+       * them, and original-color lookup rejects any missing presence bit.
+       * Dense slots are overwritten in full. Avoid touching every page twice. */
+      if (!fast_copy) unode.col.fill(float4(0.0f));
+      unode.grid_color_present.resize(unode.grids.size());
+      for (const int i : unode.grids.index_range()) {
+        const float (*colors)[4] = bke::multires_layers::polypaint_grid(*mmd, unode.grids[i]);
+        if (!colors) {
+          unode.grid_color_present[i].set(false);
+          continue;
+        }
+        unode.grid_color_present[i].set(true);
+        if (fast_copy) {
+          static_assert(sizeof(float4) == sizeof(float[4]));
+          std::memcpy(unode.col.data() + i * master_area, colors,
+                      size_t(master_area) * sizeof(float4));
+        }
+        else {
+          for (int p = 0; p < master_area; p++) {
+            unode.col[i * master_area + p] = float4(colors[p]);
           }
-          offset += grid_area;
         }
       }
       break;
@@ -2792,7 +3031,11 @@ void push_node(const Depsgraph &depsgraph,
           depsgraph, object, static_cast<const bke::pbvh::MeshNode &>(*node), type, *unode);
       break;
     case bke::pbvh::Type::Grids:
-      fill_node_data_grids(object, static_cast<const bke::pbvh::GridsNode &>(*node), type, *unode);
+      fill_node_data_grids(object,
+                           static_cast<const bke::pbvh::GridsNode &>(*node),
+                           type,
+                           *unode,
+                           step_data->layer_persistent_snapshot_valid);
       break;
     case bke::pbvh::Type::BMesh:
       BLI_assert_unreachable();
@@ -2851,7 +3094,8 @@ void push_nodes(const Depsgraph &depsgraph,
       });
       threading::parallel_for(nodes_to_fill.index_range(), 1, [&](const IndexRange range) {
         for (const auto &[node, unode] : nodes_to_fill.as_span().slice(range)) {
-          fill_node_data_grids(object, *node, type, *unode);
+          fill_node_data_grids(
+              object, *node, type, *unode, step_data->layer_persistent_snapshot_valid);
         }
       });
       break;
@@ -2890,9 +3134,12 @@ static void save_active_attribute(Object &object, SculptAttrRef *attr)
 static void save_common_data(Object &ob, SculptUndoStep *us)
 {
   us->data.object_name = ob.id.name;
-  if ((sculpt_layer_undo_frame_enabled() || sculpt_layer_undo_persistent_enabled()) &&
-      ob.runtime->sculpt_session && ob.runtime->sculpt_session->subdiv_ccg &&
-      ob.runtime->sculpt_session->multires_modifier)
+  if (ob.runtime->sculpt_session && ob.runtime->sculpt_session->subdiv_ccg &&
+      ob.runtime->sculpt_session->multires_modifier &&
+      (sculpt_layer_undo_ccg_enabled() || sculpt_layer_undo_frame_enabled() ||
+       sculpt_layer_undo_persistent_enabled() ||
+       !bke::multires_layers::base_has_visible_layers(
+           *ob.runtime->sculpt_session->multires_modifier)))
   {
     for (ModifierData &md : ob.modifiers) {
       if (md.type != eModifierType_Multires ||
@@ -2904,10 +3151,18 @@ static void save_common_data(Object &ob, SculptUndoStep *us)
       if (mmd.sculpt_layers.is_empty()) {
         break;
       }
+      us->data.native_multires_base_undo =
+          !bke::multires_layers::base_has_visible_layers(mmd);
       us->data.layer_frame_modifier = md.name;
       us->data.layer_frame_active = mmd.sculpt_layer_active;
       us->data.layer_frame_level = mmd.sculptlvl;
       us->data.layer_frame_top_level = mmd.totlvl;
+      const SubdivCCG &ccg = *ob.runtime->sculpt_session->subdiv_ccg;
+      us->data.layer_persistent_snapshot_valid =
+          !sculpt_layer_undo_ccg_enabled() && !us->data.native_multires_base_undo &&
+          mmd.sculptlvl == mmd.totlvl &&
+          ccg.level == mmd.totlvl && !ccg.dirty.coords && !ccg.dirty.hidden &&
+          !ccg.dirty.masks;
       for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
         us->data.layer_frame.append({layer.name, layer.strength,
                                     (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0});
@@ -2959,9 +3214,159 @@ static void save_common_data(Object &ob, SculptUndoStep *us)
   }
 }
 
+/* SCULPT_LAYER_FIRST_STROKE_ANCHOR_V41
+ * Sculpt decodes the current step when undoing. If its preceding visible state
+ * is a Memfile, even a successful local position swap is followed by a full
+ * Memfile decode. Create a native Type::None boundary BEFORE any stroke edits,
+ * using the same history name as the post-Add or Set Active Modifier checkpoint. Keep the checkpoint
+ * as an internal step, so undoing Add and redoing it still read all scene IDs.
+ * No global snapshot, high-resolution copy, or flush is created here. */
+static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
+                                                       const Object &ob,
+                                                       const char *&r_reason)
+{
+  const UndoStep *checkpoint = ustack.step_active;
+  if (ustack.step_init) {
+    r_reason = "ENCODE_IN_PROGRESS";
+    return false;
+  }
+  if (ustack.group_level != 0) {
+    r_reason = "UNDO_GROUP";
+    return false;
+  }
+  if (!checkpoint || checkpoint->type != BKE_UNDOSYS_TYPE_MEMFILE || checkpoint->skip ||
+      !checkpoint->prev)
+  {
+    r_reason = "HISTORY_STATE";
+    return false;
+  }
+  if (checkpoint != ustack.step_active_memfile) {
+    r_reason = "CHECKPOINT_NOT_ACTIVE";
+    return false;
+  }
+  if (std::string(checkpoint->name) != "Add Sculpt Layer" &&
+      std::string(checkpoint->name) != "Set Active Modifier")
+  {
+    r_reason = "CHECKPOINT_NAME";
+    return false;
+  }
+  /* A new stroke already discards redo via push_init_with_type. Let that same
+   * function discard it when inserting the boundary; the active checkpoint is
+   * retained. Rejecting checkpoint->next prevented this after a first Undo. */
+  if (ob.type != OB_MESH || !(ob.mode & OB_MODE_SCULPT) || ob.id.lib || !ob.data ||
+      ID_REAL_USERS(ob.data) != 1 || (ob.id.recalc & ID_RECALC_GEOMETRY))
+  {
+    r_reason = "OBJECT";
+    return false;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
+  const SculptSession *ss = ob.runtime->sculpt_session;
+  const SubdivCCG *ccg = ss ? ss->subdiv_ccg : nullptr;
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  if (mesh.id.lib || !ss || ss->bm || ss->filter_cache || ss->expand_cache ||
+      !ccg || !pbvh || pbvh->type() != bke::pbvh::Type::Grids ||
+      ccg->dirty.coords || ccg->dirty.hidden || ccg->dirty.masks ||
+      ss->deform_modifiers_active || ss->shapekey_active)
+  {
+    r_reason = "SCULPT_STATE";
+    return false;
+  }
+  const MultiresModifierData *mmd = nullptr;
+  for (const ModifierData &md : ob.modifiers) {
+    if (!(md.mode & eModifierMode_Realtime) || (md.mode & eModifierMode_DisableTemporary)) {
+      continue;
+    }
+    if (md.type != eModifierType_Multires || mmd) {
+      r_reason = "MODIFIER_STACK";
+      return false;
+    }
+    mmd = reinterpret_cast<const MultiresModifierData *>(&md);
+  }
+  if (!mmd || mmd != ss->multires_modifier || mmd->totlvl <= 0 ||
+      mmd->sculptlvl != mmd->totlvl || ccg->level != mmd->totlvl ||
+      ccg->grids_num != mesh.corners_num ||
+      ccg->grid_size != bke::subdiv::grid_size_from_level(mmd->totlvl) ||
+      ccg->grid_area != ccg->grid_size * ccg->grid_size ||
+      ccg->positions.size() != int64_t(ccg->grids_num) * ccg->grid_area ||
+      mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled ||
+      mmd->sculpt_layers.is_empty() ||
+      mmd->sculpt_layer_active != mmd->sculpt_layers.count() - 1)
+  {
+    r_reason = "MULTIRES_FRAME";
+    return false;
+  }
+  const MultiresSculptLayer *layer = bke::multires_layers::active(*mmd);
+  if (!layer || !bke::multires_layers::is_effective(*layer) || layer->base_deltas ||
+      layer->base_verts_num != 0 || layer->level != mmd->totlvl || !layer->disps ||
+      layer->grids_num != ccg->grids_num)
+  {
+    r_reason = "NEW_LAYER";
+    return false;
+  }
+  /* A newly added sparse layer has no payload. Check descriptors only; never
+   * scan or allocate high-resolution samples in the pre-stroke path. */
+  for (int grid = 0; grid < layer->grids_num; grid++) {
+    if (layer->disps[grid].disps || layer->disps[grid].level != mmd->totlvl ||
+        layer->disps[grid].totdisp != ccg->grid_area)
+    {
+      r_reason = "LAYER_NOT_EMPTY_SPARSE";
+      return false;
+    }
+  }
+  r_reason = "READY";
+  return true;
+}
+
+static void sculpt_layer_first_stroke_anchor_ensure(UndoStack &ustack, Object &ob)
+{
+  const char *env = std::getenv("BLENDER_SCULPT_FIRST_STROKE_ANCHOR");
+  if (!env || env[0] != '1' || env[1] != '\0') {
+    return;
+  }
+  const double anchor_start = BLI_time_now_seconds();
+  const char *reason = nullptr;
+  if (!sculpt_layer_first_stroke_anchor_eligible(ustack, ob, reason)) {
+    if (ustack.step_active && ustack.step_active->type == BKE_UNDOSYS_TYPE_MEMFILE &&
+        (std::string(ustack.step_active->name) == "Add Sculpt Layer" ||
+         std::string(ustack.step_active->name) == "Set Active Modifier"))
+    {
+      std::printf("[LAYER_UNDO_ANCHOR] mode=SKIP reason=%s\n", reason);
+      std::fflush(stdout);
+    }
+    return;
+  }
+  UndoStep *checkpoint = ustack.step_active;
+  SculptUndoStep *anchor = reinterpret_cast<SculptUndoStep *>(
+      BKE_undosys_step_push_init_with_type(
+          &ustack, nullptr, checkpoint->name, BKE_UNDOSYS_TYPE_SCULPT));
+  if (!anchor) {
+    return;
+  }
+  save_common_data(ob, anchor);
+  save_active_attribute(ob, &anchor->active_color_end);
+  anchor->data.grids.grids_num = ob.runtime->sculpt_session->subdiv_ccg->grids_num;
+  anchor->data.grids.grid_size = ob.runtime->sculpt_session->subdiv_ccg->grid_size;
+  anchor->data.layer_add_boundary_anchor = true;
+
+  const eUndoPushReturn result = BKE_undosys_step_push(&ustack, nullptr, nullptr);
+  if ((result & UNDO_PUSH_RET_SUCCESS) && ustack.step_active == &anchor->step &&
+      anchor->step.prev == checkpoint && ustack.step_active_memfile == checkpoint)
+  {
+    /* Replace the visible Add state, not the global checkpoint itself. The
+     * first stroke now undoes onto this native boundary. Crossing back before
+     * Add still decodes the retained Memfile and the earlier scene checkpoint. */
+    checkpoint->skip = true;
+    std::printf("[LAYER_UNDO_ANCHOR] mode=CREATE version=4.1 checkpoint=%s grids=%d total=%.3fms\n",
+                checkpoint->name, anchor->data.grids.grids_num,
+                (BLI_time_now_seconds() - anchor_start) * 1000.0);
+    std::fflush(stdout);
+  }
+}
+
 void push_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
 {
   UndoStack *ustack = ED_undo_stack_get();
+  sculpt_layer_first_stroke_anchor_ensure(*ustack, ob);
 
   /* If possible, we need to tag the object and its geometry data as 'changed in the future' in
    * the previous undo step if it's a memfile one. */
@@ -3175,6 +3580,16 @@ static bool step_encode(bContext * /*C*/, Main *bmain, UndoStep *us_p)
    * to the current 'SculptUndoStep' added by encode_init. */
   SculptUndoStep *us = reinterpret_cast<SculptUndoStep *>(us_p);
   us->step.data_size = us->data.undo_size + us->data.base_layer_deltas.size() * sizeof(float3);
+  if (us->data.type == Type::Color && us->data.grids.grids_num != 0) {
+    const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
+    if (trace && trace[0] && trace[0] != '0') {
+      std::printf("[POLYPAINT_UNDO] event=ENCODE step=%s nodes=%lld grids=%d bytes=%llu\n",
+                  us_p->name, static_cast<long long>(us->data.nodes.size()),
+                  us->data.grids.grids_num,
+                  static_cast<unsigned long long>(us->data.undo_size));
+      std::fflush(stdout);
+    }
+  }
   us->step.data_size += us->data.layer_frame.size() * sizeof(SculptLayerUndoFrameItem);
   us->step.data_size += us->data.layer_frame_modifier.size();
   for (const SculptLayerUndoFrameItem &item : us->data.layer_frame) {
@@ -3199,11 +3614,79 @@ static bool step_encode(bContext * /*C*/, Main *bmain, UndoStep *us_p)
   return true;
 }
 
+/* Opt-in sampled state trace. It observes live state and never commits or edits data. */
+static void sculpt_layer_undo_trace_state(bContext *C,
+                                          const SculptUndoStep &us,
+                                          const char *event)
+{
+  const char *trace = std::getenv("BLENDER_SCULPT_LAYER_UNDO_TRACE");
+  if (!trace || trace[0] != '1') {
+    return;
+  }
+  const Object *object = CTX_data_active_object(C);
+  if (!object || object->type != OB_MESH) {
+    return;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(object->data);
+  const SculptSession *ss = object->runtime->sculpt_session;
+  const SubdivCCG *ccg = ss ? ss->subdiv_ccg : nullptr;
+  std::printf(
+      "[UNDO_STATE] event=%s step=%s type=%d mode=%d mesh=%d/%d/%d "
+      "saved_grids=%d saved_side=%d live_grids=%d live_side=%d pending=%d/%d/%d\n",
+      event, us.step.name, int(us.data.type), int(object->mode),
+      mesh.verts_num, mesh.faces_num, mesh.corners_num,
+      us.data.grids.grids_num, us.data.grids.grid_size,
+      ccg ? ccg->grids_num : 0, ccg ? ccg->grid_size : 0,
+      ccg ? int(ccg->dirty.coords) : 0,
+      ccg ? int(ccg->dirty.hidden) : 0,
+      ccg ? int(ccg->dirty.masks) : 0);
+  for (const ModifierData &md : object->modifiers) {
+    if (md.type != eModifierType_Multires) {
+      continue;
+    }
+    const auto &mmd = reinterpret_cast<const MultiresModifierData &>(md);
+    int layer_index = 0;
+    for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+      /* Bound the cost to 256 grids and three samples per grid. This is a sampled
+       * signature: zero energy does not prove the complete layer is empty. */
+      double energy = 0.0;
+      double signature = 0.0;
+      int samples = 0;
+      const int grids = std::min(layer.grids_num, 256);
+      for (int sample_grid = 0; layer.disps && sample_grid < grids; sample_grid++) {
+        const int corner = int(int64_t(sample_grid) * layer.grids_num / grids);
+        const MDisps &grid = layer.disps[corner];
+        if (!grid.disps || grid.totdisp <= 0) {
+          continue;
+        }
+        const int indices[3] = {0, grid.totdisp / 2, grid.totdisp - 1};
+        for (const int index : indices) {
+          for (int axis = 0; axis < 3; axis++) {
+            const double value = grid.disps[index][axis];
+            energy += value * value;
+            signature += value * double(1 + corner * 3 + axis);
+          }
+          samples++;
+        }
+      }
+      std::printf(
+          "[UNDO_LAYER_STATE] event=%s modifier=%s sculpt=%d top=%d layer=%d name=%s "
+          "visible=%d strength=%.9g grids=%d sampled=%d energy=%.17g signature=%.17g\n",
+          event, md.name, mmd.sculptlvl, mmd.totlvl, layer_index++, layer.name,
+          int((layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0),
+          double(layer.strength), layer.grids_num, samples, energy, signature);
+    }
+  }
+  fflush(stdout);
+}
+
 static void step_decode_undo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoStep *us)
 {
   BLI_assert(us->step.is_applied == true);
 
+  sculpt_layer_undo_trace_state(C, *us, "UNDO_BEFORE");
   restore_list(C, depsgraph, us->data);
+  sculpt_layer_undo_trace_state(C, *us, "UNDO_AFTER");
   us->step.is_applied = false;
 }
 
@@ -3211,7 +3694,9 @@ static void step_decode_redo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoS
 {
   BLI_assert(us->step.is_applied == false);
 
+  sculpt_layer_undo_trace_state(C, *us, "REDO_BEFORE");
   restore_list(C, depsgraph, us->data);
+  sculpt_layer_undo_trace_state(C, *us, "REDO_AFTER");
   us->step.is_applied = true;
 }
 
@@ -3228,7 +3713,8 @@ static void sculpt_layer_restore_position_boundary_frame(bContext *C,
                                                          Depsgraph *depsgraph,
                                                          const StepData &step_data)
 {
-  if (step_data.type != Type::Position || step_data.layer_frame.is_empty()) {
+  if (step_data.type != Type::Position || step_data.layer_frame.is_empty() ||
+      step_data.native_multires_base_undo) {
     return;
   }
 
@@ -3258,18 +3744,67 @@ static void sculpt_layer_restore_position_boundary_frame(bContext *C,
   }
 
   const int wanted_level = std::clamp(step_data.layer_frame_level, 0, int(mmd->totlvl));
-  bool changed = (mmd->sculptlvl != wanted_level) ||
-                 (mmd->sculpt_layer_active != step_data.layer_frame_active);
+  const bool level_changed = mmd->sculptlvl != wanted_level;
+  const bool active_changed = mmd->sculpt_layer_active != step_data.layer_frame_active;
+  bool weights_changed = false;
+  bool changed = level_changed || active_changed;
 
   i = 0;
   for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
     const SculptLayerUndoFrameItem &saved = step_data.layer_frame[i++];
-    changed |= layer.strength != saved.strength ||
-               (((layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0) != saved.visible);
+    const bool layer_changed = layer.strength != saved.strength ||
+                              (((layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0) != saved.visible);
+    weights_changed |= layer_changed;
+    changed |= layer_changed;
+  }
+
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  if (trace_env && trace_env[0] && trace_env[0] != '0') {
+    std::printf("[LAYER_UNDO_BOUNDARY_CHECK] level_changed=%d weights_changed=%d active_changed=%d\n",
+                int(level_changed), int(weights_changed), int(active_changed));
+    std::fflush(stdout);
   }
 
   if (!changed) {
     std::printf("[LAYER_UNDO_BOUNDARY] mode=PRESERVE no_change=1 level=%d\n", wanted_level);
+    return;
+  }
+
+  /* Only an active-index correction is surface-neutral. Flush the old frame before changing metadata;
+   * avoid freeing the CCG/PBVH after a certified local
+   * publication or an already clean CCG. Changed levels/weights still rebuild. */
+  const char *boundary_env = std::getenv("BLENDER_SCULPT_UNDO_BOUNDARY_METADATA");
+  const bool boundary_fast = boundary_env && boundary_env[0] == '1' && boundary_env[1] == '\0';
+  SculptSession *boundary_ss = object->runtime->sculpt_session;
+  SubdivCCG *boundary_ccg = boundary_ss ? boundary_ss->subdiv_ccg : nullptr;
+  if (boundary_fast && !level_changed && !weights_changed && boundary_ss && boundary_ccg &&
+      !boundary_ss->cache && !boundary_ss->filter_cache && !boundary_ss->expand_cache &&
+      mmd->totlvl == step_data.layer_frame_top_level &&
+      boundary_ccg->level == wanted_level &&
+      boundary_ccg->grids_num == step_data.grids.grids_num &&
+      boundary_ccg->grid_size == step_data.grids.grid_size &&
+      !boundary_ccg->dirty.hidden && !boundary_ccg->dirty.masks)
+  {
+    const bool was_clean = !boundary_ccg->dirty.coords;
+    bool local_surface_preserved = false;
+    if (multires_flush_sculpt_updates(object, &local_surface_preserved) &&
+        (was_clean || local_surface_preserved))
+    {
+      mmd->sculpt_layer_active = step_data.layer_frame_active;
+      bke::multires_layers::weight_hot_delta_cache_invalidate();
+      DEG_id_tag_update(&object->id, ID_RECALC_SYNC_TO_EVAL);
+      WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, object);
+      std::printf("[LAYER_UNDO_BOUNDARY] mode=METADATA_ONLY active=%d\n", mmd->sculpt_layer_active);
+      std::fflush(stdout);
+      return;
+    }
+  }
+
+  /* Native CCG undo can leave restored coordinates pending. Flush/release the CCG
+   * while its level and weights still match the current modifier. Changing those
+   * first can make the flush reject the level or solve deltas against wrong weights. */
+  if (!multires_force_sculpt_rebuild(object)) {
+    std::printf("[LAYER_UNDO_BOUNDARY] mode=SKIP reason=OLD_FRAME_FLUSH_FAILED pending_retained=1\n");
     return;
   }
 
@@ -3290,11 +3825,8 @@ static void sculpt_layer_restore_position_boundary_frame(bContext *C,
 
   bke::multires_layers::weight_hot_delta_cache_invalidate();
 
-  /* This path only runs on the first Position step at the Sculpt entry
-   * boundary. V3 has already synchronized the persistent layer payload, so a
-   * rebuild here is a state/display correction rather than another undo
-   * commit. */
-  multires_force_sculpt_rebuild(object);
+  /* The old-frame CCG was already flushed/released before metadata changed.
+   * Evaluate the captured frame from that now-coherent persistent state. */
   DEG_id_tag_update(&object->id, ID_RECALC_GEOMETRY);
   BKE_scene_graph_evaluated_ensure(depsgraph, CTX_data_main(C));
   WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, object);
@@ -3335,7 +3867,9 @@ static void step_decode_undo(bContext *C,
       if (us_iter->step.prev && us_iter->step.prev->type == BKE_UNDOSYS_TYPE_SCULPT) {
         SculptUndoStep *prev = reinterpret_cast<SculptUndoStep *>(us_iter->step.prev);
         if (us_iter->data.type == Type::Position && prev->data.type == Type::None) {
+          sculpt_layer_undo_trace_state(C, *us_iter, "BOUNDARY_BEFORE");
           sculpt_layer_restore_position_boundary_frame(C, depsgraph, us_iter->data);
+          sculpt_layer_undo_trace_state(C, *us_iter, "BOUNDARY_AFTER");
         }
         set_active_layer(C, &prev->active_color_end);
       }
@@ -3376,8 +3910,20 @@ static void step_decode_redo(bContext *C, Depsgraph *depsgraph, SculptUndoStep *
 static void step_decode(
     bContext *C, Main *bmain, UndoStep *us_p, const eUndoStepDir dir, const bool is_final)
 {
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+  const double trace_start = trace ? BLI_time_now_seconds() : 0.0;
+  BLI_SCOPED_DEFER([&]() {
+    if (trace) {
+      std::printf("[LAYER_SCULPT_DECODE] direction=%d step=%s total=%.3fms\n",
+                  int(dir), us_p->name, (BLI_time_now_seconds() - trace_start) * 1000.0);
+      std::fflush(stdout);
+    }
+  });
   /* NOTE: behavior for undo/redo closely matches image undo. */
   BLI_assert(dir != STEP_INVALID);
+  sculpt_layer_undo_trace_state(
+      C, *reinterpret_cast<const SculptUndoStep *>(us_p), "DECODE_ENTER");
 
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
 
@@ -3418,6 +3964,12 @@ static void step_decode(
   }
 
   SculptUndoStep *us = reinterpret_cast<SculptUndoStep *>(us_p);
+  sculpt_layer_undo_trace_state(C, *us, "DECODE_READY");
+  if (trace && us->data.layer_add_boundary_anchor) {
+    std::printf("[LAYER_UNDO_ANCHOR] mode=DECODE direction=%d final=%d step=%s\n",
+                int(dir), int(is_final), us_p->name);
+    std::fflush(stdout);
+  }
   if (dir == STEP_UNDO) {
     step_decode_undo(C, depsgraph, us, is_final);
   }
@@ -3652,12 +4204,22 @@ std::optional<Span<float4>> orig_color_data_lookup_mesh(const Object & /*object*
   return unode->col.as_span();
 }
 
-std::optional<Span<float4>> orig_color_data_lookup_grids(const Object & /*object*/,
+std::optional<Span<float4>> orig_color_data_lookup_grids(const Object &object,
                                                          const bke::pbvh::GridsNode &node)
 {
   const undo::Node *unode = undo::get_node(&node, undo::Type::Color);
-  if (!unode) {
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (!unode || !ss || !ss->subdiv_ccg ||
+      unode->grid_color_side != ss->subdiv_ccg->grid_size)
+  {
     return std::nullopt;
+  }
+  /* Missing grids are represented by the base attribute, not by the zeroed
+   * slots in Undo's master snapshot. Callers must not treat those as paint. */
+  for (const int i : unode->grids.index_range()) {
+    if (!unode->grid_color_present[i]) {
+      return std::nullopt;
+    }
   }
   return unode->col.as_span();
 }
@@ -3705,3 +4267,8 @@ std::optional<Span<float>> orig_mask_data_lookup_grids(const Object & /*object*/
 }  // namespace ed::sculpt_paint
 
 }  // namespace blender
+
+
+
+
+

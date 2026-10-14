@@ -1,0 +1,12 @@
+[
+  {
+    "path": "source/blender/blenkernel/intern/multires_reshape.cc",
+    "before_sha256": "153c265519b3bd8305125aeb887690613c93ccdabbe4ce897210b2de9999416e",
+    "after_sha256": "bc521b83cca8bf4f022870338fac2d9ba43bf4bcc3dc3d2040d3065f4697aef8"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc",
+    "before_sha256": "4dacaf1a127d94a1651e808251796157f9c98d4df5256245b155e23688a46080",
+    "after_sha256": "566ac6b5e7561c0248a3d6dcef3009af52ccd23e1fe6a205b5842452586e7fd1"
+  }
+]

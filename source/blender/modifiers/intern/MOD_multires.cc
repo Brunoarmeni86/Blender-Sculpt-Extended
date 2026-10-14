@@ -11,10 +11,14 @@
 #include <cstdlib>
 #include "BLI_time.h"
 #include <cmath>
+#include <atomic>
+#include <string>
 
 #include "MEM_guardedalloc.h"
 
 #include "BLI_listbase.h"
+#include "BLI_color.hh"
+#include "BLI_task.hh"
 #include "BLI_utildefines.h"
 #include "BLI_memory_utils.hh"
 
@@ -30,6 +34,7 @@
 #include "BKE_context.hh"
 #include "MOD_util.hh"
 #include "BKE_customdata.hh"
+#include "BKE_attribute.hh"
 #include "BKE_mesh.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_modifier.hh"
@@ -195,6 +200,18 @@ static void blend_write(BlendWriter *writer, const ID * /*id_owner*/, const Modi
       }
     }
   }
+  writer->write_struct_list(&mmd->sculpt_color_attributes);
+  for (const MultiresColorAttribute &attribute : mmd->sculpt_color_attributes) {
+    if (attribute.grids && attribute.grids_num > 0) {
+      writer->write_struct_array(attribute.grids_num, attribute.grids);
+      for (int i = 0; i < attribute.grids_num; i++) {
+        const MultiresColorGrid &grid = attribute.grids[i];
+        if (grid.colors && grid.totcolor > 0) {
+          writer->write_raw(sizeof(float) * size_t(grid.totcolor) * 4, grid.colors);
+        }
+      }
+    }
+  }
   if (mmd->sculpt_face_set_grids && mmd->sculpt_face_set_grids_num > 0) {
     writer->write_struct_array(mmd->sculpt_face_set_grids_num, mmd->sculpt_face_set_grids);
     for (int i = 0; i < mmd->sculpt_face_set_grids_num; i++) {
@@ -259,6 +276,26 @@ static void blend_read(BlendDataReader *reader, ModifierData *md)
       }
     }
   }
+  BLO_read_struct_list(reader, MultiresColorAttribute, &mmd->sculpt_color_attributes);
+  mmd->sculpt_color_attribute[sizeof(mmd->sculpt_color_attribute) - 1] = '\0';
+  for (MultiresColorAttribute &attribute : mmd->sculpt_color_attributes) {
+    attribute.name[sizeof(attribute.name) - 1] = '\0';
+    if (attribute.grids_num <= 0 || !attribute.grids ||
+        !BLO_read_array(reader, &attribute.grids, attribute.grids_num)) {
+      attribute.grids = nullptr;
+      attribute.grids_num = 0;
+      attribute.level = 0;
+      continue;
+    }
+    for (int i = 0; i < attribute.grids_num; i++) {
+      MultiresColorGrid &grid = attribute.grids[i];
+      if (grid.totcolor > 0 && grid.colors &&
+          !BLO_read_array(reader, reinterpret_cast<float **>(&grid.colors), grid.totcolor, 4)) {
+        grid.colors = nullptr;
+        grid.totcolor = 0;
+      }
+    }
+  }
   if (mmd->sculpt_face_set_grids_num > 0 && mmd->sculpt_face_set_grids) {
     if (!BLO_read_array(reader, &mmd->sculpt_face_set_grids, mmd->sculpt_face_set_grids_num)) {
       mmd->sculpt_face_set_grids = nullptr;
@@ -304,6 +341,206 @@ static bke::subdiv::Subdiv *subdiv_descriptor_ensure(MultiresModifierData *mmd,
 }
 
 /* Subdivide into fully qualified mesh. */
+
+/* POLYPAINT_EVALUATED_MESH_COLOR_V1: persistent colors stay in the original
+ * Multires modifier. Object Mode / render consume a read-only projection into
+ * the named color attribute of the evaluated mesh, independently of PBVH. */
+static const MultiresModifierData *polypaint_mesh_color_source(
+    const MultiresModifierData &mmd, const ModifierEvalContext &ctx, const Mesh &base_mesh)
+{
+  const char *enabled = std::getenv("BLENDER_SCULPT_POLYPAINT_MESH_COLOR");
+  if (!enabled || enabled[0] != '1' || enabled[1] != '\0' ||
+      (ctx.flag & MOD_APPLY_ORCO) ||
+      !base_mesh.active_color_attribute || !base_mesh.active_color_attribute[0])
+  {
+    return nullptr;
+  }
+  const MultiresModifierData *source = &mmd;
+  ModifierData *original = BKE_modifier_get_original(
+      ctx.object, const_cast<ModifierData *>(&mmd.modifier));
+  if (original && original->type == eModifierType_Multires) {
+    source = reinterpret_cast<const MultiresModifierData *>(original);
+  }
+  if (!source->sculpt_color_attributes.is_empty()) {
+    return source;
+  }
+  return source->sculpt_color_grids && source->sculpt_color_level >= 1 &&
+                 source->sculpt_color_level <= 13 &&
+                 source->sculpt_color_grids_num == base_mesh.corners_num ?
+             source : nullptr;
+}
+
+static bke::SpanAttributeWriter<ColorGeometry4f> polypaint_mesh_color_writer(
+    Mesh &mesh, const std::string &name)
+{
+  bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+  const std::optional<bke::AttributeMetaData> meta = attributes.lookup_meta_data(name);
+  if (!bke::mesh::is_color_attribute(meta)) {
+    return {};
+  }
+  if (meta->domain == bke::AttrDomain::Corner && meta->data_type == bke::AttrType::ColorFloat) {
+    return attributes.lookup_for_write_span<ColorGeometry4f>(name);
+  }
+  /* Preserve subdivision's own interpolation on all unpainted corners. A
+   * temporary attribute converts BYTE/POINT to float CORNER directly, without
+   * a second full-size staging color array. Attribute names on the mesh remain
+   * valid because only the storage entry is replaced, after materialization. */
+  const VArray<ColorGeometry4f> inherited =
+      *attributes.lookup<ColorGeometry4f>(name, bke::AttrDomain::Corner);
+  if (!inherited || inherited.size() != mesh.corners_num) {
+    return {};
+  }
+  std::string temporary = ".polypaint_eval_color";
+  while (attributes.contains(temporary)) {
+    temporary += "_";
+  }
+  bke::SpanAttributeWriter<ColorGeometry4f> converted =
+      attributes.lookup_or_add_for_write_only_span<ColorGeometry4f>(temporary,
+                                                                   bke::AttrDomain::Corner);
+  if (!converted) {
+    return {};
+  }
+  inherited.materialize(converted.span);
+  converted.finish();
+  if (!attributes.rename(temporary, name, true)) {
+    attributes.remove(temporary);
+    return {};
+  }
+  return attributes.lookup_for_write_span<ColorGeometry4f>(name);
+}
+
+static bool polypaint_mesh_sample(const MultiresModifierData &source,
+                                 const OffsetIndices<int> faces,
+                                 const int face_index,
+                                 const int coarse_corner,
+                                 const float u,
+                                 const float v,
+                                 float rgba[4])
+{
+  if (face_index < 0 || face_index >= faces.size() || !std::isfinite(u) || !std::isfinite(v)) {
+    return false;
+  }
+  const IndexRange face = faces[face_index];
+  if (face.size() < 3) {
+    return false;
+  }
+  float corner_u = std::clamp(u, 0.0f, 1.0f);
+  float corner_v = std::clamp(v, 0.0f, 1.0f);
+  int corner = coarse_corner;
+  if (face.size() == 4) {
+    corner = bke::subdiv::rotate_quad_to_corner(corner_u, corner_v, &corner_u, &corner_v);
+  }
+  if (corner < 0 || corner >= face.size()) {
+    return false;
+  }
+  float grid_u, grid_v;
+  bke::subdiv::ptex_face_uv_to_grid_uv(corner_u, corner_v, &grid_u, &grid_v);
+  if (!bke::multires_layers::polypaint_sample(
+          source, face.start() + corner, grid_u, grid_v, rgba))
+  {
+    return false;
+  }
+  for (int c = 0; c < 4; c++) {
+    if (!std::isfinite(rgba[c])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void polypaint_evaluated_mesh_attribute(const MultiresModifierData &source,
+                                         const char *attribute_name,
+                                         const Mesh &base_mesh,
+                                         Mesh &evaluated_mesh,
+                                         bke::subdiv::Subdiv *subdiv,
+                                         const bke::subdiv::ToMeshSettings *settings)
+{
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+  const double start = trace ? BLI_time_now_seconds() : 0.0;
+  const std::string name(attribute_name);
+  bke::SpanAttributeWriter<ColorGeometry4f> colors =
+      polypaint_mesh_color_writer(evaluated_mesh, name);
+  if (!colors) {
+    if (trace) {
+      std::printf("[POLYPAINT_MESH_COLOR] mode=SKIP attribute=%s reason=ATTRIBUTE_MISSING_OR_INVALID\n",
+                  name.c_str());
+    }
+    return;
+  }
+  struct UserData {
+    const MultiresModifierData *source;
+    OffsetIndices<int> faces;
+    MutableSpan<ColorGeometry4f> colors;
+    std::atomic<int64_t> samples{0};
+  } data{&source, base_mesh.faces(), colors.span};
+  bool traversed = true;
+  if (subdiv && settings) {
+    bke::subdiv::ForeachContext context{};
+    context.user_data = &data;
+    context.loop = [](const bke::subdiv::ForeachContext *ctx, void *, int,
+                      const float u, const float v, int, const int face,
+                      const int coarse_corner, const int loop, int, int) {
+      auto &data = *static_cast<UserData *>(ctx->user_data);
+      if (loop < 0 || loop >= data.colors.size()) {
+        return;
+      }
+      float rgba[4];
+      if (polypaint_mesh_sample(*data.source, data.faces, face, coarse_corner, u, v, rgba)) {
+        ColorGeometry4f &color = data.colors[loop];
+        color.r = rgba[0]; color.g = rgba[1]; color.b = rgba[2]; color.a = rgba[3];
+        data.samples.fetch_add(1, std::memory_order_relaxed);
+      }
+    };
+    traversed = bke::subdiv::foreach_subdiv_geometry(subdiv, &context, settings, &base_mesh);
+  }
+  else {
+    /* Viewport/Render level 0 has one result corner per coarse corner. Sample
+     * the corresponding original-corner endpoint of the preserved master. */
+    threading::parallel_for(IndexRange(base_mesh.corners_num), 4096, [&](const IndexRange range) {
+      int64_t samples = 0;
+      for (const int corner : range) {
+        float rgba[4];
+        if (bke::multires_layers::polypaint_sample(source, corner, 1.0f, 1.0f, rgba) &&
+            std::isfinite(rgba[0]) && std::isfinite(rgba[1]) &&
+            std::isfinite(rgba[2]) && std::isfinite(rgba[3]))
+        {
+          ColorGeometry4f &color = data.colors[corner];
+          color.r = rgba[0]; color.g = rgba[1]; color.b = rgba[2]; color.a = rgba[3];
+          samples++;
+        }
+      }
+      data.samples.fetch_add(samples, std::memory_order_relaxed);
+    });
+  }
+  colors.finish();
+  if (trace) {
+    std::printf("[POLYPAINT_MESH_COLOR] mode=%s attribute=%s corners=%d sampled=%lld "
+                "complete=%d total=%.3fms\n",
+                subdiv ? "SUBDIV" : "BASE", name.c_str(), evaluated_mesh.corners_num,
+                static_cast<long long>(data.samples.load(std::memory_order_relaxed)),
+                int(traversed), (BLI_time_now_seconds() - start) * 1000.0);
+  }
+}
+
+static void polypaint_evaluated_mesh_color(const MultiresModifierData &source,
+                                         const Mesh &base_mesh, Mesh &evaluated_mesh,
+                                         bke::subdiv::Subdiv *subdiv,
+                                         const bke::subdiv::ToMeshSettings *settings)
+{
+  const char *active_name = source.sculpt_color_attribute[0] ?
+      source.sculpt_color_attribute : base_mesh.active_color_attribute;
+  if (active_name && active_name[0] && source.sculpt_color_grids) {
+    polypaint_evaluated_mesh_attribute(source, active_name, base_mesh, evaluated_mesh, subdiv, settings);
+  }
+  for (const MultiresColorAttribute &attribute : source.sculpt_color_attributes) {
+    MultiresModifierData view{};
+    if (attribute.grids && bke::multires_layers::polypaint_attribute_view(source, attribute.name, view)) {
+      polypaint_evaluated_mesh_attribute(view, attribute.name, base_mesh, evaluated_mesh, subdiv, settings);
+    }
+  }
+}
+
 
 /* Use the same mask evaluator and subdivision vertex indexing as CCG. This keeps
  * Object/Render evaluation and Bake consistent with the live Sculpt preview. */
@@ -366,6 +603,9 @@ static Mesh *multires_as_mesh(const MultiresModifierData *mmd,
       subdiv, mesh, mmd, multires_texture_mapping_matrix(*mmd, *ctx->object));
   result = bke::subdiv::subdiv_to_mesh(subdiv, &mesh_settings, mesh);
   if (result != nullptr && result != mesh) {
+    if (const MultiresModifierData *source = polypaint_mesh_color_source(*mmd, *ctx, *mesh)) {
+      polypaint_evaluated_mesh_color(*source, *mesh, *result, subdiv, &mesh_settings);
+    }
     if (mmd->sculpt_shrinkwrap_enabled) {
       const Array<float> masks = multires_shrinkwrap_mesh_masks(
           *subdiv, mesh_settings, *mesh, result->verts_num);
@@ -405,9 +645,22 @@ static Mesh *multires_as_ccg(MultiresModifierData *mmd,
   if (ccg_settings.resolution < 3) {
     return result;
   }
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+  const double attach_start = trace ? BLI_time_now_seconds() : 0.0;
   bke::subdiv::displacement_attach_from_multires(
       subdiv, mesh, mmd, multires_texture_mapping_matrix(*mmd, *ctx->object));
+  if (trace) {
+    std::printf("[MULTIRES_DISPLACEMENT_ATTACH] total=%.3fms\n",
+                (BLI_time_now_seconds() - attach_start) * 1000.0);
+  }
+  const double ccg_start = trace ? BLI_time_now_seconds() : 0.0;
   result = BKE_subdiv_to_ccg_mesh(*subdiv, ccg_settings, *mesh);
+  if (trace) {
+    std::printf("[MULTIRES_TO_CCG] faces=%d corners=%d total=%.3fms\n",
+                mesh->faces_num, mesh->corners_num,
+                (BLI_time_now_seconds() - ccg_start) * 1000.0);
+  }
   if (result && result->runtime->subdiv_ccg) {
     SubdivCCG &ccg = *result->runtime->subdiv_ccg;
     if (bke::multires_layers::shrinkwrap_ccg(
@@ -475,6 +728,13 @@ static Mesh *modify_mesh(ModifierData *md, const ModifierEvalContext *ctx, Mesh 
   const bool ignore_simplify = ctx->flag & MOD_APPLY_IGNORE_SIMPLIFY;
   if (subdiv_settings.level == 0 ||
       multires_get_level(scene, ctx->object, mmd, use_render, ignore_simplify) == 0) {
+    if (const MultiresModifierData *source = polypaint_mesh_color_source(*mmd, *ctx, *mesh)) {
+      if (!cage_copy) {
+        cage_copy = BKE_mesh_copy_for_eval(*mesh);
+        result = cage_copy;
+      }
+      polypaint_evaluated_mesh_color(*source, *mesh, *result, nullptr, nullptr);
+    }
     if (mmd->sculpt_shrinkwrap_enabled && mmd->sculpt_shrinkwrap_target &&
         !((ctx->object->mode & OB_MODE_SCULPT) &&
           (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh))) {
@@ -487,7 +747,13 @@ static Mesh *modify_mesh(ModifierData *md, const ModifierEvalContext *ctx, Mesh 
     return result;
   }
   MultiresRuntimeData *runtime_data = multires_ensure_runtime(mmd);
+  const double descriptor_start = layer_trace ? BLI_time_now_seconds() : 0.0;
   bke::subdiv::Subdiv *subdiv = subdiv_descriptor_ensure(mmd, &subdiv_settings, mesh);
+  if (layer_trace) {
+    std::printf("[MULTIRES_DESCRIPTOR] faces=%d corners=%d total=%.3fms\n",
+                mesh->faces_num, mesh->corners_num,
+                (BLI_time_now_seconds() - descriptor_start) * 1000.0);
+  }
   if (subdiv == nullptr) {
     /* Happens on bad topology, also on empty input mesh. */
     return result;
@@ -800,20 +1066,24 @@ static void shape_panel_draw(const bContext * /*C*/, Panel *panel)
   row = &layout.row(false);
   op_ptr = row->op("OBJECT_OT_multires_base_apply", IFACE_("Apply Base"), ICON_NONE);
   RNA_boolean_set(&op_ptr, "apply_heuristic", true);
-  op_ptr = row->op("OBJECT_OT_multires_base_apply", IFACE_("Conform Base"), ICON_NONE);
-  RNA_boolean_set(&op_ptr, "apply_heuristic", false);
-
-  if (!mmd->sculpt_layers.is_empty()) {
+  if (mmd->sculpt_layers.is_empty()) {
+    op_ptr = row->op("OBJECT_OT_multires_base_apply", IFACE_("Conform Base"), ICON_NONE);
+    RNA_boolean_set(&op_ptr, "apply_heuristic", false);
+  }
+  else {
+    /* Both targets share the layer-preserving rebase. Keep their fitting choices explicit,
+     * and route Base through that rebase instead of the layer-rejecting legacy operator. */
     ui::Layout &col = layout.column(false);
     col.enabled_set(RNA_enum_get(&ob_ptr, "mode") == OB_MODE_OBJECT);
-    col.label(IFACE_("Conform Base — Preserve Layers (Experimental)"), ICON_NONE);
-    op_ptr = col.op("OBJECT_OT_multires_conform_layers", IFACE_("From Final Result"), ICON_NONE);
-    if (op_ptr.type != nullptr && op_ptr.data != nullptr) {
-      RNA_boolean_set(&op_ptr, "include_visible_layers", true);
-    }
-    op_ptr = col.op("OBJECT_OT_multires_conform_layers", IFACE_("Without Layers"), ICON_NONE);
+    col.label(IFACE_("Conform — Preserve Layers (Experimental)"), ICON_NONE);
+    op_ptr = col.op("OBJECT_OT_multires_conform_layers", IFACE_("Conform Base"), ICON_NONE);
     if (op_ptr.type != nullptr && op_ptr.data != nullptr) {
       RNA_boolean_set(&op_ptr, "include_visible_layers", false);
+    }
+    op_ptr = col.op(
+        "OBJECT_OT_multires_conform_layers", IFACE_("Conform Layer-Aware"), ICON_NONE);
+    if (op_ptr.type != nullptr && op_ptr.data != nullptr) {
+      RNA_boolean_set(&op_ptr, "include_visible_layers", true);
     }
   }
 }

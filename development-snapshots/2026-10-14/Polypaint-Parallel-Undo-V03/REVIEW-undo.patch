@@ -1,0 +1,87 @@
+--- a/sculpt_undo.cc
++++ b/sculpt_undo.cc
+@@ -28,6 +28,9 @@
+ #include <cmath>
+ #include <cstdlib>
+ #include <cstdio>
++#include <cstring>
++#include <cstring>
++#include <cstring>
+ 
+ #include <mutex>
+ #include <zstd.h>
+@@ -2354,14 +2357,39 @@
+         /* Generic draw requests are invalidated by exact attribute name. An empty
+          * name leaves the painted VBO unchanged even after the master is restored. */
+         const Mesh &mesh = *id_cast<const Mesh *>(object.data);
++        const char *redraw_env = std::getenv("BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3");
++        const bool local_redraw = redraw_env && redraw_env[0] == '1' && redraw_env[1] == '\0';
++        int64_t redraw_nodes = node_mask.size();
+         if (mesh.active_color_attribute && mesh.active_color_attribute[0]) {
+-          pbvh.tag_attribute_changed(node_mask, mesh.active_color_attribute);
++          if (local_redraw) {
++            const SubdivCCG &ccg = *ss.subdiv_ccg;
++            Array<bool> dirty(ccg.grids_num, false);
++            for (const std::unique_ptr<Node> &unode : step_data.nodes) {
++              for (const int grid : unode->grids) {
++                if (grid >= 0 && grid < ccg.grids_num) dirty[grid] = true;
++              }
++            }
++            const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
++            const IndexMask redraw = IndexMask::from_predicate(node_mask, memory,
++                [&](const int i) {
++                  for (const int grid : nodes[i].grids()) {
++                    if (grid >= 0 && grid < dirty.size() && dirty[grid]) return true;
++                  }
++                  return false;
++                });
++            pbvh.tag_attribute_changed(redraw, mesh.active_color_attribute);
++            redraw_nodes = redraw.size();
++          }
++          else {
++            pbvh.tag_attribute_changed(node_mask, mesh.active_color_attribute);
++          }
+         }
+         const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
+         if (trace && trace[0] && trace[0] != '0') {
+-          std::printf("[POLYPAINT_UNDO] event=DRAW_INVALIDATE nodes=%lld attribute=%s\n",
++          std::printf("[POLYPAINT_UNDO] event=DRAW_INVALIDATE nodes=%lld attribute=%s redraw_nodes=%lld local=%d\n",
+                       static_cast<long long>(step_data.nodes.size()),
+-                      mesh.active_color_attribute ? mesh.active_color_attribute : "");
++                      mesh.active_color_attribute ? mesh.active_color_attribute : "",
++                      static_cast<long long>(redraw_nodes), int(local_redraw));
+           std::fflush(stdout);
+         }
+         break;
+@@ -2799,7 +2827,12 @@
+       unode.grid_color_side = bke::subdiv::grid_size_from_level(master_level);
+       const int master_area = unode.grid_color_side * unode.grid_color_side;
+       unode.col.reinitialize(unode.grids.size() * master_area);
+-      unode.col.fill(float4(0.0f));
++      const char *fast_env = std::getenv("BLENDER_SCULPT_POLYPAINT_UNDO_COPY_V3");
++      const bool fast_copy = fast_env && fast_env[0] == '1' && fast_env[1] == '\0';
++      /* Absent slots are never read: restore fills them before Redo can read
++       * them, and original-color lookup rejects any missing presence bit.
++       * Dense slots are overwritten in full. Avoid touching every page twice. */
++      if (!fast_copy) unode.col.fill(float4(0.0f));
+       unode.grid_color_present.resize(unode.grids.size());
+       for (const int i : unode.grids.index_range()) {
+         const float (*colors)[4] = bke::multires_layers::polypaint_grid(*mmd, unode.grids[i]);
+@@ -2808,8 +2841,15 @@
+           continue;
+         }
+         unode.grid_color_present[i].set(true);
+-        for (int p = 0; p < master_area; p++) {
+-          unode.col[i * master_area + p] = float4(colors[p]);
++        if (fast_copy) {
++          static_assert(sizeof(float4) == sizeof(float[4]));
++          std::memcpy(unode.col.data() + i * master_area, colors,
++                      size_t(master_area) * sizeof(float4));
++        }
++        else {
++          for (int p = 0; p < master_area; p++) {
++            unode.col[i * master_area + p] = float4(colors[p]);
++          }
+         }
+       }
+       break;

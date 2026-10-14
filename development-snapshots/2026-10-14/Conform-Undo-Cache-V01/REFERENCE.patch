@@ -1,0 +1,155 @@
+--- a/source/blender/blenkernel/intern/object.cc
++++ b/source/blender/blenkernel/intern/object.cc
+@@ -41,6 +41,7 @@
+ #include "DNA_nla_types.h"
+ #include "DNA_object_fluidsim_types.h"
+ #include "DNA_object_types.h"
++#include "DNA_modifier_types.h"
+ #include "DNA_pointcloud_types.h"
+ #include "DNA_rigidbody_types.h"
+ #include "DNA_scene_types.h"
+@@ -111,6 +112,7 @@
+ #include "BKE_mesh_wrapper.hh"
+ #include "BKE_modifier.hh"
+ #include "BKE_multires.hh"
++#include "BKE_multires_undo_cache_guard.hh"
+ #include "BKE_node.hh"
+ #include "BKE_object.hh"
+ #include "BKE_object_types.hh"
+@@ -1718,6 +1720,23 @@
+     return;
+   }
+   const int tot_level = mesh_eval->runtime->subdiv_ccg_tot_level;
++  /* LAYER_CCG_UNDO_CACHE_GUARD_V1: discard writes from the old evaluated
++   * layer surface during Memfile restore. Persistent base and layer payloads
++   * come from that restore, not from obsolete CCG coordinates. */
++  if (bke::multires_layers::undo_cache::discard_active()) {
++    for (const ModifierData &md : object->modifiers) {
++      if (md.type == eModifierType_Multires &&
++          !reinterpret_cast<const MultiresModifierData &>(md).sculpt_layers.is_empty())
++      {
++        std::printf("[LAYER_CCG_UNDO_GUARD] mode=DISCARD_OLD_CACHE level=%d top=%d "
++                    "dirty=%d/%d/%d\n",
++                    subdiv_ccg->level, tot_level, int(subdiv_ccg->dirty.coords),
++                    int(subdiv_ccg->dirty.hidden), int(subdiv_ccg->dirty.masks));
++        std::fflush(stdout);
++        return;
++      }
++    }
++  }
+   Object *object_orig = DEG_get_original(object);
+   Mesh *mesh_orig = id_cast<Mesh *>(object_orig->data);
+   if (subdiv_ccg->dirty.masks && !subdiv_ccg->dirty.coords && !subdiv_ccg->dirty.hidden) {
+--- a/source/blender/editors/undo/memfile_undo.cc
++++ b/source/blender/editors/undo/memfile_undo.cc
+@@ -24,6 +24,12 @@
+ #include "BKE_context.hh"
+ #include "BKE_lib_query.hh"
+ #include "BKE_main.hh"
++#include "BKE_multires_undo_cache_guard.hh"
++#include "BKE_paint.hh"
++#include "BKE_object_types.hh"
++#include "BKE_subdiv_ccg.hh"
++#include "DNA_modifier_types.h"
++#include <cstdio>
+ #include "BKE_node.hh"
+ #include "BKE_preview_image.hh"
+ #include "BKE_scene.hh"
+@@ -142,6 +148,40 @@
+     bContext *C, Main *bmain, UndoStep *us_p, const eUndoStepDir undo_direction, bool /*is_final*/)
+ {
+   BLI_assert(undo_direction != STEP_INVALID);
++  /* LAYER_CCG_UNDO_CACHE_GUARD_V1: remains active through scene/depsgraph
++   * restoration, including destruction of evaluated meshes on workers. */
++  const bke::multires_layers::undo_cache::ScopedDiscardCacheWrites layer_cache_restore_guard;
++  if (bke::multires_layers::undo_cache::discard_active()) {
++    /* Depsgraphs can be reused and cleaned up lazily AFTER decode returns.
++     * Drop only the pending-write flags of obsolete, live layer CCGs now;
++     * no persistent mesh, mask or layer payload is changed here. */
++    for (Object &object : bmain->objects) {
++      SculptSession *ss = object.runtime->sculpt_session;
++      if (!ss || !ss->subdiv_ccg) {
++        continue;
++      }
++      bool has_layers = false;
++      for (const ModifierData &md : object.modifiers) {
++        if (md.type == eModifierType_Multires &&
++            !reinterpret_cast<const MultiresModifierData &>(md).sculpt_layers.is_empty())
++        {
++          has_layers = true;
++          break;
++        }
++      }
++      SubdivCCG &ccg = *ss->subdiv_ccg;
++      if (!has_layers || (!ccg.dirty.coords && !ccg.dirty.hidden && !ccg.dirty.masks)) {
++        continue;
++      }
++      std::printf("[LAYER_CCG_UNDO_GUARD] mode=DISCARD_PENDING direction=%d level=%d "
++                  "dirty=%d/%d/%d\n", int(undo_direction), ccg.level,
++                  int(ccg.dirty.coords), int(ccg.dirty.hidden), int(ccg.dirty.masks));
++      std::fflush(stdout);
++      ccg.dirty.coords = false;
++      ccg.dirty.hidden = false;
++      ccg.dirty.masks = false;
++    }
++  }
+ 
+   bool use_old_bmain_data = true;
+ 
+--- a/source/blender/blenkernel/intern/multires_reshape.cc
++++ b/source/blender/blenkernel/intern/multires_reshape.cc
+@@ -1129,6 +1129,9 @@
+ 
+   /* All conversion and validation completed on owned scratch storage. Preserve
+    * layer objects, names, visibility, strength and RNA animation paths. */
++  /* LAYER_CCG_UNDO_CACHE_GUARD_V1: invalidate derived layer payload caches
++   * before publishing the rebased buffers. Never flush an old Sculpt CCG here. */
++  bke::multires_layers::weight_hot_delta_cache_invalidate();
+   MDisps *destination = static_cast<MDisps *>(CustomData_get_layer_for_write(
+       &mesh->corner_data, CD_MDISPS, mesh->corners_num));
+   mesh->vert_positions_for_write().copy_from(work->vert_positions());
+--- /dev/null
++++ b/source/blender/blenkernel/BKE_multires_undo_cache_guard.hh
+@@ -0,0 +1,42 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#pragma once
++
++#include <atomic>
++#include <cstdlib>
++
++namespace blender::bke::multires_layers::undo_cache {
++
++/* Memfile decode owns persistent mesh/modifier restoration. The old evaluated
++ * CCG must not publish its composed layer surface into the native mesh while
++ * that restoration is in progress. Depsgraph cleanup may use worker threads,
++ * so this scope is process-wide rather than thread-local. */
++inline std::atomic<unsigned int> discard_depth{0};
++
++inline bool discard_active()
++{
++  return discard_depth.load(std::memory_order_acquire) != 0;
++}
++
++class ScopedDiscardCacheWrites {
++  bool enabled_ = false;
++
++ public:
++  ScopedDiscardCacheWrites()
++  {
++    const char *value = std::getenv("BLENDER_SCULPT_LAYER_UNDO_CACHE_GUARD");
++    enabled_ = value && value[0] == '1' && value[1] == '\0';
++    if (enabled_) {
++      discard_depth.fetch_add(1, std::memory_order_acq_rel);
++    }
++  }
++  ~ScopedDiscardCacheWrites()
++  {
++    if (enabled_) {
++      discard_depth.fetch_sub(1, std::memory_order_acq_rel);
++    }
++  }
++  ScopedDiscardCacheWrites(const ScopedDiscardCacheWrites &) = delete;
++  ScopedDiscardCacheWrites &operator=(const ScopedDiscardCacheWrites &) = delete;
++};
++
++}  // namespace blender::bke::multires_layers::undo_cache

@@ -3883,6 +3883,49 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Edge-to-Edge", "Drag anchor brush from edge-to-edge");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  /* ANCHORED_SURFACE_PROJECTION_V1: an optional curvature-compensated stamp mapping. */
+  prop = RNA_def_property(srna, "use_anchor_surface_projection", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "flag2", BRUSH_SCULPT_ANCHOR_SURFACE_PROJECT);
+  RNA_def_property_ui_text(prop,
+                           "Surface-Adaptive Projection",
+                           "Reduce planar texture compression on gently curved surfaces when "
+                           "using Anchored stroke and Area Plane texture mapping");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  /* ANCHORED_NORMAL_GUIDED_V2: on Multires use true CCG normals for directional scale. */
+  prop = RNA_def_property(srna, "use_anchor_normal_guided_projection", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "flag2", BRUSH_SCULPT_ANCHOR_NORMAL_GUIDED);
+  RNA_def_property_ui_text(
+      prop,
+      "Normal-Guided Projection",
+      "Use evaluated Multires surface normals to improve the Anchored texture mapping; "
+      "falls back to the V1 height estimate where normals are unavailable");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  /* ANCHORED_GEODESIC_V3: opt-in discrete surface-path radius on Multires. */
+  prop = RNA_def_property(srna, "use_anchor_geodesic_projection", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "flag2", BRUSH_SCULPT_ANCHOR_GEODESIC);
+  RNA_def_property_ui_text(
+      prop,
+      "Surface Path Projection",
+      "Sample a bounded shortest-path distance over Multires grids to limit alpha "
+      "distortion on folded or curved surfaces; falls back to V2 on oversized stamps");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
+  /* ANCHORED_SURFACE_TRANSPORT_V4: opt-in tangent-frame texture orientation. */
+  prop = RNA_def_property(srna, "use_anchor_surface_transport", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "flag2", BRUSH_SCULPT_ANCHOR_TRANSPORT);
+  RNA_def_property_ui_text(
+      prop,
+      "Surface Tangent Transport",
+      "Transport the alpha orientation along Multires CCG paths instead of keeping "
+      "a fixed tangent-plane angle; requires Surface Path, falls back to V3 if unavailable");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   /* only for projection paint & vertex paint, TODO: other paint modes. */
   prop = RNA_def_property(srna, "use_alpha", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_negative_sdna(prop, nullptr, "flag", BRUSH_LOCK_ALPHA);

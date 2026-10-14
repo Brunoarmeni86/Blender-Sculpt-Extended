@@ -12,8 +12,12 @@
 #include <cstdio>
 
 #include "BKE_multires_sculpt_layers.hh"
+#include "polypaint_cpu_math.hh"
+#include "BLI_color.hh"
 #include "multires_layer_base_math.hh"
+#include "multires_layer_corner_identity.hh"
 #include "BKE_attribute.hh"
+#include "BKE_idprop.hh"
 #include "BKE_subdiv.hh"
 #include "BKE_customdata.hh"
 #include "BKE_key.hh"
@@ -41,6 +45,8 @@
 #include "DNA_modifier_types.h"
 #include "DNA_meshdata_types.h"
 
+#include <mutex>
+
 #include "BLI_listbase.h"
 #include "BLI_array.hh"
 #include "BLI_bit_vector.hh"
@@ -64,9 +70,100 @@
 
 namespace blender::bke::multires_layers {
 
-static constexpr char corner_id_attribute[] = ".sculpt_layer_corner_id";
+struct LayerPayloadIndex {
+  const MultiresSculptLayer *layer = nullptr;
+  const MDisps *descriptors = nullptr;
+  int grids_num = 0;
+  int level = 0;
+  Vector<int> grids;
 
-static constexpr char vertex_id_attribute[] = ".sculpt_layer_vertex_id";
+  void clear()
+  {
+    layer = nullptr;
+    descriptors = nullptr;
+    grids_num = level = 0;
+    grids.clear();
+  }
+};
+
+static LayerPayloadIndex &payload_index()
+{
+  static LayerPayloadIndex cache;
+  return cache;
+}
+
+static std::mutex &payload_index_mutex()
+{
+  static std::mutex mutex;
+  return mutex;
+}
+
+void payload_index_invalidate(const MultiresSculptLayer *layer)
+{
+  std::lock_guard<std::mutex> lock(payload_index_mutex());
+  LayerPayloadIndex &cache = payload_index();
+  if (layer == nullptr || cache.layer == layer) {
+    cache.clear();
+  }
+}
+
+bool payload_grids(const MultiresSculptLayer &layer,
+                   const int expected_grids,
+                   Vector<int> &r_grids)
+{
+  r_grids.clear();
+  if (layer.disps == nullptr || layer.grids_num != expected_grids ||
+      layer.level <= 0 || layer.level > 13)
+  {
+    return false;
+  }
+  const int side = subdiv::grid_size_from_level(layer.level);
+  const int area = side * side;
+  const char *value = BLI_getenv("BLENDER_SCULPT_LAYER_SUPPORT_CACHE");
+  const bool enabled = value != nullptr && value[0] == '1' && value[1] == '\0';
+  std::lock_guard<std::mutex> lock(payload_index_mutex());
+  LayerPayloadIndex &cache = payload_index();
+  const bool hit = enabled && cache.layer == &layer && cache.descriptors == layer.disps &&
+                   cache.grids_num == expected_grids && cache.level == layer.level;
+  if (hit) {
+    /* Validate occupied descriptors; zero-payload allocation changes invalidate
+     * the index via grid_ensure before the next property transaction. */
+    for (const int grid : cache.grids) {
+      const MDisps &data = layer.disps[grid];
+      if (data.disps == nullptr || data.level != layer.level || data.totdisp != area) {
+        cache.clear();
+        return false;
+      }
+    }
+    r_grids.extend(cache.grids.as_span());
+  }
+  else {
+    cache.clear();
+    for (int grid = 0; grid < expected_grids; grid++) {
+      const MDisps &data = layer.disps[grid];
+      if (data.disps == nullptr) {
+        continue;
+      }
+      if (data.level != layer.level || data.totdisp != area) {
+        return false;
+      }
+      r_grids.append(grid);
+    }
+    if (enabled) {
+      cache.layer = &layer;
+      cache.descriptors = layer.disps;
+      cache.grids_num = expected_grids;
+      cache.level = layer.level;
+      cache.grids.extend(r_grids.as_span());
+    }
+  }
+  if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+    std::printf("[LAYER_SUPPORT_INDEX] mode=%s grids=%d/%d\n",
+                enabled ? (hit ? "HIT" : "BUILD") : "OFF",
+                int(r_grids.size()), expected_grids);
+  }
+  return true;
+}
 
 bool is_effective(const MultiresSculptLayer &layer)
 {
@@ -137,6 +234,9 @@ bool base_remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh)
     }
   }
   if (stored_count == -1) {
+    /* No cage deltas depend on the old IDs. Reindex even if the attribute survived an edit,
+     * so later creation of L0 deltas starts from the current vertex order. */
+    mesh.attributes_for_write().remove(vertex_id_attribute);
     base_ensure_vertex_ids(mesh);
     return true;
   }
@@ -611,20 +711,170 @@ void polypaint_clear(MultiresModifierData &mmd)
   mmd.sculpt_color_level = 0;
 }
 
+/* POLYPAINT_MULTI_ATTRIBUTE_V1: one active owner, inactive named owners.
+ * Read views are borrowed and never alter the source or free its allocations. */
+static bool polypaint_attribute_name_valid(const char *name)
+{
+  return name && name[0] && std::strlen(name) < sizeof(MultiresColorAttribute::name);
+}
+
+static MultiresColorAttribute *polypaint_attribute_find(MultiresModifierData &mmd,
+                                                       const char *name)
+{
+  for (MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
+    if (STREQ(attribute.name, name)) {
+      return &attribute;
+    }
+  }
+  return nullptr;
+}
+
+bool polypaint_attribute_view(const MultiresModifierData &mmd,
+                             const char *name, MultiresModifierData &r_view)
+{
+  if (!polypaint_attribute_name_valid(name)) {
+    return false;
+  }
+  /* A legacy file has no name yet. Its only master belongs to the current
+   * mesh color attribute; callers must only use this fallback for that name. */
+  if (STREQ(mmd.sculpt_color_attribute, name) ||
+      (!mmd.sculpt_color_attribute[0] && mmd.sculpt_color_attributes.is_empty())) {
+    r_view.sculpt_color_grids = mmd.sculpt_color_grids;
+    r_view.sculpt_color_grids_num = mmd.sculpt_color_grids_num;
+    r_view.sculpt_color_level = mmd.sculpt_color_level;
+    return true;
+  }
+  for (const MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
+    if (STREQ(attribute.name, name)) {
+      r_view.sculpt_color_grids = attribute.grids;
+      r_view.sculpt_color_grids_num = attribute.grids_num;
+      r_view.sculpt_color_level = attribute.level;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool polypaint_attribute_activate(MultiresModifierData &mmd, const char *name)
+{
+  if (!polypaint_attribute_name_valid(name)) {
+    return false;
+  }
+  if (!mmd.sculpt_color_attribute[0]) {
+    if (!mmd.sculpt_color_grids) {
+      if (MultiresColorAttribute *target = polypaint_attribute_find(mmd, name)) {
+        mmd.sculpt_color_grids = target->grids;
+        mmd.sculpt_color_grids_num = target->grids_num;
+        mmd.sculpt_color_level = target->level;
+        BLI_remlink(&mmd.sculpt_color_attributes, target);
+        MEM_delete(target);
+      }
+    }
+    /* Migration only: the caller supplies the original mesh's current name
+     * before selecting a different attribute. No old colors are reallocated. */
+    BLI_strncpy(mmd.sculpt_color_attribute, name, sizeof(mmd.sculpt_color_attribute));
+    return true;
+  }
+  if (STREQ(mmd.sculpt_color_attribute, name)) {
+    return true;
+  }
+  MultiresColorAttribute *target = polypaint_attribute_find(mmd, name);
+  /* Validate both directories before publishing the ownership exchange. */
+  if ((mmd.sculpt_color_grids && (mmd.sculpt_color_level < 1 ||
+                                 mmd.sculpt_color_level > 13 || mmd.sculpt_color_grids_num < 0)) ||
+      (target && target->grids && (target->level < 1 || target->level > 13 ||
+                                 target->grids_num < 0))) {
+    return false;
+  }
+  auto *old = MEM_new<MultiresColorAttribute>("inactive Polypaint attribute");
+  BLI_strncpy(old->name, mmd.sculpt_color_attribute, sizeof(old->name));
+  old->grids = mmd.sculpt_color_grids;
+  old->grids_num = mmd.sculpt_color_grids_num;
+  old->level = mmd.sculpt_color_level;
+  mmd.sculpt_color_grids = target ? target->grids : nullptr;
+  mmd.sculpt_color_grids_num = target ? target->grids_num : 0;
+  mmd.sculpt_color_level = target ? target->level : 0;
+  BLI_strncpy(mmd.sculpt_color_attribute, name, sizeof(mmd.sculpt_color_attribute));
+  if (target) {
+    BLI_remlink(&mmd.sculpt_color_attributes, target);
+    MEM_delete(target); /* Payload ownership has moved to the active slot. */
+  }
+  BLI_addtail(&mmd.sculpt_color_attributes, old);
+  return true;
+}
+
+void polypaint_attribute_remove(MultiresModifierData &mmd, const char *name)
+{
+  if (!polypaint_attribute_name_valid(name)) {
+    return;
+  }
+  if (STREQ(mmd.sculpt_color_attribute, name)) {
+    polypaint_clear(mmd);
+    mmd.sculpt_color_attribute[0] = '\0';
+    return;
+  }
+  if (MultiresColorAttribute *attribute = polypaint_attribute_find(mmd, name)) {
+    MultiresModifierData owned{};
+    owned.sculpt_color_grids = attribute->grids;
+    owned.sculpt_color_grids_num = attribute->grids_num;
+    owned.sculpt_color_level = attribute->level;
+    polypaint_clear(owned);
+    BLI_remlink(&mmd.sculpt_color_attributes, attribute);
+    MEM_delete(attribute);
+  }
+}
+
+bool polypaint_attribute_rename(MultiresModifierData &mmd, const char *old_name,
+                               const char *new_name)
+{
+  if (!polypaint_attribute_name_valid(old_name) || !polypaint_attribute_name_valid(new_name)) {
+    return false;
+  }
+  if (STREQ(old_name, new_name)) {
+    return true;
+  }
+  if (STREQ(mmd.sculpt_color_attribute, new_name) || polypaint_attribute_find(mmd, new_name)) {
+    return false;
+  }
+  if (STREQ(mmd.sculpt_color_attribute, old_name)) {
+    BLI_strncpy(mmd.sculpt_color_attribute, new_name, sizeof(mmd.sculpt_color_attribute));
+  }
+  else if (MultiresColorAttribute *attribute = polypaint_attribute_find(mmd, old_name)) {
+    BLI_strncpy(attribute->name, new_name, sizeof(attribute->name));
+  }
+  return true;
+}
+
+void polypaint_attributes_clear(MultiresModifierData &mmd)
+{
+  while (!mmd.sculpt_color_attributes.is_empty()) {
+    auto *attribute = static_cast<MultiresColorAttribute *>(mmd.sculpt_color_attributes.first);
+    /* Do not use remove(name) here: malformed duplicate names must also free
+     * the exact list entry, never the active allocation. */
+    MultiresModifierData owned{};
+    owned.sculpt_color_grids = attribute->grids;
+    owned.sculpt_color_grids_num = attribute->grids_num;
+    owned.sculpt_color_level = attribute->level;
+    polypaint_clear(owned);
+    BLI_remlink(&mmd.sculpt_color_attributes, attribute);
+    MEM_delete(attribute);
+  }
+  polypaint_clear(mmd);
+  mmd.sculpt_color_attribute[0] = '\0';
+}
+
 bool polypaint_ensure(MultiresModifierData &mmd, const int level, const int grids_num)
 {
   if (level < 1 || level > 13 || grids_num < 0) {
     return false;
   }
-  if (mmd.sculpt_color_grids &&
-      (mmd.sculpt_color_grids_num != grids_num || mmd.sculpt_color_level != level))
-  {
-    if (mmd.sculpt_color_grids_num == grids_num && polypaint_resample(mmd, level)) {
-      return true;
-    }
-    polypaint_clear(mmd);
+  if (mmd.sculpt_color_grids) {
+    /* A Sculpt Level change must NOT resample/destroy the high-res master.
+     * Topology changes are handled by explicit remapping, never by clear(). */
+    return mmd.sculpt_color_grids_num == grids_num &&
+           mmd.sculpt_color_level >= 1 && mmd.sculpt_color_level <= 13;
   }
-  if (!mmd.sculpt_color_grids && grids_num > 0) {
+  if (grids_num > 0) {
     mmd.sculpt_color_grids = MEM_new_array_zeroed<MultiresColorGrid>(
         grids_num, "multires polypaint grids");
   }
@@ -633,14 +883,114 @@ bool polypaint_ensure(MultiresModifierData &mmd, const int level, const int grid
   return true;
 }
 
-float (*polypaint_grid_ensure(MultiresModifierData &mmd, const int corner))[4]
+bool polypaint_lazy_master_enabled()
 {
-  if (!mmd.sculpt_color_grids || corner < 0 || corner >= mmd.sculpt_color_grids_num) {
+  const char *value = BLI_getenv("BLENDER_SCULPT_POLYPAINT_LAZY_MASTER");
+  return value && value[0] == '1' && value[1] == '\0';
+}
+
+bool polypaint_stage_master(const MultiresModifierData &source,
+                           const int level,
+                           const int corners_num,
+                           MultiresModifierData &destination)
+{
+  if (level < 1 || level > 13 || corners_num <= 0 ||
+      destination.sculpt_color_grids || destination.sculpt_color_grids_num != 0 ||
+      destination.sculpt_color_level != 0)
+  {
+    return false;
+  }
+  const int old_level = source.sculpt_color_level;
+  if (source.sculpt_color_grids) {
+    if (old_level < 1 || old_level > 13 || level <= old_level ||
+        source.sculpt_color_grids_num != corners_num)
+    {
+      return false;
+    }
+    const int old_side = subdiv::grid_size_from_level(old_level);
+    for (int corner = 0; corner < corners_num; corner++) {
+      const MultiresColorGrid &grid = source.sculpt_color_grids[corner];
+      if (!grid.colors) {
+        continue;
+      }
+      if (grid.level != old_level || grid.totcolor != old_side * old_side) {
+        return false;
+      }
+      for (int sample = 0; sample < grid.totcolor; sample++) {
+        for (int channel = 0; channel < 4; channel++) {
+          if (!std::isfinite(grid.colors[sample][channel])) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  else if (old_level != 0 || source.sculpt_color_grids_num != 0) {
+    return false;
+  }
+
+  /* Own all staged buffers until the editor's Undo boundary succeeds. Neither
+   * the live master nor earlier Color Undo snapshots are resized in place. */
+  if (!polypaint_ensure(destination, level, corners_num)) {
+    return false;
+  }
+  const int new_side = subdiv::grid_size_from_level(level);
+  const int old_side = source.sculpt_color_grids ? subdiv::grid_size_from_level(old_level) : 0;
+  const int step = old_side ? (new_side - 1) / (old_side - 1) : 0;
+  for (int corner = 0; corner < corners_num; corner++) {
+    MultiresColorGrid &grid = destination.sculpt_color_grids[corner];
+    grid.level = level;
+    grid.totcolor = new_side * new_side;
+    if (!source.sculpt_color_grids || !source.sculpt_color_grids[corner].colors) {
+      continue;
+    }
+    const float (*old)[4] = source.sculpt_color_grids[corner].colors;
+    grid.colors = MEM_new_array_uninitialized<float[4]>(grid.totcolor,
+                                                       "staged polypaint master");
+    for (int y = 0; y < new_side; y++) {
+      const int y0 = y / step, y1 = std::min(y0 + 1, old_side - 1);
+      const double fy = double(y % step) / step;
+      for (int x = 0; x < new_side; x++) {
+        const int x0 = x / step, x1 = std::min(x0 + 1, old_side - 1);
+        if (x % step == 0 && y % step == 0) {
+          memcpy(grid.colors[y * new_side + x], old[y0 * old_side + x0], sizeof(float[4]));
+          continue;
+        }
+        const double fx = double(x % step) / step;
+        for (int channel = 0; channel < 4; channel++) {
+          const double a = double(old[y0 * old_side + x0][channel]) * (1.0 - fx) +
+                           double(old[y0 * old_side + x1][channel]) * fx;
+          const double b = double(old[y1 * old_side + x0][channel]) * (1.0 - fx) +
+                           double(old[y1 * old_side + x1][channel]) * fx;
+          grid.colors[y * new_side + x][channel] = float(a * (1.0 - fy) + b * fy);
+        }
+      }
+    }
+  }
+  return true;
+}
+
+void polypaint_swap_master(MultiresModifierData &a, MultiresModifierData &b)
+{
+  std::swap(a.sculpt_color_grids, b.sculpt_color_grids);
+  std::swap(a.sculpt_color_grids_num, b.sculpt_color_grids_num);
+  std::swap(a.sculpt_color_level, b.sculpt_color_level);
+}
+
+float (*polypaint_grid_ensure_master(MultiresModifierData &mmd, const int corner))[4]
+{
+  if (!mmd.sculpt_color_grids || corner < 0 || corner >= mmd.sculpt_color_grids_num ||
+      mmd.sculpt_color_level < 1 || mmd.sculpt_color_level > 13)
+  {
     return nullptr;
   }
   MultiresColorGrid &grid = mmd.sculpt_color_grids[corner];
   const int side = subdiv::grid_size_from_level(mmd.sculpt_color_level);
   const int area = side * side;
+  if (grid.colors && (grid.level != mmd.sculpt_color_level || grid.totcolor != area)) {
+    /* Fail closed: never return malformed storage to brush/undo writers. */
+    return nullptr;
+  }
   if (!grid.colors) {
     grid.colors = MEM_new_array_uninitialized<float[4]>(area, "multires polypaint color");
     for (int i = 0; i < area; i++) {
@@ -652,12 +1002,75 @@ float (*polypaint_grid_ensure(MultiresModifierData &mmd, const int corner))[4]
   return grid.colors;
 }
 
+float (*polypaint_grid_ensure(MultiresModifierData &mmd, const int corner))[4]
+{
+  /* Legacy writers index using the current CCG side. Never allow those writes
+   * at a different (lower or higher) level than the stored color master. */
+  return mmd.sculptlvl == mmd.sculpt_color_level ? polypaint_grid_ensure_master(mmd, corner) :
+                                                  nullptr;
+}
+
 const float (*polypaint_grid(const MultiresModifierData &mmd, const int corner))[4]
 {
-  if (!mmd.sculpt_color_grids || corner < 0 || corner >= mmd.sculpt_color_grids_num) {
+  if (!mmd.sculpt_color_grids || corner < 0 || corner >= mmd.sculpt_color_grids_num ||
+      mmd.sculpt_color_level < 1 || mmd.sculpt_color_level > 13)
+  {
     return nullptr;
   }
-  return mmd.sculpt_color_grids[corner].colors;
+  const MultiresColorGrid &grid = mmd.sculpt_color_grids[corner];
+  const int side = subdiv::grid_size_from_level(mmd.sculpt_color_level);
+  return grid.colors && grid.level == mmd.sculpt_color_level && grid.totcolor == side * side ?
+             grid.colors :
+             nullptr;
+}
+
+bool polypaint_sample_grid(const MultiresColorGrid &grid,
+                           const float u,
+                           const float v,
+                           float r_rgba[4])
+{
+  if (r_rgba == nullptr) {
+    return false;
+  }
+  r_rgba[0] = r_rgba[1] = r_rgba[2] = r_rgba[3] = 1.0f;
+  if (!grid.colors || grid.level < 1 || grid.level > 13 || !std::isfinite(u) ||
+      !std::isfinite(v))
+  {
+    return false;
+  }
+  const int side = subdiv::grid_size_from_level(grid.level);
+  if (side < 2 || grid.totcolor != side * side) {
+    return false;
+  }
+  const float x = std::clamp(u, 0.0f, 1.0f) * float(side - 1);
+  const float y = std::clamp(v, 0.0f, 1.0f) * float(side - 1);
+  const int x0 = int(x), y0 = int(y);
+  const int x1 = std::min(x0 + 1, side - 1), y1 = std::min(y0 + 1, side - 1);
+  const float tx = x - float(x0), ty = y - float(y0);
+  for (int channel = 0; channel < 4; channel++) {
+    const float a = grid.colors[y0 * side + x0][channel] * (1.0f - tx) +
+                    grid.colors[y0 * side + x1][channel] * tx;
+    const float b = grid.colors[y1 * side + x0][channel] * (1.0f - tx) +
+                    grid.colors[y1 * side + x1][channel] * tx;
+    r_rgba[channel] = a * (1.0f - ty) + b * ty;
+  }
+  return true;
+}
+
+bool polypaint_sample(const MultiresModifierData &mmd,
+                      const int corner,
+                      const float u,
+                      const float v,
+                      float r_rgba[4])
+{
+  if (r_rgba == nullptr) {
+    return false;
+  }
+  r_rgba[0] = r_rgba[1] = r_rgba[2] = r_rgba[3] = 1.0f;
+  if (!mmd.sculpt_color_grids || corner < 0 || corner >= mmd.sculpt_color_grids_num) {
+    return false;
+  }
+  return polypaint_sample_grid(mmd.sculpt_color_grids[corner], u, v, r_rgba);
 }
 
 bool polypaint_grid_discard(MultiresModifierData &mmd, const int corner)
@@ -684,6 +1097,16 @@ bool polypaint_resample(MultiresModifierData &mmd, const int new_level)
   }
   const int old_side = subdiv::grid_size_from_level(mmd.sculpt_color_level);
   const int new_side = subdiv::grid_size_from_level(new_level);
+  /* Preflight all grids before changing any: invalid metadata would otherwise
+   * read past the source and partially corrupt the persistent color master. */
+  for (int corner = 0; corner < mmd.sculpt_color_grids_num; corner++) {
+    const MultiresColorGrid &grid = mmd.sculpt_color_grids[corner];
+    if (grid.colors && (grid.level != mmd.sculpt_color_level ||
+                        grid.totcolor != old_side * old_side))
+    {
+      return false;
+    }
+  }
   for (int corner = 0; corner < mmd.sculpt_color_grids_num; corner++) {
     MultiresColorGrid &grid = mmd.sculpt_color_grids[corner];
     if (!grid.colors) {
@@ -717,6 +1140,222 @@ bool polypaint_resample(MultiresModifierData &mmd, const int new_level)
   return true;
 }
 
+
+
+/* POLYPAINT_V02A_CPU_FIRST: never synthesize white grids on a missing source.
+ * This reads the original Mesh attribute at per-face-corner resolution.
+ * Shared CCG edge values follow the same face-center/edge-midpoint convention
+ * as the CPU-side subdivision attribute approximation. */
+static bool polypaint_base_patch(const Mesh &base_mesh,
+                                 const char *attribute_name,
+                                 const int corner,
+                                 float r_patch[4][4])
+{
+  if (!attribute_name || attribute_name[0] == '\0' || corner < 0 ||
+      corner >= base_mesh.corners_num)
+  {
+    return false;
+  }
+  const VArray<ColorGeometry4f> colors = *base_mesh.attributes().lookup<ColorGeometry4f>(
+      attribute_name, AttrDomain::Corner);
+  if (!colors || colors.size() != base_mesh.corners_num) {
+    return false;
+  }
+  const Span<int> corner_faces = base_mesh.corner_to_face_map();
+  if (corner >= corner_faces.size()) {
+    return false;
+  }
+  const int face_index = corner_faces[corner];
+  const OffsetIndices<int> faces = base_mesh.faces();
+  if (face_index < 0 || face_index >= faces.size()) {
+    return false;
+  }
+  const IndexRange face = faces[face_index];
+  const int count = face.size();
+  if (count < 3 || corner < face.start() || corner >= face.one_after_last()) {
+    return false;
+  }
+  const int offset = corner - face.start();
+  const int next = face.start() + (offset + 1) % count;
+  const int prev = face.start() + (offset + count - 1) % count;
+  const ColorGeometry4f a = colors[corner];
+  const ColorGeometry4f b = colors[next];
+  const ColorGeometry4f d = colors[prev];
+  const float values_a[4] = {a.r, a.g, a.b, a.a};
+  const float values_b[4] = {b.r, b.g, b.b, b.a};
+  const float values_d[4] = {d.r, d.g, d.b, d.a};
+  for (int c = 0; c < 4; c++) {
+    r_patch[0][c] = 0.0f;
+    r_patch[1][c] = (values_a[c] + values_b[c]) * 0.5f;
+    r_patch[2][c] = (values_a[c] + values_d[c]) * 0.5f;
+    r_patch[3][c] = values_a[c];
+  }
+  for (const int face_corner : face) {
+    const ColorGeometry4f value = colors[face_corner];
+    r_patch[0][0] += value.r / float(count);
+    r_patch[0][1] += value.g / float(count);
+    r_patch[0][2] += value.b / float(count);
+    r_patch[0][3] += value.a / float(count);
+  }
+  return true;
+}
+
+bool polypaint_sample_with_base(const MultiresModifierData &mmd,
+                                const Mesh &base_mesh,
+                                const char *attribute_name,
+                                const int corner,
+                                const float u,
+                                const float v,
+                                float r_rgba[4])
+{
+  if (!r_rgba || !std::isfinite(u) || !std::isfinite(v) ||
+      corner < 0 || corner >= base_mesh.corners_num)
+  {
+    return false;
+  }
+  /* Existing true color values, including painted white, take precedence. */
+  const bool active = !mmd.sculpt_color_attribute[0] ||
+      (attribute_name && STREQ(mmd.sculpt_color_attribute, attribute_name));
+  if (active) {
+    /* The hot brush path reads the active slot directly: no directory search
+     * or modifier-sized temporary for every painted sample. */
+    if (polypaint_sample(mmd, corner, u, v, r_rgba)) {
+      return true;
+    }
+  }
+  else {
+    MultiresModifierData view{};
+    if (polypaint_attribute_view(mmd, attribute_name, view) &&
+        polypaint_sample(view, corner, u, v, r_rgba)) {
+      return true;
+    }
+  }
+  float patch[4][4];
+  if (!polypaint_base_patch(base_mesh, attribute_name, corner, patch)) {
+    return false;
+  }
+  multires_polypaint_cpu::sample_patch(patch, u, v, r_rgba);
+  return true;
+}
+
+float (*polypaint_grid_ensure_from_base(MultiresModifierData &mmd,
+                                        const Mesh &base_mesh,
+                                        const char *attribute_name,
+                                        const int corner))[4]
+{
+  if (mmd.sculpt_color_attribute[0] &&
+      (!attribute_name || !STREQ(mmd.sculpt_color_attribute, attribute_name))) {
+    return nullptr;
+  }
+  if (corner < 0 || corner >= base_mesh.corners_num || mmd.totlvl < 1 ||
+      mmd.totlvl > 13)
+  {
+    return nullptr;
+  }
+  /* Preflight topology before any resample: no partial mutation on mismatched meshes. */
+  if (mmd.sculpt_color_grids && mmd.sculpt_color_grids_num != base_mesh.corners_num) {
+    return nullptr;
+  }
+  if (polypaint_lazy_master_enabled() && !mmd.sculpt_color_grids) {
+    /* A writer cannot establish an Undo boundary. Stroke entry owns creation. */
+    return nullptr;
+  }
+  /* A color master older than the geometric maximum must be promoted before any
+   * edit. Returning an existing lower-resolution grid here would silently cap
+   * subsequent painting at its former level. */
+  if (mmd.sculpt_color_grids && mmd.sculpt_color_level < mmd.totlvl) {
+    if (polypaint_lazy_master_enabled()) {
+      /* The main-thread stroke entry must prepare before parallel Undo capture.
+       * Geometry may be finer; only the actual Paint level needs coverage. */
+      if (mmd.sculpt_color_level < mmd.sculptlvl) {
+        return nullptr;
+      }
+    }
+    else if (!polypaint_resample(mmd, mmd.totlvl)) {
+      return nullptr;
+    }
+    if (polypaint_grid(mmd, corner)) {
+      return mmd.sculpt_color_grids[corner].colors;
+    }
+  }
+  /* Existing painted data is authoritative, including explicit white. */
+  if (mmd.sculpt_color_grids && polypaint_grid(mmd, corner)) {
+    return mmd.sculpt_color_grids[corner].colors;
+  }
+  /* Delete Higher may leave an independent color master above the geometric
+   * maximum. Materialize a previously untouched corner at that stored stride,
+   * then let the coarse writer apply its interpolated difference as usual. */
+  const int master_level = mmd.sculpt_color_grids ? mmd.sculpt_color_level : mmd.totlvl;
+  if (master_level < 1 || master_level > 13) {
+    return nullptr;
+  }
+  float patch[4][4];
+  if (!polypaint_base_patch(base_mesh, attribute_name, corner, patch)) {
+    return nullptr;
+  }
+  if (!polypaint_ensure(mmd, master_level, base_mesh.corners_num) ||
+      mmd.sculpt_color_level != master_level)
+  {
+    return nullptr;
+  }
+  const int side = subdiv::grid_size_from_level(mmd.sculpt_color_level);
+  float (*master)[4] = polypaint_grid_ensure_master(mmd, corner);
+  if (!master) {
+    return nullptr;
+  }
+  /* polypaint_grid_ensure_master() is a no-op for a populated grid. Only the
+   * newly allocated case reaches here, because it was tested above. */
+  for (int y = 0; y < side; y++) {
+    for (int x = 0; x < side; x++) {
+      multires_polypaint_cpu::sample_patch(
+          patch, float(x) / float(side - 1), float(y) / float(side - 1),
+          master[y * side + x]);
+    }
+  }
+  return master;
+}
+
+bool polypaint_write_coarse_sample(MultiresModifierData &mmd,
+                                   const Mesh &base_mesh,
+                                   const char *attribute_name,
+                                   const int corner,
+                                   const int paint_level,
+                                   const int x,
+                                   const int y,
+                                   const float rgba[4])
+{
+  if (!rgba || paint_level < 1 || paint_level > mmd.totlvl ||
+      paint_level > 13 || x < 0 || y < 0)
+  {
+    return false;
+  }
+  const int paint_side = subdiv::grid_size_from_level(paint_level);
+  if (x >= paint_side || y >= paint_side) {
+    return false;
+  }
+  for (int c = 0; c < 4; c++) {
+    if (!std::isfinite(rgba[c])) {
+      return false;
+    }
+  }
+  float (*master)[4] = polypaint_grid_ensure_from_base(mmd, base_mesh, attribute_name, corner);
+  if (!master) {
+    return false;
+  }
+  const int side = subdiv::grid_size_from_level(mmd.sculpt_color_level);
+  const float u = float(x) / float(paint_side - 1);
+  const float v = float(y) / float(paint_side - 1);
+  float current[4];
+  if (!multires_polypaint_cpu::sample_grid(master, side, u, v, current)) {
+    return false;
+  }
+  float delta[4];
+  for (int c = 0; c < 4; c++) {
+    delta[c] = rgba[c] - current[c];
+  }
+  return multires_polypaint_cpu::add_coarse_delta(
+      master, side, paint_side, x, y, delta);
+}
 
 void faceset_clear(MultiresModifierData &mmd)
 {
@@ -862,13 +1501,16 @@ int faceset_sample(const MultiresModifierData &mmd,
   return grid.ids[y * side + x];
 }
 
-bool commit(Object &object)
+bool commit(Object &object, bool *r_local_surface_preserved)
 {
+  if (r_local_surface_preserved) {
+    *r_local_surface_preserved = false;
+  }
   const SculptSession *ss = object.runtime->sculpt_session;
   if (ss && (ss->cache || ss->filter_cache)) {
     return false;
   }
-  return multires_flush_sculpt_updates(&object);
+  return multires_flush_sculpt_updates(&object, r_local_surface_preserved);
 }
 
 bool compatible(const MultiresModifierData &mmd, const Mesh &mesh)
@@ -990,7 +1632,8 @@ bool resample_all(MultiresModifierData &mmd, const int new_level, const int grid
     layer.level = new_level;
     layer.grids_num = grids_num;
   }
-  return !mmd.sculpt_color_grids || polypaint_resample(mmd, new_level);
+  return polypaint_lazy_master_enabled() || !mmd.sculpt_color_grids ||
+         polypaint_resample(mmd, new_level);
 }
 
 bool can_record(const MultiresModifierData &mmd, const Mesh &mesh)
@@ -1000,6 +1643,110 @@ bool can_record(const MultiresModifierData &mmd, const Mesh &mesh)
          !(mmd.flags & eMultiresModifierFlag_UseSculptBaseMesh) &&
          std::isfinite(layer->strength) && std::abs(layer->strength) >= 1e-6f &&
          mmd.sculptlvl <= mmd.totlvl && compatible(mmd, mesh);
+}
+
+const char *merge_visible_to_base(MultiresModifierData &mmd, Mesh &mesh,
+                                  const bool remove_layers, const bool validate_only)
+{
+  /* MERGE_VISIBLE_NATIVE_BASE_V1. Keep the original cage/tangent frames.
+   * All validations precede CustomData writable access and layer removal.
+   * Once published, no further operation in this transaction can fail. */
+  if (mesh.id.lib || ID_REAL_USERS(&mesh.id) > 1 || mesh.key ||
+      CustomData_external_test(&mesh.corner_data, CD_MDISPS))
+  {
+    return "Merge requires a single-user mesh without shape keys or external displacement";
+  }
+  if (mmd.totlvl <= 0 || !compatible(mmd, mesh)) {
+    return "Merge requires valid native and layer grids at the maximum Multires level";
+  }
+  Vector<MultiresSculptLayer *> visible;
+  for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE)) {
+      continue;
+    }
+    visible.append(&layer);
+    if (!is_effective(layer) || !layer.base_deltas) {
+      continue;
+    }
+    for (int vertex = 0; vertex < layer.base_verts_num; vertex++) {
+      for (int axis = 0; axis < 3; axis++) {
+        if (layer.base_deltas[vertex][axis] != 0.0f) {
+          return "Visible L0 cage edits require frame rebasing; original layers retained";
+        }
+      }
+    }
+  }
+  if (visible.is_empty()) {
+    return "No visible Sculpt Layers to merge";
+  }
+  const MDisps *base = static_cast<const MDisps *>(
+      CustomData_get_layer(&mesh.corner_data, CD_MDISPS));
+  /* Match native compositor order, zero-strength threshold and sparse reads.
+   * Deterministic two-pass computation needs no additional high-resolution
+   * staging buffer. A shared CustomData buffer is detached only on publication. */
+  for (int corner = 0; corner < mesh.corners_num; corner++) {
+    for (int sample = 0; sample < base[corner].totdisp; sample++) {
+      for (int axis = 0; axis < 3; axis++) {
+        float value = base[corner].disps[sample][axis];
+        if (!std::isfinite(value)) {
+          return "Non-finite native displacement; original layers retained";
+        }
+        for (const MultiresSculptLayer *layer : visible) {
+          const MDisps &grid = layer->disps[corner];
+          if (is_effective(*layer) && grid.disps) {
+            value += grid.disps[sample][axis] * layer->strength;
+            if (!std::isfinite(value)) {
+              return "Non-finite merged displacement; original layers retained";
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (validate_only) {
+    return nullptr;
+  }
+
+  MDisps *destination = static_cast<MDisps *>(
+      CustomData_get_layer_for_write(&mesh.corner_data, CD_MDISPS, mesh.corners_num));
+  if (!destination) {
+    return "Native displacement is not writable; original layers retained";
+  }
+  weight_hot_delta_cache_invalidate();
+  for (int corner = 0; corner < mesh.corners_num; corner++) {
+    for (int sample = 0; sample < destination[corner].totdisp; sample++) {
+      for (int axis = 0; axis < 3; axis++) {
+        float value = destination[corner].disps[sample][axis];
+        for (const MultiresSculptLayer *layer : visible) {
+          const MDisps &grid = layer->disps[corner];
+          if (is_effective(*layer) && grid.disps) {
+            value += grid.disps[sample][axis] * layer->strength;
+          }
+        }
+        destination[corner].disps[sample][axis] = value;
+      }
+    }
+  }
+  const MultiresSculptLayer *selected = active(mmd);
+  const bool keep_selected = selected && !(selected->flag & MULTIRES_SCULPT_LAYER_VISIBLE);
+  for (MultiresSculptLayer *layer : visible) {
+    if (remove_layers) {
+      remove(mmd, *layer);
+    }
+    else {
+      for (int corner = 0; corner < layer->grids_num; corner++) {
+        MEM_SAFE_DELETE(layer->disps[corner].disps);
+      }
+      MEM_SAFE_DELETE(layer->base_deltas);
+      layer->base_verts_num = 0;
+    }
+  }
+  if (remove_layers && keep_selected) {
+    mmd.sculpt_layer_active = BLI_findindex(&mmd.sculpt_layers, selected);
+  }
+  mmd.sculpt_layer_recording = 0;
+  return nullptr;
 }
 
 bool bake_visible_to_base(MultiresModifierData &mmd, Mesh &mesh)
@@ -1058,6 +1805,7 @@ bool bake_visible_to_base(MultiresModifierData &mmd, Mesh &mesh)
 
 static void free_layer(MultiresSculptLayer &layer)
 {
+  weight_hot_delta_cache_invalidate(&layer);
   MEM_SAFE_DELETE(layer.base_deltas);
   layer.base_verts_num = 0;
   if (layer.disps != nullptr) {
@@ -1133,6 +1881,25 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
   }
   const int side = subdiv::grid_size_from_level(mmd.totlvl);
   const int area = side * side;
+  /* Validate all companion storage before publishing any layer changes. */
+  for (const MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
+    if (attribute.grids && (attribute.grids_num != old_corners_num ||
+                            attribute.level < 1 || attribute.level > 13)) {
+      return false;
+    }
+  }
+  if (mmd.sculpt_color_grids &&
+      (mmd.sculpt_color_grids_num != old_corners_num ||
+       mmd.sculpt_color_level < 1 || mmd.sculpt_color_level > 13))
+  {
+    return false;
+  }
+  if (mmd.sculpt_face_set_grids &&
+      (mmd.sculpt_face_set_grids_num != old_corners_num ||
+       mmd.sculpt_face_set_level < 1 || mmd.sculpt_face_set_level > 13))
+  {
+    return false;
+  }
   for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
     if (layer.level != mmd.totlvl || layer.grids_num != old_corners_num ||
         (old_corners_num > 0 && layer.disps == nullptr))
@@ -1144,7 +1911,7 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
         continue;
       }
       const MDisps &grid = layer.disps[old_corner];
-      if (grid.level != layer.level || grid.totdisp != area || grid.disps == nullptr) {
+      if (grid.level != layer.level || grid.totdisp != area) {
         return false;
       }
     }
@@ -1159,27 +1926,25 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
       dst.level = layer.level;
       dst.totdisp = area;
       const int old_corner = new_to_old[new_corner];
-      if (old_corner == -1) {
-        dst.disps = MEM_new_array_zeroed<float[3]>(area, "new sculpt layer corner");
-      }
-      else {
-        const MDisps &src = layer.disps[old_corner];
-        dst.disps = MEM_dupalloc(src.disps);
-        if (src.hidden != nullptr) {
-          dst.hidden = MEM_dupalloc(src.hidden);
-        }
+      if (old_corner >= 0) {
+        /* Transfer ownership, including implicit zero grids, without duplicating high-res
+         * payloads. The one-to-one map above ensures each payload is moved only once. */
+        dst = layer.disps[old_corner];
+        layer.disps[old_corner] = {};
       }
     }
+    /* free_layer() also frees L0 deltas; those were remapped separately and must survive. */
+    float (*base_deltas)[3] = layer.base_deltas;
+    const int base_verts_num = layer.base_verts_num;
+    layer.base_deltas = nullptr;
     free_layer(layer);
+    layer.base_deltas = base_deltas;
+    layer.base_verts_num = base_verts_num;
     layer.disps = remapped;
     layer.grids_num = int(new_to_old.size());
   }
   if (mmd.sculpt_color_grids) {
-    if (mmd.sculpt_color_grids_num != old_corners_num ||
-        mmd.sculpt_color_level != mmd.totlvl)
-    {
-      return false;
-    }
+    const int stored_level = mmd.sculpt_color_level;
     MultiresColorGrid *remapped = new_to_old.is_empty() ? nullptr :
         MEM_new_array_zeroed<MultiresColorGrid>(new_to_old.size(), "remapped polypaint grids");
     for (const int new_corner : new_to_old.index_range()) {
@@ -1192,14 +1957,29 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
     polypaint_clear(mmd);
     mmd.sculpt_color_grids = remapped;
     mmd.sculpt_color_grids_num = int(new_to_old.size());
-    mmd.sculpt_color_level = mmd.totlvl;
+    mmd.sculpt_color_level = stored_level;
+  }
+  for (MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
+    if (!attribute.grids) {
+      continue;
+    }
+    MultiresColorGrid *remapped = new_to_old.is_empty() ? nullptr :
+        MEM_new_array_zeroed<MultiresColorGrid>(new_to_old.size(), "remapped Paint attribute");
+    for (const int new_corner : new_to_old.index_range()) {
+      const int old_corner = new_to_old[new_corner];
+      if (old_corner >= 0) {
+        remapped[new_corner] = attribute.grids[old_corner];
+        attribute.grids[old_corner] = {};
+      }
+    }
+    for (int i = 0; i < attribute.grids_num; i++) {
+      MEM_SAFE_DELETE(attribute.grids[i].colors);
+    }
+    MEM_delete(attribute.grids);
+    attribute.grids = remapped;
+    attribute.grids_num = int(new_to_old.size());
   }
   if (mmd.sculpt_face_set_grids) {
-    if (mmd.sculpt_face_set_grids_num != old_corners_num ||
-        mmd.sculpt_face_set_level < 1 || mmd.sculpt_face_set_level > mmd.totlvl)
-    {
-      return false;
-    }
     MultiresFaceSetGrid *remapped = new_to_old.is_empty() ? nullptr :
         MEM_new_array<MultiresFaceSetGrid>(new_to_old.size(),
                                                    "remapped multires face set grids");
@@ -1224,9 +2004,37 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
   return true;
 }
 
+/* A mesh system property survives BMesh replacement, including deleting all vertices.
+ * It is a high-water mark, not a grid index. Older full memfile states restore it
+ * together with their modifier data; Edit snapshots cannot accidentally recycle it. */
+static constexpr char corner_counter_property[] = "sculpt_layer_corner_id_counter";
+
+static int corner_id_counter(Mesh &mesh)
+{
+  IDProperty *property = IDP_GetPropertyFromGroup_null(
+      IDP_ID_system_properties_get(&mesh.id), corner_counter_property);
+  if (!property) {
+    return 0;
+  }
+  return property->type == IDP_INT ? std::max(0, IDP_int_get(property)) : -1;
+}
+
+static void corner_id_counter_set(Mesh &mesh, const int value)
+{
+  IDProperty *group = IDP_ID_system_properties_ensure(&mesh.id);
+  IDProperty *property = IDP_GetPropertyFromGroup_null(group, corner_counter_property);
+  if (!property) {
+    IDP_AddToGroup(group, IDP_NewInt(value, corner_counter_property));
+  }
+  else {
+    IDP_int_set(property, std::max(IDP_int_get(property), value));
+  }
+}
+
 void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh)
 {
-  if (mmd.sculpt_layers.is_empty() && !mmd.sculpt_color_grids && !mmd.sculpt_face_set_grids) {
+  if (mmd.sculpt_layers.is_empty() && !mmd.sculpt_color_grids &&
+      mmd.sculpt_color_attributes.is_empty() && !mmd.sculpt_face_set_grids) {
     return;
   }
   /* An existing attribute belongs to the current topology. Keep it until a
@@ -1244,27 +2052,80 @@ void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh)
   else if (mmd.sculpt_color_grids) {
     stored_corners = mmd.sculpt_color_grids_num;
   }
+  else {
+    stored_corners = mesh.corners_num;
+    for (const MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
+      if (attribute.grids) {
+        stored_corners = attribute.grids_num;
+        break;
+      }
+    }
+  }
   if (stored_corners != mesh.corners_num) {
+    return;
+  }
+  const int id_base = corner_id_counter(mesh);
+  if (id_base < 0 || id_base > INT_MAX - mesh.corners_num) {
     return;
   }
   SpanAttributeWriter<int> ids = mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
       corner_id_attribute, AttrDomain::Corner);
   for (const int corner : ids.span.index_range()) {
-    ids.span[corner] = corner;
+    ids.span[corner] = id_base + corner + 1;
   }
+  corner_id_counter_set(mesh, id_base + mesh.corners_num);
   ids.finish();
+  SpanAttributeWriter<int> previous = mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+      corner_prev_attribute, AttrDomain::Corner);
+  SpanAttributeWriter<int> next = mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+      corner_next_attribute, AttrDomain::Corner);
+  SpanAttributeWriter<int> sizes = mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+      corner_face_size_attribute, AttrDomain::Corner);
+  const OffsetIndices faces = mesh.faces();
+  for (const int face_i : faces.index_range()) {
+    const IndexRange face = faces[face_i];
+    for (const int corner : face) {
+      previous.span[corner] = id_base + (corner == face.start() ? face.last() : corner - 1) + 1;
+      next.span[corner] = id_base + (corner == face.last() ? face.start() : corner + 1) + 1;
+      sizes.span[corner] = face.size();
+    }
+  }
+  previous.finish();
+  next.finish();
+  sizes.finish();
 }
 
-bool remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh)
+/* BMesh owns native Multires interpolation. Keep valid results, even when no Sculpt Layer
+ * identity can be recovered. New layer deltas and native base displacement are independent. */
+static bool initialize_missing_base_grid(MDisps &grid, const int level, const int area)
 {
-  weight_hot_delta_cache_invalidate();
+  if (grid.disps && grid.level == level && grid.totdisp == area) {
+    return false;
+  }
+  MEM_SAFE_DELETE(grid.disps);
+  MEM_SAFE_DELETE(grid.hidden);
+  grid.level = level;
+  grid.totdisp = area;
+  grid.disps = MEM_new_array_zeroed<float[3]>(area, "new multires base corner");
+  return true;
+}
+
+bool remap_after_topology_edit(MultiresModifierData &mmd,
+                              Mesh &mesh,
+                              BitVector<> *r_reset_corners,
+                              const Span<int> old_corner_ids)
+{
+  if (r_reset_corners) {
+    r_reset_corners->clear();
+  }
   if (!base_remap_after_topology_edit(mmd, mesh)) {
     return false;
   }
   if (mmd.totlvl == 0) {
     return compatible(mmd, mesh);
   }
-  if (mmd.sculpt_layers.is_empty() && !mmd.sculpt_color_grids && !mmd.sculpt_face_set_grids) {
+  if (mmd.sculpt_layers.is_empty() && !mmd.sculpt_color_grids &&
+      mmd.sculpt_color_attributes.is_empty() && !mmd.sculpt_face_set_grids) {
     return true;
   }
   int old_corners_num = 0;
@@ -1275,7 +2136,18 @@ bool remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh)
     old_corners_num = mmd.sculpt_face_set_grids_num;
   }
   else {
-    old_corners_num = mmd.sculpt_color_grids_num;
+    old_corners_num = mesh.corners_num;
+    if (mmd.sculpt_color_grids) {
+      old_corners_num = mmd.sculpt_color_grids_num;
+    }
+    else {
+      for (const MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
+        if (attribute.grids) {
+          old_corners_num = attribute.grids_num;
+          break;
+        }
+      }
+    }
   }
   ensure_corner_ids(mmd, mesh);
   const AttributeReader<int> ids_reader = mesh.attributes().lookup<int>(corner_id_attribute,
@@ -1287,30 +2159,88 @@ bool remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh)
   if (ids.size() != mesh.corners_num) {
     return false;
   }
-  if (old_corners_num == mesh.corners_num) {
-    bool identity = true;
-    for (const int corner : ids.index_range()) {
-      if (ids[corner] != corner) {
-        identity = false;
-        break;
-      }
+  const AttributeReader<int> previous_reader = mesh.attributes().lookup<int>(
+      corner_prev_attribute, AttrDomain::Corner);
+  const AttributeReader<int> next_reader = mesh.attributes().lookup<int>(
+      corner_next_attribute, AttrDomain::Corner);
+  const AttributeReader<int> size_reader = mesh.attributes().lookup<int>(
+      corner_face_size_attribute, AttrDomain::Corner);
+  if (!previous_reader || !next_reader || !size_reader) {
+    return false;
+  }
+  const VArraySpan<int> previous(previous_reader.varray);
+  const VArraySpan<int> next(next_reader.varray);
+  const VArraySpan<int> sizes(size_reader.varray);
+  /* Grid storage follows the OLD mesh array order, not numeric ID order. */
+  Array<int> canonical_ids;
+  Span<int> storage_ids = old_corner_ids;
+  if (storage_ids.is_empty() && old_corners_num > 0) {
+    canonical_ids.reinitialize(old_corners_num);
+    for (const int i : canonical_ids.index_range()) {
+      canonical_ids[i] = i + 1;
     }
-    if (identity) {
-      return true;
-    }
+    storage_ids = canonical_ids.as_span();
+  }
+  if (storage_ids.size() != old_corners_num) {
+    return false;
   }
   Array<int> counts(old_corners_num, 0);
-  for (const int id : ids) {
-    if (id >= 0 && id < old_corners_num) {
-      counts[id]++;
+  Array<int> new_to_old(mesh.corners_num, -1);
+  int max_old_id = 0;
+  const int high_water_mark = corner_id_counter(mesh);
+  if (high_water_mark < 0) {
+    return false;
+  }
+  if (!detail::corner_identity_lookup(storage_ids.data(),
+                                     old_corners_num,
+                                     ids.data(),
+                                     mesh.corners_num,
+                                     new_to_old.data(),
+                                     counts.data(),
+                                     max_old_id))
+  {
+    return false;
+  }
+  max_old_id = std::max(max_old_id, high_water_mark);
+  const OffsetIndices faces = mesh.faces();
+  bool identity = old_corners_num == mesh.corners_num;
+  for (const int face_i : faces.index_range()) {
+    const IndexRange face = faces[face_i];
+    for (const int corner : face) {
+      const int id = new_to_old[corner];
+      const int prev_corner = corner == face.start() ? face.last() : corner - 1;
+      const int next_corner = corner == face.last() ? face.start() : corner + 1;
+      /* A retained loop ID alone cannot establish grid orientation after Dissolve, Flip
+       * or rebuilding a face. Preserve only an unchanged cyclic neighborhood. */
+      if (id >= 0 && id < old_corners_num && counts[id] == 1 &&
+          sizes[corner] == face.size() && previous[corner] == ids[prev_corner] &&
+          next[corner] == ids[next_corner])
+      {
+        new_to_old[corner] = id;
+      }
+      else {
+        new_to_old[corner] = -1;
+      }
+      identity &= new_to_old[corner] == corner;
     }
   }
-  Array<int> new_to_old(mesh.corners_num, -1);
-  for (const int corner : ids.index_range()) {
-    const int id = ids[corner];
-    if (id >= 0 && id < old_corners_num && counts[id] == 1) {
-      new_to_old[corner] = id;
-    }
+  if (identity) {
+    return true;
+  }
+
+  /* Surviving identities stay stable across remaps. Allocate fresh IDs only for
+   * new/ambiguous corners; never recycle old array indices as identities. */
+  int new_ids_num = 0;
+  for (const int old_corner : new_to_old) {
+    new_ids_num += old_corner < 0;
+  }
+  if (max_old_id > INT_MAX - new_ids_num) {
+    return false;
+  }
+  Array<int> stable_ids(mesh.corners_num);
+  int next_id = max_old_id;
+  for (const int corner : new_to_old.index_range()) {
+    stable_ids[corner] = new_to_old[corner] >= 0 ? storage_ids[new_to_old[corner]] : ++next_id;
   }
 
   /* Native Multires displacement is stored directly on the current mesh
@@ -1339,21 +2269,48 @@ bool remap_after_topology_edit(MultiresModifierData &mmd, Mesh &mesh)
     return false;
   }
 
+  if (r_reset_corners) {
+    r_reset_corners->resize(mesh.corners_num, false);
+  }
   for (const int new_corner : new_to_old.index_range()) {
     if (new_to_old[new_corner] >= 0) {
       continue;
     }
     MDisps &grid = base[new_corner];
-    MEM_SAFE_DELETE(grid.disps);
-    MEM_SAFE_DELETE(grid.hidden);
-    grid.level = mmd.totlvl;
-    grid.totdisp = area;
-    grid.disps = MEM_new_array_zeroed<float[3]>(area, "new multires base corner");
+    const bool initialized = initialize_missing_base_grid(grid, mmd.totlvl, area);
+    if (r_reset_corners && initialized) {
+      (*r_reset_corners)[new_corner].set();
+    }
   }
 
-  MutableAttributeAccessor attributes = mesh.attributes_for_write();
-  attributes.remove(corner_id_attribute);
-  ensure_corner_ids(mmd, mesh);
+  corner_id_counter_set(mesh, next_id);
+  SpanAttributeWriter<int> published_ids =
+      mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+          corner_id_attribute, AttrDomain::Corner);
+  published_ids.span.copy_from(stable_ids);
+  published_ids.finish();
+  SpanAttributeWriter<int> published_previous =
+      mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+          corner_prev_attribute, AttrDomain::Corner);
+  SpanAttributeWriter<int> published_next =
+      mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+          corner_next_attribute, AttrDomain::Corner);
+  SpanAttributeWriter<int> published_sizes =
+      mesh.attributes_for_write().lookup_or_add_for_write_span<int>(
+          corner_face_size_attribute, AttrDomain::Corner);
+  for (const int face_i : faces.index_range()) {
+    const IndexRange face = faces[face_i];
+    for (const int corner : face) {
+      published_previous.span[corner] =
+          stable_ids[corner == face.start() ? face.last() : corner - 1];
+      published_next.span[corner] =
+          stable_ids[corner == face.last() ? face.start() : corner + 1];
+      published_sizes.span[corner] = face.size();
+    }
+  }
+  published_previous.finish();
+  published_next.finish();
+  published_sizes.finish();
   return true;
 }
 
@@ -2037,7 +2994,7 @@ void clear(MultiresModifierData &mmd)
   for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
     weight_hot_delta_cache_invalidate(&layer);
   }
-  polypaint_clear(mmd);
+  polypaint_attributes_clear(mmd);
   faceset_clear(mmd);
   mmd.sculpt_layer_recording = 0;
   while (!mmd.sculpt_layers.is_empty()) {
@@ -2102,6 +3059,25 @@ void copy(MultiresModifierData &dst, const MultiresModifierData &src)
    * Do not call clear() here: after a generic modifier copy the destination list may
    * temporarily contain the source pointers. */
   dst.sculpt_layers.clear_no_delete();
+  dst.sculpt_color_attributes.clear_no_delete();
+  BLI_strncpy(dst.sculpt_color_attribute, src.sculpt_color_attribute,
+              sizeof(dst.sculpt_color_attribute));
+  for (const MultiresColorAttribute &source : src.sculpt_color_attributes) {
+    auto *destination = MEM_new<MultiresColorAttribute>("Polypaint attribute copy");
+    BLI_strncpy(destination->name, source.name, sizeof(destination->name));
+    destination->grids_num = source.grids_num;
+    destination->level = source.level;
+    if (source.grids && source.grids_num > 0) {
+      destination->grids = MEM_new_array_zeroed<MultiresColorGrid>(
+          source.grids_num, "Polypaint attribute directory copy");
+      for (int i = 0; i < source.grids_num; i++) {
+        destination->grids[i] = source.grids[i];
+        destination->grids[i].colors = source.grids[i].colors ?
+            MEM_dupalloc(source.grids[i].colors) : nullptr;
+      }
+    }
+    BLI_addtail(&dst.sculpt_color_attributes, destination);
+  }
   dst.sculpt_color_grids = nullptr;
   dst.sculpt_color_grids_num = 0;
   dst.sculpt_color_level = 0;
@@ -2419,6 +3395,7 @@ float (*grid_ensure(MultiresSculptLayer &layer, const int corner))[3]
 
   if (grid.disps == nullptr) {
     grid.disps = MEM_new_array_zeroed<float[3]>(area, "multires sparse sculpt layer grid");
+    weight_hot_delta_cache_invalidate(&layer);
   }
 
   return grid.disps;
@@ -3146,3 +4123,5 @@ bool shape_key_fast_update(Object &object, Key &key, KeyBlock &key_block)
 }
 
 }  // namespace blender::bke::multires_layers
+
+

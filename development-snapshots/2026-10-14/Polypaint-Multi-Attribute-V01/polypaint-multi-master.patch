@@ -1,0 +1,914 @@
+diff --git a/source/blender/blenkernel/BKE_multires_sculpt_layers.hh b/source/blender/blenkernel/BKE_multires_sculpt_layers.hh
+index 22bc674..dc576f1 100644
+--- a/source/blender/blenkernel/BKE_multires_sculpt_layers.hh
++++ b/source/blender/blenkernel/BKE_multires_sculpt_layers.hh
+@@ -165,6 +165,15 @@ void clear(MultiresModifierData &mmd);
+ void copy(MultiresModifierData &dst, const MultiresModifierData &src);
+ 
+ void polypaint_clear(MultiresModifierData &mmd);
++/** Non-owning read view for one named attribute; never clear/free the view. */
++bool polypaint_attribute_view(const MultiresModifierData &mmd,
++                             const char *name, MultiresModifierData &r_view);
++/** Main-thread ownership exchange, before brush Undo capture. No payload copy. */
++bool polypaint_attribute_activate(MultiresModifierData &mmd, const char *name);
++void polypaint_attribute_remove(MultiresModifierData &mmd, const char *name);
++bool polypaint_attribute_rename(MultiresModifierData &mmd, const char *old_name,
++                               const char *new_name);
++void polypaint_attributes_clear(MultiresModifierData &mmd);
+ /** Opt-in independent Paint resolution. No geometry/layer publication. */
+ bool polypaint_lazy_master_enabled();
+ /** Stage a larger (or first) color master without modifying the source.
+diff --git a/source/blender/blenkernel/intern/multires.cc b/source/blender/blenkernel/intern/multires.cc
+index 6783bb9..a189fe9 100644
+--- a/source/blender/blenkernel/intern/multires.cc
++++ b/source/blender/blenkernel/intern/multires.cc
+@@ -2667,6 +2667,19 @@ static bool multires_delete_higher_validate(const MultiresModifierData &mmd,
+       }
+     }
+   }
++  for (const MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
++    if (!attribute.grids) continue;
++    if (attribute.grids_num != mesh.corners_num || attribute.level < 1 || attribute.level > 13) {
++      return false;
++    }
++    const int area = multires_grid_tot[attribute.level];
++    for (int corner = 0; corner < mesh.corners_num; corner++) {
++      const MultiresColorGrid &grid = attribute.grids[corner];
++      if (grid.colors && (grid.level != attribute.level || grid.totcolor != area)) {
++        return false;
++      }
++    }
++  }
+   if (mmd.sculpt_face_set_grids) {
+     if (mmd.sculpt_face_set_grids_num != mesh.corners_num || mmd.sculpt_face_set_level < 1 ||
+         mmd.sculpt_face_set_level > 13)
+@@ -2791,7 +2804,8 @@ void multiresModifier_del_levels(MultiresModifierData *mmd,
+   /* L0 topology edits currently do not remap companion masters. Refuse this
+    * transition explicitly until a separate base-attribute migration exists.
+    * Check after the commit, which may materialize companion storage. */
+-  if (lvl == 0 && (mmd->sculpt_color_grids || mmd->sculpt_face_set_grids)) {
++  if (lvl == 0 && (mmd->sculpt_color_grids || mmd->sculpt_face_set_grids ||
++                   !mmd->sculpt_color_attributes.is_empty())) {
+     BKE_modifier_set_error(ob, &mmd->modifier,
+                            "Keep at least level 1 while Multires Polypaint or Face Sets are stored");
+     return;
+diff --git a/source/blender/blenkernel/intern/multires_sculpt_layers.cc b/source/blender/blenkernel/intern/multires_sculpt_layers.cc
+index 59ca038..85459d8 100644
+--- a/source/blender/blenkernel/intern/multires_sculpt_layers.cc
++++ b/source/blender/blenkernel/intern/multires_sculpt_layers.cc
+@@ -711,6 +711,158 @@ void polypaint_clear(MultiresModifierData &mmd)
+   mmd.sculpt_color_level = 0;
+ }
+ 
++/* POLYPAINT_MULTI_ATTRIBUTE_V1: one active owner, inactive named owners.
++ * Read views are borrowed and never alter the source or free its allocations. */
++static bool polypaint_attribute_name_valid(const char *name)
++{
++  return name && name[0] && std::strlen(name) < sizeof(MultiresColorAttribute::name);
++}
++
++static MultiresColorAttribute *polypaint_attribute_find(MultiresModifierData &mmd,
++                                                       const char *name)
++{
++  for (MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
++    if (STREQ(attribute.name, name)) {
++      return &attribute;
++    }
++  }
++  return nullptr;
++}
++
++bool polypaint_attribute_view(const MultiresModifierData &mmd,
++                             const char *name, MultiresModifierData &r_view)
++{
++  if (!polypaint_attribute_name_valid(name)) {
++    return false;
++  }
++  /* A legacy file has no name yet. Its only master belongs to the current
++   * mesh color attribute; callers must only use this fallback for that name. */
++  if (STREQ(mmd.sculpt_color_attribute, name) ||
++      (!mmd.sculpt_color_attribute[0] && mmd.sculpt_color_attributes.is_empty())) {
++    r_view.sculpt_color_grids = mmd.sculpt_color_grids;
++    r_view.sculpt_color_grids_num = mmd.sculpt_color_grids_num;
++    r_view.sculpt_color_level = mmd.sculpt_color_level;
++    return true;
++  }
++  for (const MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
++    if (STREQ(attribute.name, name)) {
++      r_view.sculpt_color_grids = attribute.grids;
++      r_view.sculpt_color_grids_num = attribute.grids_num;
++      r_view.sculpt_color_level = attribute.level;
++      return true;
++    }
++  }
++  return false;
++}
++
++bool polypaint_attribute_activate(MultiresModifierData &mmd, const char *name)
++{
++  if (!polypaint_attribute_name_valid(name)) {
++    return false;
++  }
++  if (!mmd.sculpt_color_attribute[0]) {
++    if (!mmd.sculpt_color_grids) {
++      if (MultiresColorAttribute *target = polypaint_attribute_find(mmd, name)) {
++        mmd.sculpt_color_grids = target->grids;
++        mmd.sculpt_color_grids_num = target->grids_num;
++        mmd.sculpt_color_level = target->level;
++        BLI_remlink(&mmd.sculpt_color_attributes, target);
++        MEM_delete(target);
++      }
++    }
++    /* Migration only: the caller supplies the original mesh's current name
++     * before selecting a different attribute. No old colors are reallocated. */
++    BLI_strncpy(mmd.sculpt_color_attribute, name, sizeof(mmd.sculpt_color_attribute));
++    return true;
++  }
++  if (STREQ(mmd.sculpt_color_attribute, name)) {
++    return true;
++  }
++  MultiresColorAttribute *target = polypaint_attribute_find(mmd, name);
++  /* Validate both directories before publishing the ownership exchange. */
++  if ((mmd.sculpt_color_grids && (mmd.sculpt_color_level < 1 ||
++                                 mmd.sculpt_color_level > 13 || mmd.sculpt_color_grids_num < 0)) ||
++      (target && target->grids && (target->level < 1 || target->level > 13 ||
++                                 target->grids_num < 0))) {
++    return false;
++  }
++  auto *old = MEM_new<MultiresColorAttribute>("inactive Polypaint attribute");
++  BLI_strncpy(old->name, mmd.sculpt_color_attribute, sizeof(old->name));
++  old->grids = mmd.sculpt_color_grids;
++  old->grids_num = mmd.sculpt_color_grids_num;
++  old->level = mmd.sculpt_color_level;
++  mmd.sculpt_color_grids = target ? target->grids : nullptr;
++  mmd.sculpt_color_grids_num = target ? target->grids_num : 0;
++  mmd.sculpt_color_level = target ? target->level : 0;
++  BLI_strncpy(mmd.sculpt_color_attribute, name, sizeof(mmd.sculpt_color_attribute));
++  if (target) {
++    BLI_remlink(&mmd.sculpt_color_attributes, target);
++    MEM_delete(target); /* Payload ownership has moved to the active slot. */
++  }
++  BLI_addtail(&mmd.sculpt_color_attributes, old);
++  return true;
++}
++
++void polypaint_attribute_remove(MultiresModifierData &mmd, const char *name)
++{
++  if (!polypaint_attribute_name_valid(name)) {
++    return;
++  }
++  if (STREQ(mmd.sculpt_color_attribute, name)) {
++    polypaint_clear(mmd);
++    mmd.sculpt_color_attribute[0] = '\0';
++    return;
++  }
++  if (MultiresColorAttribute *attribute = polypaint_attribute_find(mmd, name)) {
++    MultiresModifierData owned{};
++    owned.sculpt_color_grids = attribute->grids;
++    owned.sculpt_color_grids_num = attribute->grids_num;
++    owned.sculpt_color_level = attribute->level;
++    polypaint_clear(owned);
++    BLI_remlink(&mmd.sculpt_color_attributes, attribute);
++    MEM_delete(attribute);
++  }
++}
++
++bool polypaint_attribute_rename(MultiresModifierData &mmd, const char *old_name,
++                               const char *new_name)
++{
++  if (!polypaint_attribute_name_valid(old_name) || !polypaint_attribute_name_valid(new_name)) {
++    return false;
++  }
++  if (STREQ(old_name, new_name)) {
++    return true;
++  }
++  if (STREQ(mmd.sculpt_color_attribute, new_name) || polypaint_attribute_find(mmd, new_name)) {
++    return false;
++  }
++  if (STREQ(mmd.sculpt_color_attribute, old_name)) {
++    BLI_strncpy(mmd.sculpt_color_attribute, new_name, sizeof(mmd.sculpt_color_attribute));
++  }
++  else if (MultiresColorAttribute *attribute = polypaint_attribute_find(mmd, old_name)) {
++    BLI_strncpy(attribute->name, new_name, sizeof(attribute->name));
++  }
++  return true;
++}
++
++void polypaint_attributes_clear(MultiresModifierData &mmd)
++{
++  while (!mmd.sculpt_color_attributes.is_empty()) {
++    auto *attribute = static_cast<MultiresColorAttribute *>(mmd.sculpt_color_attributes.first);
++    /* Do not use remove(name) here: malformed duplicate names must also free
++     * the exact list entry, never the active allocation. */
++    MultiresModifierData owned{};
++    owned.sculpt_color_grids = attribute->grids;
++    owned.sculpt_color_grids_num = attribute->grids_num;
++    owned.sculpt_color_level = attribute->level;
++    polypaint_clear(owned);
++    BLI_remlink(&mmd.sculpt_color_attributes, attribute);
++    MEM_delete(attribute);
++  }
++  polypaint_clear(mmd);
++  mmd.sculpt_color_attribute[0] = '\0';
++}
++
+ bool polypaint_ensure(MultiresModifierData &mmd, const int level, const int grids_num)
+ {
+   if (level < 1 || level > 13 || grids_num < 0) {
+@@ -1062,8 +1214,21 @@ bool polypaint_sample_with_base(const MultiresModifierData &mmd,
+     return false;
+   }
+   /* Existing true color values, including painted white, take precedence. */
+-  if (polypaint_sample(mmd, corner, u, v, r_rgba)) {
+-    return true;
++  const bool active = !mmd.sculpt_color_attribute[0] ||
++      (attribute_name && STREQ(mmd.sculpt_color_attribute, attribute_name));
++  if (active) {
++    /* The hot brush path reads the active slot directly: no directory search
++     * or modifier-sized temporary for every painted sample. */
++    if (polypaint_sample(mmd, corner, u, v, r_rgba)) {
++      return true;
++    }
++  }
++  else {
++    MultiresModifierData view{};
++    if (polypaint_attribute_view(mmd, attribute_name, view) &&
++        polypaint_sample(view, corner, u, v, r_rgba)) {
++      return true;
++    }
+   }
+   float patch[4][4];
+   if (!polypaint_base_patch(base_mesh, attribute_name, corner, patch)) {
+@@ -1078,6 +1243,10 @@ float (*polypaint_grid_ensure_from_base(MultiresModifierData &mmd,
+                                         const char *attribute_name,
+                                         const int corner))[4]
+ {
++  if (mmd.sculpt_color_attribute[0] &&
++      (!attribute_name || !STREQ(mmd.sculpt_color_attribute, attribute_name))) {
++    return nullptr;
++  }
+   if (corner < 0 || corner >= base_mesh.corners_num || mmd.totlvl < 1 ||
+       mmd.totlvl > 13)
+   {
+@@ -1713,6 +1882,12 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
+   const int side = subdiv::grid_size_from_level(mmd.totlvl);
+   const int area = side * side;
+   /* Validate all companion storage before publishing any layer changes. */
++  for (const MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
++    if (attribute.grids && (attribute.grids_num != old_corners_num ||
++                            attribute.level < 1 || attribute.level > 13)) {
++      return false;
++    }
++  }
+   if (mmd.sculpt_color_grids &&
+       (mmd.sculpt_color_grids_num != old_corners_num ||
+        mmd.sculpt_color_level < 1 || mmd.sculpt_color_level > 13))
+@@ -1784,6 +1959,26 @@ bool remap_surviving_corners(MultiresModifierData &mmd,
+     mmd.sculpt_color_grids_num = int(new_to_old.size());
+     mmd.sculpt_color_level = stored_level;
+   }
++  for (MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
++    if (!attribute.grids) {
++      continue;
++    }
++    MultiresColorGrid *remapped = new_to_old.is_empty() ? nullptr :
++        MEM_new_array_zeroed<MultiresColorGrid>(new_to_old.size(), "remapped Paint attribute");
++    for (const int new_corner : new_to_old.index_range()) {
++      const int old_corner = new_to_old[new_corner];
++      if (old_corner >= 0) {
++        remapped[new_corner] = attribute.grids[old_corner];
++        attribute.grids[old_corner] = {};
++      }
++    }
++    for (int i = 0; i < attribute.grids_num; i++) {
++      MEM_SAFE_DELETE(attribute.grids[i].colors);
++    }
++    MEM_delete(attribute.grids);
++    attribute.grids = remapped;
++    attribute.grids_num = int(new_to_old.size());
++  }
+   if (mmd.sculpt_face_set_grids) {
+     MultiresFaceSetGrid *remapped = new_to_old.is_empty() ? nullptr :
+         MEM_new_array<MultiresFaceSetGrid>(new_to_old.size(),
+@@ -1838,7 +2033,8 @@ static void corner_id_counter_set(Mesh &mesh, const int value)
+ 
+ void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh)
+ {
+-  if (mmd.sculpt_layers.is_empty() && !mmd.sculpt_color_grids && !mmd.sculpt_face_set_grids) {
++  if (mmd.sculpt_layers.is_empty() && !mmd.sculpt_color_grids &&
++      mmd.sculpt_color_attributes.is_empty() && !mmd.sculpt_face_set_grids) {
+     return;
+   }
+   /* An existing attribute belongs to the current topology. Keep it until a
+@@ -1856,6 +2052,15 @@ void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh)
+   else if (mmd.sculpt_color_grids) {
+     stored_corners = mmd.sculpt_color_grids_num;
+   }
++  else {
++    stored_corners = mesh.corners_num;
++    for (const MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
++      if (attribute.grids) {
++        stored_corners = attribute.grids_num;
++        break;
++      }
++    }
++  }
+   if (stored_corners != mesh.corners_num) {
+     return;
+   }
+@@ -1919,7 +2124,8 @@ bool remap_after_topology_edit(MultiresModifierData &mmd,
+   if (mmd.totlvl == 0) {
+     return compatible(mmd, mesh);
+   }
+-  if (mmd.sculpt_layers.is_empty() && !mmd.sculpt_color_grids && !mmd.sculpt_face_set_grids) {
++  if (mmd.sculpt_layers.is_empty() && !mmd.sculpt_color_grids &&
++      mmd.sculpt_color_attributes.is_empty() && !mmd.sculpt_face_set_grids) {
+     return true;
+   }
+   int old_corners_num = 0;
+@@ -1930,7 +2136,18 @@ bool remap_after_topology_edit(MultiresModifierData &mmd,
+     old_corners_num = mmd.sculpt_face_set_grids_num;
+   }
+   else {
+-    old_corners_num = mmd.sculpt_color_grids_num;
++    old_corners_num = mesh.corners_num;
++    if (mmd.sculpt_color_grids) {
++      old_corners_num = mmd.sculpt_color_grids_num;
++    }
++    else {
++      for (const MultiresColorAttribute &attribute : mmd.sculpt_color_attributes) {
++        if (attribute.grids) {
++          old_corners_num = attribute.grids_num;
++          break;
++        }
++      }
++    }
+   }
+   ensure_corner_ids(mmd, mesh);
+   const AttributeReader<int> ids_reader = mesh.attributes().lookup<int>(corner_id_attribute,
+@@ -2777,7 +2994,7 @@ void clear(MultiresModifierData &mmd)
+   for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+     weight_hot_delta_cache_invalidate(&layer);
+   }
+-  polypaint_clear(mmd);
++  polypaint_attributes_clear(mmd);
+   faceset_clear(mmd);
+   mmd.sculpt_layer_recording = 0;
+   while (!mmd.sculpt_layers.is_empty()) {
+@@ -2842,6 +3059,25 @@ void copy(MultiresModifierData &dst, const MultiresModifierData &src)
+    * Do not call clear() here: after a generic modifier copy the destination list may
+    * temporarily contain the source pointers. */
+   dst.sculpt_layers.clear_no_delete();
++  dst.sculpt_color_attributes.clear_no_delete();
++  BLI_strncpy(dst.sculpt_color_attribute, src.sculpt_color_attribute,
++              sizeof(dst.sculpt_color_attribute));
++  for (const MultiresColorAttribute &source : src.sculpt_color_attributes) {
++    auto *destination = MEM_new<MultiresColorAttribute>("Polypaint attribute copy");
++    BLI_strncpy(destination->name, source.name, sizeof(destination->name));
++    destination->grids_num = source.grids_num;
++    destination->level = source.level;
++    if (source.grids && source.grids_num > 0) {
++      destination->grids = MEM_new_array_zeroed<MultiresColorGrid>(
++          source.grids_num, "Polypaint attribute directory copy");
++      for (int i = 0; i < source.grids_num; i++) {
++        destination->grids[i] = source.grids[i];
++        destination->grids[i].colors = source.grids[i].colors ?
++            MEM_dupalloc(source.grids[i].colors) : nullptr;
++      }
++    }
++    BLI_addtail(&dst.sculpt_color_attributes, destination);
++  }
+   dst.sculpt_color_grids = nullptr;
+   dst.sculpt_color_grids_num = 0;
+   dst.sculpt_color_level = 0;
+diff --git a/source/blender/draw/intern/draw_pbvh.cc b/source/blender/draw/intern/draw_pbvh.cc
+index a1bd817..451038c 100644
+--- a/source/blender/draw/intern/draw_pbvh.cc
++++ b/source/blender/draw/intern/draw_pbvh.cc
+@@ -1205,7 +1205,12 @@ BLI_NOINLINE static void fill_polypaint_grids(const Object &object,
+                                               const MutableSpan<gpu::VertBufPtr> vbos)
+ {
+   const SculptSession &ss = *object.runtime->sculpt_session;
+-  const MultiresModifierData *mmd = polypaint_source_modifier(object);
++  const MultiresModifierData *source = polypaint_source_modifier(object);
++  MultiresModifierData view{};
++  const std::string attribute_name(request);
++  const MultiresModifierData *mmd = source &&
++      bke::multires_layers::polypaint_attribute_view(*source, attribute_name.c_str(), view) ?
++      &view : nullptr;
+   const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
+   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+   const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+@@ -2044,7 +2049,13 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
+       const MultiresModifierData *mmd = polypaint_source_modifier(object);
+       /* Choose the RGBA format before the first stroke allocates color grids.
+        * Missing grids use the same white fallback as Polypaint initialization. */
+-      use_polypaint = mmd && *request == orig_mesh_data.active_color;
++      const std::string attribute_name(*request);
++      MultiresModifierData view{};
++      use_polypaint = mmd && bke::mesh::is_color_attribute(
++          orig_mesh_data.attributes.lookup_meta_data(*request)) &&
++          (*request == orig_mesh_data.active_color ||
++           (mmd->sculpt_color_attribute[0] &&
++            bke::multires_layers::polypaint_attribute_view(*mmd, attribute_name.c_str(), view)));
+       this->ensure_grids_attribute_format(orig_mesh_data, attr, use_polypaint, data);
+     }
+   }
+diff --git a/source/blender/editors/sculpt_paint/mesh/sculpt.cc b/source/blender/editors/sculpt_paint/mesh/sculpt.cc
+index e767779..f964bec 100644
+--- a/source/blender/editors/sculpt_paint/mesh/sculpt.cc
++++ b/source/blender/editors/sculpt_paint/mesh/sculpt.cc
+@@ -7852,6 +7852,10 @@ static bool sculpt_polypaint_prepare_stroke_master(bContext *C, wmOperator *op)
+   MultiresModifierData *mmd = const_cast<MultiresModifierData *>(
+       BKE_sculpt_multires_active(scene, ob));
+   if (!bke::multires_layers::polypaint_lazy_master_enabled()) {
++    if (mmd && (mmd->sculpt_color_attribute[0] || !mmd->sculpt_color_attributes.is_empty())) {
++      BKE_report(op->reports, RPT_ERROR, "Named Polypaint masters require the lazy-master launch profile");
++      return false;
++    }
+     if (mmd && mmd->sculpt_color_grids && mmd->sculpt_color_level > 0 &&
+         mmd->sculpt_color_level < mmd->totlvl)
+     {
+@@ -7863,6 +7867,45 @@ static bool sculpt_polypaint_prepare_stroke_master(bContext *C, wmOperator *op)
+   }
+   const Mesh *mesh = id_cast<Mesh *>(ob->data);
+   const SculptSession *ss = ob->runtime->sculpt_session;
++  const char *multi = std::getenv("BLENDER_SCULPT_POLYPAINT_MULTI_ATTRIBUTE");
++  if (mmd && ((multi && multi[0] == '1') || mmd->sculpt_color_attribute[0] ||
++              !mmd->sculpt_color_attributes.is_empty())) {
++    const char *name = mesh->active_color_attribute;
++    if (!name || !name[0]) {
++      BKE_report(op->reports, RPT_ERROR, "Select a Color Attribute before painting");
++      return false;
++    }
++    if (!mmd->sculpt_color_attribute[0] || !STREQ(name, mmd->sculpt_color_attribute)) {
++      if (!(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0 ||
++          (ss && (ss->cache || ss->filter_cache))) {
++        BKE_report(op->reports, RPT_ERROR, "Use the Polypaint attribute controls between strokes with Global Undo enabled");
++        return false;
++      }
++      UndoStack *selection_stack = ED_undo_stack_get();
++      if (!selection_stack || selection_stack->step_init ||
++          !ED_undo_is_memfile_compatible(C)) {
++        return false;
++      }
++      UndoStep *previous = selection_stack->step_active;
++      ED_undo_push(C, "Before Polypaint Attribute Change");
++      if (!selection_stack->step_active || selection_stack->step_active == previous ||
++          selection_stack->step_active->type != BKE_UNDOSYS_TYPE_MEMFILE) {
++        return false;
++      }
++      if (!bke::multires_layers::polypaint_attribute_activate(*mmd, name)) {
++        BKE_report(op->reports, RPT_ERROR, "Invalid Polypaint attribute directory");
++        return false;
++      }
++      DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
++      previous = selection_stack->step_active;
++      ED_undo_push(C, "Prepare Polypaint Attribute");
++      if (!selection_stack->step_active || selection_stack->step_active == previous ||
++          selection_stack->step_active->type != BKE_UNDOSYS_TYPE_MEMFILE) {
++        BKE_report(op->reports, RPT_ERROR, "Polypaint attribute Undo checkpoint failed");
++        return false;
++      }
++    }
++  }
+   if (!mmd || mmd->sculptlvl < 1 || mmd->sculptlvl > mmd->totlvl ||
+       mmd->sculptlvl > 13 || (ss && (ss->cache || ss->filter_cache)))
+   {
+diff --git a/source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc b/source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc
+index 8f105da..2dabea2 100644
+--- a/source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc
++++ b/source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc
+@@ -7,6 +7,7 @@
+  * Implements the Sculpt Mode tools.
+  */
+ 
++#include "BLI_color.hh"
+ #include "BLI_bit_vector.hh"
+ #include "BLI_index_mask.hh"
+ #include "BLI_path_utils.hh"
+@@ -32,6 +33,7 @@
+ #include "DNA_scene_types.h"
+ #include "DNA_userdef_types.h"
+ 
++#include "BKE_attribute.h"
+ #include "BKE_attribute.hh"
+ #include "BKE_brush.hh"
+ #include "BKE_ccg.hh"
+@@ -92,6 +94,7 @@
+ 
+ #include <cmath>
+ #include <cstring>
++#include <string>
+ 
+ namespace blender::ed::sculpt_paint {
+ 
+@@ -350,6 +353,191 @@ static void SCULPT_OT_multires_base_fingerprint(wmOperatorType *ot)
+ }
+ 
+ 
++/* Named color selection is a storage transaction, not a geometry rebuild. */
++static bool sculpt_multires_polypaint_attribute_poll(bContext *C)
++{
++  const Object *object = CTX_data_active_object(C);
++  return object && object->type == OB_MESH &&
++         ELEM(object->mode, OB_MODE_OBJECT, OB_MODE_SCULPT) &&
++         BKE_modifiers_findby_type(object, eModifierType_Multires);
++}
++
++static wmOperatorStatus sculpt_multires_polypaint_attribute_exec(bContext *C, wmOperator *op)
++{
++  const char *enabled = BLI_getenv("BLENDER_SCULPT_POLYPAINT_MULTI_ATTRIBUTE");
++  if (!enabled || enabled[0] != '1' || enabled[1] != '\0') {
++    BKE_report(op->reports, RPT_ERROR, "Enable the multi-attribute Polypaint launch profile");
++    return OPERATOR_CANCELLED;
++  }
++  Object *object = CTX_data_active_object(C);
++  Mesh &mesh = *id_cast<Mesh *>(object->data);
++  SculptSession *session = object->runtime->sculpt_session;
++  if (object->id.lib || mesh.id.lib || mesh.id.us != 1 ||
++      !(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0 ||
++      (session && (session->cache || session->filter_cache))) {
++    BKE_report(op->reports, RPT_ERROR, "Finish the stroke and use local single-user mesh data with Global Undo");
++    return OPERATOR_CANCELLED;
++  }
++  MultiresModifierData *mmd = nullptr;
++  for (ModifierData &md : object->modifiers) {
++    if (md.type == eModifierType_Multires) {
++      if (mmd) {
++        BKE_report(op->reports, RPT_ERROR, "Select an object with one Multires modifier");
++        return OPERATOR_CANCELLED;
++      }
++      mmd = reinterpret_cast<MultiresModifierData *>(&md);
++    }
++  }
++  char name[68], new_name[68];
++  RNA_string_get(op->ptr, "name", name);
++  RNA_string_get(op->ptr, "new_name", new_name);
++  const int action = RNA_enum_get(op->ptr, "action");
++  const auto attributes = mesh.attributes();
++  const auto meta = attributes.lookup_meta_data(name);
++  if (!name[0] || (action == 1 ? attributes.contains(name) : !bke::mesh::is_color_attribute(meta)) ||
++      (meta && !ELEM(meta->domain, bke::AttrDomain::Point, bke::AttrDomain::Corner)) ||
++      (action == 3 && (!new_name[0] || attributes.contains(new_name)))) {
++    BKE_report(op->reports, RPT_ERROR, "Choose a valid unique Color Attribute name");
++    return OPERATOR_CANCELLED;
++  }
++  /* A removed external attribute may still own painted data. Do not reuse its
++   * name silently: restore it first, or remove its master through these controls. */
++  MultiresModifierData occupied{};
++  if (action == 1 && (STREQ(mmd->sculpt_color_attribute, name) ||
++      (!mmd->sculpt_color_attribute[0] ? false :
++       bke::multires_layers::polypaint_attribute_view(*mmd, name, occupied)))) {
++    BKE_report(op->reports, RPT_ERROR, "A retained Paint master already owns this name");
++    return OPERATOR_CANCELLED;
++  }
++  UndoStack *stack = ED_undo_stack_get();
++  if (!stack || stack->step_init || stack->group_level != 0 ||
++      !ED_undo_is_memfile_compatible(C)) {
++    BKE_report(op->reports, RPT_ERROR, "Finish the current Undo transaction first");
++    return OPERATOR_CANCELLED;
++  }
++  const UndoStep *previous = stack->step_active;
++  ED_undo_push(C, "Before Polypaint Attribute Operation");
++  if (!stack->step_active || stack->step_active == previous ||
++      stack->step_active->type != BKE_UNDOSYS_TYPE_MEMFILE) {
++    BKE_report(op->reports, RPT_ERROR, "Paint attribute checkpoint failed; no data changed");
++    return OPERATOR_CANCELLED;
++  }
++  /* Bind old one-master files BEFORE changing the mesh's active attribute. */
++  if (!mmd->sculpt_color_attribute[0] && mesh.active_color_attribute &&
++      mesh.active_color_attribute[0]) {
++    if (!bke::multires_layers::polypaint_attribute_activate(*mmd, mesh.active_color_attribute)) {
++      return OPERATOR_CANCELLED;
++    }
++  }
++  auto writable = mesh.attributes_for_write();
++  if (action == 1) {
++    if (!writable.add(name, bke::AttrDomain::Corner, bke::AttrType::ColorFloat,
++                      bke::AttributeInitDefaultValue())) {
++      return OPERATOR_CANCELLED;
++    }
++    auto colors = writable.lookup_for_write_span<ColorGeometry4f>(name);
++    colors.span.fill(ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
++    colors.finish();
++  }
++  if (ELEM(action, 0, 1)) {
++    if (!bke::multires_layers::polypaint_attribute_activate(*mmd, name)) {
++      if (action == 1) {
++        writable.remove(name);
++      }
++      BKE_report(op->reports, RPT_ERROR, "Paint master selection failed");
++      return OPERATOR_CANCELLED;
++    }
++    BKE_id_attributes_active_color_set(&mesh.id, name);
++    if (!mesh.default_color_attribute || !mesh.default_color_attribute[0]) {
++      BKE_id_attributes_default_color_set(&mesh.id, name);
++    }
++  }
++  else if (action == 2) {
++    const bool was_active = mesh.active_color_attribute && STREQ(mesh.active_color_attribute, name);
++    const bool was_default = mesh.default_color_attribute && STREQ(mesh.default_color_attribute, name);
++    if (!writable.remove(name)) {
++      return OPERATOR_CANCELLED;
++    }
++    bke::multires_layers::polypaint_attribute_remove(*mmd, name);
++    std::string replacement;
++    writable.foreach_attribute([&](const bke::AttributeIter &attribute) {
++      if (replacement.empty() && bke::mesh::is_color_attribute(
++          writable.lookup_meta_data(attribute.name)) &&
++          ELEM(attribute.domain, bke::AttrDomain::Point, bke::AttrDomain::Corner)) {
++        replacement = std::string(attribute.name);
++      }
++    });
++    if (was_active) {
++      BKE_id_attributes_active_color_set(&mesh.id, replacement.c_str());
++      if (!replacement.empty()) {
++        bke::multires_layers::polypaint_attribute_activate(*mmd, replacement.c_str());
++      }
++    }
++    if (was_default) {
++      BKE_id_attributes_default_color_set(&mesh.id, replacement.c_str());
++    }
++  }
++  else if (action == 3) {
++    const bool was_active = mesh.active_color_attribute && STREQ(mesh.active_color_attribute, name);
++    const bool was_default = mesh.default_color_attribute && STREQ(mesh.default_color_attribute, name);
++    /* Check the archive namespace before renaming the base mesh entry. */
++    MultiresModifierData collision{};
++    if (mmd->sculpt_color_attribute[0] &&
++        bke::multires_layers::polypaint_attribute_view(*mmd, new_name, collision)) {
++      BKE_report(op->reports, RPT_ERROR, "A retained Paint master already owns the new name");
++      return OPERATOR_CANCELLED;
++    }
++    if (!writable.rename(name, new_name)) {
++      return OPERATOR_CANCELLED;
++    }
++    if (!bke::multires_layers::polypaint_attribute_rename(*mmd, name, new_name)) {
++      writable.rename(new_name, name);
++      return OPERATOR_CANCELLED;
++    }
++    if (was_active) BKE_id_attributes_active_color_set(&mesh.id, new_name);
++    if (was_default) BKE_id_attributes_default_color_set(&mesh.id, new_name);
++  }
++  /* Selection only refreshes named GPU buffers. Structural attribute changes
++   * also invalidate evaluated mesh attributes through the dependency graph. */
++  if (session) {
++    if (bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*object)) {
++      IndexMaskMemory memory;
++      const IndexMask nodes = bke::pbvh::all_leaf_nodes(*pbvh, memory);
++      if (name[0]) pbvh->tag_attribute_changed(nodes, name);
++      if (new_name[0]) pbvh->tag_attribute_changed(nodes, new_name);
++    }
++  }
++  DEG_id_tag_update(&mesh.id, action == 0 ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
++  DEG_id_tag_update(&object->id, action == 0 ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
++  WM_main_add_notifier(NC_GEOM | ND_DATA, &mesh);
++  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, object);
++  std::printf("[POLYPAINT_ATTRIBUTE] action=%d name=%s master=%s level=%d archived=%d\n",
++              action, name, mmd->sculpt_color_attribute, mmd->sculpt_color_level,
++              mmd->sculpt_color_attributes.count());
++  std::fflush(stdout);
++  return OPERATOR_FINISHED;
++}
++
++static void SCULPT_OT_multires_polypaint_attribute(wmOperatorType *ot)
++{
++  static const EnumPropertyItem actions[] = {
++      {0, "SELECT", 0, "Select", "Paint on this attribute"},
++      {1, "ADD", 0, "Add", "Create a white float corner Color Attribute"},
++      {2, "REMOVE", 0, "Remove", "Remove the attribute and its Paint master"},
++      {3, "RENAME", 0, "Rename", "Rename the attribute and its Paint master together"},
++      {0, nullptr, 0, nullptr, nullptr},
++  };
++  ot->name = "Multires Polypaint Attribute";
++  ot->idname = "SCULPT_OT_multires_polypaint_attribute";
++  ot->description = "Manage independent Multires Color Attributes with Undo";
++  ot->exec = sculpt_multires_polypaint_attribute_exec;
++  ot->poll = sculpt_multires_polypaint_attribute_poll;
++  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
++  RNA_def_enum(ot->srna, "action", actions, 0, "Action", "Color Attribute operation");
++  RNA_def_string(ot->srna, "name", "", 68, "Attribute", "Color Attribute name");
++  RNA_def_string(ot->srna, "new_name", "", 68, "New Name", "New unique name");
++}
++
+ static bool sculpt_multires_merge_visible_to_base_poll(bContext *C)
+ {
+   const Object *object = CTX_data_active_object(C);
+@@ -2973,6 +3161,7 @@ void operatortypes_sculpt()
+   WM_operatortype_append(SCULPT_OT_multires_base_capture);
+   WM_operatortype_append(SCULPT_OT_multires_base_fingerprint);
+   WM_operatortype_append(SCULPT_OT_multires_merge_visible_to_base);
++  WM_operatortype_append(SCULPT_OT_multires_polypaint_attribute);
+   WM_operatortype_append(SCULPT_OT_multires_texture_displacement_bake);
+   WM_operatortype_append(SCULPT_OT_multires_shrinkwrap_bake);
+   WM_operatortype_append(SCULPT_OT_multires_layer_delete);
+diff --git a/source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc b/source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc
+index cf29938..ae43437 100644
+--- a/source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc
++++ b/source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc
+@@ -918,6 +918,12 @@ static void restore_color_grids(Object &object, StepData &step_data)
+   if (!mmd || !ccg) {
+     return;
+   }
++  const Mesh &mesh = *id_cast<Mesh *>(object.data);
++  if (mmd->sculpt_color_attribute[0] && mesh.active_color_attribute &&
++      !STREQ(mmd->sculpt_color_attribute, mesh.active_color_attribute) &&
++      !bke::multires_layers::polypaint_attribute_activate(*mmd, mesh.active_color_attribute)) {
++    return;
++  }
+   if (!mmd->sculpt_color_grids) {
+     int saved_level = 0;
+     bool has_saved_colors = false;
+diff --git a/source/blender/makesdna/DNA_modifier_types.h b/source/blender/makesdna/DNA_modifier_types.h
+index 58c38fd..d48ce45 100644
+--- a/source/blender/makesdna/DNA_modifier_types.h
++++ b/source/blender/makesdna/DNA_modifier_types.h
+@@ -1243,6 +1243,19 @@ struct MultiresColorGrid {
+   int level;
+ };
+ 
++/* Inactive Polypaint master. The active master remains in the legacy modifier
++ * slot, so brush/Color Undo capture retain their proven storage contract.
++ * Each allocation has exactly one owner. Switching exchanges directories only. */
++struct MultiresColorAttribute {
++  MultiresColorAttribute *next = nullptr;
++  MultiresColorAttribute *prev = nullptr;
++  char name[68] = "";
++  char _pad[4] = {};
++  MultiresColorGrid *grids = nullptr;
++  int grids_num = 0;
++  int level = 0;
++};
++
+ /* Persistent per-CCG-grid Face Set data.
+  * Uniform grids keep ids == nullptr and store only uniform_id.
+  * ids is allocated lazily only when a grid contains a high-resolution boundary. */
+@@ -1290,6 +1303,9 @@ struct MultiresModifierData {
+   MultiresColorGrid *sculpt_color_grids = nullptr;
+   int sculpt_color_grids_num = 0;
+   int sculpt_color_level = 0;
++  char sculpt_color_attribute[68] = "";
++  char _pad_color_attribute[4] = {};
++  ListBaseT<MultiresColorAttribute> sculpt_color_attributes = {nullptr, nullptr};
+ 
+   /* Face Set master data at the highest stored Multires resolution. Lower
+    * sculpt levels sample this data instead of destructively downsampling it. */
+diff --git a/source/blender/makesrna/intern/rna_modifier.cc b/source/blender/makesrna/intern/rna_modifier.cc
+index 12491b6..13234e1 100644
+--- a/source/blender/makesrna/intern/rna_modifier.cc
++++ b/source/blender/makesrna/intern/rna_modifier.cc
+@@ -3720,6 +3720,20 @@ static void rna_def_modifier_multires_sculpt_layer(BlenderRNA *brna)
+   RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_visible_update");
+ }
+ 
++static void rna_def_modifier_multires_color_attribute(BlenderRNA *brna)
++{
++  StructRNA *srna = RNA_def_struct(brna, "MultiresColorAttribute", nullptr);
++  RNA_def_struct_sdna(srna, "MultiresColorAttribute");
++  RNA_def_struct_ui_text(srna, "Multires Color Attribute", "Independent stored Polypaint master");
++  PropertyRNA *prop = RNA_def_property(srna, "name", PROP_STRING, PROP_NONE);
++  RNA_def_property_string_sdna(prop, nullptr, "name");
++  RNA_def_struct_name_property(srna, prop);
++  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
++  prop = RNA_def_property(srna, "level", PROP_INT, PROP_NONE);
++  RNA_def_property_int_sdna(prop, nullptr, "level");
++  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
++}
++
+ static void rna_def_modifier_multires(BlenderRNA *brna)
+ {
+   StructRNA *srna;
+@@ -3730,6 +3744,19 @@ static void rna_def_modifier_multires(BlenderRNA *brna)
+   RNA_def_struct_sdna(srna, "MultiresModifierData");
+   RNA_def_struct_ui_icon(srna, ICON_MOD_MULTIRES);
+ 
++  prop = RNA_def_property(srna, "polypaint_attributes", PROP_COLLECTION, PROP_NONE);
++  RNA_def_property_collection_sdna(prop, nullptr, "sculpt_color_attributes", nullptr);
++  RNA_def_property_struct_type(prop, "MultiresColorAttribute");
++  RNA_def_property_ui_text(prop, "Stored Color Attributes", "Inactive Polypaint masters");
++  prop = RNA_def_property(srna, "polypaint_attribute", PROP_STRING, PROP_NONE);
++  RNA_def_property_string_sdna(prop, nullptr, "sculpt_color_attribute");
++  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
++  RNA_def_property_ui_text(prop, "Paint Master Attribute", "Attribute owning the active master");
++  prop = RNA_def_property(srna, "polypaint_level", PROP_INT, PROP_NONE);
++  RNA_def_property_int_sdna(prop, nullptr, "sculpt_color_level");
++  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
++  RNA_def_property_ui_text(prop, "Color Resolution", "Active color master level");
++
+   prop = RNA_def_property(srna, "sculpt_layers", PROP_COLLECTION, PROP_NONE);
+   RNA_def_property_collection_sdna(prop, nullptr, "sculpt_layers", nullptr);
+   RNA_def_property_struct_type(prop, "MultiresSculptLayer");
+@@ -12631,6 +12658,7 @@ void RNA_def_modifier(BlenderRNA *brna)
+   rna_def_modifier_simpledeform(brna);
+   rna_def_modifier_warp(brna);
+   rna_def_modifier_multires_sculpt_layer(brna);
++  rna_def_modifier_multires_color_attribute(brna);
+   rna_def_modifier_multires(brna);
+   rna_def_modifier_surface(brna);
+   rna_def_modifier_fluid(brna);
+diff --git a/source/blender/modifiers/intern/MOD_multires.cc b/source/blender/modifiers/intern/MOD_multires.cc
+index 97da5e0..9666286 100644
+--- a/source/blender/modifiers/intern/MOD_multires.cc
++++ b/source/blender/modifiers/intern/MOD_multires.cc
+@@ -200,6 +200,18 @@ static void blend_write(BlendWriter *writer, const ID * /*id_owner*/, const Modi
+       }
+     }
+   }
++  writer->write_struct_list(&mmd->sculpt_color_attributes);
++  for (const MultiresColorAttribute &attribute : mmd->sculpt_color_attributes) {
++    if (attribute.grids && attribute.grids_num > 0) {
++      writer->write_struct_array(attribute.grids_num, attribute.grids);
++      for (int i = 0; i < attribute.grids_num; i++) {
++        const MultiresColorGrid &grid = attribute.grids[i];
++        if (grid.colors && grid.totcolor > 0) {
++          writer->write_raw(sizeof(float) * size_t(grid.totcolor) * 4, grid.colors);
++        }
++      }
++    }
++  }
+   if (mmd->sculpt_face_set_grids && mmd->sculpt_face_set_grids_num > 0) {
+     writer->write_struct_array(mmd->sculpt_face_set_grids_num, mmd->sculpt_face_set_grids);
+     for (int i = 0; i < mmd->sculpt_face_set_grids_num; i++) {
+@@ -264,6 +276,26 @@ static void blend_read(BlendDataReader *reader, ModifierData *md)
+       }
+     }
+   }
++  BLO_read_struct_list(reader, MultiresColorAttribute, &mmd->sculpt_color_attributes);
++  mmd->sculpt_color_attribute[sizeof(mmd->sculpt_color_attribute) - 1] = '\0';
++  for (MultiresColorAttribute &attribute : mmd->sculpt_color_attributes) {
++    attribute.name[sizeof(attribute.name) - 1] = '\0';
++    if (attribute.grids_num <= 0 || !attribute.grids ||
++        !BLO_read_array(reader, &attribute.grids, attribute.grids_num)) {
++      attribute.grids = nullptr;
++      attribute.grids_num = 0;
++      attribute.level = 0;
++      continue;
++    }
++    for (int i = 0; i < attribute.grids_num; i++) {
++      MultiresColorGrid &grid = attribute.grids[i];
++      if (grid.totcolor > 0 && grid.colors &&
++          !BLO_read_array(reader, reinterpret_cast<float **>(&grid.colors), grid.totcolor, 4)) {
++        grid.colors = nullptr;
++        grid.totcolor = 0;
++      }
++    }
++  }
+   if (mmd->sculpt_face_set_grids_num > 0 && mmd->sculpt_face_set_grids) {
+     if (!BLO_read_array(reader, &mmd->sculpt_face_set_grids, mmd->sculpt_face_set_grids_num)) {
+       mmd->sculpt_face_set_grids = nullptr;
+@@ -329,6 +361,9 @@ static const MultiresModifierData *polypaint_mesh_color_source(
+   if (original && original->type == eModifierType_Multires) {
+     source = reinterpret_cast<const MultiresModifierData *>(original);
+   }
++  if (!source->sculpt_color_attributes.is_empty()) {
++    return source;
++  }
+   return source->sculpt_color_grids && source->sculpt_color_level >= 1 &&
+                  source->sculpt_color_level <= 13 &&
+                  source->sculpt_color_grids_num == base_mesh.corners_num ?
+@@ -413,7 +448,8 @@ static bool polypaint_mesh_sample(const MultiresModifierData &source,
+   return true;
+ }
+ 
+-static void polypaint_evaluated_mesh_color(const MultiresModifierData &source,
++static void polypaint_evaluated_mesh_attribute(const MultiresModifierData &source,
++                                         const char *attribute_name,
+                                          const Mesh &base_mesh,
+                                          Mesh &evaluated_mesh,
+                                          bke::subdiv::Subdiv *subdiv,
+@@ -422,7 +458,7 @@ static void polypaint_evaluated_mesh_color(const MultiresModifierData &source,
+   const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+   const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+   const double start = trace ? BLI_time_now_seconds() : 0.0;
+-  const std::string name(base_mesh.active_color_attribute);
++  const std::string name(attribute_name);
+   bke::SpanAttributeWriter<ColorGeometry4f> colors =
+       polypaint_mesh_color_writer(evaluated_mesh, name);
+   if (!colors) {
+@@ -487,6 +523,25 @@ static void polypaint_evaluated_mesh_color(const MultiresModifierData &source,
+   }
+ }
+ 
++static void polypaint_evaluated_mesh_color(const MultiresModifierData &source,
++                                         const Mesh &base_mesh, Mesh &evaluated_mesh,
++                                         bke::subdiv::Subdiv *subdiv,
++                                         const bke::subdiv::ToMeshSettings *settings)
++{
++  const char *active_name = source.sculpt_color_attribute[0] ?
++      source.sculpt_color_attribute : base_mesh.active_color_attribute;
++  if (active_name && active_name[0] && source.sculpt_color_grids) {
++    polypaint_evaluated_mesh_attribute(source, active_name, base_mesh, evaluated_mesh, subdiv, settings);
++  }
++  for (const MultiresColorAttribute &attribute : source.sculpt_color_attributes) {
++    MultiresModifierData view{};
++    if (attribute.grids && bke::multires_layers::polypaint_attribute_view(source, attribute.name, view)) {
++      polypaint_evaluated_mesh_attribute(view, attribute.name, base_mesh, evaluated_mesh, subdiv, settings);
++    }
++  }
++}
++
++
+ /* Use the same mask evaluator and subdivision vertex indexing as CCG. This keeps
+  * Object/Render evaluation and Bake consistent with the live Sculpt preview. */
+ static Array<float> multires_shrinkwrap_mesh_masks(bke::subdiv::Subdiv &subdiv,

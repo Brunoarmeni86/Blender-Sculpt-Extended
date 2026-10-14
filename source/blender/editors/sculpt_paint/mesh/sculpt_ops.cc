@@ -7,11 +7,13 @@
  * Implements the Sculpt Mode tools.
  */
 
+#include "BLI_color.hh"
 #include "BLI_bit_vector.hh"
 #include "BLI_index_mask.hh"
 #include "BLI_path_utils.hh"
 #include "BLI_time.h"
 #include <cstdio>
+#include <cstdint>
 #include "MEM_guardedalloc.h"
 
 #include "BLI_enumerable_thread_specific.hh"
@@ -25,14 +27,18 @@
 #include "DNA_brush_types.h"
 #include "DNA_listBase.h"
 #include "DNA_modifier_types.h"
+#include "DNA_meshdata_types.h"
 #include "DNA_node_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
+#include "DNA_userdef_types.h"
 
+#include "BKE_attribute.h"
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_ccg.hh"
 #include "BKE_context.hh"
+#include "BKE_customdata.hh"
 #include "BKE_layer.hh"
 #include "BKE_main.hh"
 #include "BKE_material.hh"
@@ -48,6 +54,7 @@
 #include "BKE_paint_types.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
+#include "BKE_undo_system.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_subdiv.hh"
 
@@ -64,6 +71,7 @@
 #include "ED_object.hh"
 #include "ED_screen.hh"
 #include "ED_sculpt.hh"
+#include "ED_undo.hh"
 
 #include "../paint_intern.hh"
 #include "mesh_brush_common.hh"
@@ -86,6 +94,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <string>
 
 namespace blender::ed::sculpt_paint {
 
@@ -99,7 +108,530 @@ static MultiresModifierData *sculpt_multires_layer_modifier(Object &ob)
       &ob, eModifierType_Multires));
 }
 
-static bool sculpt_multires_layer_commit(Object &ob, wmOperator &op)
+/* Read-only diagnostic. No allocation, flush, evaluation, tagging or Undo push. */
+struct MultiresAuditHash {
+  uint64_t value = UINT64_C(14695981039346656037);
+  uint64_t words = 0;
+  uint64_t invalid = 0;
+
+  void word(const uint32_t bits)
+  {
+    value = (value ^ bits) * UINT64_C(1099511628211);
+    words++;
+  }
+  void scalar(const float component)
+  {
+    uint32_t bits;
+    static_assert(sizeof(bits) == sizeof(component));
+    std::memcpy(&bits, &component, sizeof(bits));
+    word(bits);
+    invalid += !std::isfinite(component);
+  }
+  void text(const char *value)
+  {
+    for (; *value; value++) {
+      word(uint32_t(static_cast<unsigned char>(*value)));
+    }
+    word(0);
+  }
+};
+
+static MultiresAuditHash multires_audit_disps(const MDisps *data, const int count)
+{
+  MultiresAuditHash hash;
+  hash.word(uint32_t(count));
+  hash.word(data != nullptr);
+  if (!data) {
+    hash.invalid += count != 0;
+    return hash;
+  }
+  for (int grid = 0; grid < count; grid++) {
+    const MDisps &item = data[grid];
+    hash.word(uint32_t(item.level));
+    hash.word(uint32_t(item.totdisp));
+    hash.word(item.disps != nullptr);
+    if (item.totdisp == 0 && item.disps == nullptr) {
+      continue;
+    }
+    if (item.level < 1 || item.level > 13) {
+      hash.invalid++;
+      continue;
+    }
+    const int side = (1 << (item.level - 1)) + 1;
+    if (item.totdisp != side * side) {
+      hash.invalid++;
+      continue;
+    }
+    /* Sparse null payloads are valid zero contributions. */
+    if (!item.disps) {
+      continue;
+    }
+    for (int sample = 0; sample < item.totdisp; sample++) {
+      for (int axis = 0; axis < 3; axis++) {
+        hash.scalar(item.disps[sample][axis]);
+      }
+    }
+  }
+  return hash;
+}
+
+static void multires_audit_json_string(const char *text)
+{
+  std::putchar('"');
+  for (; *text; text++) {
+    const unsigned char byte = static_cast<unsigned char>(*text);
+    if (byte == '"' || byte == '\\') {
+      std::putchar('\\');
+      std::putchar(byte);
+    }
+    else if (byte < 0x20) {
+      std::printf("\\u%04x", unsigned(byte));
+    }
+    else {
+      std::putchar(byte);
+    }
+  }
+  std::putchar('"');
+}
+
+static bool sculpt_multires_base_fingerprint_poll(bContext *C)
+{
+  const Object *object = CTX_data_active_object(C);
+  return object && object->type == OB_MESH &&
+         BKE_modifiers_findby_type(object, eModifierType_Multires);
+}
+
+static wmOperatorStatus sculpt_multires_base_fingerprint_exec(bContext *C, wmOperator *op)
+{
+  Object *object = CTX_data_active_object(C);
+  if (!object || object->type != OB_MESH) {
+    return OPERATOR_CANCELLED;
+  }
+  const SculptSession *ss = object->runtime->sculpt_session;
+  if (ss && (ss->cache || ss->filter_cache)) {
+    BKE_report(op->reports, RPT_ERROR, "Release the active stroke or filter before taking a fingerprint");
+    return OPERATOR_CANCELLED;
+  }
+  const MultiresModifierData *mmd = sculpt_multires_layer_modifier(*object);
+  if (!mmd) {
+    return OPERATOR_CANCELLED;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(object->data);
+  const SubdivCCG *ccg = ss ? ss->subdiv_ccg : nullptr;
+  char label[128];
+  RNA_string_get(op->ptr, "label", label);
+  const bool payloads = RNA_boolean_get(op->ptr, "include_layer_payloads");
+  const bool surface = RNA_boolean_get(op->ptr, "include_surface");
+  const double start = BLI_time_now_seconds();
+  const MDisps *base = static_cast<const MDisps *>(
+      CustomData_get_layer(&mesh.corner_data, CD_MDISPS));
+  /* No grids before the first subdivision is a valid base. */
+  const MultiresAuditHash native = multires_audit_disps(base, base ? mesh.corners_num : 0);
+  MultiresAuditHash cage, evaluated, metadata;
+  cage.word(uint32_t(mesh.verts_num));
+  for (const float3 &point : mesh.vert_positions()) {
+    for (int axis = 0; axis < 3; axis++) {
+      cage.scalar(point[axis]);
+    }
+  }
+  if (surface && ccg) {
+    evaluated.word(uint32_t(ccg->level));
+    evaluated.word(uint32_t(ccg->grids_num));
+    evaluated.word(uint32_t(ccg->grid_size));
+    for (const float3 &point : ccg->positions) {
+      for (int axis = 0; axis < 3; axis++) {
+        evaluated.scalar(point[axis]);
+      }
+    }
+  }
+  metadata.word(uint32_t(mmd->sculpt_layer_active));
+  metadata.word(uint32_t(mmd->sculpt_layer_recording));
+  int visible = 0;
+  int index = 0;
+  uint64_t layer_invalid = 0;
+  std::printf("[MULTIRES_AUDIT_BEGIN] ");
+  multires_audit_json_string(label);
+  std::putchar('\n');
+  for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    metadata.text(layer.name);
+    metadata.word(uint32_t(layer.flag));
+    metadata.scalar(layer.strength);
+    metadata.word(uint32_t(layer.level));
+    metadata.word(uint32_t(layer.grids_num));
+    visible += (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0;
+    MultiresAuditHash grids, l0;
+    if (payloads) {
+      /* Reject incompatible counts without walking an unknown descriptor table. */
+      if (layer.grids_num < 0 ||
+          (layer.grids_num != 0 && layer.grids_num != mesh.corners_num)) {
+        grids.invalid++;
+      }
+      else {
+        grids = multires_audit_disps(layer.disps, layer.grids_num);
+      }
+      l0.word(uint32_t(layer.base_verts_num));
+      l0.word(layer.base_deltas != nullptr);
+      if (layer.base_verts_num < 0 ||
+          (layer.base_verts_num != 0 && layer.base_verts_num != mesh.verts_num)) {
+        l0.invalid++;
+      }
+      else if (layer.base_deltas) {
+        for (int vertex = 0; vertex < layer.base_verts_num; vertex++) {
+          for (int axis = 0; axis < 3; axis++) {
+            l0.scalar(layer.base_deltas[vertex][axis]);
+          }
+        }
+      }
+      else {
+        l0.invalid += layer.base_verts_num != 0;
+      }
+    }
+    layer_invalid += grids.invalid + l0.invalid;
+    std::printf("[MULTIRES_LAYER_AUDIT] {\"index\":%d,\"name\":", index++);
+    multires_audit_json_string(layer.name);
+    std::printf(",\"level\":%d,\"visible\":%d,\"strength\":", layer.level,
+                int((layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0));
+    if (std::isfinite(layer.strength)) {
+      std::printf("%.9g", double(layer.strength));
+    }
+    else {
+      std::printf("null");
+    }
+    std::printf(
+        ",\"payload_read\":%d,"
+        "\"grids_hash\":\"%016llx\",\"l0_hash\":\"%016llx\",\"invalid\":%llu}\n",
+        int(payloads),
+        static_cast<unsigned long long>(grids.value),
+        static_cast<unsigned long long>(l0.value),
+        static_cast<unsigned long long>(grids.invalid + l0.invalid));
+  }
+  std::printf("[MULTIRES_BASE_AUDIT] {\"label\":");
+  multires_audit_json_string(label);
+  std::printf(
+      ",\"object\":");
+  multires_audit_json_string(object->id.name + 2);
+  std::printf(
+      ",\"modifier\":");
+  multires_audit_json_string(mmd->modifier.name);
+  std::printf(
+      ",\"sculpt\":%d,\"top\":%d,\"verts\":%d,\"corners\":%d,\"native_available\":%d,"
+      "\"active\":%d,\"recording\":%d,"
+      "\"layers\":%d,\"visible\":%d,\"pending_coords\":%d,"
+      "\"native_hash\":\"%016llx\",\"native_words\":%llu,"
+      "\"cage_hash\":\"%016llx\",\"metadata_hash\":\"%016llx\","
+      "\"surface_read\":%d,\"surface_hash\":\"%016llx\",\"invalid\":%llu,"
+      "\"milliseconds\":%.3f}\n",
+      mmd->sculptlvl, mmd->totlvl, mesh.verts_num, mesh.corners_num, int(base != nullptr),
+      mmd->sculpt_layer_active,
+      int(mmd->sculpt_layer_recording), index, visible,
+      ccg ? int(ccg->dirty.coords) : 0,
+      static_cast<unsigned long long>(native.value),
+      static_cast<unsigned long long>(native.words),
+      static_cast<unsigned long long>(cage.value),
+      static_cast<unsigned long long>(metadata.value), int(surface && ccg),
+      static_cast<unsigned long long>(evaluated.value),
+      static_cast<unsigned long long>(native.invalid + cage.invalid + metadata.invalid +
+                                      evaluated.invalid + layer_invalid),
+      (BLI_time_now_seconds() - start) * 1000.0);
+  std::fflush(stdout);
+  BKE_report(op->reports, RPT_INFO, "Read-only Multires fingerprints written to the launch log");
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_OT_multires_base_fingerprint(wmOperatorType *ot)
+{
+  ot->name = "Multires Base Fingerprint";
+  ot->idname = "SCULPT_OT_multires_base_fingerprint";
+  ot->description = "Read native base, stored layers and live surface without committing or adding an Undo step";
+  ot->exec = sculpt_multires_base_fingerprint_exec;
+  ot->poll = sculpt_multires_base_fingerprint_poll;
+  /* Intentionally no REGISTER/UNDO flags: even Repeat Last must stay untouched. */
+  ot->flag = 0;
+  RNA_def_string(ot->srna, "label", "manual", 128, "Label", "Label written to the launch log");
+  RNA_def_boolean(ot->srna, "include_layer_payloads", true, "Read Layer Payloads", "Read every stored layer sample; explicit cost on large meshes");
+  RNA_def_boolean(ot->srna, "include_surface", true, "Read Live Surface", "Read live CCG coordinates without evaluating the object");
+}
+
+
+/* Named color selection is a storage transaction, not a geometry rebuild. */
+static bool sculpt_multires_polypaint_attribute_poll(bContext *C)
+{
+  const Object *object = CTX_data_active_object(C);
+  return object && object->type == OB_MESH &&
+         ELEM(object->mode, OB_MODE_OBJECT, OB_MODE_SCULPT) &&
+         BKE_modifiers_findby_type(object, eModifierType_Multires);
+}
+
+static wmOperatorStatus sculpt_multires_polypaint_attribute_exec(bContext *C, wmOperator *op)
+{
+  const char *enabled = BLI_getenv("BLENDER_SCULPT_POLYPAINT_MULTI_ATTRIBUTE");
+  if (!enabled || enabled[0] != '1' || enabled[1] != '\0') {
+    BKE_report(op->reports, RPT_ERROR, "Enable the multi-attribute Polypaint launch profile");
+    return OPERATOR_CANCELLED;
+  }
+  Object *object = CTX_data_active_object(C);
+  Mesh &mesh = *id_cast<Mesh *>(object->data);
+  SculptSession *session = object->runtime->sculpt_session;
+  if (object->id.lib || mesh.id.lib || mesh.id.us != 1 ||
+      !(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0 ||
+      (session && (session->cache || session->filter_cache))) {
+    BKE_report(op->reports, RPT_ERROR, "Finish the stroke and use local single-user mesh data with Global Undo");
+    return OPERATOR_CANCELLED;
+  }
+  MultiresModifierData *mmd = nullptr;
+  for (ModifierData &md : object->modifiers) {
+    if (md.type == eModifierType_Multires) {
+      if (mmd) {
+        BKE_report(op->reports, RPT_ERROR, "Select an object with one Multires modifier");
+        return OPERATOR_CANCELLED;
+      }
+      mmd = reinterpret_cast<MultiresModifierData *>(&md);
+    }
+  }
+  char name[68], new_name[68];
+  RNA_string_get(op->ptr, "name", name);
+  RNA_string_get(op->ptr, "new_name", new_name);
+  const int action = RNA_enum_get(op->ptr, "action");
+  const auto attributes = mesh.attributes();
+  const auto meta = attributes.lookup_meta_data(name);
+  if (!name[0] || (action == 1 ? attributes.contains(name) : !bke::mesh::is_color_attribute(meta)) ||
+      (meta && !ELEM(meta->domain, bke::AttrDomain::Point, bke::AttrDomain::Corner)) ||
+      (action == 3 && (!new_name[0] || attributes.contains(new_name)))) {
+    BKE_report(op->reports, RPT_ERROR, "Choose a valid unique Color Attribute name");
+    return OPERATOR_CANCELLED;
+  }
+  /* A removed external attribute may still own painted data. Do not reuse its
+   * name silently: restore it first, or remove its master through these controls. */
+  MultiresModifierData occupied{};
+  if (action == 1 && (STREQ(mmd->sculpt_color_attribute, name) ||
+      (!mmd->sculpt_color_attribute[0] ? false :
+       bke::multires_layers::polypaint_attribute_view(*mmd, name, occupied)))) {
+    BKE_report(op->reports, RPT_ERROR, "A retained Paint master already owns this name");
+    return OPERATOR_CANCELLED;
+  }
+  UndoStack *stack = ED_undo_stack_get();
+  if (!stack || stack->step_init || stack->group_level != 0 ||
+      !ED_undo_is_memfile_compatible(C)) {
+    BKE_report(op->reports, RPT_ERROR, "Finish the current Undo transaction first");
+    return OPERATOR_CANCELLED;
+  }
+  const UndoStep *previous = stack->step_active;
+  ED_undo_push(C, "Before Polypaint Attribute Operation");
+  if (!stack->step_active || stack->step_active == previous ||
+      stack->step_active->type != BKE_UNDOSYS_TYPE_MEMFILE) {
+    BKE_report(op->reports, RPT_ERROR, "Paint attribute checkpoint failed; no data changed");
+    return OPERATOR_CANCELLED;
+  }
+  /* Bind old one-master files BEFORE changing the mesh's active attribute. */
+  if (!mmd->sculpt_color_attribute[0] && mesh.active_color_attribute &&
+      mesh.active_color_attribute[0]) {
+    if (!bke::multires_layers::polypaint_attribute_activate(*mmd, mesh.active_color_attribute)) {
+      return OPERATOR_CANCELLED;
+    }
+  }
+  auto writable = mesh.attributes_for_write();
+  if (action == 1) {
+    if (!writable.add(name, bke::AttrDomain::Corner, bke::AttrType::ColorFloat,
+                      bke::AttributeInitDefaultValue())) {
+      return OPERATOR_CANCELLED;
+    }
+    auto colors = writable.lookup_for_write_span<ColorGeometry4f>(name);
+    colors.span.fill(ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
+    colors.finish();
+  }
+  if (ELEM(action, 0, 1)) {
+    if (!bke::multires_layers::polypaint_attribute_activate(*mmd, name)) {
+      if (action == 1) {
+        writable.remove(name);
+      }
+      BKE_report(op->reports, RPT_ERROR, "Paint master selection failed");
+      return OPERATOR_CANCELLED;
+    }
+    BKE_id_attributes_active_color_set(&mesh.id, name);
+    if (!mesh.default_color_attribute || !mesh.default_color_attribute[0]) {
+      BKE_id_attributes_default_color_set(&mesh.id, name);
+    }
+  }
+  else if (action == 2) {
+    const bool was_active = mesh.active_color_attribute && STREQ(mesh.active_color_attribute, name);
+    const bool was_default = mesh.default_color_attribute && STREQ(mesh.default_color_attribute, name);
+    if (!writable.remove(name)) {
+      return OPERATOR_CANCELLED;
+    }
+    bke::multires_layers::polypaint_attribute_remove(*mmd, name);
+    std::string replacement;
+    writable.foreach_attribute([&](const bke::AttributeIter &attribute) {
+      if (replacement.empty() && bke::mesh::is_color_attribute(
+          writable.lookup_meta_data(attribute.name)) &&
+          ELEM(attribute.domain, bke::AttrDomain::Point, bke::AttrDomain::Corner)) {
+        replacement = std::string(attribute.name);
+      }
+    });
+    if (was_active) {
+      BKE_id_attributes_active_color_set(&mesh.id, replacement.c_str());
+      if (!replacement.empty()) {
+        bke::multires_layers::polypaint_attribute_activate(*mmd, replacement.c_str());
+      }
+    }
+    if (was_default) {
+      BKE_id_attributes_default_color_set(&mesh.id, replacement.c_str());
+    }
+  }
+  else if (action == 3) {
+    const bool was_active = mesh.active_color_attribute && STREQ(mesh.active_color_attribute, name);
+    const bool was_default = mesh.default_color_attribute && STREQ(mesh.default_color_attribute, name);
+    /* Check the archive namespace before renaming the base mesh entry. */
+    MultiresModifierData collision{};
+    if (mmd->sculpt_color_attribute[0] &&
+        bke::multires_layers::polypaint_attribute_view(*mmd, new_name, collision)) {
+      BKE_report(op->reports, RPT_ERROR, "A retained Paint master already owns the new name");
+      return OPERATOR_CANCELLED;
+    }
+    if (!writable.rename(name, new_name)) {
+      return OPERATOR_CANCELLED;
+    }
+    if (!bke::multires_layers::polypaint_attribute_rename(*mmd, name, new_name)) {
+      writable.rename(new_name, name);
+      return OPERATOR_CANCELLED;
+    }
+    if (was_active) BKE_id_attributes_active_color_set(&mesh.id, new_name);
+    if (was_default) BKE_id_attributes_default_color_set(&mesh.id, new_name);
+  }
+  /* Selection only refreshes named GPU buffers. Structural attribute changes
+   * also invalidate evaluated mesh attributes through the dependency graph. */
+  if (session) {
+    if (bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*object)) {
+      IndexMaskMemory memory;
+      const IndexMask nodes = bke::pbvh::all_leaf_nodes(*pbvh, memory);
+      if (name[0]) pbvh->tag_attribute_changed(nodes, name);
+      if (new_name[0]) pbvh->tag_attribute_changed(nodes, new_name);
+    }
+  }
+  DEG_id_tag_update(&mesh.id, action == 0 ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
+  DEG_id_tag_update(&object->id, action == 0 ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_GEOM | ND_DATA, &mesh);
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, object);
+  std::printf("[POLYPAINT_ATTRIBUTE] action=%d name=%s master=%s level=%d archived=%d\n",
+              action, name, mmd->sculpt_color_attribute, mmd->sculpt_color_level,
+              mmd->sculpt_color_attributes.count());
+  std::fflush(stdout);
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_OT_multires_polypaint_attribute(wmOperatorType *ot)
+{
+  static const EnumPropertyItem actions[] = {
+      {0, "SELECT", 0, "Select", "Paint on this attribute"},
+      {1, "ADD", 0, "Add", "Create a white float corner Color Attribute"},
+      {2, "REMOVE", 0, "Remove", "Remove the attribute and its Paint master"},
+      {3, "RENAME", 0, "Rename", "Rename the attribute and its Paint master together"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  ot->name = "Multires Polypaint Attribute";
+  ot->idname = "SCULPT_OT_multires_polypaint_attribute";
+  ot->description = "Manage independent Multires Color Attributes with Undo";
+  ot->exec = sculpt_multires_polypaint_attribute_exec;
+  ot->poll = sculpt_multires_polypaint_attribute_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  RNA_def_enum(ot->srna, "action", actions, 0, "Action", "Color Attribute operation");
+  RNA_def_string(ot->srna, "name", "", 68, "Attribute", "Color Attribute name");
+  RNA_def_string(ot->srna, "new_name", "", 68, "New Name", "New unique name");
+}
+
+static bool sculpt_multires_merge_visible_to_base_poll(bContext *C)
+{
+  const Object *object = CTX_data_active_object(C);
+  return object && object->type == OB_MESH && object->mode == OB_MODE_OBJECT &&
+         BKE_modifiers_findby_type(object, eModifierType_Multires);
+}
+
+static wmOperatorStatus sculpt_multires_merge_visible_to_base_exec(bContext *C, wmOperator *op)
+{
+  const char *enabled = BLI_getenv("BLENDER_SCULPT_LAYER_BAKE_BASE");
+  if (!enabled || enabled[0] != '1' || enabled[1] != '\0') {
+    BKE_report(op->reports, RPT_ERROR, "Enable the experimental visible-layer bake launch profile first");
+    return OPERATOR_CANCELLED;
+  }
+  Object *object = CTX_data_active_object(C);
+  if (!object || object->type != OB_MESH || object->mode != OB_MODE_OBJECT) {
+    BKE_report(op->reports, RPT_ERROR, "Switch to Object Mode before baking; pending Sculpt must commit in its original frame");
+    return OPERATOR_CANCELLED;
+  }
+  if (object->id.lib || object->adt || object->runtime->sculpt_session ||
+      !(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0)
+  {
+    BKE_report(op->reports, RPT_ERROR,
+               "Bake requires a local object without animation/drivers, no Sculpt session, and Global Undo enabled");
+    return OPERATOR_CANCELLED;
+  }
+  MultiresModifierData *mmd = nullptr;
+  for (ModifierData &md : object->modifiers) {
+    if (md.type == eModifierType_Multires) {
+      if (mmd) {
+        BKE_report(op->reports, RPT_ERROR, "Bake requires one Multires modifier");
+        return OPERATOR_CANCELLED;
+      }
+      mmd = reinterpret_cast<MultiresModifierData *>(&md);
+    }
+  }
+  if (!mmd || mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled) {
+    BKE_report(op->reports, RPT_ERROR, "Disable live displacement and shrinkwrap before baking visible layers");
+    return OPERATOR_CANCELLED;
+  }
+  const bool remove_layers = RNA_boolean_get(op->ptr, "remove_layers");
+  Mesh &mesh = *id_cast<Mesh *>(object->data);
+  if (const char *error = bke::multires_layers::merge_visible_to_base(
+          *mmd, mesh, remove_layers, true))
+  {
+    BKE_report(op->reports, RPT_ERROR, error);
+    return OPERATOR_CANCELLED;
+  }
+  UndoStack *stack = ED_undo_stack_get();
+  if (stack && (stack->step_init || stack->group_level != 0)) {
+    BKE_report(op->reports, RPT_ERROR, "Finish the active Undo transaction before baking");
+    return OPERATOR_CANCELLED;
+  }
+  const UndoStep *previous = stack ? stack->step_active : nullptr;
+  /* The last visible scene state may be a Sculpt Position step. Capture the
+   * already committed Object Mode base AND layer list before removing entries.
+   * The operator's normal global Undo push captures the post-bake state. */
+  ED_undo_push(C, "Before Bake Visible Sculpt Layers");
+  stack = ED_undo_stack_get();
+  if (!stack || stack->step_init || !stack->step_active || stack->step_active == previous ||
+      stack->step_active->type != BKE_UNDOSYS_TYPE_MEMFILE)
+  {
+    BKE_report(op->reports, RPT_ERROR, "Pre-bake Undo checkpoint failed; no layer baked");
+    return OPERATOR_CANCELLED;
+  }
+  if (const char *error = bke::multires_layers::merge_visible_to_base(*mmd, mesh, remove_layers)) {
+    BKE_report(op->reports, RPT_ERROR, error);
+    return OPERATOR_CANCELLED;
+  }
+  DEG_id_tag_update(&mesh.id, ID_RECALC_GEOMETRY);
+  DEG_id_tag_update(&object->id, ID_RECALC_GEOMETRY);
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, object);
+  std::printf("[LAYER_BAKE_BASE] visible_only=1 remove=%d sculpt=%d top=%d retained_layers=%d\n",
+              int(remove_layers), mmd->sculptlvl, mmd->totlvl, mmd->sculpt_layers.count());
+  std::fflush(stdout);
+  BKE_report(op->reports, RPT_INFO, "Visible layers baked into native Multires; hidden layers retained");
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_OT_multires_merge_visible_to_base(wmOperatorType *ot)
+{
+  ot->name = "Bake Visible Sculpt Layers into Base";
+  ot->idname = "SCULPT_OT_multires_merge_visible_to_base";
+  ot->description = "Bake visible contributions at full resolution into native Multires and remove or empty their layers";
+  ot->poll = sculpt_multires_merge_visible_to_base_poll;
+  ot->exec = sculpt_multires_merge_visible_to_base_exec;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  RNA_def_boolean(ot->srna, "remove_layers", true, "Remove Baked Layers",
+                  "Remove baked visible layers; otherwise retain empty layer slots with zero contribution");
+}
+
+static bool sculpt_multires_layer_commit(Object &ob,
+                                        wmOperator &op,
+                                        bool *r_local_surface_preserved = nullptr)
 {
   const bool trace = []() {
     const char *value = BLI_getenv("BLENDER_LAYER_RESP_TRACE");
@@ -107,7 +639,7 @@ static bool sculpt_multires_layer_commit(Object &ob, wmOperator &op)
   }();
 
   const double total_start = trace ? BLI_time_now_seconds() : 0.0;
-  const bool ok = bke::multires_layers::commit(ob);
+  const bool ok = bke::multires_layers::commit(ob, r_local_surface_preserved);
   const double total_ms = trace ? (BLI_time_now_seconds() - total_start) * 1000.0 : 0.0;
 
   if (trace) {
@@ -130,10 +662,49 @@ static wmOperatorStatus sculpt_multires_layer_commit_exec(bContext *C, wmOperato
   if (!ob) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (!mmd || !bke::multires_layers::active(*mmd)) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
-  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  bool local_surface_preserved = false;
+  if (!sculpt_multires_layer_commit(*ob, *op, &local_surface_preserved)) {
+    return OPERATOR_CANCELLED;
+  }
+
+  /* COMMIT_KEEP_CCG_V1: explicit Commit can be metadata-only after a certified
+   * local layer publication. Keep the current CCG/PBVH and synchronize the
+   * persistent modifier data, as empty Add Layer already does. This does not
+   * cancel geometry updates that other operations have already requested. */
+  const char *keep_env = BLI_getenv("BLENDER_SCULPT_COMMIT_KEEP_CCG");
+  const bool opt_in = keep_env && keep_env[0] == '1' && keep_env[1] == '\0';
+  const SculptSession *ss = ob->runtime->sculpt_session;
+  bool keep_ccg = opt_in && local_surface_preserved && ss && ss->subdiv_ccg &&
+                  ss->multires_modifier == mmd &&
+                  !mmd->sculpt_displacement_enabled && !mmd->sculpt_shrinkwrap_enabled;
+  /* Later enabled modifiers may require their own geometry evaluation. */
+  if (keep_ccg) {
+    for (ModifierData *md = mmd->modifier.next; md; md = md->next) {
+      if (BKE_modifier_is_enabled(CTX_data_scene(C), md, eModifierMode_Realtime)) {
+        keep_ccg = false;
+        break;
+      }
+    }
+  }
+  const char *trace_env = BLI_getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+  const double request_start = trace ? BLI_time_now_seconds() : 0.0;
+  DEG_id_tag_update(&ob->id, keep_ccg ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
+  if (trace) {
+    std::printf("[LAYER_COMMIT_REFRESH] request=%s opt_in=%d local_surface_preserved=%d "
+                "tag=%.3fms\n",
+                keep_ccg ? "SYNC_ONLY" : "GEOMETRY",
+                int(opt_in),
+                int(local_surface_preserved),
+                (BLI_time_now_seconds() - request_start) * 1000.0);
+    std::fflush(stdout);
+  }
   WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
-  BKE_report(op->reports, RPT_INFO, "Layer recorded in memory. Save the .blend to keep it on disk");
+  BKE_report(op->reports,
+             RPT_INFO,
+             bke::multires_layers::base_has_visible_layers(*mmd) ?
+                 "Layer recorded in memory. Save the .blend to keep it on disk" :
+                 "Native Multires base recorded. Hidden layer deltas preserved");
   return OPERATOR_FINISHED;
 }
 
@@ -2588,6 +3159,9 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_multires_layer_commit);
   WM_operatortype_append(SCULPT_OT_multires_layer_snapshot);
   WM_operatortype_append(SCULPT_OT_multires_base_capture);
+  WM_operatortype_append(SCULPT_OT_multires_base_fingerprint);
+  WM_operatortype_append(SCULPT_OT_multires_merge_visible_to_base);
+  WM_operatortype_append(SCULPT_OT_multires_polypaint_attribute);
   WM_operatortype_append(SCULPT_OT_multires_texture_displacement_bake);
   WM_operatortype_append(SCULPT_OT_multires_shrinkwrap_bake);
   WM_operatortype_append(SCULPT_OT_multires_layer_delete);

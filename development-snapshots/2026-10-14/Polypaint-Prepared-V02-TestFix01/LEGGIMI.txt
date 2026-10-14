@@ -1,0 +1,16 @@
+POLYPAINT PREPARED V02 — TEST FIX01, SOLO PYTHON
+
+La compilazione e gia completata; il test e fallito durante l'attivazione dell'asset Paint Essentials, prima di esercitare il writer. Questo aggiornamento non modifica C++, patch o binari e non ricompila.
+
+Estrai Polypaint-Prepared-V02-TestFix01 in C:\BlenderDev, chiudi eventuali finestre Blender dei test e avvia:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Prepared-V02-TestFix01\SISTEMA-E-RIPETI.ps1"
+
+Lo script legge last-prepared-run.json dal kit V02 per individuare la compilazione fallita nei test, salva una copia dei tre file Python che aggiorna e richiama COMPLETA-BUILD.ps1 sulla stessa build. Se il file di stato non c'e, aggiungi -RunDir "cartella risultati stampata dal runner".
+
+Il test crea un Brush locale di tipo SCULPT/PAINT, lo marca come asset locale e usa l'operatore supportato brush.asset_activate. Non assegna la proprieta read-only Paint.brush. Attende tra i tentativi tramite il timer UI, fino a 60 secondi, per consentire il caricamento asincrono della lista locale. Solo dopo l'attivazione registra il checkpoint iniziale e comincia le sequenze Paint/Undo/Redo. Gli stessi parametri vengono usati nei processi prepared e riferimento.
+
+I controlli originali su colori, geometria, master indipendenti e Undo/Redo restano attivi. Sei finestre di test sequenziali: non interagire. Se fallisce conserva ui-*.log e ui-report.json: ora includono brush_setup con tentativi, nome, tipo attivo ed errore.
+
+La causa precisa dell'attivazione Essentials fallita non e dimostrata dal solo traceback. Il nuovo setup rimuove la dipendenza dagli asset esterni e gestisce esplicitamente il caricamento asincrono, come richiesto dal percorso asset di Blender.
+
+Validazione locale: sintassi Python e simulazione di asset non ancora disponibile, attivazione ritardata, timeout e modo errato. L'attivazione reale va confermata nel test Windows; bpy non e disponibile in questo ambiente.

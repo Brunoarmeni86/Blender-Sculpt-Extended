@@ -1,0 +1,10 @@
+subdivision_staging_test.cc: 79 casi, funzioni di staging estratte dalla patch,
+percorso precedente estratto dal baseline, API e geometria stub. Non è Blender.
+Compilato qui con g++ -std=c++17 -Wall -Wextra -Werror
+-Wno-misleading-indentation -O1 -g -fsanitize=address,undefined
+-fno-omit-frame-pointer. ASAN_OPTIONS=detect_leaks=0 (LeakSanitizer non supportato
+nel runtime); tutte le allocazioni MEM tracciate devono invece risultare libere.
+undo_profile_test.cc: 8 casi metodo di attesa estratto, task pool stub.
+test_comparison.py: comparatore nativo, matching e 11 regressioni respinte.
+validate_export_longpaths.py: test stdlib, eseguito dal runner anche su Windows.
+I test nativi Blender obbligatori sono i VERIFICA-*.py nella radice del kit.

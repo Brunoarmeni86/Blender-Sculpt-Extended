@@ -41,6 +41,7 @@
 #include "DNA_nla_types.h"
 #include "DNA_object_fluidsim_types.h"
 #include "DNA_object_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_pointcloud_types.h"
 #include "DNA_rigidbody_types.h"
 #include "DNA_scene_types.h"
@@ -111,6 +112,7 @@
 #include "BKE_mesh_wrapper.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_undo_cache_guard.hh"
 #include "BKE_node.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -1718,6 +1720,23 @@ static void object_update_from_subsurf_ccg(Object *object)
     return;
   }
   const int tot_level = mesh_eval->runtime->subdiv_ccg_tot_level;
+  /* LAYER_CCG_UNDO_CACHE_GUARD_V1: discard writes from the old evaluated
+   * layer surface during Memfile restore. Persistent base and layer payloads
+   * come from that restore, not from obsolete CCG coordinates. */
+  if (bke::multires_layers::undo_cache::discard_active()) {
+    for (const ModifierData &md : object->modifiers) {
+      if (md.type == eModifierType_Multires &&
+          !reinterpret_cast<const MultiresModifierData &>(md).sculpt_layers.is_empty())
+      {
+        std::printf("[LAYER_CCG_UNDO_GUARD] mode=DISCARD_OLD_CACHE level=%d top=%d "
+                    "dirty=%d/%d/%d\n",
+                    subdiv_ccg->level, tot_level, int(subdiv_ccg->dirty.coords),
+                    int(subdiv_ccg->dirty.hidden), int(subdiv_ccg->dirty.masks));
+        std::fflush(stdout);
+        return;
+      }
+    }
+  }
   Object *object_orig = DEG_get_original(object);
   Mesh *mesh_orig = id_cast<Mesh *>(object_orig->data);
   if (subdiv_ccg->dirty.masks && !subdiv_ccg->dirty.coords && !subdiv_ccg->dirty.hidden) {

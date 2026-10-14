@@ -1,0 +1,90 @@
+CONFORM / UNDO CACHE — V01 CANDIDATA
+
+Scopo
+Impedire che una vecchia superficie CCG, gia composta con gli Sculpt Layers,
+venga riversata nel base nativo durante il ripristino globale Undo/Redo.
+Questa patch non incorpora layer nel base e non cancella i layer.
+
+La guardia opera in due tempi:
+1. All'inizio di Memfile Undo/Redo invalida le sole scritture pending dei vecchi
+   CCG collegati a sessioni con Sculpt Layers. Non modifica cage, displacement,
+   maschere o payload dei layer. Copre il cleanup differito del depsgraph.
+2. Durante il decode blocca il writeback nativo delle vecchie cache valutate
+   con layer, anche se il cleanup avviene su un thread di lavoro.
+Il ripristino dei dati persistenti rimane responsabilita dello snapshot Undo.
+Conform invalida le cache dei layer prima di pubblicare i buffer ricalcolati.
+Non aggiunge un flush dopo Conform.
+
+Ambito
+Tre sorgenti esistenti: object.cc, memfile_undo.cc, multires_reshape.cc.
+Un nuovo header: BKE_multires_undo_cache_guard.hh.
+Non modifica sculpt_undo.cc, il fitting Conform, Strength, layer visibili o
+nascosti, Polypaint, Commit, Bake o l'ordine dello storico.
+Le ottimizzazioni precedenti restano nel profilo. Strength/Paint V01 e le nuove
+candidate Select/Commit Anchor e Bake restano disattivate per questa prova.
+Il cleanup nativo fuori dal ripristino globale non viene riscritto: la patch
+e mirata alla sequenza osservata, non certifica tutte le transizioni possibili.
+
+STATO
+15 prove isolate del vero corpo di writeback e della guardia inserita PASS,
+con ASan/UBSan. API dati/scena e conversione geometrica sono simulate.
+LeakSanitizer non disponibile in questo ambiente; non viene dichiarato PASS.
+La compilazione MSVC e la sequenza Blender Windows devono ancora passare.
+Non ripara automaticamente un base gia alterato: ricarica la copia iniziale
+della scena per la verifica manuale.
+
+INSTALLAZIONE
+Estrai Conform-Undo-Cache-V01 in C:\BlenderDev.
+Chiudi Blender. Nella PowerShell di Visual Studio 2022:
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Conform-Undo-Cache-V01\COMPILA-E-VERIFICA.ps1"
+
+Richiede la base attuale con diagnostica Undo/Base gia compilata.
+Controlla tutti i contesti sorgente prima di modificare i file. Non sostituisce
+interi sorgenti con copie del repository. Se i contesti differiscono, si ferma.
+CMake viene risolto tramite CMAKE_COMMAND di CMakeCache.txt prima della patch.
+Salva sorgenti originali e binari Release, applica la patch e compila INSTALL.
+La Release nella build viene aggiornata; quella precedente resta nel backup.
+Poi crea una portable sperimentale e apre DUE prove factory (livelli 2 e 5).
+Non interagire con le finestre: i timer eseguono le prove e le chiudono.
+Nessuna scena dell'utente viene aperta nei test automatici.
+
+Verifiche Windows
+Conform -> Undo -> Redo, geometria massima preservata e ritorno esatto dei
+buffer base/cage/layer nei due stati. I cambiamenti ai livelli inferiori
+sono misurati nel report: Conform puo riposizionare cage e interpolanti.
+Poi Sculpt -> selezione layer -> REC -> stroke -> Undo/Redo ripetuti -> Commit
+-> Object Mode -> salvataggio e riapertura. Nessun save o cambio mode viene
+inserito fra lo stroke e il suo primo Undo. La guardia deve essere esercitata.
+Il base post-Conform deve restare identico durante Undo/Redo delle pennellate;
+i layer nascosti devono restare identici rispetto al loro stato post-Conform.
+REC continua a seguire il comportamento dello storico precedente: questa
+patch non cambia le regole dei controlli indipendenti del layer.
+
+Esito e log
+Attendi PROVE NATIVE COMPLETATE. Solo allora il launcher seleziona la portable
+verificata. In caso di errore non viene presentato un esito PASS e restano i
+backup. La cartella completa viene stampata all'inizio:
+C:\BlenderDev\Experimental-Builds\Conform-Undo-Cache-<data>-<id>
+Invia operation-error.log; per compilazione build.log, per prova native-L2.log
+o native-L5.log e il corrispondente native-L2\ui-test.json/native-L5\ui-test.json.
+PATCH.diff e run-info.json documentano le modifiche effettivamente applicate.
+REFERENCE.patch serve per revisione; non applicarla manualmente.
+
+AVVIO DOPO TEST PASS
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Conform-Undo-Cache-V01\AVVIA-CORREZIONE.ps1"
+
+Il pannello diagnostico corretto e Commit sono inclusi.
+Il log manuale viene stampato all'avvio, nella cartella experiment-tools.
+Il flag BLENDER_SCULPT_LAYER_UNDO_CACHE_GUARD=1 abilita solo la nuova guardia.
+-CacheGuardOff permette confronto sullo stesso binario, usando una copia
+della scena. L'invalidazione delle cache dopo Conform resta nel sorgente.
+
+RIPRESA dopo patch applicata ma test/build incompleti
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Conform-Undo-Cache-V01\COMPILA-E-VERIFICA.ps1" -RunDir "<cartella completa stampata>"
+
+RIPRISTINO della sola patch, con Blender chiuso
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Conform-Undo-Cache-V01\RIPRISTINA.ps1" -RunDir "<cartella completa stampata>"
+
+Verifica i checksum salvati, ripristina i sorgenti originali dal backup e
+ricompila. Non esegue reset Git e non cancella scene o portable.

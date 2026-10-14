@@ -10,6 +10,7 @@
  */
 
 #include <memory>
+#include "BLI_color.hh"
 #include "BLI_vector_set.hh"
 #include "BLI_time.h"
 #include <cstdlib>
@@ -1081,55 +1082,119 @@ static const MultiresModifierData *polypaint_source_modifier(const Object &objec
     return nullptr;
   }
 
-  /* The PBVH draw object is evaluated, while Multires Polypaint is edited and stored on the
-   * original modifier. The evaluated Multires copy intentionally doesn't own the persistent color
-   * grids, so resolve the corresponding original modifier before reading them for drawing. */
-  if (!mmd->sculpt_color_grids) {
-    ModifierData *orig_md = BKE_modifier_get_original(
-        &object, const_cast<ModifierData *>(&mmd->modifier));
-    if (orig_md && orig_md->type == eModifierType_Multires) {
-      mmd = reinterpret_cast<MultiresModifierData *>(orig_md);
-    }
+  /* The persistent Polypaint master belongs to the original modifier, not the
+   * evaluated copy. Prefer it whenever available, including after an undo or a
+   * newly painted stroke. A stale evaluated grid directory must not mask the
+   * current original data. */
+  ModifierData *orig_md = BKE_modifier_get_original(
+      &object, const_cast<ModifierData *>(&mmd->modifier));
+  if (orig_md && orig_md->type == eModifierType_Multires) {
+    mmd = reinterpret_cast<MultiresModifierData *>(orig_md);
   }
   return mmd;
 }
 
 static float4 sample_polypaint_grid_color(const MultiresColorGrid *grid,
-                                           const int grid_size,
-                                           const int index)
+                                         const int grid_size,
+                                         const int index)
 {
+  const float4 white(1.0f);
   if (!grid || !grid->colors || grid->level < 1 || grid->level > 13 || grid_size < 2 ||
-      grid_size > bke::subdiv::grid_size_from_level(13) || index < 0 || index >= grid_size * grid_size)
+      grid_size > bke::subdiv::grid_size_from_level(13) || index < 0 ||
+      index >= grid_size * grid_size)
   {
-    return float4(1.0f);
+    return white;
   }
+
   const int stored_size = bke::subdiv::grid_size_from_level(grid->level);
   if (grid->totcolor != stored_size * stored_size) {
-    return float4(1.0f);
+    return white;
   }
   if (stored_size == grid_size) {
+    /* Preserve the fast exact-resolution path: no interpolation and no per-vertex
+     * sampling work at the common case of millions of CCG samples. */
     return float4(grid->colors[index]);
   }
 
-  /* Display a stored color grid at another sculpt level without reading past
-   * its allocation or destructively resampling the persistent colors. */
-  const float x = float(index % grid_size) * float(stored_size - 1) / float(grid_size - 1);
-  const float y = float(index / grid_size) * float(stored_size - 1) / float(grid_size - 1);
-  const int x0 = int(x), y0 = int(y);
-  const int x1 = std::min(x0 + 1, stored_size - 1);
-  const int y1 = std::min(y0 + 1, stored_size - 1);
-  const float tx = x - x0, ty = y - y0;
-  float4 result;
-  for (int c = 0; c < 4; c++) {
-    const float a = std::lerp(grid->colors[y0 * stored_size + x0][c],
-                              grid->colors[y0 * stored_size + x1][c],
-                              tx);
-    const float b = std::lerp(grid->colors[y1 * stored_size + x0][c],
-                              grid->colors[y1 * stored_size + x1][c],
-                              tx);
-    result[c] = std::lerp(a, b, ty);
+  /* Use the BKE V0.1b master reader for cross-level colors. This centralizes
+   * metadata validation and keeps shader/viewport sampling consistent. */
+  const float u = float(index % grid_size) / float(grid_size - 1);
+  const float v = float(index / grid_size) / float(grid_size - 1);
+  float rgba[4];
+  if (!bke::multires_layers::polypaint_sample_grid(*grid, u, v, rgba)) {
+    return white;
   }
-  return result;
+  return float4(rgba[0], rgba[1], rgba[2], rgba[3]);
+}
+
+/* Base mesh color fallback for Multires grids that do not have a painted
+ * Polypaint master yet. Grid (0,0) is the coarse-face center, (1,0) is
+ * the forward edge midpoint, (0,1) the previous edge midpoint, and
+ * (1,1) is the original coarse corner.  Using the same face center for
+ * every grid in a face keeps colors continuous along internal seams. */
+struct PolypaintBaseColorPatch {
+  float4 center = float4(1.0f);
+  float4 next_edge = float4(1.0f);
+  float4 prev_edge = float4(1.0f);
+  float4 corner = float4(1.0f);
+  bool valid = false;
+};
+
+static float4 polypaint_base_to_float4(const ColorGeometry4f &value)
+{
+  return float4(value.r, value.g, value.b, value.a);
+}
+
+static PolypaintBaseColorPatch polypaint_base_patch(
+    const SubdivCCG &subdiv_ccg,
+    const VArray<ColorGeometry4f> &corner_colors,
+    const int grid_index)
+{
+  PolypaintBaseColorPatch patch;
+  if (!corner_colors || grid_index < 0 || grid_index >= subdiv_ccg.grid_to_face_map.size()) {
+    return patch;
+  }
+  const int face_index = subdiv_ccg.grid_to_face_map[grid_index];
+  if (face_index < 0 || face_index >= subdiv_ccg.faces.size()) {
+    return patch;
+  }
+  const IndexRange face = subdiv_ccg.faces[face_index];
+  const int start = face.start();
+  const int count = face.size();
+  if (count < 3 || grid_index < start || grid_index >= start + count ||
+      start + count > corner_colors.size())
+  {
+    return patch;
+  }
+
+  const int local = grid_index - start;
+  const int next = start + ((local + 1) % count);
+  const int prev = start + ((local + count - 1) % count);
+  patch.corner = polypaint_base_to_float4(corner_colors[grid_index]);
+  patch.next_edge = (patch.corner + polypaint_base_to_float4(corner_colors[next])) * 0.5f;
+  patch.prev_edge = (patch.corner + polypaint_base_to_float4(corner_colors[prev])) * 0.5f;
+  patch.center = float4(0.0f);
+  for (const int corner : face) {
+    patch.center += polypaint_base_to_float4(corner_colors[corner]);
+  }
+  patch.center /= float(count);
+  patch.valid = true;
+  return patch;
+}
+
+static float4 sample_polypaint_base_patch(const PolypaintBaseColorPatch &patch,
+                                         const int grid_size,
+                                         const int index)
+{
+  if (!patch.valid || grid_size < 2) {
+    return float4(1.0f);
+  }
+  const float u = float(index % grid_size) / float(grid_size - 1);
+  const float v = float(index / grid_size) / float(grid_size - 1);
+  return patch.center * ((1.0f - u) * (1.0f - v)) +
+         patch.next_edge * (u * (1.0f - v)) +
+         patch.prev_edge * ((1.0f - u) * v) +
+         patch.corner * (u * v);
 }
 
 BLI_NOINLINE static void fill_polypaint_grids(const Object &object,
@@ -1140,11 +1205,21 @@ BLI_NOINLINE static void fill_polypaint_grids(const Object &object,
                                               const MutableSpan<gpu::VertBufPtr> vbos)
 {
   const SculptSession &ss = *object.runtime->sculpt_session;
-  const MultiresModifierData *mmd = polypaint_source_modifier(object);
+  const MultiresModifierData *source = polypaint_source_modifier(object);
+  MultiresModifierData view{};
+  const std::string attribute_name(request);
+  const MultiresModifierData *mmd = source &&
+      bke::multires_layers::polypaint_attribute_view(*source, attribute_name.c_str(), view) ?
+      &view : nullptr;
   const SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  /* AttributeAccessor can adapt both FLOAT_COLOR and BYTE_COLOR from the
+   * point/corner domain to a CORNER float-color view.  No source data is
+   * modified, and the view is used only while filling these VBOs. */
+  const VArray<ColorGeometry4f> base_colors =
+      *orig_mesh_data.attributes.lookup<ColorGeometry4f>(request, bke::AttrDomain::Corner);
   ensure_vbos_allocated_grids(object,
                               attribute_format(orig_mesh_data, request, bke::AttrType::ColorFloat),
                               use_flat_layout,
@@ -1159,6 +1234,17 @@ BLI_NOINLINE static void fill_polypaint_grids(const Object &object,
                       grid < mmd->sculpt_color_grids_num ?
                   &mmd->sculpt_color_grids[grid] :
                   nullptr;
+          /* Never allocate or mutate a Polypaint master just to display
+           * the base attribute: an unpainted object must render the base
+           * colors, not a flat white grid. */
+          const bool has_master = color_grid && color_grid->colors;
+          const PolypaintBaseColorPatch base_patch = has_master ?
+              PolypaintBaseColorPatch{} :
+              polypaint_base_patch(subdiv_ccg, base_colors, grid);
+          const auto sample = [&](const int index) -> float4 {
+            return has_master ? sample_polypaint_grid_color(color_grid, key.grid_size, index) :
+                                sample_polypaint_base_patch(base_patch, key.grid_size, index);
+          };
           if (use_flat_layout[node_index]) {
             for (int y = 0; y < key.grid_size - 1; y++) {
               for (int x = 0; x < key.grid_size - 1; x++) {
@@ -1167,7 +1253,7 @@ BLI_NOINLINE static void fill_polypaint_grids(const Object &object,
                                         CCG_grid_xy_to_index(key.grid_size, x + 1, y + 1),
                                         CCG_grid_xy_to_index(key.grid_size, x, y + 1)};
                 for (const int index : indices) {
-                  *data++ = sample_polypaint_grid_color(color_grid, key.grid_size, index);
+                  *data++ = sample(index);
                 }
               }
             }
@@ -1175,7 +1261,7 @@ BLI_NOINLINE static void fill_polypaint_grids(const Object &object,
           else {
             const int area = key.grid_size * key.grid_size;
             for (int i = 0; i < area; i++) {
-              *data++ = sample_polypaint_grid_color(color_grid, key.grid_size, i);
+              *data++ = sample(i);
             }
           }
         }
@@ -1963,7 +2049,13 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_attribute_data(const Object &object,
       const MultiresModifierData *mmd = polypaint_source_modifier(object);
       /* Choose the RGBA format before the first stroke allocates color grids.
        * Missing grids use the same white fallback as Polypaint initialization. */
-      use_polypaint = mmd && *request == orig_mesh_data.active_color;
+      const std::string attribute_name(*request);
+      MultiresModifierData view{};
+      use_polypaint = mmd && bke::mesh::is_color_attribute(
+          orig_mesh_data.attributes.lookup_meta_data(*request)) &&
+          (*request == orig_mesh_data.active_color ||
+           (mmd->sculpt_color_attribute[0] &&
+            bke::multires_layers::polypaint_attribute_view(*mmd, attribute_name.c_str(), view)));
       this->ensure_grids_attribute_format(orig_mesh_data, attr, use_polypaint, data);
     }
   }

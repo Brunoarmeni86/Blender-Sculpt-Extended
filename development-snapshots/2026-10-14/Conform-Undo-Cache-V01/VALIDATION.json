@@ -1,0 +1,14 @@
+{
+  "isolated_writeback_cases": 15,
+  "asan_ubsan": "PASS",
+  "leak_sanitizer": "NOT_AVAILABLE",
+  "blender_geometry_and_id_api": "MODELED",
+  "msvc_compile": "PENDING",
+  "blender_windows_native_sequence": "PENDING",
+  "large_mesh_performance": "NOT_TESTED",
+  "patch_roundtrip": "PASS",
+  "instrumented_memfile_anchor": "PASS",
+  "ambiguous_preflight_zero_writes": "PASS",
+  "python_syntax": "PASS",
+  "native_gate_negative_tests": "PASS"
+}

@@ -1,0 +1,66 @@
+POLYPAINT PARALLEL + UNDO V03 - Windows / Prepared V02
+
+Base richiesta: Multi Attribute + Prepared V02 gia compilata e funzionante.
+Estrarre la cartella Polypaint-Parallel-Undo-V03 in C:\BlenderDev.
+Chiudere Blender. PowerShell VS2022:
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Parallel-Undo-V03\COMPILA-E-VERIFICA.ps1"
+
+COSA CAMBIA
+1. Paint CPU distribuito fra nodi PBVH, solo se ogni griglia ha un unico proprietario.
+   Verifica tabella master e risoluzione prima dei worker; scalda le cache mesh sul thread
+   principale; alloca solo payload delle griglie esclusive. Fallback seriale se non idoneo.
+   L'ordine dei campioni all'interno della griglia rimane quello della V02.
+2. Undo Color: copia le griglie dense senza precedente azzeramento; non tocca le aree
+   implicite, che restano protette dai bit di presenza. Formato e budget Undo invariati.
+3. Ridisegno Paint dei nodi modificati. Undo: mappa le griglie salvate sui nodi PBVH
+   correnti, anche se la suddivisione dei nodi e cambiata. Tag del solo attributo attivo.
+   Nessuna modifica al codice Position Undo, DNA, kernel colore o file .blend.
+
+CONTROLLI E TEST
+Preflight hash base, header V02 e funzione Paint completa. Nessuna sovrascrittura di
+sorgenti sconosciuti. Backup sorgenti e Release, patch reversibile, build incrementale.
+Il runner apre 10 finestre Blender una alla volta: 2 regressioni lazy e 8 confronti
+(reference, parallel, undo/redraw, combined, ciascuno con/senza layer).
+Non interagire con le finestre dei test. Fixture con pennello locale incluso TestFix01.
+La fixture multi piu densa deve esercitare il percorso parallelo: il log viene verificato.
+Snapshot: tutti gli attributi, selezione/rinomina/rimozione, Undo/Redo, promozione master,
+Delete Higher/Subdivide, metadati layer e geometria. Confronto A/B a tolleranza 1e-6.
+Quando tutti i flag V03 sono spenti viene eseguita la funzione originale Prepared V02.
+La portable e il suo ZIP vengono prodotti solo dopo il superamento dei test.
+
+AVVIO DOPO COMPILAZIONE
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Parallel-Undo-V03\AVVIA-ESPERIMENTO.ps1"
+
+Confronto con Prepared V02: aggiungere -ReferencePaint.
+Solo parallelo: aggiungere -UndoCopyOff -LocalRedrawOff.
+Solo Undo/ridisegno: aggiungere -ParallelOff.
+Tre controlli indipendenti disponibili: -ParallelOff -UndoCopyOff -LocalRedrawOff.
+Gli switch impostano flag per il processo avviato, ripristinando poi l'ambiente PowerShell.
+Per misurare usare lo stesso file e la stessa pennellata fra avvii, senza salvare modifiche.
+[POLYPAINT_CPU] total e wall time del dab. I tempi gather/factors/write del percorso
+parallelo sono SOMME sui worker, non wall time. workers indica i contesti TLS usati,
+non garantisce il numero di core contemporanei. paint-profiles.json conserva i log.
+
+RIPRESA TEST DOPO BUILD RIUSCITA
+COMPLETA-BUILD.ps1 -RunDir "percorso risultati stampato dal runner"
+Non ricompila; verifica hash dei sorgenti e del binario prima di riaprire i test.
+last-v03-run.json nel kit registra la cartella dell'ultimo tentativo applicato.
+
+RIPRISTINO A PREPARED V02
+RIPRISTINA.ps1 -RunDir "percorso risultati della V03"
+Verifica i sorgenti, salva un nuovo backup, inverte la patch V03 esatta e ricompila.
+Non usare il RunDir della V02: occorre quello della V03.
+
+VERIFICHE LOCALI E LIMITI
+C++ reale dei cicli Paint e Undo con API di scena/PBVH/Array simulate:
+- 4800 casi Paint, due thread reali, colore numericamente identico al writer precedente;
+- 3600 catture/ripristini Undo, 960 slot impliciti avvelenati mai resi visibili;
+- 2000 ripartizioni griglie/nodi per il predicato di ridisegno Undo;
+- installer LF/CRLF, righe finali, reversibilita, rifiuto dei sorgenti sconosciuti.
+ASan/UBSan. LeakSanitizer non disponibile in questo ambiente; allocazioni simulate
+contate esplicitamente. Blender/bpy e MSVC non disponibili qui: compilazione e test
+nativi si eseguono sul PC Windows. Nessuna promessa di accelerazione su mesh reali
+prima delle misure. Questo Undo riduce traffico di memoria, non il budget delle copie;
+non e un Undo a tile. Il tag locale riduce invalidazioni PBVH, non tutti i costi del
+viewport o dell'esportazione del color attribute alla mesh valutata.

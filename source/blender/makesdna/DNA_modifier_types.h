@@ -1243,6 +1243,19 @@ struct MultiresColorGrid {
   int level;
 };
 
+/* Inactive Polypaint master. The active master remains in the legacy modifier
+ * slot, so brush/Color Undo capture retain their proven storage contract.
+ * Each allocation has exactly one owner. Switching exchanges directories only. */
+struct MultiresColorAttribute {
+  MultiresColorAttribute *next = nullptr;
+  MultiresColorAttribute *prev = nullptr;
+  char name[68] = "";
+  char _pad[4] = {};
+  MultiresColorGrid *grids = nullptr;
+  int grids_num = 0;
+  int level = 0;
+};
+
 /* Persistent per-CCG-grid Face Set data.
  * Uniform grids keep ids == nullptr and store only uniform_id.
  * ids is allocated lazily only when a grid contains a high-resolution boundary. */
@@ -1290,6 +1303,9 @@ struct MultiresModifierData {
   MultiresColorGrid *sculpt_color_grids = nullptr;
   int sculpt_color_grids_num = 0;
   int sculpt_color_level = 0;
+  char sculpt_color_attribute[68] = "";
+  char _pad_color_attribute[4] = {};
+  ListBaseT<MultiresColorAttribute> sculpt_color_attributes = {nullptr, nullptr};
 
   /* Face Set master data at the highest stored Multires resolution. Lower
    * sculpt levels sample this data instead of destructively downsampling it. */

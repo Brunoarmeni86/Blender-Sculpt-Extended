@@ -8,8 +8,10 @@
 
 #include "DNA_brush_types.h"
 #include "DNA_meshdata_types.h"
+#include "DNA_modifier_types.h"
 
 #include "BLI_color.hh"
+#include "BLI_time.h"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_hash.h"
 #include "BLI_math_color_blend.h"
@@ -23,6 +25,12 @@
 #include "BKE_colortools.hh"
 #include "BKE_customdata.hh"
 #include "BKE_mesh.hh"
+#include "BKE_multires_sculpt_layers.hh"
+#include "BKE_multires_polypaint_prepared.hh"
+#include <unordered_set>
+#include <vector>
+#include "BKE_subdiv.hh"
+#include "BKE_subdiv_ccg.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
@@ -38,6 +46,8 @@
 #include "IMB_imbuf.hh"
 
 #include <cmath>
+#include <cstdlib>
+#include <cstdio>
 
 namespace blender::ed::sculpt_paint::color {
 
@@ -560,6 +570,404 @@ static void do_sample_wet_paint_task(const Depsgraph &depsgraph,
   }
 }
 
+/* POLYPAINT_V02B_CPU_GRIDS: deliberately serial until shared CCG edges have a
+ * dedicated synchronization pass. The existing mesh-paint path stays unchanged.
+ * Only the basic Paint operation is supported here; Smear/Blur are separate. */
+static void do_paint_brush_grids_cpu_prepared_v02(const Depsgraph &depsgraph,
+                                     const Sculpt &sd,
+                                     Object &object,
+                                     const IndexMask &node_mask)
+{
+  const char *enabled = std::getenv("BLENDER_SCULPT_POLYPAINT_CPU");
+  if (!enabled || enabled[0] != '1' || enabled[1] != '\0') {
+    return;
+  }
+  SculptSession &ss = *object.runtime->sculpt_session;
+  if (!ss.cache || !ss.subdiv_ccg || !ss.multires_modifier) {
+    return;
+  }
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+  const double paint_start = trace ? BLI_time_now_seconds() : 0.0;
+  MultiresModifierData &mmd = *ss.multires_modifier;
+  SubdivCCG &ccg = *ss.subdiv_ccg;
+  Mesh &base_mesh = *id_cast<Mesh *>(object.data);
+  if (mmd.sculptlvl < 1 || mmd.sculptlvl > mmd.totlvl ||
+      ccg.grid_size != bke::subdiv::grid_size_from_level(mmd.sculptlvl) ||
+      ccg.grids_num != base_mesh.corners_num ||
+      !active_color_attribute(base_mesh))
+  {
+    return;
+  }
+  const char *name = base_mesh.active_color_attribute;
+  if (!name || name[0] == '\0') {
+    return;
+  }
+  const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
+  const float3 primary = ss.cache->toggle_settings.invert ?
+                             BKE_brush_secondary_color_get(&sd.paint, &brush) :
+                             BKE_brush_color_get(&sd.paint, &brush);
+  const float strength = std::clamp(
+      std::abs(ss.cache->bstrength) * BKE_brush_alpha_get(&sd.paint, &brush) *
+          ss.cache->paint_brush.flow,
+      0.0f,
+      1.0f);
+  if (strength == 0.0f) {
+    return;
+  }
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+  Vector<float3> positions;
+  Vector<float> factors;
+  Vector<float> distances;
+  bool changed = false;
+  int64_t touched_samples = 0;
+  const char *prepared_env = std::getenv("BLENDER_SCULPT_POLYPAINT_PREPARED_V2");
+  const bool prepared_enabled = prepared_env && prepared_env[0] == '1' && prepared_env[1] == '\0';
+  bke::multires_polypaint_cpu::PreparedPaintPlan prepared_plan;
+  int64_t prepared_samples = 0, prepared_grids = 0;
+  double gather_ms = 0.0, factors_ms = 0.0, write_ms = 0.0, prepare_ms = 0.0;
+  const double setup_end = trace ? BLI_time_now_seconds() : 0.0;
+
+  /* The grid sampler and delta writer share the same master storage. Serial
+   * execution prevents overlapping coarse-support writes across PBVH nodes. */
+  node_mask.foreach_index([&](const int node_index) {
+    const Span<int> grids = nodes[node_index].grids();
+    double stage_start = trace ? BLI_time_now_seconds() : 0.0;
+    const Span<float3> co = gather_grids_positions(ccg, grids, positions);
+    if (trace) {
+      const double now = BLI_time_now_seconds();
+      gather_ms += (now - stage_start) * 1000.0;
+      stage_start = now;
+    }
+    calc_factors_common_grids(
+        depsgraph, brush, object, co, nodes[node_index], factors, distances);
+    if (trace) {
+      const double now = BLI_time_now_seconds();
+      factors_ms += (now - stage_start) * 1000.0;
+      stage_start = now;
+    }
+    int prepared_grid = -1;
+    float (*prepared_master)[4] = nullptr;
+    for (const int i : co.index_range()) {
+      const float influence = std::clamp(factors[i] * strength, 0.0f, 1.0f);
+      if (influence <= 0.0f) {
+        continue;
+      }
+      const int local_grid = i / ccg.grid_area;
+      const int pixel = i % ccg.grid_area;
+      const int grid_index = grids[local_grid];
+      const int x = pixel % ccg.grid_size;
+      const int y = pixel / ccg.grid_size;
+      if (prepared_grid != grid_index) {
+        prepared_grid = grid_index;
+        prepared_master = nullptr;
+      }
+      if (prepared_master) {
+        const float brush_rgb[3] = {primary[0], primary[1], primary[2]};
+        const bool wrote = prepared_plan.blend(prepared_master, x, y, brush_rgb, influence);
+        changed |= wrote;
+        touched_samples += int(wrote);
+        prepared_samples += int(wrote);
+        continue;
+      }
+      const float u = float(x) / float(ccg.grid_size - 1);
+      const float v = float(y) / float(ccg.grid_size - 1);
+      float before[4];
+      if (!bke::multires_layers::polypaint_sample_with_base(
+              mmd, base_mesh, name, grid_index, u, v, before))
+      {
+        continue;
+      }
+      float target[4];
+      for (int channel = 0; channel < 3; channel++) {
+        target[channel] = before[channel] * (1.0f - influence) +
+                          primary[channel] * influence;
+      }
+      target[3] = before[3];
+      const bool wrote = bke::multires_layers::polypaint_write_coarse_sample(
+          mmd, base_mesh, name, grid_index, mmd.sculptlvl, x, y, target);
+      if (wrote && prepared_enabled && bke::multires_layers::polypaint_grid(mmd, grid_index)) {
+        const double start = trace ? BLI_time_now_seconds() : 0.0;
+        const int master_side = bke::subdiv::grid_size_from_level(mmd.sculpt_color_level);
+        if (prepared_plan.prepare(master_side, ccg.grid_size)) {
+          prepared_master = mmd.sculpt_color_grids[grid_index].colors;
+          prepared_grids++;
+        }
+        if (trace) prepare_ms += (BLI_time_now_seconds() - start) * 1000.0;
+      }
+      changed |= wrote;
+      touched_samples += int(wrote);
+    }
+    if (trace) write_ms += (BLI_time_now_seconds() - stage_start) * 1000.0;
+  });
+  const double notify_start = trace ? BLI_time_now_seconds() : 0.0;
+  if (changed) {
+    pbvh.tag_attribute_changed(node_mask, name);
+  }
+  const double paint_end = trace ? BLI_time_now_seconds() : 0.0;
+  if (trace) {
+    std::printf("[POLYPAINT_CPU] paint_level=%d master_level=%d nodes=%lld "
+                "touched=%lld changed=%d total=%.3fms\n",
+                mmd.sculptlvl, mmd.sculpt_color_level,
+                static_cast<long long>(node_mask.size()),
+                static_cast<long long>(touched_samples), int(changed),
+                (BLI_time_now_seconds() - paint_start) * 1000.0);
+    std::printf("[POLYPAINT_PREPARED_V2] enabled=%d reused_samples=%lld prepared_grids=%lld "
+                "setup=%.3fms gather=%.3fms factors=%.3fms write=%.3fms "
+                "prepare=%.3fms notify=%.3fms\n",
+                int(prepared_enabled), static_cast<long long>(prepared_samples),
+                static_cast<long long>(prepared_grids), (setup_end - paint_start) * 1000.0,
+                gather_ms, factors_ms, write_ms, prepare_ms,
+                (paint_end - notify_start) * 1000.0);
+  }
+}
+
+static void do_paint_brush_grids_cpu(const Depsgraph &depsgraph,
+                                     const Sculpt &sd,
+                                     Object &object,
+                                     const IndexMask &node_mask)
+{
+  const auto flag_enabled = [](const char *name) {
+    const char *value = std::getenv(name);
+    return value && value[0] == '1' && value[1] == '\0';
+  };
+  if (!flag_enabled("BLENDER_SCULPT_POLYPAINT_PARALLEL_V3") &&
+      !flag_enabled("BLENDER_SCULPT_POLYPAINT_UNDO_COPY_V3") &&
+      !flag_enabled("BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3"))
+  {
+    do_paint_brush_grids_cpu_prepared_v02(depsgraph, sd, object, node_mask);
+    return;
+  }
+  const char *enabled = std::getenv("BLENDER_SCULPT_POLYPAINT_CPU");
+  if (!enabled || enabled[0] != '1' || enabled[1] != '\0') {
+    return;
+  }
+  SculptSession &ss = *object.runtime->sculpt_session;
+  if (!ss.cache || !ss.subdiv_ccg || !ss.multires_modifier) {
+    return;
+  }
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+  const double paint_start = trace ? BLI_time_now_seconds() : 0.0;
+  MultiresModifierData &mmd = *ss.multires_modifier;
+  SubdivCCG &ccg = *ss.subdiv_ccg;
+  Mesh &base_mesh = *id_cast<Mesh *>(object.data);
+  if (mmd.sculptlvl < 1 || mmd.sculptlvl > mmd.totlvl ||
+      ccg.grid_size != bke::subdiv::grid_size_from_level(mmd.sculptlvl) ||
+      ccg.grids_num != base_mesh.corners_num ||
+      !active_color_attribute(base_mesh))
+  {
+    return;
+  }
+  const char *name = base_mesh.active_color_attribute;
+  if (!name || name[0] == '\0') {
+    return;
+  }
+  const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
+  const float3 primary = ss.cache->toggle_settings.invert ?
+                             BKE_brush_secondary_color_get(&sd.paint, &brush) :
+                             BKE_brush_color_get(&sd.paint, &brush);
+  const float strength = std::clamp(
+      std::abs(ss.cache->bstrength) * BKE_brush_alpha_get(&sd.paint, &brush) *
+          ss.cache->paint_brush.flow,
+      0.0f,
+      1.0f);
+  if (strength == 0.0f) {
+    return;
+  }
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+  const char *parallel_env = std::getenv("BLENDER_SCULPT_POLYPAINT_PARALLEL_V3");
+  const bool parallel_requested = parallel_env && parallel_env[0] == '1' && parallel_env[1] == '\0';
+  const char *local_env = std::getenv("BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3");
+  const bool local_redraw = local_env && local_env[0] == '1' && local_env[1] == '\0';
+  const char *prepared_env = std::getenv("BLENDER_SCULPT_POLYPAINT_PREPARED_V2");
+  const bool prepared_enabled = prepared_env && prepared_env[0] == '1' && prepared_env[1] == '\0';
+  bool parallel_ok = parallel_requested && node_mask.size() > 1 &&
+      mmd.sculpt_color_grids && mmd.sculpt_color_grids_num == ccg.grids_num &&
+      mmd.sculpt_color_level >= mmd.sculptlvl && mmd.sculpt_color_level <= 13 &&
+      (mmd.sculpt_color_level >= mmd.totlvl || bke::multires_layers::polypaint_lazy_master_enabled());
+  if (parallel_ok) {
+    /* Grid indices, not PBVH node ids, own the writes. Refuse overlapping
+     * ownership and malformed shared payloads before any worker is started. */
+    std::vector<int> owners(ccg.grids_num, -1);
+    std::unordered_set<const void *> payloads;
+    node_mask.foreach_index([&](const int node_index) {
+      for (const int grid : nodes[node_index].grids()) {
+        if (grid < 0 || grid >= ccg.grids_num) {
+          parallel_ok = false;
+          continue;
+        }
+        if (owners[grid] >= 0) {
+          if (owners[grid] != node_index) parallel_ok = false;
+          continue;
+        }
+        owners[grid] = node_index;
+        const void *payload = mmd.sculpt_color_grids[grid].colors;
+        if (payload && !payloads.insert(payload).second) parallel_ok = false;
+      }
+    });
+    /* Resolve read-only mesh caches on the main thread before lazy grid
+     * materialization. The directory/resolution is already fixed by stroke entry. */
+    base_mesh.corner_to_face_map();
+    base_mesh.faces();
+    base_mesh.attributes().lookup<ColorGeometry4f>(name, bke::AttrDomain::Corner);
+  }
+  struct LocalWork {
+    Vector<float3> positions;
+    Vector<float> factors;
+    Vector<float> distances;
+    bke::multires_polypaint_cpu::PreparedPaintPlan prepared_plan;
+    int64_t touched_samples = 0, prepared_samples = 0, prepared_grids = 0;
+    double gather_ms = 0.0, factors_ms = 0.0, write_ms = 0.0, prepare_ms = 0.0;
+  };
+  threading::EnumerableThreadSpecific<LocalWork> work;
+  std::vector<unsigned char> node_changed(nodes.size(), 0);
+  const double setup_end = trace ? BLI_time_now_seconds() : 0.0;
+  auto paint_node = [&](const int node_index) {
+    LocalWork &tls = work.local();
+    auto &positions = tls.positions;
+    auto &factors = tls.factors;
+    auto &distances = tls.distances;
+    auto &prepared_plan = tls.prepared_plan;
+    bool changed = false;
+    int64_t touched_samples = 0, prepared_samples = 0, prepared_grids = 0;
+    double gather_ms = 0.0, factors_ms = 0.0, write_ms = 0.0, prepare_ms = 0.0;
+    const Span<int> grids = nodes[node_index].grids();
+    double stage_start = trace ? BLI_time_now_seconds() : 0.0;
+    const Span<float3> co = gather_grids_positions(ccg, grids, positions);
+    if (trace) {
+      const double now = BLI_time_now_seconds();
+      gather_ms += (now - stage_start) * 1000.0;
+      stage_start = now;
+    }
+    calc_factors_common_grids(
+        depsgraph, brush, object, co, nodes[node_index], factors, distances);
+    if (trace) {
+      const double now = BLI_time_now_seconds();
+      factors_ms += (now - stage_start) * 1000.0;
+      stage_start = now;
+    }
+    int prepared_grid = -1;
+    float (*prepared_master)[4] = nullptr;
+    for (const int i : co.index_range()) {
+      const float influence = std::clamp(factors[i] * strength, 0.0f, 1.0f);
+      if (influence <= 0.0f) {
+        continue;
+      }
+      const int local_grid = i / ccg.grid_area;
+      const int pixel = i % ccg.grid_area;
+      const int grid_index = grids[local_grid];
+      const int x = pixel % ccg.grid_size;
+      const int y = pixel / ccg.grid_size;
+      if (prepared_grid != grid_index) {
+        prepared_grid = grid_index;
+        prepared_master = nullptr;
+      }
+      if (prepared_master) {
+        const float brush_rgb[3] = {primary[0], primary[1], primary[2]};
+        const bool wrote = prepared_plan.blend(prepared_master, x, y, brush_rgb, influence);
+        changed |= wrote;
+        touched_samples += int(wrote);
+        prepared_samples += int(wrote);
+        continue;
+      }
+      const float u = float(x) / float(ccg.grid_size - 1);
+      const float v = float(y) / float(ccg.grid_size - 1);
+      float before[4];
+      if (!bke::multires_layers::polypaint_sample_with_base(
+              mmd, base_mesh, name, grid_index, u, v, before))
+      {
+        continue;
+      }
+      float target[4];
+      for (int channel = 0; channel < 3; channel++) {
+        target[channel] = before[channel] * (1.0f - influence) +
+                          primary[channel] * influence;
+      }
+      target[3] = before[3];
+      const bool wrote = bke::multires_layers::polypaint_write_coarse_sample(
+          mmd, base_mesh, name, grid_index, mmd.sculptlvl, x, y, target);
+      if (wrote && prepared_enabled && bke::multires_layers::polypaint_grid(mmd, grid_index)) {
+        const double start = trace ? BLI_time_now_seconds() : 0.0;
+        const int master_side = bke::subdiv::grid_size_from_level(mmd.sculpt_color_level);
+        if (prepared_plan.prepare(master_side, ccg.grid_size)) {
+          prepared_master = mmd.sculpt_color_grids[grid_index].colors;
+          prepared_grids++;
+        }
+        if (trace) prepare_ms += (BLI_time_now_seconds() - start) * 1000.0;
+      }
+      changed |= wrote;
+      touched_samples += int(wrote);
+    }
+    if (trace) write_ms += (BLI_time_now_seconds() - stage_start) * 1000.0;
+    tls.touched_samples += touched_samples;
+    tls.prepared_samples += prepared_samples;
+    tls.prepared_grids += prepared_grids;
+    tls.gather_ms += gather_ms;
+    tls.factors_ms += factors_ms;
+    tls.write_ms += write_ms;
+    tls.prepare_ms += prepare_ms;
+    node_changed[node_index] = changed;
+  };
+  if (parallel_ok) {
+    node_mask.foreach_index(paint_node, exec_mode::grain_size(1));
+  }
+  else {
+    node_mask.foreach_index(paint_node);
+  }
+  int64_t touched_samples = 0, prepared_samples = 0, prepared_grids = 0;
+  double gather_ms = 0.0, factors_ms = 0.0, write_ms = 0.0, prepare_ms = 0.0;
+  int workers = 0;
+  for (const LocalWork &tls : work) {
+    touched_samples += tls.touched_samples;
+    prepared_samples += tls.prepared_samples;
+    prepared_grids += tls.prepared_grids;
+    gather_ms += tls.gather_ms;
+    factors_ms += tls.factors_ms;
+    write_ms += tls.write_ms;
+    prepare_ms += tls.prepare_ms;
+    workers++;
+  }
+  bool changed = false;
+  node_mask.foreach_index([&](const int node_index) { changed |= bool(node_changed[node_index]); });
+  const double notify_start = trace ? BLI_time_now_seconds() : 0.0;
+  int64_t redraw_nodes = 0;
+  if (changed) {
+    if (local_redraw) {
+      IndexMaskMemory memory;
+      const IndexMask redraw = IndexMask::from_predicate(node_mask, memory,
+          [&](const int i) { return bool(node_changed[i]); });
+      pbvh.tag_attribute_changed(redraw, name);
+      redraw_nodes = redraw.size();
+    }
+    else {
+      pbvh.tag_attribute_changed(node_mask, name);
+      redraw_nodes = node_mask.size();
+    }
+  }
+  const double paint_end = trace ? BLI_time_now_seconds() : 0.0;
+  if (trace) {
+    std::printf("[POLYPAINT_CPU] paint_level=%d master_level=%d nodes=%lld "
+                "touched=%lld changed=%d total=%.3fms\n",
+                mmd.sculptlvl, mmd.sculpt_color_level,
+                static_cast<long long>(node_mask.size()),
+                static_cast<long long>(touched_samples), int(changed),
+                (BLI_time_now_seconds() - paint_start) * 1000.0);
+    std::printf("[POLYPAINT_PARALLEL_V3] requested=%d eligible=%d workers=%d redraw_local=%d redraw_nodes=%lld\n",
+                int(parallel_requested), int(parallel_ok), workers, int(local_redraw),
+                static_cast<long long>(redraw_nodes));
+    std::printf("[POLYPAINT_PREPARED_V2] enabled=%d reused_samples=%lld prepared_grids=%lld "
+                "setup=%.3fms gather=%.3fms factors=%.3fms write=%.3fms "
+                "prepare=%.3fms notify=%.3fms\n",
+                int(prepared_enabled), static_cast<long long>(prepared_samples),
+                static_cast<long long>(prepared_grids), (setup_end - paint_start) * 1000.0,
+                gather_ms, factors_ms, write_ms, prepare_ms,
+                (paint_end - notify_start) * 1000.0);
+  }
+}
+
 void do_paint_brush(const Depsgraph &depsgraph,
                     PaintModeSettings &paint_mode_settings,
                     const Sculpt &sd,
@@ -573,9 +981,16 @@ void do_paint_brush(const Depsgraph &depsgraph,
   }
   PRF_scope(ProfileCategory::Editor);
 
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  if (pbvh.type() == bke::pbvh::Type::Grids) {
+    do_paint_brush_grids_cpu(depsgraph, sd, ob, node_mask);
+    return;
+  }
+  if (pbvh.type() != bke::pbvh::Type::Mesh) {
+    return;
+  }
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   SculptSession &ss = *ob.runtime->sculpt_session;
-  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
 
   if (!ss.cache->paint_brush.density_seed) {
@@ -861,6 +1276,9 @@ void do_smear_brush(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   SculptSession &ss = *ob.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  if (pbvh.type() != bke::pbvh::Type::Mesh) {
+    return;
+  }
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
 
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
@@ -939,6 +1357,9 @@ void do_blur_brush(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   SculptSession &ss = *ob.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  if (pbvh.type() != bke::pbvh::Type::Mesh) {
+    return;
+  }
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
 
   if (!ss.cache->paint_brush.density_seed) {

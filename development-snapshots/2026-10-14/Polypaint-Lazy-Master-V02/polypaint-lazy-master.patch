@@ -1,0 +1,328 @@
+diff --git a/source/blender/blenkernel/BKE_multires_sculpt_layers.hh b/source/blender/blenkernel/BKE_multires_sculpt_layers.hh
+index bd1c596..22bc674 100644
+--- a/source/blender/blenkernel/BKE_multires_sculpt_layers.hh
++++ b/source/blender/blenkernel/BKE_multires_sculpt_layers.hh
+@@ -165,6 +165,18 @@ void clear(MultiresModifierData &mmd);
+ void copy(MultiresModifierData &dst, const MultiresModifierData &src);
+ 
+ void polypaint_clear(MultiresModifierData &mmd);
++/** Opt-in independent Paint resolution. No geometry/layer publication. */
++bool polypaint_lazy_master_enabled();
++/** Stage a larger (or first) color master without modifying the source.
++ * Only color-master fields in the empty destination are populated; caller owns
++ * them through polypaint_clear. Existing samples are copied exactly, sparse
++ * corners remain implicit. Never downsample or change base-corner topology. */
++bool polypaint_stage_master(const MultiresModifierData &source,
++                           int level,
++                           int corners_num,
++                           MultiresModifierData &destination);
++/** Swap color-master ownership only; does not touch Sculpt Layers or geometry. */
++void polypaint_swap_master(MultiresModifierData &a, MultiresModifierData &b);
+ float (*polypaint_grid_ensure(MultiresModifierData &mmd, int corner))[4];
+ const float (*polypaint_grid(const MultiresModifierData &mmd, int corner))[4];
+ bool polypaint_grid_discard(MultiresModifierData &mmd, int corner);
+diff --git a/source/blender/blenkernel/intern/multires_sculpt_layers.cc b/source/blender/blenkernel/intern/multires_sculpt_layers.cc
+index 995e895..59ca038 100644
+--- a/source/blender/blenkernel/intern/multires_sculpt_layers.cc
++++ b/source/blender/blenkernel/intern/multires_sculpt_layers.cc
+@@ -731,6 +731,100 @@ bool polypaint_ensure(MultiresModifierData &mmd, const int level, const int grid
+   return true;
+ }
+ 
++bool polypaint_lazy_master_enabled()
++{
++  const char *value = BLI_getenv("BLENDER_SCULPT_POLYPAINT_LAZY_MASTER");
++  return value && value[0] == '1' && value[1] == '\0';
++}
++
++bool polypaint_stage_master(const MultiresModifierData &source,
++                           const int level,
++                           const int corners_num,
++                           MultiresModifierData &destination)
++{
++  if (level < 1 || level > 13 || corners_num <= 0 ||
++      destination.sculpt_color_grids || destination.sculpt_color_grids_num != 0 ||
++      destination.sculpt_color_level != 0)
++  {
++    return false;
++  }
++  const int old_level = source.sculpt_color_level;
++  if (source.sculpt_color_grids) {
++    if (old_level < 1 || old_level > 13 || level <= old_level ||
++        source.sculpt_color_grids_num != corners_num)
++    {
++      return false;
++    }
++    const int old_side = subdiv::grid_size_from_level(old_level);
++    for (int corner = 0; corner < corners_num; corner++) {
++      const MultiresColorGrid &grid = source.sculpt_color_grids[corner];
++      if (!grid.colors) {
++        continue;
++      }
++      if (grid.level != old_level || grid.totcolor != old_side * old_side) {
++        return false;
++      }
++      for (int sample = 0; sample < grid.totcolor; sample++) {
++        for (int channel = 0; channel < 4; channel++) {
++          if (!std::isfinite(grid.colors[sample][channel])) {
++            return false;
++          }
++        }
++      }
++    }
++  }
++  else if (old_level != 0 || source.sculpt_color_grids_num != 0) {
++    return false;
++  }
++
++  /* Own all staged buffers until the editor's Undo boundary succeeds. Neither
++   * the live master nor earlier Color Undo snapshots are resized in place. */
++  if (!polypaint_ensure(destination, level, corners_num)) {
++    return false;
++  }
++  const int new_side = subdiv::grid_size_from_level(level);
++  const int old_side = source.sculpt_color_grids ? subdiv::grid_size_from_level(old_level) : 0;
++  const int step = old_side ? (new_side - 1) / (old_side - 1) : 0;
++  for (int corner = 0; corner < corners_num; corner++) {
++    MultiresColorGrid &grid = destination.sculpt_color_grids[corner];
++    grid.level = level;
++    grid.totcolor = new_side * new_side;
++    if (!source.sculpt_color_grids || !source.sculpt_color_grids[corner].colors) {
++      continue;
++    }
++    const float (*old)[4] = source.sculpt_color_grids[corner].colors;
++    grid.colors = MEM_new_array_uninitialized<float[4]>(grid.totcolor,
++                                                       "staged polypaint master");
++    for (int y = 0; y < new_side; y++) {
++      const int y0 = y / step, y1 = std::min(y0 + 1, old_side - 1);
++      const double fy = double(y % step) / step;
++      for (int x = 0; x < new_side; x++) {
++        const int x0 = x / step, x1 = std::min(x0 + 1, old_side - 1);
++        if (x % step == 0 && y % step == 0) {
++          memcpy(grid.colors[y * new_side + x], old[y0 * old_side + x0], sizeof(float[4]));
++          continue;
++        }
++        const double fx = double(x % step) / step;
++        for (int channel = 0; channel < 4; channel++) {
++          const double a = double(old[y0 * old_side + x0][channel]) * (1.0 - fx) +
++                           double(old[y0 * old_side + x1][channel]) * fx;
++          const double b = double(old[y1 * old_side + x0][channel]) * (1.0 - fx) +
++                           double(old[y1 * old_side + x1][channel]) * fx;
++          grid.colors[y * new_side + x][channel] = float(a * (1.0 - fy) + b * fy);
++        }
++      }
++    }
++  }
++  return true;
++}
++
++void polypaint_swap_master(MultiresModifierData &a, MultiresModifierData &b)
++{
++  std::swap(a.sculpt_color_grids, b.sculpt_color_grids);
++  std::swap(a.sculpt_color_grids_num, b.sculpt_color_grids_num);
++  std::swap(a.sculpt_color_level, b.sculpt_color_level);
++}
++
+ float (*polypaint_grid_ensure_master(MultiresModifierData &mmd, const int corner))[4]
+ {
+   if (!mmd.sculpt_color_grids || corner < 0 || corner >= mmd.sculpt_color_grids_num ||
+@@ -993,11 +1087,22 @@ float (*polypaint_grid_ensure_from_base(MultiresModifierData &mmd,
+   if (mmd.sculpt_color_grids && mmd.sculpt_color_grids_num != base_mesh.corners_num) {
+     return nullptr;
+   }
++  if (polypaint_lazy_master_enabled() && !mmd.sculpt_color_grids) {
++    /* A writer cannot establish an Undo boundary. Stroke entry owns creation. */
++    return nullptr;
++  }
+   /* A color master older than the geometric maximum must be promoted before any
+    * edit. Returning an existing lower-resolution grid here would silently cap
+    * subsequent painting at its former level. */
+   if (mmd.sculpt_color_grids && mmd.sculpt_color_level < mmd.totlvl) {
+-    if (!polypaint_resample(mmd, mmd.totlvl)) {
++    if (polypaint_lazy_master_enabled()) {
++      /* The main-thread stroke entry must prepare before parallel Undo capture.
++       * Geometry may be finer; only the actual Paint level needs coverage. */
++      if (mmd.sculpt_color_level < mmd.sculptlvl) {
++        return nullptr;
++      }
++    }
++    else if (!polypaint_resample(mmd, mmd.totlvl)) {
+       return nullptr;
+     }
+     if (polypaint_grid(mmd, corner)) {
+@@ -1358,7 +1463,8 @@ bool resample_all(MultiresModifierData &mmd, const int new_level, const int grid
+     layer.level = new_level;
+     layer.grids_num = grids_num;
+   }
+-  return !mmd.sculpt_color_grids || polypaint_resample(mmd, new_level);
++  return polypaint_lazy_master_enabled() || !mmd.sculpt_color_grids ||
++         polypaint_resample(mmd, new_level);
+ }
+ 
+ bool can_record(const MultiresModifierData &mmd, const Mesh &mesh)
+diff --git a/source/blender/editors/sculpt_paint/mesh/sculpt.cc b/source/blender/editors/sculpt_paint/mesh/sculpt.cc
+index d203ed4..e767779 100644
+--- a/source/blender/editors/sculpt_paint/mesh/sculpt.cc
++++ b/source/blender/editors/sculpt_paint/mesh/sculpt.cc
+@@ -58,6 +58,7 @@
+ #include "DNA_node_types.h"
+ #include "DNA_object_types.h"
+ #include "DNA_scene_types.h"
++#include "DNA_userdef_types.h"
+ 
+ #include "BKE_attribute.hh"
+ #include "BKE_brush.hh"
+@@ -83,6 +84,7 @@
+ #include "BKE_paint_types.hh"
+ #include "BKE_report.hh"
+ #include "BKE_subdiv_ccg.hh"
++#include "BKE_undo_system.hh"
+ 
+ #include "BLT_translation.hh"
+ 
+@@ -100,6 +102,7 @@
+ #include "ED_paint.hh"
+ #include "ED_screen.hh"
+ #include "ED_sculpt.hh"
++#include "ED_undo.hh"
+ #include "ED_view3d.hh"
+ 
+ #include "../paint_intern.hh"
+@@ -7839,26 +7842,101 @@ static bool sculpt_polypaint_skips_geometry_rec(bContext *C)
+  * V0.2b code did an all-grid resample while Color Undo captured dense data,
+  * which caused a UI lock in the reported Windows test. Refuse only this
+  * unsupported transition; never discard or downsample color data. */
+-static bool sculpt_polypaint_requires_master_promotion(bContext *C)
++static bool sculpt_polypaint_prepare_stroke_master(bContext *C, wmOperator *op)
+ {
+   if (!sculpt_polypaint_skips_geometry_rec(C)) {
+-    return false;
++    return true;
+   }
+   Object *ob = CTX_data_active_object(C);
+   Scene *scene = CTX_data_scene(C);
+-  const MultiresModifierData *mmd = BKE_sculpt_multires_active(scene, ob);
+-  return mmd && mmd->sculpt_color_grids && mmd->sculpt_color_level > 0 &&
+-         mmd->sculpt_color_level < mmd->totlvl;
++  MultiresModifierData *mmd = const_cast<MultiresModifierData *>(
++      BKE_sculpt_multires_active(scene, ob));
++  if (!bke::multires_layers::polypaint_lazy_master_enabled()) {
++    if (mmd && mmd->sculpt_color_grids && mmd->sculpt_color_level > 0 &&
++        mmd->sculpt_color_level < mmd->totlvl)
++    {
++      BKE_report(op->reports, RPT_WARNING,
++                 "Multires Polypaint: master promotion after Subdivide pending; original color preserved");
++      return false;
++    }
++    return true;
++  }
++  const Mesh *mesh = id_cast<Mesh *>(ob->data);
++  const SculptSession *ss = ob->runtime->sculpt_session;
++  if (!mmd || mmd->sculptlvl < 1 || mmd->sculptlvl > mmd->totlvl ||
++      mmd->sculptlvl > 13 || (ss && (ss->cache || ss->filter_cache)))
++  {
++    BKE_report(op->reports, RPT_ERROR, "Cannot prepare Paint resolution during another sculpt transaction");
++    return false;
++  }
++  if (mmd->sculpt_color_grids && mmd->sculpt_color_level >= mmd->sculptlvl &&
++      mmd->sculpt_color_level <= 13 && mmd->sculpt_color_grids_num == mesh->corners_num)
++  {
++    return true;
++  }
++
++  MultiresModifierData staged{};
++  const int previous_level = mmd->sculpt_color_level;
++  if (!bke::multires_layers::polypaint_stage_master(*mmd, mmd->sculptlvl,
++                                                  mesh->corners_num, staged))
++  {
++    bke::multires_layers::polypaint_clear(staged);
++    BKE_report(op->reports, RPT_ERROR, "Invalid Paint master; original colors preserved");
++    return false;
++  }
++  const bool use_undo = U.undosteps > 0 && (U.uiflag & USER_GLOBALUNDO);
++  UndoStack *stack = use_undo ? ED_undo_stack_get() : nullptr;
++  if (use_undo && (!stack || stack->step_init || !ED_undo_is_memfile_compatible(C))) {
++    bke::multires_layers::polypaint_clear(staged);
++    BKE_report(op->reports, RPT_ERROR, "Paint promotion requires a completed Undo transaction");
++    return false;
++  }
++  /* A full color-resolution change cannot cross older Color steps silently:
++   * their saved grid strides differ. Preserve the old master in a Memfile
++   * boundary before publishing. This happens once, outside stroke/parallel
++   * node capture, and does not change Position Undo or first-stroke anchors. */
++  if (use_undo) {
++    UndoStep *before = stack->step_active;
++    ED_undo_push(C, "Before Polypaint Resolution Change");
++    if (!stack->step_active || stack->step_active == before ||
++        stack->step_active->type != BKE_UNDOSYS_TYPE_MEMFILE)
++    {
++      bke::multires_layers::polypaint_clear(staged);
++      BKE_report(op->reports, RPT_ERROR, "Paint promotion checkpoint failed; original colors preserved");
++      return false;
++    }
++  }
++  bke::multires_layers::polypaint_swap_master(*mmd, staged);
++  DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
++  if (use_undo) {
++    UndoStep *before = stack->step_active;
++    ED_undo_push(C, "Prepare Polypaint Resolution");
++    if (!stack->step_active || stack->step_active == before ||
++        stack->step_active->type != BKE_UNDOSYS_TYPE_MEMFILE)
++    {
++      bke::multires_layers::polypaint_swap_master(*mmd, staged);
++      bke::multires_layers::polypaint_clear(staged);
++      DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
++      BKE_report(op->reports, RPT_ERROR, "Paint promotion Undo failed; original colors restored");
++      return false;
++    }
++  }
++  bke::multires_layers::polypaint_clear(staged);
++  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
++  const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
++  if (trace && trace[0] && trace[0] != '0') {
++    std::printf("[POLYPAINT_LAZY_MASTER] from=%d to=%d geometry=%d undo_boundary=%d\n",
++                previous_level, mmd->sculpt_color_level, mmd->totlvl, int(use_undo));
++    std::fflush(stdout);
++  }
++  return true;
+ }
+ 
+ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
+                                                    wmOperator *op,
+                                                    const wmEvent *event)
+ {
+-  if (sculpt_polypaint_requires_master_promotion(C)) {
+-    BKE_report(op->reports,
+-               RPT_WARNING,
+-               "Multires Polypaint: master promotion after Subdivide pending; original color preserved");
++  if (!sculpt_polypaint_prepare_stroke_master(C, op)) {
+     return OPERATOR_CANCELLED;
+   }
+ 
+@@ -7990,10 +8068,7 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
+     BKE_report(op->reports, RPT_ERROR, "Experimental Multires Polypaint is disabled");
+     return OPERATOR_CANCELLED;
+   }
+-  if (sculpt_polypaint_requires_master_promotion(C)) {
+-    BKE_report(op->reports,
+-               RPT_WARNING,
+-               "Multires Polypaint: master promotion after Subdivide pending; original color preserved");
++  if (!sculpt_polypaint_prepare_stroke_master(C, op)) {
+     return OPERATOR_CANCELLED;
+   }
+ 
+diff --git a/source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc b/source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc
+index 5b523a3..cf29938 100644
+--- a/source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc
++++ b/source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc
+@@ -2782,7 +2782,9 @@ static void fill_node_data_grids(const Object &object,
+         break;
+       }
+       if (mmd->sculpt_color_grids && mmd->sculpt_color_level < mmd->totlvl &&
+-          !bke::multires_layers::polypaint_resample(*mmd, mmd->totlvl))
++          (bke::multires_layers::polypaint_lazy_master_enabled() ?
++               mmd->sculpt_color_level < mmd->sculptlvl :
++               !bke::multires_layers::polypaint_resample(*mmd, mmd->totlvl)))
+       {
+         break;
+       }

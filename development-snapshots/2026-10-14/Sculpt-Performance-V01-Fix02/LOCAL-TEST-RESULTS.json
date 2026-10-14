@@ -1,0 +1,13 @@
+{
+  "isolated_cpp_staging_cases_pass": 79,
+  "isolated_undo_wait_cases_pass": 8,
+  "patch_installation_states_pass": 4,
+  "incompatible_patch_mutation_rejected": true,
+  "comparator_regression_rejections_pass": 11,
+  "archive_and_subprocess_checks_pass": true,
+  "native_ms_vc_build_tested": false,
+  "native_blender_ab_tested": false,
+  "powershell_execution_tested": false,
+  "geometric_backend_of_cpp_test": "stub",
+  "native_checks_required_before_final_build_zip": true
+}

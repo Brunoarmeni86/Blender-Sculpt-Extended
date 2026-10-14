@@ -9,6 +9,7 @@
  */
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "CLG_log.h"
@@ -206,6 +207,14 @@ static void undosys_step_decode(bContext *C,
           else {
             /* Load the previous memfile state so any ID's referenced in this
              * undo step will be correctly resolved, see: #56163. */
+            const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+            if (trace_env && trace_env[0] && trace_env[0] != '0') {
+              std::printf("[LAYER_UNDO_MEMFILE_SWITCH] native_step=%s checkpoint=%s "
+                          "active_checkpoint=%s\n",
+                          us->name, us_iter->name,
+                          ustack->step_active_memfile ? ustack->step_active_memfile->name : "NONE");
+              std::fflush(stdout);
+            }
             undosys_step_decode(C, bmain, ustack, us_iter, dir, false);
             /* May have been freed on memfile read. */
             bmain = G_MAIN;

@@ -1,0 +1,28 @@
+POLYPAINT PREPARED V02 — PRIMA OTTIMIZZAZIONE CPU
+
+Base: multi-attributo V01 Fix01 compilata e con test passati, sopra Conform/Undo Cache, Bake Visible e Lazy Master. Non applicare prima il vecchio Sculpt-Strength-Paint V01.
+
+Estrai la cartella Polypaint-Prepared-V02 in C:\BlenderDev. Chiudi Blender quando hai finito la verifica della mesh. Compila e verifica:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Prepared-V02\COMPILA-E-VERIFICA.ps1"
+
+Il kit modifica soltanto la funzione CPU del Paint in sculpt_paint_color.cc e aggiunge BKE_multires_polypaint_prepared.hh. Non modifica Color Undo, storage, shader, geometria, operatori o dati dei master. Conserva multi-attributo, Conform/Undo, bake e lazy. Per ogni griglia il primo campione influenzato usa ancora il writer precedente, incluse inizializzazione e verifiche. I successivi riusano puntatore/risoluzione preparati. A pari livello scrivono soltanto il centro della zona 3x3; ai livelli inferiori riusano gli stessi pesi preparati e conservano la sequenza dei delta. Il parallelismo non e ancora introdotto.
+
+Prima della patch vengono verificati quattro sorgenti della base multi-attributo e il contenuto esatto della funzione Paint. Sono riconosciute due versioni note del writer; il resto del file viene preservato. La patch effettiva e registrata come applied.patch nella cartella risultati, insieme ai backup sorgenti, agli hash e al backup Release. CRLF/LF e righe vuote finali non creano falsi conflitti di base. Funzioni sconosciute bloccano l'applicazione e producono paint-function-observed.cc.txt da allegare, senza cambiare sorgenti.
+
+Dopo compilazione il runner esegue sei processi UI, uno alla volta: regressione lazy con/senza layer, multi-attributo prepared con/senza layer, multi-attributo riferimento con/senza layer. Non interagire. Verifica Paint, selezione, aggiunta, rinomina, rimozione, Undo/Redo, promozione isolata, riapertura dei file e Delete Higher/Subdivide. Confronta i colori di tutti gli attributi, geometria e metadati tra prepared e riferimento. Crea portable/ZIP solo dopo il PASS.
+
+Avvio ottimizzato:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Prepared-V02\AVVIA-ESPERIMENTO.ps1"
+
+Confronto sullo STESSO binario, writer precedente:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Prepared-V02\AVVIA-ESPERIMENTO.ps1" -ReferencePaint
+
+Per una misura utile usa lo stesso file, pennello, raggio, livello e distanza camera. Distingui il primo tratto, che materializza colori e cattura Undo, dai tratti su una zona gia dipinta. Confronta sia Sculpt=master sia Sculpt<master. I tempi del solo kernel non rappresentano tutta la latenza della pennellata.
+
+Log: [POLYPAINT_CPU] continua a riportare il totale del writer. [POLYPAINT_PREPARED_V2] riporta enabled, reused_samples, prepared_grids, setup, gather, factors, write, prepare e notify. prepare e un sottoinsieme di write: non sommarli. paint-profiles.json riassume i tempi delle scene piccole di test; non e uno stress test su mesh dense. I log della tua sessione sono stampati dal launcher.
+
+COMPLETA-BUILD.ps1 -RunDir "cartella risultati" ripete copia/test/ZIP senza ricompilare, solo dopo una compilazione completata. In caso di errore conserva operation-error.log, build.log, ui-*.log e la cartella risultati. Se vuoi annullare soltanto questa ottimizzazione:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Polypaint-Prepared-V02\RIPRISTINA.ps1" -RunDir "cartella risultati originale"
+Il ripristino usa la patch esatta di quella prova e ricompila la base multi-attributo.
+
+Validazione locale: 1080 confronti del ciclo reale Paint e 127 casi numerici del kernel con ASan/UBSan, usando API scena/PBVH simulate; otto varianti di installazione e sintassi Python. Compilazione Blender/MSVC e Undo/Redo reali restano da verificare sul tuo Windows. L'ottimizzazione e limitata a Paint base; Smear/Blur e il problema degli spike geometrici restano separati.

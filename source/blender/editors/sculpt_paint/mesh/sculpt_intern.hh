@@ -38,6 +38,8 @@ namespace blender {
 struct MultiresSculptLayer;
 
 namespace ed::sculpt_paint {
+struct AnchorSurfacePathCache;
+struct AnchorProjectionDiagnostics;
 namespace brushes {
 struct ElasticGrabWeightCache;
 }
@@ -221,6 +223,12 @@ struct StrokeToggleSettings {
  * needed for individual brush strokes.
  */
 struct StrokeCache {
+  /* ANCHORED_GEODESIC_V3: read-only surface-path cache during parallel brush sampling. */
+  std::shared_ptr<AnchorSurfacePathCache> anchor_surface_path;
+  /* V5: independent local footprint per symmetry/radial/tile pass, freed with stroke. */
+  Vector<std::shared_ptr<AnchorSurfacePathCache>, 8> anchor_surface_passes;
+  bool anchor_surface_allocation_failed = false;
+  std::shared_ptr<AnchorProjectionDiagnostics> anchor_projection_diagnostics;
   /* SCULPT_ELASTIC_GRAB_EXACT_V2: freed with this stroke, never stored in DNA. */
   std::shared_ptr<brushes::ElasticGrabWeightCache> elastic_grab_weight_cache;
   /* SCULPT_ELASTIC_ACCELERATED_V2: approximate weights must never share Exact entries. */
@@ -800,7 +808,9 @@ void sculpt_apply_texture(const SculptSession &ss,
                           const float brush_point[3],
                           int thread_id,
                           float *r_value,
-                          float4 &r_rgba);
+                          float4 &r_rgba,
+                          const float3 *surface_normal = nullptr,
+                          int ccg_index = -1);
 
 /**
  * Calculates the vertex offset for a single vertex depending on the brush setting rgb as vector
