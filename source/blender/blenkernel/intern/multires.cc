@@ -2135,6 +2135,28 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
   if (!mmd) {
     return false;
   }
+  /* LAYER_CCG_WRITEBACK_TRACE_V00: trace the explicit persistence owner, to
+   * compare with the evaluated-cache native reshape path in object.cc. */
+  const char *layer_trace_env = BLI_getenv("BLENDER_SCULPT_CCG_WRITEBACK_TRACE");
+  const bool layer_trace_enabled = layer_trace_env && layer_trace_env[0] == '1' &&
+                                   layer_trace_env[1] == '\0';
+  if (layer_trace_enabled && !mmd->sculpt_layers.is_empty()) {
+    std::printf("[LAYER_CCG_WRITEBACK_V00] path=EXPLICIT_FLUSH object=%p ccg=%p "
+                "dirty=%d/%d/%d ccg_level=%d top=%d sculpt_level=%d "
+                "layers=%d active=%d recording=%d\n",
+                static_cast<void *>(object),
+                static_cast<void *>(ccg),
+                int(ccg->dirty.coords),
+                int(ccg->dirty.hidden),
+                int(ccg->dirty.masks),
+                ccg->level,
+                int(mmd->totlvl),
+                int(mmd->sculptlvl),
+                mmd->sculpt_layers.count(),
+                mmd->sculpt_layer_active,
+                int(mmd->sculpt_layer_recording));
+    std::fflush(stdout);
+  }
   Mesh *mesh = id_cast<Mesh *>(object->data);
   if (ccg->dirty.masks && !ccg->dirty.coords && !ccg->dirty.hidden) {
     const BitVector<> *mask_subset = changes.masks_full ? nullptr : &changes.mask_grids;
