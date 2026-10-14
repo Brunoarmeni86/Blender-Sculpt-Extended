@@ -6976,7 +6976,26 @@ void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_
   const SculptSession &ss = *object.runtime->sculpt_session;
   const MultiresModifierData *mmd = ss.multires_modifier;
   if (mmd != nullptr) {
-    multires_mark_as_modified(vc.depsgraph, &object, MULTIRES_COORDS_MODIFIED);
+    /* LAYER_CCG_DIRTY_DOMAINS_V01:
+     * A paint/mask redraw is not a position edit. Tagging all stroke types as
+     * COORDS_MODIFIED sends a composed Sculpt Layer CCG through native
+     * reshape on evaluated-cache teardown, potentially baking those layers
+     * into CD_MDISPS a second time. Only position strokes own position dirt. */
+    switch (update_type) {
+      case UpdateType::Position:
+        multires_mark_as_modified(vc.depsgraph, &object, MULTIRES_COORDS_MODIFIED);
+        break;
+      case UpdateType::Mask:
+        multires_mark_as_modified(vc.depsgraph, &object, MULTIRES_MASK_MODIFIED);
+        break;
+      case UpdateType::Visibility:
+        multires_mark_as_modified(vc.depsgraph, &object, MULTIRES_HIDDEN_MODIFIED);
+        break;
+      case UpdateType::Color:
+      case UpdateType::Image:
+      case UpdateType::FaceSet:
+        break;
+    }
   }
 
   if (update_type == UpdateType::Image) {
