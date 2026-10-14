@@ -10,6 +10,7 @@
 #define DNA_DEPRECATED_ALLOW
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <optional>
@@ -1746,6 +1747,51 @@ static void object_update_from_subsurf_ccg(Object *object)
       subdiv_ccg->dirty.masks = false;
     }
     return;
+  }
+  /* LAYER_CCG_WRITEBACK_TRACE_V00: diagnostics only, no behavior change.
+   * An evaluated CCG can already contain the visible Sculpt Layer stack.
+   * A native reshape here would then write a composed surface to CD_MDISPS.
+   * Record this path before changing any ownership or publication logic. */
+  const char *layer_trace_env = std::getenv("BLENDER_SCULPT_CCG_WRITEBACK_TRACE");
+  const bool layer_trace_enabled = layer_trace_env && layer_trace_env[0] == '1' &&
+                                   layer_trace_env[1] == '\0';
+  if (layer_trace_enabled) {
+    for (const ModifierData &md : object_orig->modifiers) {
+      if (md.type != eModifierType_Multires) {
+        continue;
+      }
+      const auto &mmd = reinterpret_cast<const MultiresModifierData &>(md);
+      if (mmd.sculpt_layers.is_empty()) {
+        continue;
+      }
+      int effective_layers = 0;
+      for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+        if ((layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) && layer.strength != 0.0f) {
+          effective_layers++;
+        }
+      }
+      std::printf("[LAYER_CCG_WRITEBACK_V00] path=NATIVE_RESHAPE object=%p orig=%p "
+                  "ccg=%p session=%p dirty=%d/%d/%d ccg_level=%d top=%d "
+                  "modifier_top=%d sculpt_level=%d layers=%d effective=%d "
+                  "active=%d recording=%d\n",
+                  static_cast<void *>(object),
+                  static_cast<void *>(object_orig),
+                  static_cast<void *>(subdiv_ccg),
+                  static_cast<void *>(object_orig->runtime->sculpt_session),
+                  int(subdiv_ccg->dirty.coords),
+                  int(subdiv_ccg->dirty.hidden),
+                  int(subdiv_ccg->dirty.masks),
+                  subdiv_ccg->level,
+                  tot_level,
+                  int(mmd.totlvl),
+                  int(mmd.sculptlvl),
+                  mmd.sculpt_layers.count(),
+                  effective_layers,
+                  mmd.sculpt_layer_active,
+                  int(mmd.sculpt_layer_recording));
+      std::fflush(stdout);
+      break;
+    }
   }
   multiresModifier_reshapeFromCCG(tot_level, mesh_orig, subdiv_ccg);
   /* NOTE: we need to reshape into an original mesh from main database,
