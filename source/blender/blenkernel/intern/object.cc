@@ -37,6 +37,7 @@
 #include "DNA_lightprobe_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_meshdata_types.h"
 #include "DNA_meta_types.h"
 #include "DNA_movieclip_types.h"
 #include "DNA_nla_types.h"
@@ -78,6 +79,7 @@
 #include "BKE_crazyspace.hh"
 #include "BKE_curve.hh"
 #include "BKE_curves.hh"
+#include "BKE_customdata.hh"
 #include "BKE_deform.hh"
 #include "BKE_displist.h"
 #include "BKE_duplilist.hh"
@@ -1753,7 +1755,8 @@ static void object_update_from_subsurf_ccg(Object *object)
    * A native reshape here would then write a composed surface to CD_MDISPS.
    * Record this path before changing any ownership or publication logic. */
   const char *layer_trace_env = std::getenv("BLENDER_SCULPT_CCG_WRITEBACK_TRACE");
-  const bool layer_trace_enabled = layer_trace_env && layer_trace_env[0] == '1' &&
+  const bool layer_trace_enabled = layer_trace_env &&
+                                   (layer_trace_env[0] == '1' || layer_trace_env[0] == '2') &&
                                    layer_trace_env[1] == '\0';
   if (layer_trace_enabled) {
     for (const ModifierData &md : object_orig->modifiers) {
@@ -1795,7 +1798,106 @@ static void object_update_from_subsurf_ccg(Object *object)
       break;
     }
   }
+  /* LAYER_CCG_WRITEBACK_AUDIT_V01: diagnostic, no behavior change.
+   * Sample a few native and weighted-layer values before native reshape.
+   * In TRACE=2 mode, compare the native displacement increment with the
+   * weighted layer contribution. Only the equal-level case is meaningful. */
+  struct LayerCCGWritebackProbe {
+    int corner = -1;
+    int index = -1;
+    float native_before[3] = {};
+    float weighted_layers[3] = {};
+  };
+  LayerCCGWritebackProbe layer_ccg_probes[9];
+  int layer_ccg_probe_count = 0;
+  const bool layer_ccg_audit = layer_trace_env && layer_trace_env[0] == '2' &&
+                               layer_trace_env[1] == '\0';
+  if (layer_ccg_audit && mesh_orig->corners_num > 0 && subdiv_ccg->level == tot_level) {
+    const MDisps *native = static_cast<const MDisps *>(
+        CustomData_get_layer(&mesh_orig->corner_data, CD_MDISPS));
+    if (native != nullptr) {
+      const MultiresModifierData *layer_mmd = nullptr;
+      for (const ModifierData &md : object_orig->modifiers) {
+        if (md.type == eModifierType_Multires) {
+          const auto &candidate = reinterpret_cast<const MultiresModifierData &>(md);
+          if (!candidate.sculpt_layers.is_empty() && candidate.totlvl == tot_level) {
+            layer_mmd = &candidate;
+            break;
+          }
+        }
+      }
+      if (layer_mmd != nullptr) {
+        const int grids[] = {0, mesh_orig->corners_num / 2, mesh_orig->corners_num - 1};
+        for (const int grid : grids) {
+          const MDisps &native_grid = native[grid];
+          if (native_grid.disps == nullptr || native_grid.level != tot_level ||
+              native_grid.totdisp <= 0)
+          {
+            continue;
+          }
+          const int samples[] = {0, native_grid.totdisp / 2, native_grid.totdisp - 1};
+          for (const int i : samples) {
+            LayerCCGWritebackProbe &probe = layer_ccg_probes[layer_ccg_probe_count++];
+            probe.corner = grid;
+            probe.index = i;
+            for (int axis = 0; axis < 3; axis++) {
+              probe.native_before[axis] = native_grid.disps[i][axis];
+            }
+            for (const MultiresSculptLayer &layer : layer_mmd->sculpt_layers) {
+              if ((layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) == 0 ||
+                  !std::isfinite(layer.strength) || layer.strength == 0.0f ||
+                  layer.disps == nullptr || grid >= layer.grids_num)
+              {
+                continue;
+              }
+              const MDisps &layer_grid = layer.disps[grid];
+              if (layer_grid.disps == nullptr || layer_grid.level != tot_level ||
+                  layer_grid.totdisp != native_grid.totdisp)
+              {
+                continue;
+              }
+              for (int axis = 0; axis < 3; axis++) {
+                probe.weighted_layers[axis] += layer_grid.disps[i][axis] * layer.strength;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
   multiresModifier_reshapeFromCCG(tot_level, mesh_orig, subdiv_ccg);
+  if (layer_ccg_audit) {
+    const MDisps *native_after = static_cast<const MDisps *>(
+        CustomData_get_layer(&mesh_orig->corner_data, CD_MDISPS));
+    double projection = 0.0;
+    double layer_square = 0.0;
+    double mismatch_square = 0.0;
+    for (int p = 0; native_after != nullptr && p < layer_ccg_probe_count; p++) {
+      const LayerCCGWritebackProbe &probe = layer_ccg_probes[p];
+      const MDisps &grid = native_after[probe.corner];
+      if (!grid.disps || probe.index >= grid.totdisp) {
+        continue;
+      }
+      for (int axis = 0; axis < 3; axis++) {
+        const double delta = double(grid.disps[probe.index][axis]) -
+                             double(probe.native_before[axis]);
+        const double weighted = double(probe.weighted_layers[axis]);
+        projection += delta * weighted;
+        layer_square += weighted * weighted;
+        mismatch_square += (delta - weighted) * (delta - weighted);
+      }
+    }
+    std::printf("[LAYER_CCG_WRITEBACK_AUDIT] samples=%d "
+                "layer_signal=%g projection_ratio=%g residual_ratio=%g "
+                "valid_ratio=%d level=%d\n",
+                layer_ccg_probe_count,
+                std::sqrt(layer_square),
+                layer_square > 1.0e-20 ? projection / layer_square : 0.0,
+                layer_square > 1.0e-20 ? std::sqrt(mismatch_square / layer_square) : 0.0,
+                int(layer_square > 1.0e-20),
+                tot_level);
+    std::fflush(stdout);
+  }
   /* NOTE: we need to reshape into an original mesh from main database,
    * allowing:
    *
