@@ -1004,25 +1004,58 @@ bool can_record(const MultiresModifierData &mmd, const Mesh &mesh)
 
 bool bake_visible_to_base(MultiresModifierData &mmd, Mesh &mesh)
 {
-  weight_hot_delta_cache_invalidate();
-  if (!compatible(mmd, mesh) || ID_REAL_USERS(&mesh.id) > 1) {
+  /* BAKE_VISIBLE_TO_BASE_V2
+   *
+   * Only effective visible layers are incorporated. Hidden (including hidden
+   * L0) layers remain byte-for-byte unchanged. The visible result at the
+   * current top-level CCG resolution is preserved by moving the weighted
+   * displacement into CD_MDISPS and clearing precisely those moved offsets.
+   *
+   * Cage-changing L0 deltas require a reshape of the tangent displacement
+   * field, rather than a direct addition. Refuse these until that separate
+   * operation is implemented, to avoid silently modifying the high-res shape.
+   */
+  if (!compatible(mmd, mesh) || ID_REAL_USERS(&mesh.id) > 1 || mmd.totlvl <= 0) {
     return false;
   }
+
+  int baked_layer_count = 0;
   for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
-    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE)) {
-      return false;
+    if (!is_effective(layer)) {
+      continue;
+    }
+    baked_layer_count++;
+    if (layer.base_deltas) {
+      for (int vertex = 0; vertex < layer.base_verts_num; vertex++) {
+        for (int axis = 0; axis < 3; axis++) {
+          if (layer.base_deltas[vertex][axis] != 0.0f) {
+            std::printf("[LAYER_BAKE] mode=REJECT reason=VISIBLE_L0_CAGE_DEFORMATION\\n");
+            return false;
+          }
+        }
+      }
+    }
+
+    /* compatible() checks the grid layout; additionally ensure that each
+     * effective layer has actual displacement storage before using it. */
+    for (int corner = 0; corner < mesh.corners_num; corner++) {
+      if (!layer.disps[corner].disps) {
+        return false;
+      }
     }
   }
-  Array<float3> baked_positions(mesh.vert_positions());
-  if (!base_deltas_apply(mmd, baked_positions)) {
+  if (baked_layer_count == 0) {
     return false;
   }
+
   MDisps *base = static_cast<MDisps *>(
       CustomData_get_layer_for_write(&mesh.corner_data, CD_MDISPS, mesh.corners_num));
-  /* First validate every resulting component, then apply the same calculation.
-   * Layer entries are cleared only after their contribution has been read. */
+
+  /* Two passes: validate the complete output before mutating any grid.
+   * Once validation has passed, the second pass cannot fail for unchanged
+   * input, so every selected contribution is transferred exactly once. */
   for (int pass = 0; pass < 2; pass++) {
-    for (int corner = 0; mmd.totlvl > 0 && corner < mesh.corners_num; corner++) {
+    for (int corner = 0; corner < mesh.corners_num; corner++) {
       for (int i = 0; i < base[corner].totdisp; i++) {
         for (int axis = 0; axis < 3; axis++) {
           float value = base[corner].disps[i][axis];
@@ -1030,29 +1063,47 @@ bool bake_visible_to_base(MultiresModifierData &mmd, Mesh &mesh)
             return false;
           }
           for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
-            value += layer.disps[corner].disps[i][axis] * layer.strength;
+            if (!is_effective(layer)) {
+              continue;
+            }
+            const float displacement = layer.disps[corner].disps[i][axis];
+            if (!std::isfinite(displacement)) {
+              return false;
+            }
+            value += displacement * layer.strength;
             if (!std::isfinite(value)) {
               return false;
             }
           }
           if (pass == 1) {
             base[corner].disps[i][axis] = value;
-            for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
-              layer.disps[corner].disps[i][axis] = 0.0f;
-            }
           }
         }
       }
     }
   }
-  mesh.vert_positions_for_write().copy_from(baked_positions);
-  mesh.tag_positions_changed();
+
+  /* Clear only data actually incorporated into the base. In particular, do
+   * not touch any hidden layer or a visible layer with zero contribution. */
   for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (!is_effective(layer)) {
+      continue;
+    }
+    for (int corner = 0; corner < mesh.corners_num; corner++) {
+      memset(layer.disps[corner].disps,
+             0,
+             sizeof(float[3]) * layer.disps[corner].totdisp);
+    }
     if (layer.base_deltas) {
       memset(layer.base_deltas, 0, sizeof(float[3]) * layer.base_verts_num);
     }
   }
+
+  weight_hot_delta_cache_invalidate();
+  mesh.tag_positions_changed();
   mmd.sculpt_layer_recording = 0;
+  std::printf("[LAYER_BAKE] mode=VISIBLE_TO_BASE layers=%d hidden_preserved=1 l0_reshape=0\\n",
+              baked_layer_count);
   return true;
 }
 
