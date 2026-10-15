@@ -140,7 +140,9 @@ static void neighbor_position_average_interior_grids_impl(const OffsetIndices<in
 
         if constexpr (use_factors) {
           if (factors[node_vert_index] == 0.0f) {
-            new_positions[node_vert_index] = read_position(vert);
+            /* The caller discards zero-factor translations. Avoid expensive
+             * or ambiguous isolated lookups at stitched CCG borders. */
+            new_positions[node_vert_index] = positions[vert];
             continue;
           }
         }
