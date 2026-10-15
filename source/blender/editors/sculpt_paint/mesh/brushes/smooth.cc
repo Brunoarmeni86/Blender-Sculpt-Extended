@@ -5,6 +5,7 @@
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_modifier_types.h"
 #include "smooth_preserve_shape.hh"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
@@ -196,6 +197,7 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
  * tangent frames as the Multires displacement evaluator. */
 struct IsolatedSmoothContext {
   const SubdivCCG &ccg;
+  const CCGKey key;
   Vector<const MultiresSculptLayer *> other_layers;
   Span<int> ptex_offsets;
 };
@@ -250,8 +252,7 @@ static float3 smooth_other_layer_offset(const IsolatedSmoothContext &context,
     return *cached;
   }
   const SubdivCCG &ccg = context.ccg;
-  const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
-  const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, index);
+  const SubdivCCGCoord coord = SubdivCCGCoord::from_index(context.key, index);
   const int face_index = BKE_subdiv_ccg_grid_to_face_index(ccg, coord.grid_index);
   const IndexRange face = ccg.faces[face_index];
   const int corner = coord.grid_index - face.start();
@@ -356,6 +357,10 @@ static void calc_grids(const Depsgraph &depsgraph,
     for (const int grid : grids) {
       const int base_index = grid * key.grid_area;
       for (int i = 0; i < key.grid_area; i++, node_sample++) {
+        if (tls.factors[node_sample] == 0.0f) {
+          translations[node_sample] = float3(0.0f);
+          continue;
+        }
         const float3 center = read_isolated(base_index + i);
         translations[node_sample] = new_positions[node_sample] - center;
       }
@@ -447,7 +452,8 @@ void do_smooth_brush(const Depsgraph &depsgraph,
       const Span<int> corner_verts = base_mesh.corner_verts();
 
       threading::EnumerableThreadSpecific<LocalData> all_tls;
-      IsolatedSmoothContext isolated_context{*ss.subdiv_ccg};
+      IsolatedSmoothContext isolated_context{
+          *ss.subdiv_ccg, BKE_subdiv_ccg_key_top_level(*ss.subdiv_ccg), {}, {}};
       const bool isolation_enabled =
           smooth_isolated_context_build(object, *ss.subdiv_ccg, isolated_context) &&
           !(brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE);
