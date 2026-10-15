@@ -23,6 +23,7 @@
 
 #include "BLI_array.hh"
 #include "BLI_map.hh"
+#include "BLI_math_matrix.hh"
 #include <cstdlib>
 #include <cmath>
 #include "BLI_enumerable_thread_specific.hh"
@@ -457,6 +458,15 @@ void do_smooth_brush(const Depsgraph &depsgraph,
       const bool isolation_enabled =
           smooth_isolated_context_build(object, *ss.subdiv_ccg, isolated_context) &&
           !(brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE);
+      const char *isolated_trace = std::getenv("BLENDER_SCULPT_SMOOTH_ISOLATED_TRACE");
+      if (isolated_trace && isolated_trace[0] == '1' && isolated_trace[1] == '\0') {
+        std::fprintf(stderr,
+                     "[SMOOTH_ISOLATED_V01] enabled=%d others=%lld sculpt=%d grid_side=%d\n",
+                     int(isolation_enabled),
+                     static_cast<long long>(isolated_context.other_layers.size()),
+                     ss.subdiv_ccg->level,
+                     ss.subdiv_ccg->grid_size);
+      }
       for (const float strength : iteration_strengths(brush_strength)) {
         MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
         node_mask.foreach_index(
