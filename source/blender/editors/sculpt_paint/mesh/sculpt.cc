@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include "sculpt_layer_delta_smooth_v01.hh"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -4932,7 +4933,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
    * Instrumentation only: no sculpt math / PBVH / undo behavior changes. */
   const Mesh *sculpt_mesh_v3_probe_mesh = BKE_object_get_original_mesh(&ob);
   const bool sculpt_mesh_v3_probe_enabled =
-      sculpt_mesh_v3_probe_mesh && sculpt_mesh_v3_probe_mesh->verts_num >= 1'000'000;
+      (sculpt_mesh_v3_probe_mesh && sculpt_mesh_v3_probe_mesh->verts_num >= 1'000'000) ||
+      (std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG") &&
+       std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG")[0]);
   const double sculpt_mesh_v3_probe_total_start = BLI_time_now_seconds();
   double sculpt_mesh_v3_probe_gather_ms = 0.0;
   double sculpt_mesh_v3_probe_undo_ms = 0.0;
@@ -5083,6 +5086,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
         (BLI_time_now_seconds() - sculpt_mesh_v3_probe_undo_start) * 1000.0;
   }
 
+  /* Capture Auto Smooth's reference before the main brush changes the CCG. */
+  if (!layer_delta_smooth_v01::prepare_region(ob, node_mask)) { return; }
+
   /* There are issues with the underlying normals cache / mesh data that can cause the data to
    * become out of date.
    *
@@ -5149,6 +5155,13 @@ static void do_brush_action(const Depsgraph &depsgraph,
       break;
     }
     case SCULPT_BRUSH_TYPE_SMOOTH:
+      if (layer_delta_smooth_v01::owns(ob) &&
+          (brush.smooth_deform_type != BRUSH_SMOOTH_DEFORM_LAPLACIAN ||
+           ss.cache->initial_direction_flipped))
+      {
+        layer_delta_smooth_v01::fail("surface_or_inverted_smooth_not_supported_v01");
+        break;
+      }
       if (brush.smooth_deform_type == BRUSH_SMOOTH_DEFORM_LAPLACIAN) {
         /* NOTE: The enhance brush needs to initialize its state on the first brush step. The
          * stroke strength can become 0 during the stroke, but it can not change sign (the sign is
@@ -6929,7 +6942,9 @@ void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_
   /* Sculpt Mesh V3 memory pressure probe: post-brush update / redraw scheduling. */
   const Mesh *sculpt_mesh_v3_flush_mesh = BKE_object_get_original_mesh(&object);
   const bool sculpt_mesh_v3_flush_enabled =
-      sculpt_mesh_v3_flush_mesh && sculpt_mesh_v3_flush_mesh->verts_num >= 1'000'000;
+      (sculpt_mesh_v3_flush_mesh && sculpt_mesh_v3_flush_mesh->verts_num >= 1'000'000) ||
+      (std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG") &&
+       std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG")[0]);
   const SculptMeshV3MemorySample sculpt_mesh_v3_flush_mem_start =
       sculpt_mesh_v3_memory_sample();
   const double sculpt_mesh_v3_flush_start = BLI_time_now_seconds();
@@ -6976,11 +6991,7 @@ void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_
   const SculptSession &ss = *object.runtime->sculpt_session;
   const MultiresModifierData *mmd = ss.multires_modifier;
   if (mmd != nullptr) {
-    /* LAYER_CCG_DIRTY_DOMAINS_V01:
-     * A paint/mask redraw is not a position edit. Tagging all stroke types as
-     * COORDS_MODIFIED sends a composed Sculpt Layer CCG through native
-     * reshape on evaluated-cache teardown, potentially baking those layers
-     * into CD_MDISPS a second time. Only position strokes own position dirt. */
+    /* LAYER_CCG_DIRTY_DOMAINS_V01: preserve independent edit domains. */
     switch (update_type) {
       case UpdateType::Position:
         multires_mark_as_modified(vc.depsgraph, &object, MULTIRES_COORDS_MODIFIED);
@@ -7663,9 +7674,19 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   StrokeCache *cache = ss.cache;
   cache->stroke_distance = this->stroke_distance();
 
+  /* SCULPT_STROKE_PROFILE_V01: opt-in, one append per update; no geometry changes. */
+  const char *stroke_profile_path = std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG");
+  const bool stroke_profile_enabled = stroke_profile_path && stroke_profile_path[0];
+  const double stroke_profile_start = stroke_profile_enabled ? BLI_time_now_seconds() : 0.0;
+  double stroke_profile_prepared = stroke_profile_start;
+  double stroke_profile_brushed = stroke_profile_start;
+  double stroke_profile_fixed = stroke_profile_start;
+
+
   stroke_modifiers_check(depsgraph, this->vc.rv3d, sd, ob, &brush);
   stroke_cache_update(itemptr);
   restore_from_undo_step_if_necessary(depsgraph, sd, ob);
+  if (stroke_profile_enabled) { stroke_profile_prepared = BLI_time_now_seconds(); }
 
   if (dyntopo::stroke_is_dyntopo(ob, brush)) {
     do_symmetrical_brush_actions(
@@ -7675,11 +7696,15 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   do_symmetrical_brush_actions(
       depsgraph, scene, sd, ob, do_brush_action, *this->paint_mode_settings_);
 
+  if (stroke_profile_enabled) { stroke_profile_brushed = BLI_time_now_seconds(); }
+
   /* Hack to fix noise texture tearing mesh. */
   sculpt_fix_noise_tear(sd, ob);
 
   ss.cache->first_time = false;
   copy_v3_v3(ss.cache->last_location, ss.cache->location);
+
+  if (stroke_profile_enabled) { stroke_profile_fixed = BLI_time_now_seconds(); }
 
   /* Cleanup. */
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
@@ -7696,6 +7721,27 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   else {
     flush_update_step(this->vc, *this->object, UpdateType::Position);
   }
+  if (stroke_profile_enabled) {
+    const double finished = BLI_time_now_seconds();
+    const SubdivCCG *ccg = ss.subdiv_ccg;
+    const bool pbvh_draw = BKE_sculptsession_use_pbvh_draw(&ob, this->vc.rv3d);
+    FILE *log = std::fopen(stroke_profile_path, "a");
+    if (log) {
+      std::fprintf(log,
+                   "[SCULPT_STROKE] brush=%d grids=%d area=%d pbvh_draw=%d "
+                   "prepare_ms=%.3f brush_symmetry_ms=%.3f tear_fix_ms=%.3f "
+                   "flush_ms=%.3f callback_ms=%.3f\n",
+                   int(brush.sculpt_brush_type), ccg ? ccg->grids_num : 0,
+                   ccg ? ccg->grid_area : 0, int(pbvh_draw),
+                   (stroke_profile_prepared - stroke_profile_start) * 1000.0,
+                   (stroke_profile_brushed - stroke_profile_prepared) * 1000.0,
+                   (stroke_profile_fixed - stroke_profile_brushed) * 1000.0,
+                   (finished - stroke_profile_fixed) * 1000.0,
+                   (finished - stroke_profile_start) * 1000.0);
+      std::fclose(log);
+    }
+  }
+
 }
 
 static void brush_exit_tex(Sculpt &sd)
@@ -7710,6 +7756,7 @@ static void brush_exit_tex(Sculpt &sd)
 
 void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 {
+  layer_delta_smooth_v01::reset();
   Object &ob = *this->object;
   SculptSession &ss = *ob.runtime->sculpt_session;
   Sculpt &sd = *this->sculpt_;
@@ -8008,6 +8055,14 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   {
     return OPERATOR_CANCELLED;
   }
+  const Brush *delta_brush = BKE_paint_brush_for_read(&CTX_data_tool_settings(C)->sculpt->paint);
+  if (delta_brush && !layer_delta_smooth_v01::begin(
+          *CTX_data_active_object(C), *delta_brush, op->reports,
+          BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")) == BrushSwitchMode::Smooth))
+  {
+    return OPERATOR_CANCELLED;
+  }
+
   int ignore_background_click;
   Object &ob = *CTX_data_active_object(C);
   Scene &scene = *CTX_data_scene(C);
@@ -8139,6 +8194,14 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
   {
     return OPERATOR_CANCELLED;
   }
+  const Brush *delta_brush = BKE_paint_brush_for_read(&CTX_data_tool_settings(C)->sculpt->paint);
+  if (delta_brush && !layer_delta_smooth_v01::begin(
+          *CTX_data_active_object(C), *delta_brush, op->reports,
+          BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")) == BrushSwitchMode::Smooth))
+  {
+    return OPERATOR_CANCELLED;
+  }
+
   brush_stroke_init(C, op);
 
   SculptPaintStroke *stroke = MEM_new<SculptPaintStroke>(__func__, C, op, nullptr);

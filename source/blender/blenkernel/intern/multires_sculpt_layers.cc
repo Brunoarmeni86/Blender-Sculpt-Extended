@@ -1557,6 +1557,10 @@ bool compatible(const MultiresModifierData &mmd, const Mesh &mesh)
 
 bool resample_all(MultiresModifierData &mmd, const int new_level, const int grids_num)
 {
+  /* SUBDIV_PROFILE_V1: opt-in; no per-grid clock calls. */
+  const char *profile_path = BLI_getenv("BLENDER_SUBDIV_PROFILE_LOG");
+  const bool profile = profile_path && profile_path[0];
+  const double profile_start = profile ? BLI_time_now_seconds() : 0.0;
   weight_hot_delta_cache_invalidate();
   if (new_level <= 0 || new_level > 13 || grids_num <= 0) {
     return false;
@@ -1584,8 +1588,32 @@ bool resample_all(MultiresModifierData &mmd, const int new_level, const int grid
     }
   }
 
+  const double validation_end = profile ? BLI_time_now_seconds() : 0.0;
+  double coordinate_ms = 0.0;
+  int layers_processed = 0;
+  double output_mib = 0.0;
   for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    const double coordinate_start = profile ? BLI_time_now_seconds() : 0.0;
     const int old_side = subdiv::grid_size_from_level(layer.level);
+    /* SUBDIV_COORD_TABLE_V1: reuse identical coordinates for all grids.
+     * Keep the original floating-point expression and interpolation order. */
+    Array<int> coord_lower(new_side);
+    Array<int> coord_upper(new_side);
+    Array<int> coord_nearest(new_side);
+    Array<float> coord_fraction(new_side);
+    for (int i = 0; i < new_side; i++) {
+      const float u = float(i) * float(old_side - 1) / float(new_side - 1);
+      coord_lower[i] = int(u);
+      coord_upper[i] = std::min(int(u) + 1, old_side - 1);
+      coord_nearest[i] = int(std::round(u));
+      coord_fraction[i] = u - float(int(u));
+    }
+    if (profile) {
+      coordinate_ms += (BLI_time_now_seconds() - coordinate_start) * 1000.0;
+      layers_processed++;
+      output_mib += double(grids_num) * double(new_side) * double(new_side) *
+                    sizeof(float[3]) / (1024.0 * 1024.0);
+    }
     /* Input validation above covers every layer before any mutation. Process
      * one grid at a time so old and new full-layer buffers never coexist.
      * There are no recoverable failure exits after this point. */
@@ -1601,13 +1629,11 @@ bool resample_all(MultiresModifierData &mmd, const int new_level, const int grid
         new_grid.hidden = BLI_BITMAP_NEW(new_grid.totdisp, "resampled sculpt layer hidden");
       }
       for (int y = 0; y < new_side; y++) {
-        const float v = float(y) * float(old_side - 1) / float(new_side - 1);
-        const int y0 = int(v), y1 = std::min(y0 + 1, old_side - 1);
-        const float fy = v - float(y0);
+        const int y0 = coord_lower[y], y1 = coord_upper[y];
+        const float fy = coord_fraction[y];
         for (int x = 0; x < new_side; x++) {
-          const float u = float(x) * float(old_side - 1) / float(new_side - 1);
-          const int x0 = int(u), x1 = std::min(x0 + 1, old_side - 1);
-          const float fx = u - float(x0);
+          const int x0 = coord_lower[x], x1 = coord_upper[x];
+          const float fx = coord_fraction[x];
           const int dst = y * new_side + x;
           const int i00 = y0 * old_side + x0, i10 = y0 * old_side + x1;
           const int i01 = y1 * old_side + x0, i11 = y1 * old_side + x1;
@@ -1619,7 +1645,7 @@ bool resample_all(MultiresModifierData &mmd, const int new_level, const int grid
             new_grid.disps[dst][axis] = a * (1.0f - fy) + b * fy;
           }
           if (old_grid.hidden) {
-            const int sx = int(std::round(u)), sy = int(std::round(v));
+            const int sx = coord_nearest[x], sy = coord_nearest[y];
             BLI_BITMAP_SET(new_grid.hidden, dst,
                            BLI_BITMAP_TEST_BOOL(old_grid.hidden, sy * old_side + sx));
           }
@@ -1632,8 +1658,28 @@ bool resample_all(MultiresModifierData &mmd, const int new_level, const int grid
     layer.level = new_level;
     layer.grids_num = grids_num;
   }
-  return polypaint_lazy_master_enabled() || !mmd.sculpt_color_grids ||
-         polypaint_resample(mmd, new_level);
+  const double layer_end = profile ? BLI_time_now_seconds() : 0.0;
+  const bool result = polypaint_lazy_master_enabled() || !mmd.sculpt_color_grids ||
+                      polypaint_resample(mmd, new_level);
+  if (profile) {
+    const double end = BLI_time_now_seconds();
+    if (FILE *log = std::fopen(profile_path, "a")) {
+      std::fprintf(log,
+                   "[SUBDIV_PROFILE_V1] level=%d grids=%d layers=%d ok=%d "
+                   "validation_ms=%.3f coordinates_ms=%.3f resample_ms=%.3f "
+                   "polypaint_ms=%.3f total_ms=%.3f output_disps_mib=%.3f\n",
+                   new_level, grids_num, layers_processed, int(result),
+                   (validation_end - profile_start) * 1000.0, coordinate_ms,
+                   (layer_end - validation_end) * 1000.0 - coordinate_ms,
+                   (end - layer_end) * 1000.0, (end - profile_start) * 1000.0,
+                   output_mib);
+      std::fclose(log);
+    }
+    else {
+      std::fprintf(stderr, "[SUBDIV_PROFILE_V1] Cannot open log: %s\n", profile_path);
+    }
+  }
+  return result;
 }
 
 bool can_record(const MultiresModifierData &mmd, const Mesh &mesh)
@@ -1651,19 +1697,10 @@ const char *merge_visible_to_base(MultiresModifierData &mmd, Mesh &mesh,
   /* MERGE_VISIBLE_NATIVE_BASE_V1. Keep the original cage/tangent frames.
    * All validations precede CustomData writable access and layer removal.
    * Once published, no further operation in this transaction can fail. */
-  /* Do not conflate independent constraints into a single "single-user"
-   * error. Each may require a different, potentially destructive user action. */
-  if (mesh.id.lib) {
-    return "Merge blocked: Mesh datablock is linked; make the Mesh local";
-  }
-  if (ID_REAL_USERS(&mesh.id) > 1) {
-    return "Merge blocked: Mesh datablock has multiple users; make Mesh data single-user";
-  }
-  if (mesh.key) {
-    return "Merge blocked: Mesh has Shape Keys; bake needs a key-free mesh";
-  }
-  if (CustomData_external_test(&mesh.corner_data, CD_MDISPS)) {
-    return "Merge blocked: Multires displacement uses external storage";
+  if (mesh.id.lib || ID_REAL_USERS(&mesh.id) > 1 || mesh.key ||
+      CustomData_external_test(&mesh.corner_data, CD_MDISPS))
+  {
+    return "Merge requires a single-user mesh without shape keys or external displacement";
   }
   if (mmd.totlvl <= 0 || !compatible(mmd, mesh)) {
     return "Merge requires valid native and layer grids at the maximum Multires level";

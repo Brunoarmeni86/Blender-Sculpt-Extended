@@ -7,6 +7,8 @@
  * Implements the Sculpt Mode tools.
  */
 
+#include "BKE_anim_data.hh"
+#include "ANIM_action.hh"
 #include "BLI_color.hh"
 #include "BLI_bit_vector.hh"
 #include "BLI_index_mask.hh"
@@ -59,6 +61,7 @@
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_subdiv.hh"
 
+#include "DEG_depsgraph_build.hh"
 #include "DEG_depsgraph.hh"
 
 #include "IMB_colormanagement.hh"
@@ -96,6 +99,8 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+
+#include "sculpt_polypaint_uv_bake_v01.hh"
 
 namespace blender::ed::sculpt_paint {
 
@@ -558,44 +563,37 @@ static wmOperatorStatus sculpt_multires_merge_visible_to_base_exec(bContext *C, 
     BKE_report(op->reports, RPT_ERROR, "Switch to Object Mode before baking; pending Sculpt must commit in its original frame");
     return OPERATOR_CANCELLED;
   }
-  /* MERGE_VISIBLE_PRECISE_ERRORS_V01: these guards protect independent states.
-   * Report the exact failing precondition instead of saying "local object" for
-   * unrelated cases such as stale SculptSession or disabled Global Undo.
-   * Do not relax safety checks or discard pending CCG data during diagnosis. */
-  if (object->id.lib) {
-    BKE_report(op->reports, RPT_ERROR,
-               "Bake blocked: Object is linked from an external library; make the Object local");
-    return OPERATOR_CANCELLED;
-  }
-  /* Blender can retain an empty AnimData container after removing an
-   * Action or driver. Such a container does not animate any geometry and
-   * must not prevent Merge Visible to Base. Do not clear it here: the object
-   * may own other animation runtime metadata. */
-  if (const AnimData *adt = object->adt) {
-    const bool animation_in_use = adt->action != nullptr || adt->tmpact != nullptr ||
-                                  !adt->nla_tracks.is_empty() || !adt->drivers.is_empty() ||
-                                  !adt->overrides.is_empty() || adt->act_track != nullptr ||
-                                  adt->actstrip != nullptr;
-    if (animation_in_use) {
-      BKE_report(op->reports, RPT_ERROR,
-                 "Bake blocked: Object has a real Action, NLA track, driver, or animation "
-                 "override; inspect animation before baking");
-      return OPERATOR_CANCELLED;
+  /* MERGE_EMPTY_ACTION_V2 */
+  const auto merge_action_has_content = [](const bAction *dna_action) {
+    if (!dna_action) {
+      return false;
     }
-  }
-  if (object->runtime->sculpt_session) {
+    const animrig::Action &action = dna_action->wrap();
+    for (const animrig::Slot *slot : action.slots()) {
+      for (const FCurve *fcu :
+           animrig::fcurves_for_action_slot(action, slot->handle))
+      {
+        if (fcu->totvert > 0 || !fcu->modifiers.is_empty() || fcu->driver) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  const AnimData *merge_adt = object->adt;
+  const bool merge_has_animation = merge_adt &&
+      (merge_action_has_content(merge_adt->action) ||
+       merge_adt->tmpact != nullptr ||
+       !merge_adt->nla_tracks.is_empty() ||
+       !merge_adt->drivers.is_empty() ||
+       !merge_adt->overrides.is_empty() ||
+       merge_adt->act_track != nullptr ||
+       merge_adt->actstrip != nullptr);
+  if (object->id.lib || merge_has_animation || object->runtime->sculpt_session ||
+      !(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0)
+  {
     BKE_report(op->reports, RPT_ERROR,
-               "Bake blocked: SculptSession still exists in Object Mode; verify sculpt exit/flush");
-    return OPERATOR_CANCELLED;
-  }
-  if (!(U.uiflag & USER_GLOBALUNDO)) {
-    BKE_report(op->reports, RPT_ERROR,
-               "Bake blocked: enable Global Undo in Preferences > System");
-    return OPERATOR_CANCELLED;
-  }
-  if (U.undosteps <= 0) {
-    BKE_report(op->reports, RPT_ERROR,
-               "Bake blocked: set Undo Steps greater than zero in Preferences");
+               "Bake requires a local object without animation/drivers, no Sculpt session, and Global Undo enabled");
     return OPERATOR_CANCELLED;
   }
   MultiresModifierData *mmd = nullptr;
@@ -647,6 +645,12 @@ static wmOperatorStatus sculpt_multires_merge_visible_to_base_exec(bContext *C, 
   std::printf("[LAYER_BAKE_BASE] visible_only=1 remove=%d sculpt=%d top=%d retained_layers=%d\n",
               int(remove_layers), mmd->sculptlvl, mmd->totlvl, mmd->sculpt_layers.count());
   std::fflush(stdout);
+  /* Undo already captured the original Action assignment before baking. */
+  if (object->adt && !merge_has_animation) {
+    BKE_animdata_free(&object->id, true);
+    DEG_relations_tag_update(CTX_data_main(C));
+    WM_main_add_notifier(NC_ANIMATION | ND_ANIMCHAN, object);
+  }
   BKE_report(op->reports, RPT_INFO, "Visible layers baked into native Multires; hidden layers retained");
   return OPERATOR_FINISHED;
 }
@@ -1391,16 +1395,43 @@ static void SCULPT_OT_multires_layer_duplicate(wmOperatorType *ot)
 
 static wmOperatorStatus sculpt_multires_layer_set_active_exec(bContext *C, wmOperator *op)
 {
+  /* LAYER_SELECT_OPERATOR_V02: preserve live geometry on a metadata-only switch. */
   Object *ob = CTX_data_active_object(C);
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
   const int index = RNA_int_get(op->ptr, "index");
-  if (index >= mmd->sculpt_layers.count()) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (index < 0 || index >= mmd->sculpt_layers.count()) return OPERATOR_CANCELLED;
+  if (index == mmd->sculpt_layer_active) return OPERATOR_CANCELLED;
+
+  const double started = BLI_time_now_seconds();
+  const SculptSession *ss = ob->runtime->sculpt_session;
+  const SubdivCCG *old_ccg = ss ? ss->subdiv_ccg : nullptr;
+  const bool pending = old_ccg && old_ccg->dirty.coords;
+  bool surface_preserved = false;
+  /* Pending coordinates still belong to the OLD selected layer. */
+  if (!sculpt_multires_layer_commit(*ob, *op, &surface_preserved)) {
+    return OPERATOR_CANCELLED;
+  }
+  const double committed = BLI_time_now_seconds();
+  ss = ob->runtime->sculpt_session;
+  const bool keep_surface = old_ccg && ss && ss->subdiv_ccg == old_ccg &&
+                            bke::object::pbvh_get(*ob) && (!pending || surface_preserved);
   bke::multires_layers::set_active(*mmd, index);
-  multires_force_sculpt_rebuild(ob);
-  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  if (keep_surface) {
+    DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  else {
+    multires_force_sculpt_rebuild(ob);
+    DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  }
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  const char *trace = BLI_getenv("BLENDER_LAYER_RESP_TRACE");
+  if (trace && trace[0] == '1') {
+    std::printf("[LAYER_SELECT_OPERATOR_V02] target=%d pending=%d rebuild=%d commit_ms=%.3f total_ms=%.3f\n",
+                index, int(pending), int(!keep_surface),
+                (committed - started) * 1000.0, (BLI_time_now_seconds() - started) * 1000.0);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -3196,6 +3227,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_multires_base_fingerprint);
   WM_operatortype_append(SCULPT_OT_multires_merge_visible_to_base);
   WM_operatortype_append(SCULPT_OT_multires_polypaint_attribute);
+  WM_operatortype_append(SCULPT_OT_multires_polypaint_uv_bake_v01);
   WM_operatortype_append(SCULPT_OT_multires_texture_displacement_bake);
   WM_operatortype_append(SCULPT_OT_multires_shrinkwrap_bake);
   WM_operatortype_append(SCULPT_OT_multires_layer_delete);

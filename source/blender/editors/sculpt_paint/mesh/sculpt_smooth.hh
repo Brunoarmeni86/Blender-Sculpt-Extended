@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include "BLI_function_ref.hh"
 #include "BLI_generic_span.hh"
 #include "BLI_offset_indices.hh"
 #include "BLI_ordered_edge.hh"
@@ -57,20 +56,6 @@ void neighbor_position_average_interior_grids(OffsetIndices<int> faces,
                                               const SubdivCCG &subdiv_ccg,
                                               Span<int> grids,
                                               MutableSpan<float3> new_positions);
-
-/** Experimental V01: averages a virtual (layer-isolated) position field.
- * Read the CCG index from the callback, including neighbors outside active PBVH nodes.
- * Never allocate a dense second CCG position buffer. */
-void neighbor_position_average_interior_grids_isolated(
-    OffsetIndices<int> faces,
-    Span<int> corner_verts,
-    BitSpan boundary_verts,
-    const Set<OrderedEdge> &boundary_edges,
-    const SubdivCCG &subdiv_ccg,
-    Span<int> grids,
-    Span<float> factors,
-    FunctionRef<float3(int)> read_isolated_position,
-    MutableSpan<float3> new_positions);
 
 void neighbor_position_average_bmesh(const Set<BMVert *, 0> &verts,
                                      MutableSpan<float3> new_positions);

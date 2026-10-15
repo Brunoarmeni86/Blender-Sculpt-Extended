@@ -5,25 +5,18 @@
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
 
 #include "DNA_brush_types.h"
-#include "DNA_modifier_types.h"
 #include "smooth_preserve_shape.hh"
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_mesh.hh"
-#include "BKE_multires.hh"
-#include "BKE_multires_sculpt_layers.hh"
-#include "BKE_subdiv.hh"
-#include "BKE_subdiv_eval.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
 #include "BKE_subdiv_ccg.hh"
 
 #include "BLI_array.hh"
-#include "BLI_map.hh"
-#include "BLI_math_matrix.hh"
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_task.hh"
 
@@ -34,9 +27,7 @@
 #include "editors/sculpt_paint/mesh/sculpt_smooth.hh"
 
 #include "bmesh.hh"
-
-#include <cstdio>
-#include <cstdlib>
+#include "editors/sculpt_paint/mesh/sculpt_layer_delta_smooth_v01.hh"
 
 namespace blender::ed::sculpt_paint::brushes {
 
@@ -67,8 +58,6 @@ struct LocalData {
   Vector<int> neighbor_data;
   Vector<float3> new_positions;
   Vector<float3> translations;
-  /* V01 opt-in: offsets cached only for visited CCG samples/neighbor halo. */
-  Map<int, float3> isolated_other_offsets;
 };
 
 BLI_NOINLINE static void apply_positions_faces(const Sculpt &sd,
@@ -186,114 +175,6 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
   }
 }
 
-/* SCULPT_SMOOTH_ISOLATED_V01
- * Experimental, layer-aware Smooth. Instead of modifying the live CCG or
- * allocating a second dense surface, create virtual positions by removing
- * the other visible layers' object-space displacement at queried samples.
- *
- * CCG seams combine several tangent frames. V01 deliberately excludes the
- * first/last two rows and columns of each grid from editing, so no unverified
- * seam-space interpolation is used as a writable smoothing target.
- *
- * At the top sculpt level the layer samples use the same per-corner
- * tangent frames as the Multires displacement evaluator. */
-struct IsolatedSmoothContext {
-  const SubdivCCG &ccg;
-  const CCGKey key;
-  Vector<const MultiresSculptLayer *> other_layers;
-  Span<int> ptex_offsets;
-};
-
-static bool smooth_isolated_context_build(const Object &object,
-                                          const SubdivCCG &ccg,
-                                          IsolatedSmoothContext &context)
-{
-  const char *flag = std::getenv("BLENDER_SCULPT_SMOOTH_ISOLATED");
-  if (!flag || flag[0] != '1' || flag[1] != '\0') {
-    return false;
-  }
-  const SculptSession *ss = object.runtime->sculpt_session;
-  const MultiresModifierData *mmd = ss ? ss->multires_modifier : nullptr;
-  const Mesh *mesh = object.type == OB_MESH ? static_cast<const Mesh *>(object.data) : nullptr;
-  if (!mmd || !mesh || !ccg.subdiv || ccg.level != mmd->totlvl ||
-      ccg.level != mmd->sculptlvl || ccg.grid_size < 9 ||
-      ccg.grids_num != mesh->corners_num || !mmd->sculpt_layer_recording ||
-      mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled)
-  {
-    return false;
-  }
-  const MultiresSculptLayer *active = bke::multires_layers::active(*mmd);
-  if (!active || !bke::multires_layers::is_effective(*active) ||
-      active->level != mmd->totlvl || active->grids_num != ccg.grids_num)
-  {
-    return false;
-  }
-  for (const MultiresSculptLayer &other : mmd->sculpt_layers) {
-    if (&other == active || !bke::multires_layers::is_effective(other)) {
-      continue;
-    }
-    /* L0 moves the cage/limit surface; it cannot be removed using a grid
-     * tangent-space offset without rebasing. Disable isolation conservatively. */
-    if (other.base_deltas != nullptr || other.disps == nullptr ||
-        other.grids_num != ccg.grids_num || other.level < 1)
-    {
-      return false;
-    }
-    context.other_layers.append(&other);
-  }
-  context.ptex_offsets = bke::subdiv::face_ptex_offset_get(ccg.subdiv);
-  return !context.other_layers.is_empty() &&
-         context.ptex_offsets.size() == ccg.faces.size() + 1;
-}
-
-static float3 smooth_other_layer_offset(const IsolatedSmoothContext &context,
-                                        const int index,
-                                        Map<int, float3> &cache)
-{
-  if (const float3 *cached = cache.lookup_ptr(index)) {
-    return *cached;
-  }
-  const SubdivCCG &ccg = context.ccg;
-  const SubdivCCGCoord coord = SubdivCCGCoord::from_index(context.key, index);
-  const int face_index = BKE_subdiv_ccg_grid_to_face_index(ccg, coord.grid_index);
-  const IndexRange face = ccg.faces[face_index];
-  const int corner = coord.grid_index - face.start();
-  const float grid_u = float(coord.x) / float(ccg.grid_size - 1);
-  const float grid_v = float(coord.y) / float(ccg.grid_size - 1);
-
-  float3 weighted_tangent(0.0f);
-  for (const MultiresSculptLayer *layer : context.other_layers) {
-    float sampled[3];
-    if (bke::multires_layers::sample_tangent(
-            *layer, coord.grid_index, ccg.grid_size, grid_u, grid_v, sampled))
-    {
-      weighted_tangent += float3(sampled[0], sampled[1], sampled[2]);
-    }
-  }
-  if (math::is_zero(weighted_tangent)) {
-    cache.add(index, float3(0.0f));
-    return float3(0.0f);
-  }
-
-  const bool quad = face.size() == 4;
-  const int ptex_face = context.ptex_offsets[face_index] + (quad ? 0 : corner);
-  float u, v;
-  if (quad) {
-    bke::subdiv::rotate_grid_to_quad(corner, grid_u, grid_v, &u, &v);
-  }
-  else {
-    bke::subdiv::grid_uv_to_ptex_face_uv(grid_u, grid_v, &u, &v);
-  }
-  float3 P, dPdu, dPdv;
-  bke::subdiv::eval_limit_point_and_derivatives(
-      ccg.subdiv, ptex_face, u, v, P, dPdu, dPdv);
-  float3x3 tangent;
-  BKE_multires_construct_tangent_matrix(tangent, dPdu, dPdv, quad ? corner : 0);
-  const float3 offset = math::transform_direction(tangent, weighted_tangent);
-  cache.add(index, offset);
-  return offset;
-}
-
 static void calc_grids(const Depsgraph &depsgraph,
                        const Sculpt &sd,
                        const OffsetIndices<int> faces,
@@ -304,8 +185,7 @@ static void calc_grids(const Depsgraph &depsgraph,
                        const Brush &brush,
                        const float strength,
                        const bke::pbvh::GridsNode &node,
-                       LocalData &tls,
-                       const IsolatedSmoothContext *isolation)
+                       LocalData &tls)
 {
   SculptSession &ss = *object.runtime->sculpt_session;
   SubdivCCG &subdiv_ccg = *ss.subdiv_ccg;
@@ -317,68 +197,20 @@ static void calc_grids(const Depsgraph &depsgraph,
 
   scale_factors(tls.factors, strength);
 
-  /* Seam-safe V01: no edits in or within two samples of CCG grid borders.
-   * Neighbor reads for writable interior samples thus remain inside their
-   * own tangent chart. A future version will handle stitched seams. */
-  if (isolation) {
-    const int side = subdiv_ccg.grid_size;
-    const int area = subdiv_ccg.grid_area;
-    for (const int grid_i : grids.index_range()) {
-      for (int y = 0; y < side; y++) {
-        for (int x = 0; x < side; x++) {
-          if (x < 2 || y < 2 || x >= side - 2 || y >= side - 2) {
-            tls.factors[grid_i * area + y * side + x] = 0.0f;
-          }
-        }
-      }
-    }
-  }
-
   tls.new_positions.resize(positions.size());
   const MutableSpan<float3> new_positions = tls.new_positions;
+  smooth::neighbor_position_average_interior_grids(faces,
+                                                   corner_verts,
+                                                   boundary_verts,
+                                                   boundary_edges,
+                                                   subdiv_ccg,
+                                                   grids,
+                                                   tls.factors,
+                                                   new_positions);
 
   tls.translations.resize(positions.size());
   const MutableSpan<float3> translations = tls.translations;
-
-  if (isolation) {
-    const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
-    const auto read_isolated = [&](const int index) -> float3 {
-      return subdiv_ccg.positions[index] -
-             smooth_other_layer_offset(*isolation, index, tls.isolated_other_offsets);
-    };
-    smooth::neighbor_position_average_interior_grids_isolated(faces,
-                                                              corner_verts,
-                                                              boundary_verts,
-                                                              boundary_edges,
-                                                              subdiv_ccg,
-                                                              grids,
-                                                              tls.factors,
-                                                              read_isolated,
-                                                              new_positions);
-    int node_sample = 0;
-    for (const int grid : grids) {
-      const int base_index = grid * key.grid_area;
-      for (int i = 0; i < key.grid_area; i++, node_sample++) {
-        if (tls.factors[node_sample] == 0.0f) {
-          translations[node_sample] = float3(0.0f);
-          continue;
-        }
-        const float3 center = read_isolated(base_index + i);
-        translations[node_sample] = new_positions[node_sample] - center;
-      }
-    }
-  }
-  else {
-    smooth::neighbor_position_average_interior_grids(faces,
-                                                     corner_verts,
-                                                     boundary_verts,
-                                                     boundary_edges,
-                                                     subdiv_ccg,
-                                                     grids,
-                                                     tls.factors,
-                                                     new_positions);
-    translations_from_new_positions(new_positions, positions, translations);
-  }
+  translations_from_new_positions(new_positions, positions, translations);
   if (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE) {
     tls.normals.resize(positions.size());
     gather_grids_normals(subdiv_ccg, grids, tls.normals.as_mutable_span());
@@ -390,6 +222,98 @@ static void calc_grids(const Depsgraph &depsgraph,
 
   clip_and_lock_translations(sd, ss, positions, translations);
   apply_translations(translations, grids, subdiv_ccg);
+}
+
+/* DELTA_SMOOTH_V01: fixed sparse reference, Jacobi reads followed by separate writes.
+ * Reads delta = live CCG - (stroke-start CCG - stitched weighted active-layer delta).
+ * Thus no curvature from base/other layers enters the smoothing average. */
+static bool do_layer_delta_smooth(const Depsgraph &depsgraph,
+                                 const Sculpt &sd,
+                                 const Brush &brush,
+                                 Object &object,
+                                 const IndexMask &node_mask,
+                                 const float brush_strength)
+{
+  namespace delta = layer_delta_smooth_v01;
+  if (!delta::owns(object)) {
+    const SculptSession &session = *object.runtime->sculpt_session;
+    const MultiresModifierData *mmd = session.multires_modifier;
+    if (delta::enabled() && mmd && !mmd->sculpt_layers.is_empty()) {
+      delta::fail("stroke_not_prepared");
+      return true;
+    }
+    return false;
+  }
+  if (!delta::prepare_region(object, node_mask)) { return true; }
+  SculptSession &ss = *object.runtime->sculpt_session;
+  SubdivCCG &ccg = *ss.subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const OffsetIndices faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  Array<int> offset_data;
+  const OffsetIndices<int> offsets = create_node_vert_offsets(key, nodes, node_mask, offset_data);
+  Array<float3> changes(offsets.total_size());
+  threading::EnumerableThreadSpecific<LocalData> all_tls;
+  const Map<int, float3> &reference = delta::state().reference;
+  const auto read_delta = [&](const SubdivCCGCoord coord) -> float3 {
+    const int index = coord.to_index(key);
+    return ccg.positions[index] - reference.lookup(index);
+  };
+  for (const float strength : iteration_strengths(brush_strength)) {
+    if (strength <= 0.0f) { continue; }
+    node_mask.foreach_index([&](const int i, const int pos) {
+      LocalData &tls = all_tls.local();
+      const Span<int> grids = nodes[i].grids();
+      const MutableSpan positions = gather_grids_positions(ccg, grids, tls.positions);
+      calc_factors_common_grids(depsgraph, brush, object, positions, nodes[i],
+                                tls.factors, tls.distances);
+      scale_factors(tls.factors, strength);
+      MutableSpan<float3> node_changes = changes.as_mutable_span().slice(offsets[pos]);
+      int local_index = 0;
+      for (const int grid : grids) {
+        for (int y = 0; y < key.grid_size; y++) {
+          for (int x = 0; x < key.grid_size; x++, local_index++) {
+            node_changes[local_index] = float3(0.0f);
+            if (tls.factors[local_index] == 0.0f) { continue; }
+            const SubdivCCGCoord coord{grid, short(x), short(y)};
+            SubdivCCGNeighbors neighbors;
+            BKE_subdiv_ccg_neighbor_coords_get(ccg, coord, false, neighbors);
+            if (boundary::vert_is_boundary(faces, corner_verts,
+                                           ss.boundary_info_cache->verts,
+                                           ss.boundary_info_cache->edges, ccg, coord)) {
+              if (neighbors.coords.size() == 2) { neighbors.coords.clear(); }
+              else {
+                neighbors.coords.remove_if([&](const SubdivCCGCoord neighbor) {
+                  return !boundary::vert_is_boundary(faces, corner_verts,
+                      ss.boundary_info_cache->verts, ss.boundary_info_cache->edges, ccg, neighbor);
+                });
+              }
+            }
+            if (neighbors.coords.is_empty()) { continue; }
+            const float3 center = read_delta(coord);
+            float3 translation(0.0f);
+            for (const SubdivCCGCoord neighbor : neighbors.coords) {
+              translation += read_delta(neighbor) - center;
+            }
+            translation /= float(neighbors.coords.size());
+            if (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE) {
+              smooth_preserve_shape_translation(translation, ccg.normals[coord.to_index(key)]);
+            }
+            node_changes[local_index] = translation * tls.factors[local_index];
+          }
+        }
+      }
+      clip_and_lock_translations(sd, ss, positions, node_changes);
+    }, exec_mode::grain_size(1));
+    /* A barrier separates all neighbor reads from all position writes, including other nodes. */
+    node_mask.foreach_index([&](const int i, const int pos) {
+      apply_translations(changes.as_span().slice(offsets[pos]), nodes[i].grids(), ccg);
+    }, exec_mode::grain_size(1));
+  }
+  return true;
 }
 
 static void calc_bmesh(const Depsgraph &depsgraph,
@@ -449,25 +373,14 @@ void do_smooth_brush(const Depsgraph &depsgraph,
       do_smooth_brush_mesh(depsgraph, sd, brush, object, node_mask, brush_strength);
       break;
     case bke::pbvh::Type::Grids: {
+      if (do_layer_delta_smooth(depsgraph, sd, brush, object, node_mask, brush_strength)) {
+        break;
+      }
       const Mesh &base_mesh = *id_cast<const Mesh *>(object.data);
       const OffsetIndices faces = base_mesh.faces();
       const Span<int> corner_verts = base_mesh.corner_verts();
 
       threading::EnumerableThreadSpecific<LocalData> all_tls;
-      IsolatedSmoothContext isolated_context{
-          *ss.subdiv_ccg, BKE_subdiv_ccg_key_top_level(*ss.subdiv_ccg), {}, {}};
-      const bool isolation_enabled =
-          smooth_isolated_context_build(object, *ss.subdiv_ccg, isolated_context) &&
-          !(brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE);
-      const char *isolated_trace = std::getenv("BLENDER_SCULPT_SMOOTH_ISOLATED_TRACE");
-      if (isolated_trace && isolated_trace[0] == '1' && isolated_trace[1] == '\0') {
-        std::fprintf(stderr,
-                     "[SMOOTH_ISOLATED_V01] enabled=%d others=%lld sculpt=%d grid_side=%d\n",
-                     int(isolation_enabled),
-                     static_cast<long long>(isolated_context.other_layers.size()),
-                     ss.subdiv_ccg->level,
-                     ss.subdiv_ccg->grid_size);
-      }
       for (const float strength : iteration_strengths(brush_strength)) {
         MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
         node_mask.foreach_index(
@@ -483,8 +396,7 @@ void do_smooth_brush(const Depsgraph &depsgraph,
                          brush,
                          strength,
                          nodes[i],
-                         tls,
-                         isolation_enabled ? &isolated_context : nullptr);
+                         tls);
             },
             exec_mode::grain_size(1));
       }

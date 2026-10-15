@@ -17,6 +17,10 @@
 #include "BLI_math_matrix.hh"
 #include "BLI_math_vector.h"
 #include "BLI_task.hh"
+#include "BLI_time.h"
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include "BLI_utildefines.h"
 
 #include "BKE_customdata.hh"
@@ -44,15 +48,15 @@ namespace blender {
 /** \name Local Structs
  * \{ */
 
-/* Surface refers to a simplified and lower-memory footprint representation of the limit surface.
- *
- * Used to store pre-calculated information which is expensive or impossible to evaluate when
- * traversing the final limit surface. */
+/* Cached tangent-space detail from the original surface, evaluated before
+ * the subdivision evaluator is refined to the edited coordinates. */
 
+/* SUBDIV_DETAIL_CACHE_V1: retain the final tangent-space detail, rather
+ * than the original point and its 3x3 tangent matrix. */
 struct SurfacePoint {
-  float3 P = float3(0.0f);
-  float3x3 tangent_matrix = float3x3::identity();
+  float3 detail_delta_tangent = float3(0.0f);
 };
+static_assert(sizeof(SurfacePoint) == sizeof(float3));
 
 struct SurfaceGrid {
   Array<SurfacePoint> points = {};
@@ -284,14 +288,23 @@ static SurfacePoint *base_surface_grids_read(MultiresReshapeSmoothContext *resha
   return &surface_grid->points[grid_element_index];
 }
 
+static void evaluate_final_original_point(
+    const MultiresReshapeSmoothContext *reshape_smooth_context,
+    const GridCoord *grid_coord,
+    float3 &r_orig_final_P);
+
 static void base_surface_grids_write(MultiresReshapeSmoothContext *reshape_smooth_context,
                                      const GridCoord *grid_coord,
                                      const float3 &P,
                                      const float3x3 &tangent_matrix)
 {
   SurfacePoint *point = base_surface_grids_read(reshape_smooth_context, grid_coord);
-  point->P = P;
-  point->tangent_matrix = tangent_matrix;
+  float3 orig_final_P;
+  evaluate_final_original_point(reshape_smooth_context, grid_coord, orig_final_P);
+  const float3 original_detail_delta = orig_final_P - P;
+  const float3x3 original_sculpt_tangent_matrix_inv = math::invert(tangent_matrix);
+  point->detail_delta_tangent = math::transform_direction(
+      original_sculpt_tangent_matrix_inv, original_detail_delta);
 }
 
 /** \} */
@@ -951,20 +964,33 @@ static void reshape_subdiv_create(MultiresReshapeSmoothContext *reshape_smooth_c
 using ReshapeSubdivCoarsePositionCb = void(
     const MultiresReshapeSmoothContext *reshape_smooth_context, const Vertex *vert, float3 &r_P);
 
+/* The final callback reads stored positions only. The original callback also
+ * enters a surface evaluator and deliberately remains serial in V01. */
+static void reshape_subdiv_refine_final_P(
+    const MultiresReshapeSmoothContext *reshape_smooth_context, const Vertex *vert, float3 &r_P);
+
 /* Refine subdivision surface topology at a reshape level for new coarse vertices positions. */
 static void reshape_subdiv_refine(const MultiresReshapeSmoothContext *reshape_smooth_context,
                                   ReshapeSubdivCoarsePositionCb coarse_position_cb)
 {
+  /* SUBDIV_REFINE_SERIAL_BATCH_V1: bounded buffer, serial callbacks and upload. */
   bke::subdiv::Subdiv *reshape_subdiv = reshape_smooth_context->reshape_subdiv;
-
-  /* TODO(sergey): For non-trivial coarse_position_cb we should multi-thread this loop. */
-
   const int num_vertices = reshape_smooth_context->geometry.vertices.size();
-  for (int i = 0; i < num_vertices; ++i) {
-    const Vertex *vert = &reshape_smooth_context->geometry.vertices[i];
-    float3 P;
-    coarse_position_cb(reshape_smooth_context, vert, P);
-    reshape_subdiv->evaluator->eval_output->setCoarsePositions(P, i, 1);
+  constexpr int batch_size = 4096;
+  Array<float> positions(std::min(num_vertices, batch_size) * 3);
+
+  for (int first = 0; first < num_vertices; first += batch_size) {
+    const int count = std::min(num_vertices - first, batch_size);
+    for (int j = 0; j < count; j++) {
+      const Vertex *vert = &reshape_smooth_context->geometry.vertices[first + j];
+      float3 P;
+      coarse_position_cb(reshape_smooth_context, vert, P);
+      positions[j * 3] = P[0];
+      positions[j * 3 + 1] = P[1];
+      positions[j * 3 + 2] = P[2];
+    }
+    reshape_subdiv->evaluator->eval_output->setCoarsePositions(
+        positions.data(), first, count);
   }
   reshape_subdiv->evaluator->eval_output->refine();
 }
@@ -1243,23 +1269,10 @@ static void evaluate_higher_grid_positions_with_details(
   const MultiresReshapeContext *reshape_context = reshape_smooth_context->reshape_context;
   foreach_toplevel_grid_coord(
       reshape_smooth_context, [&](const PTexCoord *ptex_coord, const GridCoord *grid_coord) {
-        /* Position of the original vertex at top level. */
-        float3 orig_final_P;
-        evaluate_final_original_point(reshape_smooth_context, grid_coord, orig_final_P);
-
-        /* Original surface point on sculpt level (sculpt level before edits in sculpt mode). */
+        /* Detail was computed from original grids before refining final positions. */
         const SurfacePoint *orig_sculpt_point = base_surface_grids_read(reshape_smooth_context,
                                                                         grid_coord);
-
-        /* Difference between original top level and original sculpt level in object space. */
-        const float3 original_detail_delta = orig_final_P - orig_sculpt_point->P;
-
-        /* Difference between original top level and original sculpt level in tangent space of
-         * original sculpt level. */
-        const float3x3 original_sculpt_tangent_matrix_inv = math::invert(
-            orig_sculpt_point->tangent_matrix);
-        float3 original_detail_delta_tangent = math::transform_direction(
-            original_sculpt_tangent_matrix_inv, original_detail_delta);
+        const float3 &original_detail_delta_tangent = orig_sculpt_point->detail_delta_tangent;
 
         /* Limit surface of smoothed (subdivided) edited sculpt level. */
         float3 smooth_limit_P;

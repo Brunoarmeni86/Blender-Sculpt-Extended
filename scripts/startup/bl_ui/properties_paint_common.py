@@ -593,6 +593,29 @@ class StrokePanel(BrushPanel):
 
         if brush.stroke_method == 'ANCHORED':
             col.prop(brush, "use_edge_to_edge", text="Edge to Edge")
+            if mode == 'SCULPT':
+                # ANCHORED_SURFACE_PROJECTION_V1. Other brush modes remain unchanged.
+                anchor_projection = col.column()
+                # Sculpt deformation reads brush.mtex (Texture), not mask_mtex.
+                # See BKE_brush_mask_texture_get(..., OB_MODE_SCULPT).
+                anchor_projection.enabled = (brush.texture_slot.map_mode == 'AREA_PLANE')
+                anchor_projection.prop(brush, "use_anchor_surface_projection",
+                                       text="Surface-Adaptive Projection")
+                normal_guided = anchor_projection.column()
+                normal_guided.enabled = brush.use_anchor_surface_projection
+                normal_guided.prop(brush, "use_anchor_normal_guided_projection",
+                                   text="Normal-Guided (Multires)")
+                surface_path = anchor_projection.column()
+                surface_path.enabled = brush.use_anchor_surface_projection
+                surface_path.prop(brush, "use_anchor_geodesic_projection",
+                                  text="Surface Path (Multires, Experimental)")
+                transport = anchor_projection.column()
+                transport.enabled = (brush.use_anchor_surface_projection
+                                     and brush.use_anchor_geodesic_projection)
+                transport.prop(brush, "use_anchor_surface_transport",
+                               text="Surface Tangent Transport (V4)")
+                if brush.texture_slot.map_mode != 'AREA_PLANE':
+                    col.label(text="Set Texture Mapping to Area Plane", icon='INFO')
 
         if brush.stroke_method == 'AIRBRUSH':
             col.prop(brush, "rate", text="Rate", slider=True)

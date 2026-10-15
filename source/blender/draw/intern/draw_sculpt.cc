@@ -7,6 +7,7 @@
  */
 
 #include <cstdio>
+#include "multires_draw_profile_v01.hh"
 #include "draw_sculpt.hh"
 
 #include "DNA_mesh_types.h"
@@ -103,6 +104,8 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
   const bool sculpt_mesh_v3_draw_enabled =
       pbvh->type() == bke::pbvh::Type::Mesh && sculpt_mesh_v3_draw_mesh &&
       sculpt_mesh_v3_draw_mesh->verts_num >= 1'000'000;
+  const bool multires_draw_probe = pbvh->type() == bke::pbvh::Type::Grids &&
+      multires_draw_profile_v01::path();
   const double sculpt_mesh_v3_draw_total_start = BLI_time_now_seconds();
   const double sculpt_mesh_v3_draw_normals_start = sculpt_mesh_v3_draw_total_start;  bke::pbvh::update_normals_from_eval(*const_cast<Object *>(ob), *pbvh);
   const double sculpt_mesh_v3_draw_normals_ms =
@@ -174,6 +177,20 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
                  sculpt_mesh_v3_draw_search_ms,
                  sculpt_mesh_v3_draw_batches_ms);
   }
+  if (multires_draw_probe) {
+    const SubdivCCG *ccg = sculpt_session ? sculpt_session->subdiv_ccg : nullptr;
+    multires_draw_profile_v01::log(
+        "[MULTIRES_DRAW] grids=%d area=%d wire=%d fast=%d painting=%d attrs=%lld "
+        "visible=%lld requested=%lld normals_ms=%.3f search_ms=%.3f batches_ms=%.3f "
+        "prepare_ms=%.3f\n",
+        ccg ? ccg->grids_num : 0, ccg ? ccg->grid_area : 0,
+        int(use_wire), int(fast_mode), int(rv3d && (rv3d->rflag & RV3D_PAINTING)),
+        static_cast<long long>(attrs.size()), static_cast<long long>(visible_nodes.size()),
+        static_cast<long long>(nodes_to_update.size()), sculpt_mesh_v3_draw_normals_ms,
+        sculpt_mesh_v3_draw_search_ms, sculpt_mesh_v3_draw_batches_ms,
+        sculpt_mesh_v3_draw_total_ms);
+  }
+
   const Span<int> material_indices = draw_data.ensure_material_indices(*ob);
 
   const int max_material = std::max(0, BKE_object_material_count_eval(ob) - 1);

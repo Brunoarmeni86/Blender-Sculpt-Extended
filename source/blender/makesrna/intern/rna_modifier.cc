@@ -1928,10 +1928,61 @@ static void rna_MultiresSculptLayer_visible_set(PointerRNA *ptr, bool value)
   }
 }
 
+/* LAYER_SELECT_METADATA_V01: selection changes the recording destination, not composition. */
 static void rna_MultiresModifier_active_layer_set(PointerRNA *ptr, int value)
 {
-  if (rna_multires_layer_prepare(ptr)) {
-    bke::multires_layers::set_active(*static_cast<MultiresModifierData *>(ptr->data), value);
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  auto *mmd = static_cast<MultiresModifierData *>(ptr->data);
+  if (!ob || !mmd) { return; }
+  const int count = mmd->sculpt_layers.count();
+  const int target = count == 0 ? 0 : std::clamp(value, 0, count - 1);
+  /* Clicking the same row must not flush, release the PBVH, or disable REC. */
+  if (target == mmd->sculpt_layer_active) { return; }
+
+  const SculptSession *ss = ob->runtime->sculpt_session;
+  const bool pending_positions = ss && ss->subdiv_ccg && ss->subdiv_ccg->dirty.coords;
+  bool surface_preserved = false;
+  const double started = BLI_time_now_seconds();
+  /* Commit while the OLD active index/strength/visibility still owns pending coordinates. */
+  if (!bke::multires_layers::commit(*ob, &surface_preserved)) {
+    BKE_modifier_set_error(ob, &mmd->modifier, "Commit pending sculpt before changing layer");
+    return;
+  }
+  const double committed = BLI_time_now_seconds();
+  const bool rebuild = pending_positions && !surface_preserved;
+  if (rebuild && !multires_force_sculpt_rebuild(ob)) {
+    BKE_modifier_set_error(ob, &mmd->modifier, "Cannot preserve pending sculpt while changing layer");
+    return;
+  }
+  if (rebuild) { DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY); }
+  /* Preserve the existing REC-off policy on a real layer switch. */
+  for (ModifierData &md : ob->modifiers) {
+    if (md.type == eModifierType_Multires) {
+      reinterpret_cast<MultiresModifierData *>(&md)->sculpt_layer_recording = 0;
+    }
+  }
+  bke::multires_layers::set_active(*mmd, target);
+  const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  if (trace && trace[0] == '1') {
+    std::printf("[LAYER_SELECT_V01] target=%d pending=%d rebuild=%d commit_ms=%.3f total_ms=%.3f\n",
+                target, int(pending_positions), int(rebuild),
+                (committed - started) * 1000.0, (BLI_time_now_seconds() - started) * 1000.0);
+  }
+}
+
+static void rna_MultiresModifier_active_layer_update(
+    Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  Object *ob = id_cast<Object *>(ptr->owner_id);
+  const SculptSession *ss = ob ? ob->runtime->sculpt_session : nullptr;
+  if (ss && ss->subdiv_ccg && bke::object::pbvh_get(*ob)) {
+    /* Geometry is unchanged; synchronize active index and recording metadata only. */
+    DEG_id_tag_update(ptr->owner_id, ID_RECALC_SYNC_TO_EVAL);
+    WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
+  }
+  else {
+    /* No live Multires surface (or the conservative setter fallback released it). */
+    rna_Modifier_update(nullptr, nullptr, ptr);
   }
 }
 
@@ -3701,7 +3752,7 @@ static void rna_def_modifier_multires_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_MultiresSculptLayer_name_set");
   RNA_def_struct_name_property(srna, prop);
   RNA_def_property_ui_text(prop, "Name", "Layer name");
-  RNA_def_property_update(prop, NC_OBJECT | ND_MODIFIER | NA_RENAME, "rna_Modifier_dependency_update");
+  RNA_def_property_update(prop, NC_OBJECT | ND_MODIFIER | NA_RENAME, "rna_Modifier_name_update");
 
   prop = RNA_def_property(srna, "strength", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "strength");
@@ -3774,7 +3825,7 @@ static void rna_def_modifier_multires(BlenderRNA *brna)
   RNA_def_property_int_funcs(prop, nullptr, "rna_MultiresModifier_active_layer_set", nullptr);
   RNA_def_property_range(prop, 0, INT_MAX);
   RNA_def_property_ui_text(prop, "Active Sculpt Layer", "Index of the active sculpt layer");
-  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+  RNA_def_property_update(prop, 0, "rna_MultiresModifier_active_layer_update");
 
   prop = RNA_def_property(srna, "use_sculpt_displacement", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_displacement_enabled", 0);

@@ -32,6 +32,7 @@ _modules = [
     "properties_data_mesh",
     "properties_data_metaball",
     "properties_data_modifier",
+    "properties_polypaint_bake",
     "properties_data_pointcloud",
     "properties_data_shaderfx",
     "properties_data_lightprobe",
@@ -124,6 +125,7 @@ def register():
 
     space_filebrowser.register_props()
     properties_paint_common.register()
+    properties_polypaint_bake.register_props()
 
     from bpy.props import (
         EnumProperty,
@@ -187,6 +189,7 @@ def register():
 def unregister():
     from bpy.utils import unregister_class
 
+    properties_polypaint_bake.unregister_props()
     properties_paint_common.unregister()
 
     for mod in reversed(_modules_loaded):
