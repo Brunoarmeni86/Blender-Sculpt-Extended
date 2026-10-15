@@ -557,11 +557,33 @@ static wmOperatorStatus sculpt_multires_merge_visible_to_base_exec(bContext *C, 
     BKE_report(op->reports, RPT_ERROR, "Switch to Object Mode before baking; pending Sculpt must commit in its original frame");
     return OPERATOR_CANCELLED;
   }
-  if (object->id.lib || object->adt || object->runtime->sculpt_session ||
-      !(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0)
-  {
+  /* MERGE_VISIBLE_PRECISE_ERRORS_V01: these guards protect independent states.
+   * Report the exact failing precondition instead of saying "local object" for
+   * unrelated cases such as stale SculptSession or disabled Global Undo.
+   * Do not relax safety checks or discard pending CCG data during diagnosis. */
+  if (object->id.lib) {
     BKE_report(op->reports, RPT_ERROR,
-               "Bake requires a local object without animation/drivers, no Sculpt session, and Global Undo enabled");
+               "Bake blocked: Object is linked from an external library; make the Object local");
+    return OPERATOR_CANCELLED;
+  }
+  if (object->adt) {
+    BKE_report(op->reports, RPT_ERROR,
+               "Bake blocked: Object has animation data or drivers; use a safe unanimated copy");
+    return OPERATOR_CANCELLED;
+  }
+  if (object->runtime->sculpt_session) {
+    BKE_report(op->reports, RPT_ERROR,
+               "Bake blocked: SculptSession still exists in Object Mode; verify sculpt exit/flush");
+    return OPERATOR_CANCELLED;
+  }
+  if (!(U.uiflag & USER_GLOBALUNDO)) {
+    BKE_report(op->reports, RPT_ERROR,
+               "Bake blocked: enable Global Undo in Preferences > System");
+    return OPERATOR_CANCELLED;
+  }
+  if (U.undosteps <= 0) {
+    BKE_report(op->reports, RPT_ERROR,
+               "Bake blocked: set Undo Steps greater than zero in Preferences");
     return OPERATOR_CANCELLED;
   }
   MultiresModifierData *mmd = nullptr;
