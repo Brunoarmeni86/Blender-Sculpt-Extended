@@ -24,6 +24,7 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_anim_types.h"
 #include "DNA_brush_types.h"
 #include "DNA_listBase.h"
 #include "DNA_modifier_types.h"
@@ -566,10 +567,21 @@ static wmOperatorStatus sculpt_multires_merge_visible_to_base_exec(bContext *C, 
                "Bake blocked: Object is linked from an external library; make the Object local");
     return OPERATOR_CANCELLED;
   }
-  if (object->adt) {
-    BKE_report(op->reports, RPT_ERROR,
-               "Bake blocked: Object has animation data or drivers; use a safe unanimated copy");
-    return OPERATOR_CANCELLED;
+  /* Blender can retain an empty AnimData container after removing an
+   * Action or driver. Such a container does not animate any geometry and
+   * must not prevent Merge Visible to Base. Do not clear it here: the object
+   * may own other animation runtime metadata. */
+  if (const AnimData *adt = object->adt) {
+    const bool animation_in_use = adt->action != nullptr || adt->tmpact != nullptr ||
+                                  !adt->nla_tracks.is_empty() || !adt->drivers.is_empty() ||
+                                  !adt->overrides.is_empty() || adt->act_track != nullptr ||
+                                  adt->actstrip != nullptr;
+    if (animation_in_use) {
+      BKE_report(op->reports, RPT_ERROR,
+                 "Bake blocked: Object has a real Action, NLA track, driver, or animation "
+                 "override; inspect animation before baking");
+      return OPERATOR_CANCELLED;
+    }
   }
   if (object->runtime->sculpt_session) {
     BKE_report(op->reports, RPT_ERROR,
