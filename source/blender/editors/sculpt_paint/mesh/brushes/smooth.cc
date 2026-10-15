@@ -24,8 +24,6 @@
 #include "BLI_array.hh"
 #include "BLI_map.hh"
 #include "BLI_math_matrix.hh"
-#include <cstdlib>
-#include <cmath>
 #include "BLI_enumerable_thread_specific.hh"
 #include "BLI_task.hh"
 
@@ -36,6 +34,9 @@
 #include "editors/sculpt_paint/mesh/sculpt_smooth.hh"
 
 #include "bmesh.hh"
+
+#include <cstdio>
+#include <cstdlib>
 
 namespace blender::ed::sculpt_paint::brushes {
 
