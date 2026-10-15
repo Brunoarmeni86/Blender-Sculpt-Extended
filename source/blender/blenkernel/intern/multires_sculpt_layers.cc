@@ -1651,10 +1651,19 @@ const char *merge_visible_to_base(MultiresModifierData &mmd, Mesh &mesh,
   /* MERGE_VISIBLE_NATIVE_BASE_V1. Keep the original cage/tangent frames.
    * All validations precede CustomData writable access and layer removal.
    * Once published, no further operation in this transaction can fail. */
-  if (mesh.id.lib || ID_REAL_USERS(&mesh.id) > 1 || mesh.key ||
-      CustomData_external_test(&mesh.corner_data, CD_MDISPS))
-  {
-    return "Merge requires a single-user mesh without shape keys or external displacement";
+  /* Do not conflate independent constraints into a single "single-user"
+   * error. Each may require a different, potentially destructive user action. */
+  if (mesh.id.lib) {
+    return "Merge blocked: Mesh datablock is linked; make the Mesh local";
+  }
+  if (ID_REAL_USERS(&mesh.id) > 1) {
+    return "Merge blocked: Mesh datablock has multiple users; make Mesh data single-user";
+  }
+  if (mesh.key) {
+    return "Merge blocked: Mesh has Shape Keys; bake needs a key-free mesh";
+  }
+  if (CustomData_external_test(&mesh.corner_data, CD_MDISPS)) {
+    return "Merge blocked: Multires displacement uses external storage";
   }
   if (mmd.totlvl <= 0 || !compatible(mmd, mesh)) {
     return "Merge requires valid native and layer grids at the maximum Multires level";
