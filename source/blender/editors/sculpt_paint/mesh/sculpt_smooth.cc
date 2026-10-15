@@ -99,7 +99,7 @@ static float3 average_positions(const CCGKey &key,
   return result;
 }
 
-template<bool use_factors>
+template<bool use_factors, bool isolated>
 static void neighbor_position_average_interior_grids_impl(const OffsetIndices<int> faces,
                                                           const Span<int> corner_verts,
                                                           const BitSpan boundary_verts,
@@ -107,11 +107,18 @@ static void neighbor_position_average_interior_grids_impl(const OffsetIndices<in
                                                           const SubdivCCG &subdiv_ccg,
                                                           const Span<int> grids,
                                                           const Span<float> factors,
-                                                          const MutableSpan<float3> new_positions)
+                                                          const MutableSpan<float3> new_positions,
+                                                          const FunctionRef<float3(int)> read_isolated_position = {})
 {
   PRF_scope(ProfileCategory::Editor);
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
   const Span<float3> positions = subdiv_ccg.positions;
+  const auto read_position = [&](const int index) -> float3 {
+    if constexpr (isolated) {
+      return read_isolated_position(index);
+    }
+    return positions[index];
+  };
 
   BLI_assert(grids.size() * key.grid_area == new_positions.size());
   if constexpr (use_factors) {
@@ -133,7 +140,7 @@ static void neighbor_position_average_interior_grids_impl(const OffsetIndices<in
 
         if constexpr (use_factors) {
           if (factors[node_vert_index] == 0.0f) {
-            new_positions[node_vert_index] = positions[vert];
+            new_positions[node_vert_index] = read_position(vert);
             continue;
           }
         }
@@ -163,7 +170,15 @@ static void neighbor_position_average_interior_grids_impl(const OffsetIndices<in
         }
 
         if (neighbors.coords.is_empty()) {
-          new_positions[node_vert_index] = positions[vert];
+          new_positions[node_vert_index] = read_position(vert);
+        }
+        else if constexpr (isolated) {
+          float3 total(0.0f);
+          const float inv_size = math::rcp(float(neighbors.coords.size()));
+          for (const SubdivCCGCoord neighbor : neighbors.coords) {
+            total += read_position(neighbor.to_index(key)) * inv_size;
+          }
+          new_positions[node_vert_index] = total;
         }
         else {
           new_positions[node_vert_index] = average_positions(key, positions, neighbors.coords);
@@ -181,7 +196,7 @@ void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
                                               const Span<int> grids,
                                               const MutableSpan<float3> new_positions)
 {
-  neighbor_position_average_interior_grids_impl<false>(
+  neighbor_position_average_interior_grids_impl<false, false>(
       faces, corner_verts, boundary_verts, boundary_edges, subdiv_ccg, grids, {}, new_positions);
 }
 
@@ -194,7 +209,7 @@ void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
                                               const Span<float> factors,
                                               const MutableSpan<float3> new_positions)
 {
-  neighbor_position_average_interior_grids_impl<true>(faces,
+  neighbor_position_average_interior_grids_impl<true, false>(faces,
                                                       corner_verts,
                                                       boundary_verts,
                                                       boundary_edges,
@@ -202,6 +217,28 @@ void neighbor_position_average_interior_grids(const OffsetIndices<int> faces,
                                                       grids,
                                                       factors,
                                                       new_positions);
+}
+
+void neighbor_position_average_interior_grids_isolated(
+    const OffsetIndices<int> faces,
+    const Span<int> corner_verts,
+    const BitSpan boundary_verts,
+    const Set<OrderedEdge> &boundary_edges,
+    const SubdivCCG &subdiv_ccg,
+    const Span<int> grids,
+    const Span<float> factors,
+    const FunctionRef<float3(int)> read_isolated_position,
+    const MutableSpan<float3> new_positions)
+{
+  neighbor_position_average_interior_grids_impl<true, true>(faces,
+                                                             corner_verts,
+                                                             boundary_verts,
+                                                             boundary_edges,
+                                                             subdiv_ccg,
+                                                             grids,
+                                                             factors,
+                                                             new_positions,
+                                                             read_isolated_position);
 }
 
 template<typename T>
