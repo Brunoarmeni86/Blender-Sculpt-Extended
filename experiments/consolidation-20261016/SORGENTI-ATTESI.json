@@ -1,0 +1,39 @@
+{
+  "BaseCheckpoint": "3aad427850425cb038887196476822ef62713e1f",
+  "Normalization": "Decode UTF-8/BOM; CRLF to LF; one trailing LF",
+  "Scope": "Eight core files; other working-source files are not certified against Git.",
+  "Files": [
+    {
+      "Path": "source/blender/editors/interface/interface_handlers.cc",
+      "NormalizedSHA256": "2911c68ef9d2183b82a1038ec66ce7334a8316771dace78de51b901028f8925e"
+    },
+    {
+      "Path": "source/blender/editors/undo/ed_undo.cc",
+      "NormalizedSHA256": "b7894f30ed5f456986b0e12a4d4f2006a90bd6fd983a8bb1dfae87e83b909e7c"
+    },
+    {
+      "Path": "source/blender/blenkernel/intern/undo_system.cc",
+      "NormalizedSHA256": "c2dc96fbdefd33520c046b3961936648a6beea1383d13204720444e4c17d6743"
+    },
+    {
+      "Path": "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc",
+      "NormalizedSHA256": "49e65fac87606bd9beab6beda71613cec0889dcf4658205857313c17dd41a780"
+    },
+    {
+      "Path": "source/blender/makesrna/intern/rna_modifier.cc",
+      "NormalizedSHA256": "612440b2edc5b9f12f5b4e57bb136373756b1e5677c4cc1d963ad0bf10e216b6"
+    },
+    {
+      "Path": "source/blender/editors/sculpt_paint/mesh/sculpt_cloth.cc",
+      "NormalizedSHA256": "5998efeeced664fe976f90be132acb83ae3d0cc5c197f188ceb403ae46f07914"
+    },
+    {
+      "Path": "source/blender/editors/sculpt_paint/mesh/sculpt_layer_delta_smooth_v01.hh",
+      "NormalizedSHA256": "76db238f033a27dcfdc9f078c9a576cf35f5abb10e0a49e2e33b53360385cabf"
+    },
+    {
+      "Path": "source/blender/editors/sculpt_paint/mesh/brushes/smooth.cc",
+      "NormalizedSHA256": "63b97640f87036ecf5fcb94af189eee06110b1783e7e105e7d11928a0b9861fb"
+    }
+  ]
+}

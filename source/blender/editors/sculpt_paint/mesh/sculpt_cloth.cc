@@ -65,6 +65,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <mutex>
 
 namespace blender::ed::sculpt_paint::cloth {
 
@@ -1431,6 +1432,63 @@ static void cloth_brush_satisfy_constraints(const Depsgraph &depsgraph,
   }
 }
 
+/* CLOTH_LAYER_JOURNAL_V01
+ * Cloth writes absolute simulation coordinates, bypassing apply_translations.
+ * Keep those coordinates bit-for-bit while journaling every changed grid/sample
+ * so a preceding or following ordinary brush cannot hide Cloth's commit footprint.
+ * Workers own disjoint grids; journal storage is merged under the shared mutex. */
+static void write_simulation_grids_positions(const CCGKey &key,
+                                            const Span<int> grids,
+                                            const Span<float3> simulation_positions,
+                                            SubdivCCG &subdiv_ccg)
+{
+  MutableSpan<float3> positions = subdiv_ccg.positions;
+  Vector<int, 32> changed_grids;
+  Vector<int64_t, 256> changed_samples;
+  for (const int grid : grids) {
+    const IndexRange range = bke::ccg::grid_range(key, grid);
+    MutableSpan<float3> current = positions.slice(range);
+    const Span<float3> next = simulation_positions.slice(range);
+    bool changed = false;
+    for (const int i : current.index_range()) {
+      const float3 &a = current[i];
+      const float3 &b = next[i];
+      if (a.x != b.x || a.y != b.y || a.z != b.z) {
+        changed_samples.append(int64_t(grid) * int64_t(key.grid_area) + i);
+        changed = true;
+      }
+    }
+    /* Preserve the original absolute copy, including its floating-point bits.
+     * Do not replace this with positions += simulation - positions. */
+    current.copy_from(next);
+    if (changed) {
+      changed_grids.append(grid);
+    }
+  }
+  if (changed_grids.is_empty()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(subdiv_ccg.sculpt_dirty_position_grids_mutex);
+  if (subdiv_ccg.sculpt_dirty_position_grid_flags.size() != subdiv_ccg.grids_num) {
+    subdiv_ccg.sculpt_dirty_position_grid_flags.reinitialize(subdiv_ccg.grids_num);
+    subdiv_ccg.sculpt_dirty_position_grid_flags.fill(false);
+    subdiv_ccg.sculpt_dirty_position_grids.clear();
+  }
+  if (subdiv_ccg.sculpt_dirty_position_sample_flags.size() != positions.size()) {
+    subdiv_ccg.sculpt_dirty_position_sample_flags.resize(positions.size(), false);
+    subdiv_ccg.sculpt_dirty_position_sample_flags.fill(false);
+  }
+  for (const int64_t sample : changed_samples) {
+    subdiv_ccg.sculpt_dirty_position_sample_flags[sample].set();
+  }
+  for (const int grid : changed_grids) {
+    if (!subdiv_ccg.sculpt_dirty_position_grid_flags[grid]) {
+      subdiv_ccg.sculpt_dirty_position_grid_flags[grid] = true;
+      subdiv_ccg.sculpt_dirty_position_grids.append(grid);
+    }
+  }
+}
+
 void do_simulation_step(const Depsgraph &depsgraph,
                         const Sculpt &sd,
                         Object &object,
@@ -1517,10 +1575,7 @@ void do_simulation_step(const Depsgraph &depsgraph,
             const Span<int> verts = calc_vert_indices_grids(key, grids, tls.vert_indices);
             solve_verts_simulation(object, brush, sim_location, verts, factors, tls, cloth_sim);
 
-            for (const int grid : grids) {
-              const IndexRange grid_range = bke::ccg::grid_range(key, grid);
-              positions.slice(grid_range).copy_from(cloth_positions.slice(grid_range));
-            }
+            write_simulation_grids_positions(key, grids, cloth_positions, subdiv_ccg);
 
             cloth_sim.node_state[cloth_sim.node_state_index.lookup(&nodes[i])] =
                 SCULPT_CLOTH_NODE_INACTIVE;
@@ -2589,3 +2644,4 @@ void SCULPT_OT_cloth_filter(wmOperatorType *ot)
 }
 
 }  // namespace blender::ed::sculpt_paint::cloth
+

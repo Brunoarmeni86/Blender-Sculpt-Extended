@@ -1,0 +1,33 @@
+PROVE CONSIGLIATE - BLENDER SCULPT EXTENDED
+
+Usare una copia di un file semplice, poi una scena rappresentativa del proprio lavoro.
+Annotare il nome del pennello, i livelli Multires, il numero dei layer e la forza.
+
+[ ] Due layer: dettaglio su A, B attivo e visibile con REC. Draw/Clay/Grab su B.
+    Nascondendo B il dettaglio di A deve ricomparire intatto.
+[ ] Undo/Redo delle pennellate, Commit e cambio layer senza salti della superficie.
+[ ] Strength 1 -> 0.7 -> 0.2, confermando separatamente. Undo: 0.7 -> 1;
+    Redo: 0.7 -> 0.2. Visibility off/on deve avere i propri passaggi Undo.
+[ ] Alternare una pennellata, Strength e Visibility. Undo deve rispettare l'ordine.
+[ ] Delta Smooth sul layer B vuoto: nessuna modifica visibile della superficie.
+[ ] Delta Smooth su B con dettaglio, prima al massimo livello, poi a livelli inferiori.
+    Provare pennellate consecutive e tornare al massimo: il dettaglio fine va conservato.
+    Livello 0/base mesh, Surface Smooth/inversione e live Displacement/Shrinkwrap
+    non fanno parte del supporto Delta Smooth di questa versione.
+[ ] Draw in una zona e Cloth in un'altra senza Commit intermedio, poi Commit.
+    Ripetere nell'ordine inverso. Entrambe le deformazioni devono conservarsi.
+[ ] Forza del layer 0.5, poi Undo/Redo, Commit, cambio livello e cambio layer.
+[ ] Salvataggio con nuovo nome e riapertura: forma, layer e colore devono conservarsi.
+[ ] Polypaint Multires visibile in viewport/materiale; bake UV e UDIM se usati.
+[ ] Per provare Cycles GPU selezionare il proprio dispositivo nelle preferenze di
+    questa copia. La presenza dei backend dipende dalla configurazione riportata
+    in BUILD-INFO.json; il controllo di avvio non certifica un render GPU.
+
+La chiusura di REC dopo alcuni controlli/Commit e il comportamento attuale:
+riattivarlo prima di scolpire. Un trascinamento continuo dello slider e una sola azione.
+Il filtro Smooth globale lavora sulla superficie composta; il pennello Delta Smooth
+isola invece il contributo del layer attivo.
+
+Per una segnalazione utile: pochi passaggi ripetibili, risultato atteso e risultato
+ottenuto. Chiudere Blender, compilare la scheda e raccogliere i log. Eventuali
+scene, immagini o video possono essere allegati separatamente se necessari.

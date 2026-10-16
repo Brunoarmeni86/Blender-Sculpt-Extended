@@ -1,9 +1,9 @@
 {
-  "Timestamp": "2026-10-16T07:33:21.218170+00:00",
-  "BaseCheckpoint": "72dae3ab28b5abafc0fe5156f9a47e484aaab26c",
+  "Timestamp": "2026-10-16T09:33:03.380426+00:00",
+  "BaseCheckpoint": "3aad427850425cb038887196476822ef62713e1f",
   "Branch": "checkpoint/sculpt-extended-20261015",
   "ObservedExecutableSHA256": null,
-  "Profile": "weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-full-ccg-batch-v01-pbvh-factor1-smooth-guard-v02",
+  "Profile": "consolidated-cloth-journal-v01-smooth-coarse-v02-controls-undo-v36-full-ccg-batch-v01",
   "Files": [
     {
       "Path": "source/blender/blenkernel/intern/multires.cc",
@@ -95,15 +95,18 @@
     },
     {
       "Path": "experiments/sculpt-extended-20261016/AVVIA-COMPLETO.ps1",
-      "SHA256": "a3174f63da01d7c3a19df99db4738911bbf3f1be110d719c0f20a499e345d41d"
+      "SHA256": "37dd328cf4206cc467745c733ba9e13cc98af1f58e48f7499577262784a6eebe",
+      "Provenance": "UTF-8 repository content"
     },
     {
       "Path": "experiments/sculpt-extended-20261016/AGGIORNA-GITHUB.ps1",
-      "SHA256": "808180962e41454df8f28f4e0451d391886388529375a70b69d2e4e45d4da120"
+      "SHA256": "8400fd2dbeb45abc3552947cb5454b569527e1cacc8c962726c4200027e9518b",
+      "Provenance": "UTF-8 repository content"
     },
     {
       "Path": "experiments/sculpt-extended-20261016/LEGGIMI.md",
-      "SHA256": "0d96da1578f5a29bf9b3f55f98186df1705db74b1180efd515c7bd175d553172"
+      "SHA256": "3c7068e15d036d15c5f1ad62892279235641e770c2cad4cc5dc104b39785fb44",
+      "Provenance": "UTF-8 repository content"
     },
     {
       "Path": "source/blender/editors/include/ED_sculpt.hh",
@@ -200,24 +203,121 @@
     {
       "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Clay-Verify-V01/experiment-tools/PROVA-POLYPAINT.py",
       "SHA256": "da22d193dca6e00f24e59182c2c3694951caee2547dc0d91118bdc9c71c00515"
+    },
+    {
+      "Path": "source/blender/editors/sculpt_paint/mesh/sculpt_cloth.cc",
+      "SHA256": "98044715ad487ad33df6f298251b87375f8c9a09772a03a062ef8687a6896339",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "source/blender/editors/sculpt_paint/mesh/sculpt_layer_delta_smooth_v01.hh",
+      "SHA256": "87c23c93c945105c315a0c79687b32102cdc801f165f9f9f910eb6ed5f3f900c",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/GUIDA-TEST.txt",
+      "SHA256": "238de34c49228aba712861230d7c3c372bc3f77e342c8e3a56de4041b376b0e2",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/RACCOGLI-LOG.cmd",
+      "SHA256": "01d8f950c01f5ec3304ffa6fa39993507c0a73b90d2dc8da9e9c50679dd75264",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/AVVIA-SCULPT.ps1",
+      "SHA256": "dcac971b569a9dbeead2e2c66859f057afe58e9d4c57cbaa5e0c1cf53264e4b9",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/RACCOGLI-LOG.ps1",
+      "SHA256": "442703af710e5b2abb6ba1f802b526d55a12c02943cd2d9e357dcbc20413cc1d",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/CREA-SHAREABLE.ps1",
+      "SHA256": "062395e27a98c5287d590ac406c247a70f453b8c867bf7399b877071b20bb6c0",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/SORGENTI-ATTESI.json",
+      "SHA256": "9666705ff03c2bd766c9161a6b95afdbf1f32866e53738a3088f3e9524b502d7",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/SCHEDA-SEGNALAZIONE.txt",
+      "SHA256": "f477b26fe9100eeb78b69151739224f797a1d9b2e6f725045d9c55d1aadd9391",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/LEGGIMI-PORTABLE.txt",
+      "SHA256": "9a82929e25d55c10860303603fd906ae2e2ab0121c55bedd89f8d63fd629fc0f",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/AVVIA-SCULPT.cmd",
+      "SHA256": "09558f08c778d2aba82dd137c55b5755d54173f181794ebd675e42155ef893a1",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/LEGGIMI.txt",
+      "SHA256": "2863e89b134056b5ef80a1419db2d751a880d7f13952d741f5bcb997a2cb3669",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/VERIFICA-BUILD.py",
+      "SHA256": "41e6077bc884ac4e724db51ebdffde69a2602404caa2e25b28a9676876a94505",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/SculptExtended/LOAD-SIDEBAR.py",
+      "SHA256": "e6c95eede28767d8d88aa8b6ffb8bacd4d7b8f4960cafe97ec946f4636613cb9",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/SculptExtended/AVVIA-ESPERIMENTO.ps1",
+      "SHA256": "6501df7c13faa835a00f4c4368a546bdac54d7ffc9d14493b15f9f429ef015d4",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/SculptExtended/AVVIA-COMPLETO.ps1",
+      "SHA256": "37dd328cf4206cc467745c733ba9e13cc98af1f58e48f7499577262784a6eebe",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/SculptExtended/experiment-tools/LAYER-DIAGNOSTICS.py",
+      "SHA256": "53ce80ef3d32e4db8ff811f44b4796fcccbb8d21ea4fd843a7ae5f947f269b5f",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/SculptExtended/experiment-tools/POLYPAINT-BAKE.py",
+      "SHA256": "89826dd9e134612950c16a0933be87cf2b870c9d8666184c57a8d1cb66a2ab33",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/SculptExtended/experiment-tools/PROVA-POLYPAINT.py",
+      "SHA256": "40510636331a97f974c7d6fb597ce6814102a9f8e62bba799bfd29e1b3cc4e07",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/SculptExtended/experiment-tools/AVVIA-ESPERIMENTO.ps1",
+      "SHA256": "aac2eeaf2c9fc82e4d505e962063e212befda7665234f0370ed94079dba39ad0",
+      "Provenance": "UTF-8 repository content"
+    },
+    {
+      "Path": "experiments/consolidation-20261016/SculptExtended/addon/__init__.py",
+      "SHA256": "a2cf8b543db9e8f380bfd2ca1bc94bc39a77f820466216a7d0606d818b5acb77",
+      "Provenance": "UTF-8 repository content"
     }
   ],
   "PreviousObservedExecutableSHA256": "4BDC85FEA5BCD54CAE390C99D71F87D4B1B8464CB847E0A19F7AA1C9C03DEE41",
-  "ExecutableHashNote": "Latest Windows binary not supplied; parent checkpoint plus exact user-compiled Smooth Guard V02 source. Evaluator Trace diagnostic patch excluded.",
+  "ExecutableHashNote": "No latest Windows binary hash supplied; generated tester build will record its own executable hash.",
   "Validation": {
-    "SmoothGuard": {
-      "WindowsBuild": "user compiled and reported working",
-      "FingerprintLog": "risultati-20261016-090344-751.zip",
-      "Scope": "empty layer surface unchanged; protected payloads unchanged; full sequence not captured"
-    },
-    "Grab": {
-      "FingerprintLog": "risultati-20261016-091601-378.zip",
-      "Scope": "empty layer weight 1, before/after/undo/redo/commit/switch protected hashes preserved; expected exact surface hashes",
-      "FollowUp": "user visually confirmed populated layer weight 0.5 and save/reopen; no follow-up fingerprints"
-    },
-    "ClayClayStrips": "user reported working; no fingerprint logs supplied",
-    "Draw": "shared recording path; not separately verified",
-    "PoseClothGlobalFilters": "under review; no changes published"
+    "ClothJournalV01": "User explicitly confirmed compiled and tested on Windows",
+    "DeltaSmoothCoarseV02": "User explicitly confirmed compiled and tested on Windows",
+    "ParameterUndoV36Profile": "User reported working; retain controls in Undo",
+    "NewWindowsDistribution": "Script prepared; clean build/install/smoke/package must execute on Windows",
+    "LatestRuntimeLogs": "No follow-up logs supplied for these three checks"
   },
   "PreviousValidation": {
     "Log": "Cold-Start-20261016-082324.zip",
@@ -233,6 +333,78 @@
       15.976,
       15.52,
       6.248
+    ]
+  },
+  "ValidationHistory": [
+    {
+      "Log": "Cold-Start-20261016-082324.zip",
+      "DuplicateLog": "Cold-Start-20261016-082404.zip",
+      "StartupMode": "REUSE",
+      "FullCCGMode": "BATCH",
+      "CCGBuilds": 1,
+      "PositionsMS": 2558.033,
+      "GridEvaluationMS": 2821.855,
+      "ConversionMS": 5033.468,
+      "UndoRedoMS": [
+        12.173,
+        15.976,
+        15.52,
+        6.248
+      ]
+    },
+    {
+      "SmoothGuard": {
+        "WindowsBuild": "user compiled and reported working",
+        "FingerprintLog": "risultati-20261016-090344-751.zip",
+        "Scope": "empty layer surface unchanged; protected payloads unchanged; full sequence not captured"
+      },
+      "Grab": {
+        "FingerprintLog": "risultati-20261016-091601-378.zip",
+        "Scope": "empty layer weight 1, before/after/undo/redo/commit/switch protected hashes preserved; expected exact surface hashes",
+        "FollowUp": "user visually confirmed populated layer weight 0.5 and save/reopen; no follow-up fingerprints"
+      },
+      "ClayClayStrips": "user reported working; no fingerprint logs supplied",
+      "Draw": "shared recording path; not separately verified",
+      "PoseClothGlobalFilters": "under review; no changes published"
+    }
+  ],
+  "CoreSourceVerification": {
+    "BaseCheckpoint": "3aad427850425cb038887196476822ef62713e1f",
+    "Normalization": "Decode UTF-8/BOM; CRLF to LF; one trailing LF",
+    "Scope": "Eight core files; other working-source files are not certified against Git.",
+    "Files": [
+      {
+        "Path": "source/blender/editors/interface/interface_handlers.cc",
+        "NormalizedSHA256": "2911c68ef9d2183b82a1038ec66ce7334a8316771dace78de51b901028f8925e"
+      },
+      {
+        "Path": "source/blender/editors/undo/ed_undo.cc",
+        "NormalizedSHA256": "b7894f30ed5f456986b0e12a4d4f2006a90bd6fd983a8bb1dfae87e83b909e7c"
+      },
+      {
+        "Path": "source/blender/blenkernel/intern/undo_system.cc",
+        "NormalizedSHA256": "c2dc96fbdefd33520c046b3961936648a6beea1383d13204720444e4c17d6743"
+      },
+      {
+        "Path": "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc",
+        "NormalizedSHA256": "49e65fac87606bd9beab6beda71613cec0889dcf4658205857313c17dd41a780"
+      },
+      {
+        "Path": "source/blender/makesrna/intern/rna_modifier.cc",
+        "NormalizedSHA256": "612440b2edc5b9f12f5b4e57bb136373756b1e5677c4cc1d963ad0bf10e216b6"
+      },
+      {
+        "Path": "source/blender/editors/sculpt_paint/mesh/sculpt_cloth.cc",
+        "NormalizedSHA256": "5998efeeced664fe976f90be132acb83ae3d0cc5c197f188ceb403ae46f07914"
+      },
+      {
+        "Path": "source/blender/editors/sculpt_paint/mesh/sculpt_layer_delta_smooth_v01.hh",
+        "NormalizedSHA256": "76db238f033a27dcfdc9f078c9a576cf35f5abb10e0a49e2e33b53360385cabf"
+      },
+      {
+        "Path": "source/blender/editors/sculpt_paint/mesh/brushes/smooth.cc",
+        "NormalizedSHA256": "63b97640f87036ecf5fcb94af189eee06110b1783e7e105e7d11928a0b9861fb"
+      }
     ]
   }
 }

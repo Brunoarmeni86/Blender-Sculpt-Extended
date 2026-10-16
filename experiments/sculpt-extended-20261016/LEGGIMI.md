@@ -174,3 +174,47 @@ steps. Actual Blender integration remains the Windows user's runtime validation.
 Evaluator Trace V01 is a separate diagnostic patch and is not included in this
 functional checkpoint. No latest Windows executable hash was supplied; this
 commit is the previous checkpoint plus the exact validated Smooth guard source.
+
+
+## Consolidated Cloth, coarse Delta Smooth and control Undo (2026-10-16)
+
+The user explicitly confirmed compiling and testing both Cloth Journal V01 and
+Delta Smooth Coarse V02 on Windows, and then confirmed the property Undo launch
+profile working. These are user-reported runtime checks; no new logs or current
+Windows executable hash were supplied for those follow-up tests.
+
+- Cloth keeps the existing absolute simulation-position copy bit-for-bit and
+  merges changed samples/grids into the shared journal, preventing incomplete
+  commit footprints when mixed with standard brushes. Native solver unchanged.
+  Local actual-helper tests: 257 cases with API stubs, ASan/UBSan, including
+  preceding/following brush writes and four disjoint worker tasks.
+- Delta Smooth accepts valid levels 1..maximum while layer storage stays at
+  maximum. Integer lattice strides select exactly the high-grid samples at
+  current-level coordinates. Pending lower-level commit uses the native
+  detail-preserving reshape, followed by CCG refresh before capturing the next
+  stroke reference. Maximum-level behavior and Smooth Guard V02 are retained.
+  Local actual-function tests: 69120 comparisons against the native sampler,
+  levels 1..9, tri/quad/ngon grids, weights 1/.5/-1/2, and pending refresh guards.
+  These use Blender API stubs and do not simulate real OpenSubdiv/Undo.
+- The complete launcher explicitly sets V36 UI controls Undo=1, UI Undo=1,
+  CCG Undo=1; legacy boundary/metadata overlays=0. No Undo C++ code changed here.
+  A completed slider gesture is one UI action. Global property snapshots can
+  cost more than local stroke Undo. Native pairing tests with stubs cover 29
+  success/failure/redo-link/guard cases; real usage was confirmed by the user.
+- Pose geometry and global Smooth were reported working. Global Smooth keeps
+  composed-surface semantics; it is not changed into isolated delta smoothing.
+
+The distribution builder is in experiments/consolidation-20261016/. Its small
+script kit is not a Blender binary. On Windows CREA-SHAREABLE.ps1 verifies eight
+core source files, preserves the configured CMake/GPU options, builds Release
+INSTALL with --clean-first by default, performs a factory-startup registration
+check and packages only CMake-installed files plus the complete runtime.
+The generated tester ZIP includes double-click startup, a local config folder,
+test guide, report form, log collector, BUILD-INFO.json and a SHA256 sidecar.
+No automatic upload, .blend collection or personal addon/preferences inclusion.
+
+The build and package scripts were prepared on Linux. Windows execution and the
+new distributable binary/archive have not been produced in this environment.
+The eight-file verification is not a full Git comparison of all working sources.
+Evaluator Trace remains a separate diagnostic patch, disabled in normal startup.
+Face Sets work resumes after this consolidation; no Face Sets changes are included.

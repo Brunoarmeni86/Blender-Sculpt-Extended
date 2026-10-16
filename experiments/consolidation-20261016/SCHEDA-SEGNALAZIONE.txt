@@ -1,0 +1,24 @@
+BLENDER SCULPT EXTENDED - SEGNALAZIONE TEST
+
+Problema:
+
+Passaggi per riprodurlo:
+1.
+2.
+3.
+
+Risultato atteso:
+
+Risultato ottenuto:
+
+Ripetibile sempre / a volte:
+
+Sculpt Level e massimo livello:
+Numero layer, layer attivo, forza e REC:
+Pennello e impostazioni rilevanti:
+Numero indicativo di vertici / campioni:
+
+Windows / CPU / RAM / GPU:
+Eventuale messaggio di errore:
+
+BUILD-INFO.json e i log vengono aggiunti dal raccoglitore.

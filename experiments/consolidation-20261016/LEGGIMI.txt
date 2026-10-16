@@ -1,0 +1,51 @@
+SCULPT EXTENDED CONSOLIDATO - 16 OTTOBRE 2026
+
+Questo ZIP contiene gli script e il runtime per costruire il pacchetto tester;
+non contiene Blender gia compilato. La compilazione avviene sul PC Windows.
+L'utente ha confermato compilazione/prova di Cloth Journal V01 e Smooth Coarse
+V02, e il corretto funzionamento dell'avvio con Undo delle proprieta.
+
+Estrarre la cartella Sculpt-Extended-Consolidato-20261016 in C:\BlenderDev.
+Chiudere Blender. Nella PowerShell di Visual Studio 2022:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Extended-Consolidato-20261016\CREA-SHAREABLE.ps1"
+
+Il comando verifica gli otto sorgenti centrali, conserva la cache CMake e le
+opzioni Cycles/GPU, quindi ricompila pulito Release e il target INSTALL.
+Non applica patch e non sostituisce i sorgenti. Se un sorgente non corrisponde,
+si ferma prima della compilazione: inviare il nome del file segnalato.
+I processi di compilazione attivi bloccano l'avvio; sono chiusi solo i nodi
+MSBuild riusabili il cui padre e gia terminato.
+La ricompilazione pulita elimina gli oggetti compilati precedenti, poi li
+ricostruisce; non elimina il progetto o la configurazione CMake.
+Per una compilazione successiva incrementale aggiungere -Incremental.
+
+Dopo INSTALL esegue un controllo in background con impostazioni di fabbrica:
+registrazione degli operatori, RNA Multires, integrazione bake Polypaint e
+caricamento del runtime Python. Non e una prova automatica di sculpt/Undo,
+conservazione dei dettagli o rendering GPU.
+
+Il pacchetto finale usa SOLO i file del manifest di installazione di CMake,
+piu il runtime completo e gli strumenti per tester. Non copia la cartella di
+build indiscriminatamente: vecchi log, backup e preferenze non vengono aggiunti.
+Lo ZIP viene scritto in C:\BlenderDev\shareable, con nome e SHA256 stampati.
+La copia ha configurazione locale ed e avviabile con AVVIA-SCULPT.cmd.
+La build corrente riceve anche il runtime aggiornato, con backup dei file
+di runtime sovrascritti nella cartella build-<data>/runtime-backup del kit.
+
+PER I TESTER
+Distribuire lo ZIP Blender-Sculpt-Extended-<data>.zip prodotto dallo script,
+non questo piccolo kit di compilazione. Il tester deve soltanto estrarlo e
+aprire AVVIA-SCULPT.cmd. Include guida, scheda di segnalazione e raccolta log.
+Non invia file automaticamente e non allega scene .blend o preferenze ai log.
+
+TRACCIABILITA E LIMITI
+CHECKPOINT.txt identifica il checkpoint pubblicato. BUILD-INFO.json nel pacchetto
+finale registra hash dell'eseguibile, otto sorgenti verificati, configurazione
+Cycles e controlli. Gli hash degli otto file non certificano ogni altro file
+del SourceRoot. Eventuale Evaluator Trace V01 locale e una diagnostica separata,
+spenta nell'avvio normale e non compresa nel checkpoint funzionale.
+La precedente cartella sperimentale resta utilizzabile; il kit non modifica
+main, non cancella file .blend e non include addon/preferenze personali.
+PowerShell e Blender Windows non sono disponibili nell'ambiente di preparazione:
+la compilazione, il controllo in background e lo ZIP eseguibile verranno creati
+realmente sul PC Windows, non sono gia stati eseguiti qui.

@@ -32,6 +32,9 @@ struct State {
   SubdivCCG *ccg = nullptr;
   const MultiresSculptLayer *layer = nullptr;
   Span<int> ptex;
+  /* DELTA_SMOOTH_COARSE_V02: persistent layer grids remain at maximum resolution. */
+  int stored_grid_size = 0;
+  int sample_stride = 0;
   Map<int, float3> raw_offsets;
   Map<int, float3> reference;
   bool ready = false;
@@ -65,9 +68,13 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
            !(layer->flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
            !std::isfinite(layer->strength) || std::abs(layer->strength) < 1e-6f)
   { error = "Delta Smooth requires REC and a visible active layer with nonzero strength"; }
-  else if (ss->subdiv_ccg->level != mmd->totlvl || mmd->sculptlvl != mmd->totlvl ||
-           layer->level != mmd->totlvl || layer->grids_num != ss->subdiv_ccg->grids_num)
-  { error = "Delta Smooth V01 requires the highest Multires sculpt level"; }
+  else if (mmd->totlvl < 1 || mmd->totlvl > 13 || ss->subdiv_ccg->level < 1 ||
+           ss->subdiv_ccg->level > mmd->totlvl ||
+           ss->subdiv_ccg->level != mmd->sculptlvl || layer->level != mmd->totlvl ||
+           layer->grids_num != ss->subdiv_ccg->grids_num ||
+           ss->subdiv_ccg->grid_size != bke::subdiv::grid_size_from_level(mmd->sculptlvl) ||
+           ss->subdiv_ccg->grid_area != ss->subdiv_ccg->grid_size * ss->subdiv_ccg->grid_size)
+  { error = "Delta Smooth requires a valid Multires level and maximum-resolution layer grids"; }
   else if ((mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) ||
            mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled)
   { error = "Delta Smooth V01 does not support Sculpt Base Mesh or live displacement/shrinkwrap"; }
@@ -90,9 +97,21 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
     BKE_report(reports, RPT_ERROR, "Cannot commit pending sculpt before Delta Smooth");
     return false;
   }
-  if ((pending && !preserved) || object.runtime->sculpt_session != ss || ss->subdiv_ccg != ccg) {
-    BKE_report(reports, RPT_ERROR, "Delta Smooth requires a preserved live surface; retry after Commit");
+  if (object.runtime->sculpt_session != ss || ss->subdiv_ccg != ccg) {
+    BKE_report(reports, RPT_ERROR, "Delta Smooth surface changed while committing pending sculpt");
     return false;
+  }
+  if (pending && !preserved) {
+    /* Lower-level edits use native detail-preserving reshape at Commit. Reattach
+     * its newly stored layer data and refresh the current CCG before capturing
+     * a new stroke reference. This runs before stroke cache/Undo initialization.
+     * Keep the established maximum-level preservation requirement unchanged. */
+    if (ccg->level >= mmd->totlvl || !multires_refresh_sculpt_ccg(&object, mmd) ||
+        object.runtime->sculpt_session != ss || ss->subdiv_ccg != ccg)
+    {
+      BKE_report(reports, RPT_ERROR, "Cannot refresh Multires after lower-level sculpt Commit");
+      return false;
+    }
   }
   layer = bke::multires_layers::active(*mmd);
   if (!ccg->subdiv || !layer || !layer->disps) {
@@ -102,6 +121,11 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
   State &s = state();
   s.ptex = bke::subdiv::face_ptex_offset_get(ccg->subdiv);
   if (s.ptex.size() != ccg->faces.size() + 1) { reset(); return false; }
+  s.stored_grid_size = bke::subdiv::grid_size_from_level(layer->level);
+  s.sample_stride = (s.stored_grid_size - 1) / (ccg->grid_size - 1);
+  if (s.sample_stride < 1 ||
+      (ccg->grid_size - 1) * s.sample_stride != s.stored_grid_size - 1)
+  { reset(); return false; }
   s.object = &object; s.ccg = ccg; s.layer = layer; s.ready = true;
   std::fprintf(stderr, "[LAYER_DELTA_SMOOTH_V01] begin level=%d strength=%.6f pending_commit=%d\n",
                ccg->level, layer->strength, int(pending));
@@ -117,14 +141,21 @@ inline bool raw_offset(const int index, float3 &out)
   const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, index);
   if (coord.grid_index < 0 || coord.grid_index >= s.layer->grids_num) { return fail("grid_index"); }
   const MDisps &grid = s.layer->disps[coord.grid_index];
-  if (grid.level != s.layer->level || grid.totdisp != key.grid_area) { return fail("grid_descriptor"); }
+  if (grid.level != s.layer->level ||
+      grid.totdisp != s.stored_grid_size * s.stored_grid_size)
+  { return fail("grid_descriptor"); }
   if (!grid.disps) { out = float3(0.0f); s.raw_offsets.add(index, out); return true; }
   const int face_index = BKE_subdiv_ccg_grid_to_face_index(ccg, coord.grid_index);
   const IndexRange face = ccg.faces[face_index];
   const int corner = coord.grid_index - face.start();
   const float gu = float(coord.x) / float(key.grid_size - 1);
   const float gv = float(coord.y) / float(key.grid_size - 1);
-  const float *sample = grid.disps[coord.y * key.grid_size + coord.x];
+  /* Multires grids are nested dyadic lattices. Every current-level sample is
+   * exactly a stored-level sample: use an integer stride, no layer resampling,
+   * no bilinear rounding and no downsampling of persistent high detail. */
+  const int stored_x = int(coord.x) * s.sample_stride;
+  const int stored_y = int(coord.y) * s.sample_stride;
+  const float *sample = grid.disps[stored_y * s.stored_grid_size + stored_x];
   const float3 delta = float3(sample[0], sample[1], sample[2]) * s.layer->strength;
   if (!finite(delta)) { return fail("nonfinite_layer_sample"); }
   if (delta.x == 0.0f && delta.y == 0.0f && delta.z == 0.0f) {
@@ -210,3 +241,4 @@ inline bool prepare_region(Object &object, const IndexMask &node_mask)
 }
 inline bool owns(const Object &object) { return state().object == &object; }
 }  // namespace blender::ed::sculpt_paint::layer_delta_smooth_v01
+

@@ -1,0 +1,15 @@
+BLENDER SCULPT EXTENDED - VERSIONE DI TEST
+
+Estrarre tutto lo ZIP in una cartella scrivibile e aprire AVVIA-SCULPT.cmd.
+L'avvio attiva il profilo completo delle funzioni personalizzate.
+Avviando direttamente blender.exe alcune funzioni sperimentali possono restare spente.
+Non sono richieste compilazione, installazione o patch sul computer del tester.
+
+La configurazione di questa copia e locale alla cartella della versione Blender.
+Usare copie dei propri .blend e salvare i risultati con un nome distinto.
+Leggere GUIDA-TEST.txt. Per segnalare un problema compilare SCHEDA-SEGNALAZIONE.txt,
+chiudere Blender e aprire RACCOGLI-LOG.cmd. Il raccoglitore prepara uno ZIP locale;
+non invia messaggi o file automaticamente e non allega file .blend o preferenze.
+
+Questa e una build sperimentale per test di Sculpt Layers e Multires.
+BUILD-INFO.json identifica eseguibile, checkpoint, configurazione e controlli eseguiti.

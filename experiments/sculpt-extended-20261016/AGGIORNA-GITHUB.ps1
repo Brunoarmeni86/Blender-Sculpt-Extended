@@ -5,7 +5,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $branch = 'checkpoint/sculpt-extended-20261015'
-$baseCommit = '72dae3ab28b5abafc0fe5156f9a47e484aaab26c'
+$baseCommit = '3aad427850425cb038887196476822ef62713e1f'
 $snapshot = 'experiments/sculpt-extended-20261016'
 function Invoke-Git([string[]]$GitArgs) {
     $result = & git -c submodule.recurse=false -c diff.ignoreSubmodules=all -C $PublishRepo @GitArgs
@@ -64,7 +64,13 @@ $native = @(
     'source/blender/editors/include/ED_sculpt.hh',
     'source/blender/editors/util/ed_util.cc',
     'source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc',
-    'source/blender/editors/sculpt_paint/mesh/brushes/smooth.cc'
+    'source/blender/editors/sculpt_paint/mesh/brushes/smooth.cc',
+    'source/blender/editors/interface/interface_handlers.cc',
+    'source/blender/editors/undo/ed_undo.cc',
+    'source/blender/blenkernel/intern/undo_system.cc',
+    'source/blender/makesrna/intern/rna_modifier.cc',
+    'source/blender/editors/sculpt_paint/mesh/sculpt_cloth.cc',
+    'source/blender/editors/sculpt_paint/mesh/sculpt_layer_delta_smooth_v01.hh'
 )
 $kitRoot = Join-Path $BuildDir 'bin\Release\SculptExtended'
 $kit = @(
@@ -94,6 +100,11 @@ $markers = @{
     'source/blender/draw/intern/draw_sculpt.cc' = 'MULTIRES_OVERLAY_NEUTRAL_V01'
     'source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc' = 'OPEN_FILE_UNDO_ANCHOR_V01'
     'source/blender/editors/sculpt_paint/mesh/brushes/smooth.cc' = 'LAYER_DELTA_SMOOTH_GUARD_V02'
+    'source/blender/editors/sculpt_paint/mesh/sculpt_cloth.cc' = 'CLOTH_LAYER_JOURNAL_V01'
+    'source/blender/editors/sculpt_paint/mesh/sculpt_layer_delta_smooth_v01.hh' = 'DELTA_SMOOTH_COARSE_V02'
+    'source/blender/editors/interface/interface_handlers.cc' = 'SCULPT_LAYER_UNDO_CONTROLS_V36'
+    'source/blender/editors/undo/ed_undo.cc' = 'SCULPT_LAYER_UNDO_CONTROLS_V36'
+    'source/blender/blenkernel/intern/undo_system.cc' = 'SCULPT_LAYER_UNDO_CONTROLS_V36'
 }
 foreach ($relative in $markers.Keys) {
     if (![IO.File]::ReadAllText((Join-Path $SourceRoot $relative)).Contains($markers[$relative])) {
@@ -140,7 +151,7 @@ $manifest = [ordered]@{
     BaseCheckpoint = $baseCommit
     Branch = $branch
     ObservedExecutableSHA256 = (Get-FileHash -LiteralPath $exe).Hash
-    Profile = 'weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-full-ccg-batch-v01-smooth-guard-v02-pbvh-factor1'
+    Profile = 'weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-full-ccg-batch-v01-smooth-coarse-v02-cloth-journal-v01-controls-undo-v36-pbvh-factor1'
     Files = @($items | ForEach-Object { [ordered]@{ Path = $_.Target; SHA256 = (Get-FileHash -LiteralPath (Join-Path $PublishRepo $_.Target)).Hash } })
 }
 $writeManifest = $true
@@ -169,7 +180,7 @@ $unexpected = @($actualStaged | Where-Object { $files -cnotcontains $_ })
 if ($unexpected.Count) { throw ('File in staging non previsti: ' + ($unexpected -join ', ') + '. Nessun commit effettuato.') }
 Invoke-Git @('diff','--cached','--stat','--ignore-submodules=all') | Out-Host
 if ($actualStaged.Count) {
-    Invoke-Git @('commit','-m','Checkpoint validated isolated Smooth guard and complete Sculpt profile') | Out-Host
+    Invoke-Git @('commit','-m','Checkpoint consolidated Cloth journal, coarse Delta Smooth and property Undo profile') | Out-Host
 }
 Invoke-Git @('push','--recurse-submodules=no','origin',("HEAD:refs/heads/$branch")) | Out-Host
 $localHead = [string](Invoke-Git @('rev-parse','HEAD'))
