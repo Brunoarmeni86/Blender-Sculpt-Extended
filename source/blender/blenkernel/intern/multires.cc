@@ -40,7 +40,9 @@
 #include "BKE_mesh_types.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
 #include "multires_layer_cache_budget.hh"
+#include "multires_weight_multi_cache_v01.hh"
 #include "BKE_multires_sculpt_layers.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
@@ -1114,14 +1116,14 @@ struct MultiresWeightHotDeltaCache {
   const MDisps *layer_disps=nullptr;
   uint64_t fingerprint=0;
   int level=-1, side=0, area=0, grids_num=0;
-  Vector<int> grids;
+  Array<int> grids;
   Array<int> grid_offsets;
   Array<float3> deltas;
   void clear()
   {
     mesh=nullptr; mmd=nullptr; layer=nullptr; layer_disps=nullptr;
     fingerprint=0; level=-1; side=area=grids_num=0;
-    grids.clear(); grid_offsets={}; deltas={};
+    grids={}; grid_offsets={}; deltas={};
   }
 };
 static MultiresWeightHotDeltaCache &multires_weight_hot_delta_cache()
@@ -1129,6 +1131,38 @@ static MultiresWeightHotDeltaCache &multires_weight_hot_delta_cache()
   static MultiresWeightHotDeltaCache cache;
   return cache;
 }
+/* LAYER_WEIGHT_MULTI_CACHE_V01: bounded, opt-in; legacy engine remains available. */
+static bool multires_weight_multi_cache_enabled()
+{
+  static const bool enabled = []() {
+    const char *v = BLI_getenv("BLENDER_SCULPT_WEIGHT_MULTI_CACHE");
+    return v && v[0] == '1' && v[1] == '\0';
+  }();
+  return enabled;
+}
+
+static int64_t multires_weight_multi_cache_budget()
+{
+  static const int64_t bytes = []() -> int64_t {
+    const char *v = BLI_getenv("BLENDER_SCULPT_WEIGHT_MULTI_CACHE_MB");
+    if (!v || !v[0]) return int64_t(2048) * 1024 * 1024;
+    char *end = nullptr;
+    const long mb = std::strtol(v, &end, 10);
+    /* Invalid settings disable the new cache rather than request unbounded RAM. */
+    if (end == v || *end != '\0' || mb < 0 || mb > 8192) return 0;
+    return int64_t(mb) * 1024 * 1024;
+  }();
+  return bytes;
+}
+
+using MultiresWeightMultiCache =
+    bke::multires_layers::weight_multi_v01::BoundedLRU<MultiresWeightHotDeltaCache>;
+static MultiresWeightMultiCache &multires_weight_multi_cache()
+{
+  static MultiresWeightMultiCache cache;
+  return cache;
+}
+
 static std::mutex &multires_weight_hot_delta_cache_mutex()
 {
   static std::mutex mutex;
@@ -1138,14 +1172,22 @@ static std::mutex &multires_weight_hot_delta_cache_mutex()
 void bke::multires_layers::weight_hot_delta_cache_invalidate(
     const MultiresSculptLayer *layer)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("layer.invalidate_weight_cache", layer);
   payload_index_invalidate(layer);
   std::unique_lock<std::mutex> lock(multires_weight_hot_delta_cache_mutex());
   MultiresWeightHotDeltaCache &hot = multires_weight_hot_delta_cache();
-  if (layer != nullptr && hot.layer != layer) {
-    return;
+  const int removed = multires_weight_multi_cache().invalidate(
+      [&](const MultiresWeightHotDeltaCache &entry) {
+        return layer == nullptr || entry.layer == layer;
+      });
+  const bool clear_legacy = layer == nullptr || hot.layer == layer;
+  const bool had_cache = removed > 0 || (clear_legacy && hot.layer != nullptr);
+  if (clear_legacy) hot.clear();
+  if (blender::bke::sculpt_cold_v01::path()) {
+    blender::bke::sculpt_cold_v01::event("WEIGHT_CACHE_INVALIDATE", "scope=%s layer=%p removed=%d legacy=%d entries_left=%d",
+      layer ? "LAYER" : "ALL", static_cast<const void *>(layer), removed, int(clear_legacy),
+      multires_weight_multi_cache().size());
   }
-  const bool had_cache = hot.layer != nullptr;
-  hot.clear();
   if (had_cache && BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
     std::printf("[LAYER_WEIGHT_HOT_DELTA] mode=INVALIDATE scope=%s\n",
                 layer != nullptr ? "LAYER" : "ALL");
@@ -1225,9 +1267,45 @@ bool bke::multires_layers::weight_direct_delta(Object &object,
   const int64_t budget = multires_layer_cache_budget_bytes();
   const bool budget_fits = bke::multires_layers::cache_budget::weight_fits(
       int(payload_grids.size()), area, ccg->grids_num, budget);
-  const bool hot_enabled = multires_weight_hot_delta_cache_enabled() && budget_fits;
+  bool hot_enabled = multires_weight_hot_delta_cache_enabled() && budget_fits;
   std::unique_lock<std::mutex> hot_lock(multires_weight_hot_delta_cache_mutex());
-  MultiresWeightHotDeltaCache &hot=multires_weight_hot_delta_cache();
+  MultiresWeightHotDeltaCache *selected = &multires_weight_hot_delta_cache();
+  const bool multi = multires_weight_multi_cache_enabled();
+  int multi_evicted = 0;
+  int multi_invalidated = 0;
+  if (multi) {
+    /* Never retain the old singleton in addition to the new budget. */
+    selected->clear();
+    MultiresWeightMultiCache &pool = multires_weight_multi_cache();
+    /* Conservative single-object/base/layout scope. Fingerprints read the exact
+     * evaluated cage, not the temporary evaluator pointer. Layer mutations still
+     * use all existing explicit invalidation hooks (including Undo/Redo). */
+    multi_invalidated = pool.invalidate([&](const MultiresWeightHotDeltaCache &entry) {
+      return entry.mesh != mesh || entry.mmd != &mmd || entry.fingerprint != fingerprint ||
+             entry.level != mmd.totlvl || entry.side != side || entry.area != area ||
+             entry.grids_num != ccg->grids_num ||
+             (entry.layer == &layer &&
+              (entry.layer_disps != layer.disps || entry.grids.size() != payload_grids.size()));
+    });
+    hot_enabled = multires_weight_hot_delta_cache_enabled();
+    if (hot_enabled) {
+      MultiresWeightHotDeltaCache *entry = pool.find(
+          [&](const MultiresWeightHotDeltaCache &candidate) { return candidate.layer == &layer; });
+      if (!entry) {
+        const int64_t charge = int64_t(sizeof(MultiresWeightHotDeltaCache)) + 128 +
+            int64_t(payload_grids.size()) * sizeof(int) +
+            int64_t(ccg->grids_num) * sizeof(int) +
+            int64_t(payload_grids.size()) * int64_t(area) * sizeof(float3);
+        entry = pool.insert(charge, multires_weight_multi_cache_budget(), multi_evicted);
+      }
+      if (entry) selected = entry;
+      else hot_enabled = false;
+    }
+    else {
+      pool.invalidate([](const MultiresWeightHotDeltaCache &) { return true; });
+    }
+  }
+  MultiresWeightHotDeltaCache &hot = *selected;
 
   bool exact_hit=hot_enabled && hot.mesh==mesh && hot.mmd==&mmd &&
       hot.layer==&layer && hot.layer_disps==layer.disps && hot.fingerprint==fingerprint &&
@@ -1243,7 +1321,7 @@ bool bke::multires_layers::weight_direct_delta(Object &object,
     *r_hot_cache_hit = exact_hit;
   }
 
-  if (!hot_enabled && budget >= 0) {
+  if (!hot_enabled && !multi && budget >= 0) {
     hot.clear();
     if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
       std::printf("[LAYER_CACHE_BUDGET] weight=BYPASS budget=%.1fMiB grids=%d\n",
@@ -1255,7 +1333,7 @@ bool bke::multires_layers::weight_direct_delta(Object &object,
     hot.clear();
     hot.mesh=mesh; hot.mmd=&mmd; hot.layer=&layer; hot.layer_disps=layer.disps;
     hot.fingerprint=fingerprint; hot.level=mmd.totlvl; hot.side=side;
-    hot.area=area; hot.grids_num=ccg->grids_num; hot.grids=payload_grids;
+    hot.area=area; hot.grids_num=ccg->grids_num; hot.grids=Array<int>(payload_grids.as_span());
     hot.grid_offsets=Array<int>(ccg->grids_num); hot.grid_offsets.fill(-1);
     hot.deltas=Array<float3>(int64_t(payload_grids.size())*int64_t(area));
     for (const int j: payload_grids.index_range()) hot.grid_offsets[payload_grids[j]]=j*area;
@@ -1294,9 +1372,23 @@ bool bke::multires_layers::weight_direct_delta(Object &object,
                   double(payload_grids.size())*double(area)*sizeof(float3)/(1024.0*1024.0),
                   (BLI_time_now_seconds()-hot_start)*1000.0);
     }
+    if (multi && BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+      const MultiresWeightMultiCache &pool = multires_weight_multi_cache();
+      std::printf("[LAYER_WEIGHT_MULTI_V01] mode=%s entries=%d used_mib=%.3f budget_mib=%.1f evicted=%d invalidated=%d\n",
+                  exact_hit ? "HIT" : "BUILD", pool.size(),
+                  double(pool.bytes()) / (1024.0 * 1024.0),
+                  double(multires_weight_multi_cache_budget()) / (1024.0 * 1024.0),
+                  multi_evicted, multi_invalidated);
+    }
     return true;
   }
 
+  if (multi && BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+    const MultiresWeightMultiCache &pool = multires_weight_multi_cache();
+    std::printf("[LAYER_WEIGHT_MULTI_V01] mode=BYPASS entries=%d used_mib=%.3f budget_mib=%.1f\n",
+                pool.size(), double(pool.bytes()) / (1024.0 * 1024.0),
+                double(multires_weight_multi_cache_budget()) / (1024.0 * 1024.0));
+  }
   const float inv=1.0f/float(side-1);
   threading::parallel_for(payload_grids.index_range(),1,[&](const IndexRange range){
     for (const int j: range) {

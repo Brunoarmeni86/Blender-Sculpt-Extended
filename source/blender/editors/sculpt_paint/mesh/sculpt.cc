@@ -76,6 +76,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
 #include "BKE_multires_sculpt_layers.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
@@ -6806,6 +6807,7 @@ static StrokeToggleSettings create_toggle_settings(const wmOperator &op, Main &b
 
 static void brush_stroke_init(bContext *C, const wmOperator *op)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.brush_init", CTX_data_active_object(C));
   Object &ob = *CTX_data_active_object(C);
   ToolSettings *tool_settings = CTX_data_tool_settings(C);
   Sculpt &sd = *tool_settings->sculpt;
@@ -6821,7 +6823,9 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
     ss.cache->toggle_settings = create_toggle_settings(*op, *CTX_data_main(C), sd.paint);
   }
 
+  cold_trace.mark("gpu_context_and_stroke_cache");
   brush_init_tex(sd, ss);
+  cold_trace.mark("brush_textures");
 
   const bool needs_colors = brush_type_is_paint(brush->sculpt_brush_type) &&
                             !SCULPT_use_image_paint_brush(tool_settings->paint_mode, ob);
@@ -6832,9 +6836,12 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
 
   /* CTX_data_ensure_evaluated_depsgraph should be used at the end to include the updates of
    * earlier steps modifying the data. */
+  cold_trace.mark("color_layer");
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  cold_trace.mark("ensure_evaluated_depsgraph");
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, brush_type_is_paint(brush->sculpt_brush_type));
 
+  cold_trace.mark("sculpt_object_for_edit");
   ED_paint_brush_type_update_sticky_shading_color(C, &ob);
 }
 
@@ -7523,8 +7530,10 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
 
 bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.test_start", this->object);
   /* Don't start the stroke until `mval` goes over the mesh. */
   if (over_mesh(*this->depsgraph, this->vc, *sculpt_, this->brush, op, mval)) {
+    cold_trace.mark("raycast_over_mesh");
     Object &ob = *this->object;
     Brush *brush = this->brush;
 
@@ -7548,10 +7557,13 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
       BKE_curvemapping_init(brush->curve_rand_value);
     }
 
+    cold_trace.mark("stroke_cache_init");
     cursor_geometry_info_update(*this->depsgraph, *paint, sculpt_, this->vc, base_, mval, false);
 
+    cold_trace.mark("cursor_geometry");
     stroke_undo_begin(*this->scene, this->brush, *this->paint_mode_settings_, *this->object, op);
 
+    cold_trace.mark("undo_begin");
     return true;
   }
   return false;
@@ -7665,6 +7677,7 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
 
 void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.update_step", this->object);
   const Scene &scene = *this->scene;
   Depsgraph &depsgraph = *this->depsgraph;
   Sculpt &sd = *sculpt_;
@@ -7672,6 +7685,11 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   SculptSession &ss = *ob.runtime->sculpt_session;
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   StrokeCache *cache = ss.cache;
+  if (blender::bke::sculpt_cold_v01::path()) {
+    blender::bke::sculpt_cold_v01::event("DAB", "object=%p first=%d ccg=%p pbvh=%p brush=%d",
+      static_cast<void *>(&ob), int(cache->first_time), static_cast<void *>(ss.subdiv_ccg),
+      static_cast<void *>(bke::object::pbvh_get(ob)), int(this->brush->sculpt_brush_type));
+  }
   cache->stroke_distance = this->stroke_distance();
 
   /* SCULPT_STROKE_PROFILE_V01: opt-in, one append per update; no geometry changes. */
@@ -8045,10 +8063,12 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
                                                    wmOperator *op,
                                                    const wmEvent *event)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.invoke", CTX_data_active_object(C));
   if (!sculpt_polypaint_prepare_stroke_master(C, op)) {
     return OPERATOR_CANCELLED;
   }
 
+  cold_trace.mark("polypaint_preflight");
   SculptPaintStroke *stroke;
   if (!sculpt_polypaint_skips_geometry_rec(C) &&
       !sculpt_layers_editable(C, op->reports))
@@ -8063,6 +8083,7 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  cold_trace.mark("layer_checks_and_delta_smooth_begin");
   int ignore_background_click;
   Object &ob = *CTX_data_active_object(C);
   Scene &scene = *CTX_data_scene(C);
@@ -8080,7 +8101,9 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   WM_event_tablet_data(event, &pen_flip, nullptr);
 
   stroke = MEM_new<SculptPaintStroke>(__func__, C, op, event);
+  cold_trace.mark("stroke_constructor_including_depsgraph");
   brush_stroke_init(C, op);
+  cold_trace.mark("brush_stroke_init");
 
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   Brush &brush = *BKE_paint_brush(&sd.paint);
@@ -8149,7 +8172,9 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_PASS_THROUGH;
   }
 
+  cold_trace.mark("checks_before_first_modal");
   const wmOperatorStatus retval = op->type->modal(C, op, event);
+  cold_trace.mark("first_modal_including_first_dab");
   OPERATOR_RETVAL_CHECK(retval);
 
   if (ELEM(retval, OPERATOR_FINISHED, OPERATOR_CANCELLED)) {

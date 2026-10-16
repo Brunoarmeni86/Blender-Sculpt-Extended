@@ -63,6 +63,7 @@
 #include "BKE_mesh_runtime.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
 #include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object.hh"
 #include "BKE_paint.hh"
@@ -2105,11 +2106,15 @@ void BKE_sculptsession_bm_to_me(Object *ob)
 
 void BKE_sculptsession_free_pbvh(Object &object)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("paint.free_pbvh", &object);
   SculptSession *ss = object.runtime->sculpt_session;
   if (!ss) {
     return;
   }
 
+  blender::bke::sculpt_cold_v01::event("PBVH_FREE", "object=%p pbvh=%p boundary=%d islands=%d",
+    static_cast<void *>(&object), static_cast<void *>(ss->pbvh.get()),
+    int(bool(ss->boundary_info_cache)), int(bool(ss->topology_island_cache)));
   ss->pbvh.reset();
   ss->edge_to_face_offsets = {};
   ss->edge_to_face_indices = {};
@@ -2399,6 +2404,7 @@ static void sculpt_update_object(Depsgraph *depsgraph,
                                  Object *ob_eval,
                                  bool is_paint_tool)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("paint.update_object", ob);
   using namespace blender::bke;
   Scene *scene = DEG_get_input_scene(depsgraph);
   Sculpt *sd = scene->toolsettings->sculpt;
@@ -2428,6 +2434,7 @@ static void sculpt_update_object(Depsgraph *depsgraph,
   ss.subdiv_ccg = mesh_eval->runtime->subdiv_ccg.get();
 
   pbvh::Tree &pbvh = object::pbvh_ensure(*depsgraph, *ob);
+  cold_trace.mark("pbvh_ensure");
 
   if (ss.deform_modifiers_active) {
     /* Painting doesn't need crazyspace, use already evaluated mesh coordinates if possible. */
@@ -2512,11 +2519,14 @@ static void sculpt_update_object(Depsgraph *depsgraph,
   /* This solves a crash when running a sculpt brush in background mode, because there is no redraw
    * after entering sculpt mode to make sure normals are allocated. Recalculating normals with
    * every brush step is too expensive currently. */
+  cold_trace.mark("deform_and_paint_setup");
   bke::pbvh::update_normals(*depsgraph, *ob, pbvh);
+  cold_trace.mark("update_normals");
 }
 
 void BKE_sculpt_update_object_before_eval(Object *ob_eval)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("paint.before_geometry_eval", ob_eval);
   /* Update before mesh evaluation in the dependency graph. */
   Object *ob_orig = DEG_get_original(ob_eval);
   SculptSession *ss = ob_orig->runtime->sculpt_session;
@@ -2526,6 +2536,13 @@ void BKE_sculpt_update_object_before_eval(Object *ob_eval)
 
   bke::pbvh::Tree *pbvh = bke::object::pbvh_get(*ob_orig);
 
+  if (blender::bke::sculpt_cold_v01::path()) {
+    blender::bke::sculpt_cold_v01::event("EVAL_INVALIDATION", "object=%p ccg=%p pbvh=%p stroke=%d filter=%d expand=%d action=%s",
+      static_cast<void *>(ob_orig), static_cast<void *>(ss->subdiv_ccg),
+      static_cast<void *>(pbvh), int(ss->cache != nullptr), int(ss->filter_cache != nullptr),
+      int(ss->expand_cache != nullptr),
+      (!ss->cache && !ss->filter_cache && !ss->expand_cache) ? "FREE_PBVH" : "TAG_ALL_POSITIONS");
+  }
   if (!ss->cache && !ss->filter_cache && !ss->expand_cache) {
     /* Avoid performing the following normal update for Multires, as it causes race conditions
      * and other intermittent crashes with shared meshes.
@@ -2598,6 +2615,7 @@ void BKE_sculpt_mask_layers_ensure(Depsgraph *depsgraph,
                                    Object *ob,
                                    MultiresModifierData *mmd)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("paint.ensure_mask_storage", ob);
   using namespace blender::bke;
   Mesh *mesh = id_cast<Mesh *>(ob->data);
   const OffsetIndices faces = mesh->faces();
@@ -2607,6 +2625,7 @@ void BKE_sculpt_mask_layers_ensure(Depsgraph *depsgraph,
   /* if multires is active, create a grid paint mask layer if there
    * isn't one already */
   if (mmd && !CustomData_has_layer(&mesh->corner_data, CD_GRID_PAINT_MASK)) {
+    blender::bke::sculpt_cold_v01::event("MASK_STORAGE", "object=%p mode=CREATE_AND_REEVALUATE", static_cast<void *>(ob));
     int level = max_ii(1, mmd->sculptlvl);
     int gridsize = CCG_grid_size(level);
     int gridarea = gridsize * gridsize;
@@ -2782,7 +2801,9 @@ namespace bke::object {
 
 pbvh::Tree &pbvh_ensure(Depsgraph &depsgraph, Object &object)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("paint.pbvh_ensure", &object);
   if (pbvh::Tree *pbvh = pbvh_get(object)) {
+    blender::bke::sculpt_cold_v01::event("PBVH", "object=%p mode=HIT pbvh=%p", static_cast<void *>(&object), static_cast<void *>(pbvh));
     return *pbvh;
   }
   BLI_assert(object.runtime->sculpt_session != nullptr);
@@ -2804,6 +2825,9 @@ pbvh::Tree &pbvh_ensure(Depsgraph &depsgraph, Object &object)
     }
   }
 
+  blender::bke::sculpt_cold_v01::event("PBVH", "object=%p mode=BUILD pbvh=%p ccg=%p",
+    static_cast<void *>(&object), static_cast<void *>(object::pbvh_get(object)),
+    static_cast<void *>(ss.subdiv_ccg));
   return *object::pbvh_get(object);
 }
 

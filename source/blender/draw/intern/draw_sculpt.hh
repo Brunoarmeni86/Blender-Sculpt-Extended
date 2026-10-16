@@ -35,7 +35,9 @@ enum SculptBatchFeature {
   SCULPT_BATCH_MASK = 1 << 1,
   SCULPT_BATCH_FACE_SET = 1 << 2,
   SCULPT_BATCH_VERTEX_COLOR = 1 << 3,
-  SCULPT_BATCH_UV = 1 << 4
+  SCULPT_BATCH_UV = 1 << 4,
+  /* Only for the separate overlay pass; never omit primary surface geometry. */
+  SCULPT_BATCH_SKIP_NEUTRAL_OVERLAY = 1 << 5
 };
 ENUM_OPERATORS(SculptBatchFeature);
 

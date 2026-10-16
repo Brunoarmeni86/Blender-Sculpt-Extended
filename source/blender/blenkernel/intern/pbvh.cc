@@ -44,6 +44,7 @@
 #include "bmesh.hh"
 
 #include "pbvh_intern.hh"
+#include "multires_pbvh_group_probe_v01.hh"
 
 namespace blender {
 
@@ -483,8 +484,27 @@ Tree Tree::from_grids(const Mesh &base_mesh, const SubdivCCG &subdiv_ccg)
   /* We use a lower value here compared to regular mesh sculpting because the number of elements is
    * on average 4x as many due to the prim_indices_ being associated with face corners, not faces.
    */
-  constexpr int base_limit = 800;
-  const int leaf_limit = std::max(base_limit / key.grid_area, 1);
+  /* MULTIRES_PBVH_GROUP_PROBE_V01: opt-in partition-size diagnostic.
+   * Default/invalid factor keeps the exact previous partition threshold. */
+  const char *group_factor_env = std::getenv("BLENDER_MULTIRES_PBVH_GROUP_FACTOR");
+  const int requested_group_factor = group_probe_v01::factor(group_factor_env);
+  int group_factor = requested_group_factor;
+  /* The native draw layout becomes flat when ANY face in a node is sharp.
+   * Keep the original partition for mixed smooth/flat meshes, so regrouping
+   * cannot change which smooth grids inherit that layout. */
+  if (group_factor != 1) {
+    const VArraySpan sharp_faces = *base_mesh.attributes().lookup<bool>(
+        "sharp_face", AttrDomain::Face);
+    bool has_flat = false, has_smooth = false;
+    for (const bool sharp : sharp_faces) {
+      has_flat |= sharp;
+      has_smooth |= !sharp;
+      if (has_flat && has_smooth) break;
+    }
+    if (has_flat && has_smooth) group_factor = 1;
+  }
+  const int leaf_limit = group_probe_v01::leaf_faces(
+      key.grid_area, group_factor == 1 ? nullptr : group_factor_env);
 
   Array<float3> face_centers(faces.size());
   const Bounds<float3> bounds = threading::parallel_reduce(
@@ -560,6 +580,17 @@ Tree Tree::from_grids(const Mesh &base_mesh, const SubdivCCG &subdiv_ccg)
   }
 
   update_mask_grids(subdiv_ccg, nodes.index_range(), pbvh);
+
+  if (std::getenv("BLENDER_LAYER_RESP_TRACE")) {
+    int leaves = 0;
+    for (const GridsNode &node : nodes) {
+      leaves += !node.grids().is_empty();
+    }
+    std::printf("[MULTIRES_PBVH_GROUP_V01] factor=%d requested_factor=%d leaf_faces=%d leaves=%d nodes=%d grids=%d area=%d samples=%lld\n",
+                group_factor, requested_group_factor, leaf_limit, leaves, int(nodes.size()),
+                subdiv_ccg.grids_num, key.grid_area, (long long)positions.size());
+    std::fflush(stdout);
+  }
 
   /* Building the PBVH needs to tag every node so bounds, normals and draw data are initialized.
    * Those tags are not sculpt edits and must not seed the persistent V3 change journal.

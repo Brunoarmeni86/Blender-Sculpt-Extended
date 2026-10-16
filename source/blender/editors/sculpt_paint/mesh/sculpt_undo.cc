@@ -68,6 +68,7 @@
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_multires.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
 #include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -3226,6 +3227,12 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
                                                        const char *&r_reason)
 {
   const UndoStep *checkpoint = ustack.step_active;
+  /* OPEN_FILE_UNDO_ANCHOR_V01: only the actual initial Memfile root.
+   * Its persistent payload is already captured in Original. Add a native,
+   * metadata-only Sculpt boundary; do not resnapshot or retain extra geometry. */
+  const char *open_env = std::getenv("BLENDER_SCULPT_OPEN_FILE_ANCHOR");
+  const bool open_file_root = open_env && open_env[0] == '1' && open_env[1] == '\0' &&
+      checkpoint && checkpoint->prev == nullptr && std::string(checkpoint->name) == "Original";
   if (ustack.step_init) {
     r_reason = "ENCODE_IN_PROGRESS";
     return false;
@@ -3235,7 +3242,7 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
     return false;
   }
   if (!checkpoint || checkpoint->type != BKE_UNDOSYS_TYPE_MEMFILE || checkpoint->skip ||
-      !checkpoint->prev)
+      (!checkpoint->prev && !open_file_root))
   {
     r_reason = "HISTORY_STATE";
     return false;
@@ -3244,7 +3251,7 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
     r_reason = "CHECKPOINT_NOT_ACTIVE";
     return false;
   }
-  if (std::string(checkpoint->name) != "Add Sculpt Layer" &&
+  if (!open_file_root && std::string(checkpoint->name) != "Add Sculpt Layer" &&
       std::string(checkpoint->name) != "Set Active Modifier")
   {
     r_reason = "CHECKPOINT_NAME";
@@ -3290,7 +3297,7 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
       ccg->positions.size() != int64_t(ccg->grids_num) * ccg->grid_area ||
       mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled ||
       mmd->sculpt_layers.is_empty() ||
-      mmd->sculpt_layer_active != mmd->sculpt_layers.count() - 1)
+      (!open_file_root && mmd->sculpt_layer_active != mmd->sculpt_layers.count() - 1))
   {
     r_reason = "MULTIRES_FRAME";
     return false;
@@ -3302,6 +3309,21 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
   {
     r_reason = "NEW_LAYER";
     return false;
+  }
+  if (open_file_root) {
+    /* An opened file can have an occupied layer at any valid stack position.
+     * Keep every frame/ownership/runtime check above, and validate the stored
+     * descriptors through can_record. Never scan/copy dense sample arrays. */
+    if (!G_MAIN || !G_MAIN->is_memfile_undo_written) {
+      r_reason = "OPEN_FILE_CHECKPOINT_NOT_WRITTEN";
+      return false;
+    }
+    if (!mmd->sculpt_layer_recording || !bke::multires_layers::can_record(*mmd, mesh)) {
+      r_reason = "OPEN_FILE_FRAME";
+      return false;
+    }
+    r_reason = "READY_OPEN_FILE";
+    return true;
   }
   /* A newly added sparse layer has no payload. Check descriptors only; never
    * scan or allocate high-resolution samples in the pre-stroke path. */
@@ -3326,15 +3348,19 @@ static void sculpt_layer_first_stroke_anchor_ensure(UndoStack &ustack, Object &o
   const double anchor_start = BLI_time_now_seconds();
   const char *reason = nullptr;
   if (!sculpt_layer_first_stroke_anchor_eligible(ustack, ob, reason)) {
+    const char *open_env = std::getenv("BLENDER_SCULPT_OPEN_FILE_ANCHOR");
+    const bool trace_open = open_env && open_env[0] == '1' && open_env[1] == '\0';
     if (ustack.step_active && ustack.step_active->type == BKE_UNDOSYS_TYPE_MEMFILE &&
         (std::string(ustack.step_active->name) == "Add Sculpt Layer" ||
-         std::string(ustack.step_active->name) == "Set Active Modifier"))
+         std::string(ustack.step_active->name) == "Set Active Modifier" ||
+         (trace_open && std::string(ustack.step_active->name) == "Original")))
     {
       std::printf("[LAYER_UNDO_ANCHOR] mode=SKIP reason=%s\n", reason);
       std::fflush(stdout);
     }
     return;
   }
+  const bool open_file_root = std::string(reason) == "READY_OPEN_FILE";
   UndoStep *checkpoint = ustack.step_active;
   SculptUndoStep *anchor = reinterpret_cast<SculptUndoStep *>(
       BKE_undosys_step_push_init_with_type(
@@ -3356,6 +3382,12 @@ static void sculpt_layer_first_stroke_anchor_ensure(UndoStack &ustack, Object &o
      * first stroke now undoes onto this native boundary. Crossing back before
      * Add still decodes the retained Memfile and the earlier scene checkpoint. */
     checkpoint->skip = true;
+    if (open_file_root) {
+      std::printf("[LAYER_OPEN_FILE_ANCHOR_V01] mode=CREATE checkpoint=Original grids=%d geometry_copies=0 total=%.3fms\n",
+                  anchor->data.grids.grids_num,
+                  (BLI_time_now_seconds() - anchor_start) * 1000.0);
+      std::fflush(stdout);
+    }
     std::printf("[LAYER_UNDO_ANCHOR] mode=CREATE version=4.1 checkpoint=%s grids=%d total=%.3fms\n",
                 checkpoint->name, anchor->data.grids.grids_num,
                 (BLI_time_now_seconds() - anchor_start) * 1000.0);
@@ -3365,8 +3397,16 @@ static void sculpt_layer_first_stroke_anchor_ensure(UndoStack &ustack, Object &o
 
 void push_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("undo.push_begin", &ob);
   UndoStack *ustack = ED_undo_stack_get();
+  if (blender::bke::sculpt_cold_v01::path()) {
+    blender::bke::sculpt_cold_v01::event("UNDO_INPUT", "object=%p active=%s memfile=%d init=%d",
+      static_cast<void *>(&ob), ustack->step_active ? ustack->step_active->name : "<none>",
+      int(ustack->step_active && ustack->step_active->type == BKE_UNDOSYS_TYPE_MEMFILE),
+      int(ustack->step_init != nullptr));
+  }
   sculpt_layer_first_stroke_anchor_ensure(*ustack, ob);
+  cold_trace.mark("first_stroke_anchor");
 
   /* If possible, we need to tag the object and its geometry data as 'changed in the future' in
    * the previous undo step if it's a memfile one. */
@@ -3382,7 +3422,9 @@ void push_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
   const SculptSession &ss = *ob.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
 
+  cold_trace.mark("undo_step_allocate");
   save_common_data(ob, us);
+  cold_trace.mark("save_common_metadata");
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {

@@ -49,6 +49,7 @@
 #include "BKE_mesh_mirror.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
 #include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
@@ -2024,6 +2025,7 @@ static void SCULPT_OT_symmetrize(wmOperatorType *ot)
 
 static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &scene, Object &ob)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.init_session", &ob);
   /* Create persistent sculpt mode data. */
   BKE_sculpt_toolsettings_data_ensure(&bmain, &scene);
 
@@ -2040,11 +2042,14 @@ static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &s
    */
   DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
 
+  cold_trace.mark("create_session_and_tag_geometry");
   BKE_scene_graph_evaluated_ensure(&depsgraph, &bmain);
+  cold_trace.mark("ensure_evaluated_depsgraph");
 
   /* This function expects a fully evaluated depsgraph. */
   BKE_sculpt_update_object_for_edit(&depsgraph, &ob, false);
 
+  cold_trace.mark("sculpt_object_for_edit");
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
   if (mesh.attributes().contains(".sculpt_face_set")) {
     /* Here we can detect geometry that was just added to Sculpt Mode as it has the
@@ -2093,6 +2098,7 @@ void object_sculpt_mode_enter(Main &bmain,
                               const bool force_dyntopo,
                               ReportList *reports)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.enter_mode", &ob);
   const eObjectMode mode_flag = OB_MODE_SCULPT;
   Mesh *mesh = BKE_mesh_from_object(&ob);
 

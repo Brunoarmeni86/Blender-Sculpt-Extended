@@ -12,6 +12,7 @@
 #include "BLI_time.h"
 #include "BLI_threads.h"
 #include "BKE_subdiv_ccg.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
 
 #include "MEM_guardedalloc.h"
 
@@ -997,6 +998,7 @@ Mesh *BKE_subdiv_to_ccg_mesh(Subdiv &subdiv,
                              const SubdivToCCGSettings &settings,
                              const Mesh &coarse_mesh)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("subdiv.to_ccg_mesh", &coarse_mesh);
   /* Make sure evaluator is ready. */
   stats_begin(&subdiv.stats, SUBDIV_STATS_SUBDIV_TO_CCG);
   if (!eval_begin_from_mesh(&subdiv, &coarse_mesh, SUBDIV_EVALUATOR_TYPE_CPU)) {
@@ -1005,6 +1007,7 @@ Mesh *BKE_subdiv_to_ccg_mesh(Subdiv &subdiv,
     }
   }
   stats_end(&subdiv.stats, SUBDIV_STATS_SUBDIV_TO_CCG);
+  cold_trace.mark("evaluator_begin_from_mesh");
   SubdivCCGMaskEvaluator mask_evaluator;
   bool has_mask = BKE_subdiv_ccg_mask_init_from_paint(&mask_evaluator, &coarse_mesh);
   std::unique_ptr<SubdivCCG> subdiv_ccg = BKE_subdiv_to_ccg(
@@ -1015,7 +1018,9 @@ Mesh *BKE_subdiv_to_ccg_mesh(Subdiv &subdiv,
   if (!subdiv_ccg) {
     return nullptr;
   }
+  cold_trace.mark("evaluate_ccg");
   Mesh *result = BKE_mesh_copy_for_eval(coarse_mesh);
+  cold_trace.mark("copy_coarse_mesh_for_eval");
   result->runtime->subdiv_ccg = std::move(subdiv_ccg);
   return result;
 }
