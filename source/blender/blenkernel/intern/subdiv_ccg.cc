@@ -22,6 +22,7 @@
 #include "BLI_math_bits.h"
 #include "BLI_math_geom.h"
 #include "BLI_math_vector.h"
+#include "BLI_math_vector.hh"
 #include "BLI_ordered_edge.hh"
 #include "BLI_set.hh"
 #include "BLI_task.hh"
@@ -214,6 +215,12 @@ static void subdiv_ccg_eval_special_grid(Subdiv &subdiv,
   }
 }
 
+/* MULTIRES_CCG_FULL_BATCH_V01: opt-in, bounded temporary scratch only. */
+static bool subdiv_ccg_eval_full_batch_v01(SubdivCCG &subdiv_ccg,
+                                          Subdiv &subdiv,
+                                          Span<int> face_ptex_offset,
+                                          SubdivCCGMaskEvaluator *mask_evaluator);
+
 bool BKE_subdiv_ccg_evaluate_existing(SubdivCCG &subdiv_ccg,
                                       Subdiv &subdiv,
                                       SubdivCCGMaskEvaluator *mask_evaluator)
@@ -226,18 +233,22 @@ bool BKE_subdiv_ccg_evaluate_existing(SubdivCCG &subdiv_ccg,
   const int num_faces = topology_refiner->base_level().GetNumFaces();
   const Span<int> face_ptex_offset = face_ptex_offset_get(&subdiv);
   BLI_assert(face_ptex_offset.size() == subdiv_ccg.faces.size() + 1);
-  threading::parallel_for(IndexRange(num_faces), 1024, [&](const IndexRange range) {
-    for (const int face_index : range) {
-      if (subdiv_ccg.faces[face_index].size() == 4) {
-        subdiv_ccg_eval_regular_grid(
-            subdiv, subdiv_ccg, face_ptex_offset, mask_evaluator, face_index);
+  const bool full_batch = subdiv_ccg_eval_full_batch_v01(
+      subdiv_ccg, subdiv, face_ptex_offset, mask_evaluator);
+  if (!full_batch) {
+    threading::parallel_for(IndexRange(num_faces), 1024, [&](const IndexRange range) {
+      for (const int face_index : range) {
+        if (subdiv_ccg.faces[face_index].size() == 4) {
+          subdiv_ccg_eval_regular_grid(
+              subdiv, subdiv_ccg, face_ptex_offset, mask_evaluator, face_index);
+        }
+        else {
+          subdiv_ccg_eval_special_grid(
+              subdiv, subdiv_ccg, face_ptex_offset, mask_evaluator, face_index);
+        }
       }
-      else {
-        subdiv_ccg_eval_special_grid(
-            subdiv, subdiv_ccg, face_ptex_offset, mask_evaluator, face_index);
-      }
-    }
-  });
+    });
+  }
   const double layer_positions_end = layer_trace ? BLI_time_now_seconds() : 0.0;
   /* If displacement is used, need to calculate normals after all final
    * coordinates are known. */
@@ -444,7 +455,8 @@ static void subdiv_ccg_eval_displaced_faces_batch(
     SubdivCCGMaskEvaluator *mask_evaluator,
     const Span<int> face_indices,
     SubdivCCGFaceBatchScratch &scratch,
-    SubdivCCGBatchProfile *profile)
+    SubdivCCGBatchProfile *profile,
+    const bool preserve_native_derivatives = false)
 {
   const int grid_size = subdiv_ccg.grid_size;
   const int grid_area = subdiv_ccg.grid_area;
@@ -527,6 +539,21 @@ static void subdiv_ccg_eval_displaced_faces_batch(
   const double profile_displacement_start = profile ? BLI_time_now_seconds() : 0.0;
   for (const int i : IndexRange(points_num)) {
     const OpenSubdiv_PatchCoord &coord = scratch.patch_coords[i];
+    /* The native scalar path repairs zero/equal tangents near singularities.
+     * Keep this opt-in for full evaluation; existing local batch calls retain
+     * their previous behavior through the default false parameter. */
+    if (preserve_native_derivatives &&
+        (math::is_zero(scratch.dPdu[i]) || math::is_zero(scratch.dPdv[i]) ||
+         math::is_equal(scratch.dPdu[i], scratch.dPdv[i])))
+    {
+      eval_limit_point_and_derivatives(&subdiv,
+                                      coord.ptex_face,
+                                      coord.u,
+                                      coord.v,
+                                      scratch.positions[i],
+                                      scratch.dPdu[i],
+                                      scratch.dPdv[i]);
+    }
     float3 displacement;
     eval_displacement(&subdiv,
                       coord.ptex_face,
@@ -557,6 +584,81 @@ static void subdiv_ccg_eval_displaced_faces_batch(
         profile->mask_ns, BLI_time_now_seconds() - profile_mask_start);
   }
 }
+
+static bool subdiv_ccg_eval_full_batch_v01(SubdivCCG &subdiv_ccg,
+                                          Subdiv &subdiv,
+                                          const Span<int> face_ptex_offset,
+                                          SubdivCCGMaskEvaluator *mask_evaluator)
+{
+  const char *env = std::getenv("BLENDER_MULTIRES_CCG_FULL_BATCH");
+  if (!env || env[0] != '1' || env[1] != '\0') {
+    return false;
+  }
+  const auto reject = [](const char *reason) {
+    std::printf("[MULTIRES_CCG_FULL_BATCH_V01] mode=LEGACY reason=%s\n", reason);
+    return false;
+  };
+  if (!subdiv.displacement_evaluator || !subdiv.evaluator ||
+      !subdiv.evaluator->eval_output || !subdiv.topology_refiner) {
+    return reject("EVALUATOR");
+  }
+  const int num_faces = subdiv.topology_refiner->base_level().GetNumFaces();
+  if (num_faces <= 0 || num_faces != subdiv_ccg.faces.size() ||
+      face_ptex_offset.size() != num_faces + 1 || subdiv_ccg.grid_area <= 0 ||
+      subdiv_ccg.grid_size <= 1 ||
+      int64_t(subdiv_ccg.grid_size) * subdiv_ccg.grid_size != subdiv_ccg.grid_area ||
+      subdiv_ccg.positions.size() != int64_t(subdiv_ccg.grids_num) * subdiv_ccg.grid_area ||
+      (!subdiv_ccg.masks.is_empty() &&
+       subdiv_ccg.masks.size() != subdiv_ccg.positions.size())) {
+    return reject("LAYOUT");
+  }
+  int max_corners = 0;
+  for (const int face_i : IndexRange(num_faces)) {
+    max_corners = std::max(max_corners, int(subdiv_ccg.faces[face_i].size()));
+  }
+  if (max_corners <= 0 || subdiv_ccg.faces.total_size() != subdiv_ccg.grids_num) {
+    return reject("CORNERS");
+  }
+  /* Up to 1 MiB per worker, with a 16 MiB target split over reported CPU threads.
+   * Nothing is reserved up front. Oversized individual faces use native scalar
+   * evaluation; never allocate scratch proportional to the entire dense mesh. */
+  const int threads = std::max(1, BLI_system_thread_count());
+  const int64_t scratch_budget = std::min<int64_t>(1024 * 1024,
+                                                   (16 * 1024 * 1024) / threads);
+  const int64_t bytes_per_point = sizeof(OpenSubdiv_PatchCoord) + sizeof(int) +
+                                  3 * sizeof(float3);
+  const int64_t bytes_per_face = int64_t(max_corners) * subdiv_ccg.grid_area * bytes_per_point;
+  if (bytes_per_face > scratch_budget) {
+    return reject("SCRATCH_LIMIT");
+  }
+  const int batch_faces = int(std::min<int64_t>(8, scratch_budget / bytes_per_face));
+  const int chunks = int((int64_t(num_faces) + batch_faces - 1) / batch_faces);
+  threading::EnumerableThreadSpecific<SubdivCCGFaceBatchScratch> scratch;
+  threading::parallel_for(IndexRange(chunks), 1, [&](const IndexRange range) {
+    SubdivCCGFaceBatchScratch &local = scratch.local();
+    for (const int chunk : range) {
+      const int start = chunk * batch_faces;
+      const int count = std::min(batch_faces, num_faces - start);
+      int indices[8];
+      for (int i = 0; i < count; i++) {
+        indices[i] = start + i;
+      }
+      subdiv_ccg_eval_displaced_faces_batch(subdiv,
+                                           subdiv_ccg,
+                                           face_ptex_offset,
+                                           mask_evaluator,
+                                           Span<int>(indices, count),
+                                           local,
+                                           nullptr,
+                                           true);
+    }
+  });
+  std::printf("[MULTIRES_CCG_FULL_BATCH_V01] mode=BATCH faces=%d batch_faces=%d "
+              "scratch_per_worker_max_kib=%.1f\n",
+              num_faces, batch_faces, double(bytes_per_face * batch_faces) / 1024.0);
+  return true;
+}
+
 #endif
 #endif
 
@@ -2260,3 +2362,4 @@ void BKE_subdiv_ccg_stitch_update_normals_reuse(SubdivCCG &subdiv_ccg,
 }  // namespace blender
 
   // namespace blender
+

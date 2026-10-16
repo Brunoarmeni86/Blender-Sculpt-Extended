@@ -5,7 +5,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $branch = 'checkpoint/sculpt-extended-20261015'
-$baseCommit = '646596f92498c449600b2b09aeee11a7a117b04d'
+$baseCommit = '77547303508031e1209a3d0bd0e114d7dd490884'
 $snapshot = 'experiments/sculpt-extended-20261016'
 function Invoke-Git([string[]]$GitArgs) {
     $result = & git -c submodule.recurse=false -c diff.ignoreSubmodules=all -C $PublishRepo @GitArgs
@@ -88,6 +88,7 @@ $markers = @{
     'source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc' = 'MULTIRES_STARTUP_REUSE_V02'
     'source/blender/editors/include/ED_sculpt.hh' = 'object_sculpt_mode_restore_reuse_ready'
     'source/blender/editors/util/ed_util.cc' = 'MULTIRES_STARTUP_REUSE_V02'
+    'source/blender/blenkernel/intern/subdiv_ccg.cc' = 'MULTIRES_CCG_FULL_BATCH_V01'
     'source/blender/blenkernel/intern/multires.cc' = 'LAYER_WEIGHT_MULTI_CACHE_V01'
     'source/blender/draw/intern/draw_sculpt.cc' = 'MULTIRES_OVERLAY_NEUTRAL_V01'
     'source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc' = 'OPEN_FILE_UNDO_ANCHOR_V01'
@@ -137,7 +138,7 @@ $manifest = [ordered]@{
     BaseCheckpoint = $baseCommit
     Branch = $branch
     ObservedExecutableSHA256 = (Get-FileHash -LiteralPath $exe).Hash
-    Profile = 'weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-pbvh-factor1'
+    Profile = 'weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-full-ccg-batch-v01-pbvh-factor1'
     Files = @($items | ForEach-Object { [ordered]@{ Path = $_.Target; SHA256 = (Get-FileHash -LiteralPath (Join-Path $PublishRepo $_.Target)).Hash } })
 }
 $writeManifest = $true
@@ -166,7 +167,7 @@ $unexpected = @($actualStaged | Where-Object { $files -cnotcontains $_ })
 if ($unexpected.Count) { throw ('File in staging non previsti: ' + ($unexpected -join ', ') + '. Nessun commit effettuato.') }
 Invoke-Git @('diff','--cached','--stat','--ignore-submodules=all') | Out-Host
 if ($actualStaged.Count) {
-    Invoke-Git @('commit','-m','Checkpoint validated Multires startup reuse V02 and full Sculpt profile') | Out-Host
+    Invoke-Git @('commit','-m','Checkpoint validated full Multires CCG batching and complete Sculpt profile') | Out-Host
 }
 Invoke-Git @('push','--recurse-submodules=no','origin',("HEAD:refs/heads/$branch")) | Out-Host
 $localHead = [string](Invoke-Git @('rev-parse','HEAD'))
@@ -177,4 +178,5 @@ Write-Host "PUBBLICATO E VERIFICATO: $localHead" -ForegroundColor Green
 Write-Host "Branch: $branch"
 Write-Host "Backup repository: $backup"
 Write-Host 'Sorgenti di lavoro e build non modificati. Nessuna compilazione avviata.'
+
 

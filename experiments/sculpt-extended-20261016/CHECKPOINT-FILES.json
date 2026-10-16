@@ -1,9 +1,9 @@
 {
-  "Timestamp": "2026-10-16T06:12:17.793502+00:00",
-  "BaseCheckpoint": "646596f92498c449600b2b09aeee11a7a117b04d",
+  "Timestamp": "2026-10-16T06:28:02.003035+00:00",
+  "BaseCheckpoint": "77547303508031e1209a3d0bd0e114d7dd490884",
   "Branch": "checkpoint/sculpt-extended-20261015",
   "ObservedExecutableSHA256": null,
-  "Profile": "weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-pbvh-factor1",
+  "Profile": "weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-full-ccg-batch-v01-pbvh-factor1",
   "Files": [
     {
       "Path": "source/blender/blenkernel/intern/multires.cc",
@@ -19,7 +19,7 @@
     },
     {
       "Path": "source/blender/blenkernel/intern/subdiv_ccg.cc",
-      "SHA256": "C23299D0D31D2ED20FCC35A505B34F9AF3CEA47267574AE12A499F154DB4F0FA"
+      "SHA256": "9bcc14df8ec63b3400d73548032ef75782c52dd01aa559725fa11fc43601e821"
     },
     {
       "Path": "source/blender/blenkernel/intern/pbvh.cc",
@@ -95,15 +95,15 @@
     },
     {
       "Path": "experiments/sculpt-extended-20261016/AVVIA-COMPLETO.ps1",
-      "SHA256": "38abbff287e4235daa005474a29410f6af8c0882474a40f7d7785d110c0bbcef"
+      "SHA256": "a3174f63da01d7c3a19df99db4738911bbf3f1be110d719c0f20a499e345d41d"
     },
     {
       "Path": "experiments/sculpt-extended-20261016/AGGIORNA-GITHUB.ps1",
-      "SHA256": "ac9df0d98bddccda688708824e38bf8adad03a0959a0c2171855298d90e90433"
+      "SHA256": "cea90b714cdad1d3448db8eeb0670dadc633f21e52fdb5a3672f2ba84dabbbaa"
     },
     {
       "Path": "experiments/sculpt-extended-20261016/LEGGIMI.md",
-      "SHA256": "ed9ef55768b3f815fb94bf3304f04aa5b82478539f60c5be466a65bbbb0996d4"
+      "SHA256": "acf924f3619293f491bbbb089f228bba455e28aef1372d0e23cf8ac9d6343a48"
     },
     {
       "Path": "source/blender/editors/include/ED_sculpt.hh",
@@ -115,12 +115,21 @@
     }
   ],
   "PreviousObservedExecutableSHA256": "4BDC85FEA5BCD54CAE390C99D71F87D4B1B8464CB847E0A19F7AA1C9C03DEE41",
-  "ExecutableHashNote": "Latest Windows binary not supplied; source reconstruction is parent checkpoint plus tested Startup Reuse V01/V02 blocks.",
+  "ExecutableHashNote": "Latest Windows binary not supplied; source reconstruction is parent checkpoint plus tested Full CCG Batch V01 exact blocks.",
   "Validation": {
-    "Log": "Cold-Start-20261016-080816.zip",
-    "Mode": "REUSE",
+    "Log": "Cold-Start-20261016-082324.zip",
+    "DuplicateLog": "Cold-Start-20261016-082404.zip",
+    "StartupMode": "REUSE",
+    "FullCCGMode": "BATCH",
     "CCGBuilds": 1,
-    "SculptInitMS": 1270.905,
-    "RecordedUndoMS": 4.911
+    "PositionsMS": 2558.033,
+    "GridEvaluationMS": 2821.855,
+    "ConversionMS": 5033.468,
+    "UndoRedoMS": [
+      12.173,
+      15.976,
+      15.52,
+      6.248
+    ]
   }
 }

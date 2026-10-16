@@ -88,3 +88,37 @@ is not established by this one load test.
 The CHECKPOINT-FILES manifest retains previous hashes for unchanged files.
 Changed and new file hashes in this commit use the Git UTF-8 file content.
 No hash for the latest user-built executable was supplied in this update.
+
+
+
+## Validated full CCG batch V01 (2026-10-16)
+
+Full displaced CCG evaluation can use the existing OpenSubdiv multi-face batch
+implementation with up to eight coarse faces per batch. Quad/ngon coordinate
+mapping, displacement, mask writes and the native final normal stage are retained.
+The scalar zero/equal derivative correction is explicitly preserved for the new
+full path; existing local batch calls retain their previous default behavior.
+
+BLENDER_MULTIRES_CCG_FULL_BATCH=1 enables this in the complete launcher. Unset/0
+follows native scalar evaluation. Oversized individual faces, missing evaluators
+and incompatible layouts fall back. Temporary owned scratch is capped at 1 MiB
+per worker, targeting 16 MiB divided over reported CPU threads; OpenSubdiv internal
+temporary allocations are additional. No persistent dense cache is added.
+
+The user confirmed retaining the change. Windows mostro.blend log comparison,
+124208 grids, area 289:
+- previous Cold-Start-20261016-080816.zip positions 4720.192 ms, grid evaluation
+  5038.520 ms, conversion to CCG 7180.618 ms;
+- Cold-Start-20261016-082324.zip positions 2558.033 ms, grid evaluation
+  2821.855 ms, conversion to CCG 5033.468 ms; one CCG build and Startup V02 REUSE;
+- recorded Undo/Redo 6.248-15.976 ms; own scratch 469.6 KiB per worker.
+Cold-Start-20261016-082404.zip contains identical session files and is not an
+independent repeat. This is one before/after scene test, not broad compatibility
+or a total file-open benchmark.
+
+Local C++17 ASan/UBSan tests with simulated Blender/evaluator APIs compare
+24 mixed tri/quad/ngon configurations at levels 1-6 with four threads: scalar/batch
+coordinates and masks match bit-for-bit, including singular-derivative correction.
+Normal-stage inputs and fallback/opt-in behavior are checked; actual OpenSubdiv
+and full Blender Windows validation require runtime tests. The user compiled
+and ran this Windows build. Latest executable hash was not supplied.
