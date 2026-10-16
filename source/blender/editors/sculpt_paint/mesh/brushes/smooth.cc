@@ -195,8 +195,10 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
  * first/last two rows and columns of each grid from editing, so no unverified
  * seam-space interpolation is used as a writable smoothing target.
  *
- * At the top sculpt level the layer samples use the same per-corner
- * tangent frames as the Multires displacement evaluator. */
+ * Layer grids are stored at the highest Multires level, but normalized
+ * UV sampling allows the isolated read to work at lower sculpt levels.
+ * This changes the Smooth input only: the existing Multires recording path
+ * remains responsible for preserving high-frequency residuals on commit. */
 struct IsolatedSmoothContext {
   const SubdivCCG &ccg;
   const CCGKey key;
@@ -215,8 +217,8 @@ static bool smooth_isolated_context_build(const Object &object,
   const SculptSession *ss = object.runtime->sculpt_session;
   const MultiresModifierData *mmd = ss ? ss->multires_modifier : nullptr;
   const Mesh *mesh = object.type == OB_MESH ? static_cast<const Mesh *>(object.data) : nullptr;
-  if (!mmd || !mesh || !ccg.subdiv || ccg.level != mmd->totlvl ||
-      ccg.level != mmd->sculptlvl || ccg.grid_size < 9 ||
+  if (!mmd || !mesh || !ccg.subdiv || ccg.level != mmd->sculptlvl ||
+      ccg.level > mmd->totlvl || ccg.grid_size < 9 ||
       ccg.grids_num != mesh->corners_num || !mmd->sculpt_layer_recording ||
       mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled)
   {
