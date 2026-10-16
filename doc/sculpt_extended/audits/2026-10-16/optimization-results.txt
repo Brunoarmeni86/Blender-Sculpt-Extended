@@ -1,0 +1,7 @@
+P1 finite positive color buffers: 2800 sequential operations bitwise equal
+P2 interior ratio=1: visited=9 nonzero=1 zero_weight=8
+P2 interior ratio=2: visited=25 nonzero=9 zero_weight=16
+P2 interior ratio=4: visited=81 nonzero=49 zero_weight=32
+P2 interior ratio=8: visited=289 nonzero=225 zero_weight=64
+P3 signed-zero counterexample: original neighbor=+0 candidate=-0; not universally bitwise equivalent
+P4 nonfinite delta: both reject

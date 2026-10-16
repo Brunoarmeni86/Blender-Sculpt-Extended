@@ -2,7 +2,9 @@
 
 Punto d'ingresso per le chat che lavorano su `Brunoarmeni86/Blender-Sculpt-Extended`.
 
-**Ultimo approfondimento:** [16 ottobre 2026 — animazione, gruppi e identità dopo Edit](audits/2026-10-16/ANIMATION-TOPOLOGY-REVIEW.md).
+**Prestazioni:** [16 ottobre 2026 — ulteriori ottimizzazioni e prove sul kernel colore](audits/2026-10-16/PERFORMANCE-REVIEW.md).
+
+**Ultimo approfondimento sui difetti:** [16 ottobre 2026 — animazione, gruppi e identità dopo Edit](audits/2026-10-16/ANIMATION-TOPOLOGY-REVIEW.md).
 
 **Secondo approfondimento:** [16 ottobre 2026 — Bake sparse, Apply Scale, Undo asincrono e master HR](audits/2026-10-16/DEEP-REVIEW.md).
 

@@ -1,0 +1,6 @@
+{
+  "source/blender/blenkernel/intern/polypaint_cpu_math.hh": "c846e228628843a0f0c89d60355d76673b661cf2",
+  "source/blender/blenkernel/intern/multires_sculpt_layers.cc": "79b0c38916eadf246924b3fe34b83d58a2a2cfb8",
+  "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc": "77b2966ade961cf307be8ca7bf94b05550dd0e35",
+  "source/blender/blenkernel/intern/shrinkwrap.cc": "21eaf1d6323a6b4d0d1d110e0fcb34772e2c0597"
+}

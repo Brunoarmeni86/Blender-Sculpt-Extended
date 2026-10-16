@@ -1,0 +1,21 @@
+{
+  "checkpoint": "01194d089eb5b324b125d0ef6ebaf877dd13f326",
+  "scope": "Actual math header versus experimental skip-zero variant; no native Blender test, no timings",
+  "source": "source/blender/blenkernel/intern/polypaint_cpu_math.hh",
+  "source_git_blob": "c846e228628843a0f0c89d60355d76673b661cf2",
+  "compile": [
+    "g++",
+    "-std=c++17",
+    "-O1",
+    "-g",
+    "-fsanitize=address,undefined",
+    "-fno-omit-frame-pointer",
+    "-I",
+    "/workspace/scratch/fc7da3ae444f/audit",
+    "/workspace/scratch/fc7da3ae444f/audit/build-optimizations/compare.cc",
+    "-o",
+    "/workspace/scratch/fc7da3ae444f/audit/build-optimizations/compare"
+  ],
+  "ASAN_OPTIONS": "detect_leaks=0",
+  "stderr": ""
+}
