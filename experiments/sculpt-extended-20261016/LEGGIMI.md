@@ -57,3 +57,34 @@ Copiare il contenuto del kit salvato in `bin\Release\SculptExtended`, conservand
 la struttura delle sottocartelle. Il wrapper completo risolve l'eseguibile accanto
 alla cartella SculptExtended; accetta anche `-BlenderExe` e `-BlendFile` espliciti.
 Questo aggiornamento GitHub non copia automaticamente il kit sulla build attuale.
+
+
+
+## Validated startup reuse V02 (2026-10-16)
+
+File-load restoration checks the completed Multires CCG before temporarily
+resetting the saved Sculpt mode and tagging SYNC_TO_EVAL. The active, editable,
+visible object's existing evaluation is retained only when the complete strict
+preflight succeeds. Sculpt session initialization validates again after tool
+settings initialization and falls back to native geometry evaluation if needed.
+The fully evaluated graph guard and CCG ownership are retained. Other restore
+paths are unchanged. BLENDER_MULTIRES_STARTUP_REUSE=1 enables this in the full
+launcher; unset/0 follows native restoration. The validated initial Undo anchor
+remains enabled.
+
+Windows user build and log comparison on mostro.blend: 124208 grids, area 289.
+Cold-Start-20261016-075500.zip: two CCG builds, Sculpt init 10832.850 ms.
+Cold-Start-20261016-080816.zip: one CCG build, Sculpt init 1270.905 ms,
+mode=REUSE with identical candidate/live pointer. Recorded Undo 4.911 ms.
+This measures Sculpt initialization, not total file opening. GPU preparation
+varies between runs and is not an isolated benchmark of this change.
+
+Local C++17 ASan/UBSan tests use simulated Blender APIs: 42 predicate rejection
+cases plus the actual added restore branch and its eligibility/fallback cases,
+including invalidation after toolsettings. Complete Blender Windows compilation
+and runtime confirmation were performed by the user; broader scene compatibility
+is not established by this one load test.
+
+The CHECKPOINT-FILES manifest retains previous hashes for unchanged files.
+Changed and new file hashes in this commit use the Git UTF-8 file content.
+No hash for the latest user-built executable was supplied in this update.

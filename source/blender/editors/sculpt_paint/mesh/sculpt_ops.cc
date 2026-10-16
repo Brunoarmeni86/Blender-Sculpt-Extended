@@ -16,6 +16,8 @@
 #include "BLI_time.h"
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 #include "MEM_guardedalloc.h"
 
 #include "BLI_enumerable_thread_specific.hh"
@@ -46,6 +48,7 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
+#include "BKE_mesh_runtime.hh"
 #include "BKE_mesh_mirror.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
@@ -63,6 +66,7 @@
 #include "BKE_subdiv.hh"
 
 #include "DEG_depsgraph_build.hh"
+#include "DEG_depsgraph_query.hh"
 #include "DEG_depsgraph.hh"
 
 #include "IMB_colormanagement.hh"
@@ -2023,11 +2027,156 @@ static void SCULPT_OT_symmetrize(wmOperatorType *ot)
 /** \name Sculpt Mode Toggle Operator
  * \{ */
 
+/* MULTIRES_STARTUP_REUSE_V02
+ * Reuse only a completed, object-owned CCG from the active viewport graph,
+ * before creating the first SculptSession. Never cache a borrowed pointer
+ * across operations and never transfer ownership of Mesh/SubdivCCG/Subdiv. */
+static SubdivCCG *sculpt_startup_ccg_reuse_candidate(Depsgraph &depsgraph,
+                                                    Scene &scene,
+                                                    Object &object,
+                                                    Object *&r_object_eval,
+                                                    const char *&r_reason)
+{
+  r_object_eval = nullptr;
+  const auto reject = [&](const char *reason) -> SubdivCCG * {
+    r_reason = reason;
+    return nullptr;
+  };
+  const char *env = std::getenv("BLENDER_MULTIRES_STARTUP_REUSE");
+  if (!env || env[0] != '1' || env[1] != '\0') {
+    return reject("OFF");
+  }
+  if (object.type != OB_MESH || object.mode != OB_MODE_SCULPT || !object.data ||
+      object.id.lib || object.runtime->sculpt_session) {
+    return reject("OBJECT_OR_EXISTING_SESSION");
+  }
+  if (!DEG_is_active(&depsgraph)) {
+    return reject("GRAPH_INACTIVE");
+  }
+  if (DEG_is_evaluating(&depsgraph)) {
+    return reject("GRAPH_EVALUATING");
+  }
+  if (DEG_get_mode(&depsgraph) != DAG_EVAL_VIEWPORT) {
+    return reject("GRAPH_NOT_VIEWPORT");
+  }
+  if (DEG_get_input_scene(&depsgraph) != &scene) {
+    return reject("GRAPH_OTHER_SCENE");
+  }
+  if (!DEG_is_fully_evaluated(&depsgraph)) {
+    return reject("GRAPH_PENDING_UPDATES");
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  if (mesh.id.lib || ID_REAL_USERS(&mesh.id) != 1 || mesh.key ||
+      (mesh.flag & ME_SCULPT_DYNAMIC_TOPOLOGY)) {
+    return reject("MESH_FRAME");
+  }
+  /* A session changes modifier filtering. Restrict reuse to exactly one
+   * enabled modifier including virtual modifiers, so both evaluations agree. */
+  VirtualModifierData virtual_data;
+  MultiresModifierData *mmd = nullptr;
+  for (ModifierData *md = BKE_modifiers_get_virtual_modifierlist(&object, &virtual_data);
+       md; md = md->next)
+  {
+    if (!BKE_modifier_is_enabled(&scene, md, eModifierMode_Realtime)) {
+      continue;
+    }
+    if (md->type != eModifierType_Multires || mmd) {
+      return reject("MODIFIER_STACK");
+    }
+    mmd = reinterpret_cast<MultiresModifierData *>(md);
+  }
+  if (!mmd || mmd->totlvl <= 0 || mmd->totlvl > 13 ||
+      mmd->sculptlvl != mmd->totlvl || mmd->sculpt_layers.is_empty() ||
+      (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) ||
+      mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled) {
+    return reject("MULTIRES_FRAME");
+  }
+  for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    if (layer.base_deltas || layer.base_verts_num != 0) {
+      return reject("L0_LAYER");
+    }
+  }
+  if (!bke::multires_layers::compatible(*mmd, mesh)) {
+    return reject("LAYER_LAYOUT");
+  }
+  Object *object_eval = DEG_get_evaluated(&depsgraph, &object);
+  if (!object_eval || object_eval == &object || !DEG_is_evaluated(object_eval) ||
+      DEG_get_original(object_eval) != &object || object_eval->mode != object.mode ||
+      !DEG_id_is_fully_evaluated(&depsgraph, &object_eval->id) ||
+      !DEG_object_geometry_is_evaluated(*object_eval) ||
+      object_eval->runtime->sculpt_session || !object_eval->runtime->is_data_eval_owned) {
+    return reject("EVALUATED_OBJECT");
+  }
+  MultiresModifierData *eval_mmd = nullptr;
+  for (ModifierData &md : object_eval->modifiers) {
+    if (!BKE_modifier_is_enabled(&scene, &md, eModifierMode_Realtime)) {
+      continue;
+    }
+    if (md.type != eModifierType_Multires || eval_mmd) {
+      return reject("EVALUATED_STACK");
+    }
+    eval_mmd = reinterpret_cast<MultiresModifierData *>(&md);
+  }
+  if (!eval_mmd || BKE_modifier_get_original(object_eval, &eval_mmd->modifier) != &mmd->modifier ||
+      eval_mmd->totlvl != mmd->totlvl || eval_mmd->sculptlvl != mmd->sculptlvl ||
+      eval_mmd->flags != mmd->flags ||
+      eval_mmd->sculpt_displacement_enabled != mmd->sculpt_displacement_enabled ||
+      eval_mmd->sculpt_shrinkwrap_enabled != mmd->sculpt_shrinkwrap_enabled) {
+    return reject("EVALUATED_MODIFIER");
+  }
+  /* No wrapper subdivision: this query only retrieves the existing mesh. */
+  Mesh *mesh_eval = BKE_object_get_evaluated_mesh_no_subsurf(object_eval);
+  if (!mesh_eval || object_eval->runtime->data_eval != &mesh_eval->id ||
+      mesh_eval->verts_num != mesh.verts_num || mesh_eval->faces_num != mesh.faces_num ||
+      mesh_eval->corners_num != mesh.corners_num ||
+      mesh_eval->runtime->subdiv_ccg_tot_level != mmd->totlvl) {
+    return reject("EVALUATED_MESH");
+  }
+  SubdivCCG *ccg = mesh_eval->runtime->subdiv_ccg.get();
+  const int side = bke::subdiv::grid_size_from_level(mmd->totlvl);
+  const int64_t samples = int64_t(mesh.corners_num) * side * side;
+  if (!ccg || !ccg->subdiv || ccg->level != mmd->totlvl ||
+      ccg->grids_num != mesh.corners_num || ccg->grid_size != side ||
+      ccg->grid_area != side * side || ccg->positions.size() != samples ||
+      ccg->normals.size() != samples || (!ccg->masks.is_empty() && ccg->masks.size() != samples) ||
+      ccg->faces.size() != mesh.faces_num || ccg->faces.total_size() != mesh.corners_num ||
+      ccg->grid_to_face_map.size() != mesh.corners_num ||
+      ccg->dirty.coords || ccg->dirty.hidden || ccg->dirty.masks ||
+      !ccg->sculpt_dirty_position_grids.is_empty()) {
+    return reject("CCG_LAYOUT_OR_PENDING");
+  }
+  r_object_eval = object_eval;
+  r_reason = "READY";
+  return ccg;
+}
+
+/* Inspect before ED_editors_init resets the saved mode and tags SYNC_TO_EVAL.
+ * This function is read-only; init_sculpt_mode_session validates again after
+ * tool-settings initialization. A rejected second check uses native evaluation. */
+bool object_sculpt_mode_restore_reuse_ready(Depsgraph &depsgraph, Scene &scene, Object &ob)
+{
+  Object *object_eval = nullptr;
+  const char *reason = nullptr;
+  const SubdivCCG *ccg = sculpt_startup_ccg_reuse_candidate(
+      depsgraph, scene, ob, object_eval, reason);
+  if (std::string(reason) != "OFF") {
+    std::printf("[MULTIRES_STARTUP_REUSE_V02] stage=RESTORE_PREFLIGHT ready=%d reason=%s\n",
+                ccg != nullptr, reason);
+    std::fflush(stdout);
+  }
+  return ccg != nullptr;
+}
+
 static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &scene, Object &ob)
 {
   blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.init_session", &ob);
   /* Create persistent sculpt mode data. */
   BKE_sculpt_toolsettings_data_ensure(&bmain, &scene);
+
+  Object *reuse_eval = nullptr;
+  const char *reuse_reason = nullptr;
+  SubdivCCG *reuse_ccg = sculpt_startup_ccg_reuse_candidate(
+      depsgraph, scene, ob, reuse_eval, reuse_reason);
 
   /* Create sculpt mode session data. */
   if (ob.runtime->sculpt_session != nullptr) {
@@ -2040,9 +2189,17 @@ static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &s
    * multires modifier sets .runtime.ccg in
    * the evaluated mesh.
    */
-  DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  if (reuse_ccg) {
+    /* Mirror the native copy-on-eval session alias (deg_eval_copy_on_write.cc).
+     * The evaluated object must see the new session for draw and modifier code.
+     * Mesh/CCG ownership stays entirely with the existing evaluated result. */
+    reuse_eval->runtime->sculpt_session = ob.runtime->sculpt_session;
+  }
+  else {
+    DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  }
 
-  cold_trace.mark("create_session_and_tag_geometry");
+  cold_trace.mark("create_session_and_bind_or_tag_geometry");
   BKE_scene_graph_evaluated_ensure(&depsgraph, &bmain);
   cold_trace.mark("ensure_evaluated_depsgraph");
 
@@ -2050,6 +2207,14 @@ static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &s
   BKE_sculpt_update_object_for_edit(&depsgraph, &ob, false);
 
   cold_trace.mark("sculpt_object_for_edit");
+  if (std::string(reuse_reason) != "OFF") {
+    const SubdivCCG *live_ccg = ob.runtime->sculpt_session->subdiv_ccg;
+    const bool preserved = reuse_ccg && live_ccg == reuse_ccg;
+    std::printf("[MULTIRES_STARTUP_REUSE_V02] mode=%s reason=%s candidate=%p live=%p\n",
+                preserved ? "REUSE" : (reuse_ccg ? "REEVALUATED" : "LEGACY"),
+                reuse_reason, static_cast<void *>(reuse_ccg), static_cast<const void *>(live_ccg));
+    std::fflush(stdout);
+  }
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
   if (mesh.attributes().contains(".sculpt_face_set")) {
     /* Here we can detect geometry that was just added to Sculpt Mode as it has the
@@ -3285,3 +3450,4 @@ void keymap_sculpt(wmKeyConfig *keyconf)
 }
 
 }  // namespace blender::ed::sculpt_paint
+

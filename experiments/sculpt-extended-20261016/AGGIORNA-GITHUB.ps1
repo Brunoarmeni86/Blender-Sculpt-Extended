@@ -5,7 +5,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $branch = 'checkpoint/sculpt-extended-20261015'
-$baseCommit = '8c8f0d3219b904c13ae614054c68e79fa1ce36f3'
+$baseCommit = '646596f92498c449600b2b09aeee11a7a117b04d'
 $snapshot = 'experiments/sculpt-extended-20261016'
 function Invoke-Git([string[]]$GitArgs) {
     $result = & git -c submodule.recurse=false -c diff.ignoreSubmodules=all -C $PublishRepo @GitArgs
@@ -13,7 +13,17 @@ function Invoke-Git([string[]]$GitArgs) {
     return $result
 }
 if (Get-Process -Name blender -ErrorAction SilentlyContinue) { throw 'Chiudi Blender prima di creare il checkpoint.' }
-$busy = @(Get-Process -Name cmake,MSBuild,cl,link,ninja,nvcc -ErrorAction SilentlyContinue)
+# Orphaned reusable MSBuild workers cannot receive new jobs from their old parent.
+# Ignore only those workers; active parents or compiler/linker processes still block.
+$processes = @(Get-CimInstance Win32_Process)
+$busy = @($processes | Where-Object {
+    $p = $_
+    $buildProcess = $p.Name -in @('cmake.exe','MSBuild.exe','cl.exe','link.exe','ninja.exe','nvcc.exe')
+    $orphanWorker = $p.Name -eq 'MSBuild.exe' -and
+        $p.CommandLine -match '/nodemode:1' -and $p.CommandLine -match '/nodeReuse:true' -and
+        !($processes | Where-Object { $_.ProcessId -eq $p.ParentProcessId })
+    $buildProcess -and !$orphanWorker
+})
 if ($busy.Count) { throw 'Compilazione ancora attiva. Attendi prima del checkpoint.' }
 if (!(Test-Path -LiteralPath (Join-Path $PublishRepo '.git'))) { throw "Repository Git non trovato: $PublishRepo. Non viene creato un nuovo clone." }
 $top = ([string](Invoke-Git @('rev-parse','--show-toplevel'))).Replace('/', '\').TrimEnd('\')
@@ -51,6 +61,8 @@ $native = @(
     'source/blender/draw/engines/overlay/overlay_sculpt.hh',
     'source/blender/editors/sculpt_paint/mesh/sculpt.cc',
     'source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc',
+    'source/blender/editors/include/ED_sculpt.hh',
+    'source/blender/editors/util/ed_util.cc',
     'source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc'
 )
 $kitRoot = Join-Path $BuildDir 'bin\Release\SculptExtended'
@@ -73,6 +85,9 @@ foreach ($item in $items) {
     if (!(Test-Path -LiteralPath $item.Source -PathType Leaf)) { throw "File richiesto mancante: $($item.Source). Nessuna copia effettuata." }
 }
 $markers = @{
+    'source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc' = 'MULTIRES_STARTUP_REUSE_V02'
+    'source/blender/editors/include/ED_sculpt.hh' = 'object_sculpt_mode_restore_reuse_ready'
+    'source/blender/editors/util/ed_util.cc' = 'MULTIRES_STARTUP_REUSE_V02'
     'source/blender/blenkernel/intern/multires.cc' = 'LAYER_WEIGHT_MULTI_CACHE_V01'
     'source/blender/draw/intern/draw_sculpt.cc' = 'MULTIRES_OVERLAY_NEUTRAL_V01'
     'source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc' = 'OPEN_FILE_UNDO_ANCHOR_V01'
@@ -122,7 +137,7 @@ $manifest = [ordered]@{
     BaseCheckpoint = $baseCommit
     Branch = $branch
     ObservedExecutableSHA256 = (Get-FileHash -LiteralPath $exe).Hash
-    Profile = 'weight-cache-1024-overlay-neutral-open-file-undo-pbvh-factor1'
+    Profile = 'weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-pbvh-factor1'
     Files = @($items | ForEach-Object { [ordered]@{ Path = $_.Target; SHA256 = (Get-FileHash -LiteralPath (Join-Path $PublishRepo $_.Target)).Hash } })
 }
 $writeManifest = $true
@@ -151,7 +166,7 @@ $unexpected = @($actualStaged | Where-Object { $files -cnotcontains $_ })
 if ($unexpected.Count) { throw ('File in staging non previsti: ' + ($unexpected -join ', ') + '. Nessun commit effettuato.') }
 Invoke-Git @('diff','--cached','--stat','--ignore-submodules=all') | Out-Host
 if ($actualStaged.Count) {
-    Invoke-Git @('commit','-m','Checkpoint validated Multires cache, neutral overlay and initial Sculpt undo') | Out-Host
+    Invoke-Git @('commit','-m','Checkpoint validated Multires startup reuse V02 and full Sculpt profile') | Out-Host
 }
 Invoke-Git @('push','--recurse-submodules=no','origin',("HEAD:refs/heads/$branch")) | Out-Host
 $localHead = [string](Invoke-Git @('rev-parse','HEAD'))
@@ -162,3 +177,4 @@ Write-Host "PUBBLICATO E VERIFICATO: $localHead" -ForegroundColor Green
 Write-Host "Branch: $branch"
 Write-Host "Backup repository: $backup"
 Write-Host 'Sorgenti di lavoro e build non modificati. Nessuna compilazione avviata.'
+

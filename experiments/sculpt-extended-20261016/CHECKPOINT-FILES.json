@@ -1,109 +1,126 @@
 {
-    "Timestamp":  "2026-10-16T06:58:37.7549520+02:00",
-    "BaseCheckpoint":  "8c8f0d3219b904c13ae614054c68e79fa1ce36f3",
-    "Branch":  "checkpoint/sculpt-extended-20261015",
-    "ObservedExecutableSHA256":  "4BDC85FEA5BCD54CAE390C99D71F87D4B1B8464CB847E0A19F7AA1C9C03DEE41",
-    "Profile":  "weight-cache-1024-overlay-neutral-open-file-undo-pbvh-factor1",
-    "Files":  [
-                  {
-                      "Path":  "source/blender/blenkernel/intern/multires.cc",
-                      "SHA256":  "18448595385002C01C4D363C4B429406C4DC4CD3A64DE1D12EC70EFA4927690D"
-                  },
-                  {
-                      "Path":  "source/blender/blenkernel/intern/multires_weight_multi_cache_v01.hh",
-                      "SHA256":  "77B5EDE1D6EFC3A22546E1F0A034B30891B03E8DCB4416ABFAB7BDDA667F6703"
-                  },
-                  {
-                      "Path":  "source/blender/blenkernel/intern/paint.cc",
-                      "SHA256":  "DC2F3A6E65328C2ACE4EBE5106BB536CA0689616A633DDA579CA04074EDF38A0"
-                  },
-                  {
-                      "Path":  "source/blender/blenkernel/intern/subdiv_ccg.cc",
-                      "SHA256":  "C23299D0D31D2ED20FCC35A505B34F9AF3CEA47267574AE12A499F154DB4F0FA"
-                  },
-                  {
-                      "Path":  "source/blender/blenkernel/intern/pbvh.cc",
-                      "SHA256":  "5313992E3B333D29765CE3FC2230E571D3BD769A5DE2A6A544E73499C08BE69C"
-                  },
-                  {
-                      "Path":  "source/blender/blenkernel/intern/multires_pbvh_group_probe_v01.hh",
-                      "SHA256":  "4581EF66435C07253208678B08FD067BC2572D4943C04E85F18D32BA38EF37A6"
-                  },
-                  {
-                      "Path":  "source/blender/blenkernel/BKE_sculpt_cold_start_profile.hh",
-                      "SHA256":  "E16F79C82F4B19BFCF22A046A10BA2027CABC1A1CB0A32E9DF78D9641775AA10"
-                  },
-                  {
-                      "Path":  "source/blender/modifiers/intern/MOD_multires.cc",
-                      "SHA256":  "7D9A3C0AE5D6D05C9C2853089180C589CE384680813D596122B756EF709C02CC"
-                  },
-                  {
-                      "Path":  "source/blender/draw/intern/draw_sculpt.cc",
-                      "SHA256":  "2B15D6713F5B9E4BB2F65305E8C2A7671D782BA389E735203451FBB444C57F3C"
-                  },
-                  {
-                      "Path":  "source/blender/draw/intern/draw_sculpt.hh",
-                      "SHA256":  "F696C0C35F3BF2516A3442BC64B2385877B2A2080285C32F62E0690F582FF4A0"
-                  },
-                  {
-                      "Path":  "source/blender/draw/intern/multires_overlay_neutral_v01.hh",
-                      "SHA256":  "C368BB964E0C8E35C05CD7DBE4FA0401F123D74D5337B50D42E9E97A9B96B664"
-                  },
-                  {
-                      "Path":  "source/blender/draw/engines/overlay/overlay_sculpt.hh",
-                      "SHA256":  "D1A0ACE01DCB9474C2000BF410E3EF617AE2A84CDCAF1C5DC5DFFBADD7FF073B"
-                  },
-                  {
-                      "Path":  "source/blender/editors/sculpt_paint/mesh/sculpt.cc",
-                      "SHA256":  "C7AFABC9FFB2C89902DCB3DA34B766618260DEEFD33C83F6727228765513E0E7"
-                  },
-                  {
-                      "Path":  "source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc",
-                      "SHA256":  "D53BDA68B19E84BACFDC790FC952256D7E4CD3FB0160D1A6888358C98B81D60C"
-                  },
-                  {
-                      "Path":  "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc",
-                      "SHA256":  "349E3EDD63C75EDE02109B7280AD6995773AFAE8796B27335B63E17E971E1890"
-                  },
-                  {
-                      "Path":  "experiments/sculpt-extended-20261016/AVVIA-ESPERIMENTO.ps1",
-                      "SHA256":  "F9C16B67071CAEC6B63DC4813161FE9622D070D64E92E84D76CAC0A75FC2DB0E"
-                  },
-                  {
-                      "Path":  "experiments/sculpt-extended-20261016/LOAD-SIDEBAR.py",
-                      "SHA256":  "3E1A86415DF65EB74B928B592346FC25E006611CFAAF15A4ABD3F0B3E30DB1D3"
-                  },
-                  {
-                      "Path":  "experiments/sculpt-extended-20261016/addon/__init__.py",
-                      "SHA256":  "74C2B0963767CE65CDACC19B3A6FE01DAAB34F26C337AC33C41139F6EF68D527"
-                  },
-                  {
-                      "Path":  "experiments/sculpt-extended-20261016/experiment-tools/AVVIA-ESPERIMENTO.ps1",
-                      "SHA256":  "4E384EF820E74F3E73805A2E16FA68B2B5E0AD2375E1E4B97F699257EC21AC3E"
-                  },
-                  {
-                      "Path":  "experiments/sculpt-extended-20261016/experiment-tools/LAYER-DIAGNOSTICS.py",
-                      "SHA256":  "3F4AA3F4D12F148716A9AA4D3A8A4F43FC7E0524CC0EEC463BB791D199A83EB6"
-                  },
-                  {
-                      "Path":  "experiments/sculpt-extended-20261016/experiment-tools/POLYPAINT-BAKE.py",
-                      "SHA256":  "3C088E5B4388C94A0DFBC40DF98D0E7149F57F83B89520DA1352CB64C818AC5B"
-                  },
-                  {
-                      "Path":  "experiments/sculpt-extended-20261016/experiment-tools/PROVA-POLYPAINT.py",
-                      "SHA256":  "066EAB8F9EA0644D7653D11CBBFCFB6804BC29F7AE1FECE9C18755C54B282D09"
-                  },
-                  {
-                      "Path":  "experiments/sculpt-extended-20261016/AVVIA-COMPLETO.ps1",
-                      "SHA256":  "20AF477C74EF30AD64E4CCC3D06AB680A1D5D0ECC93ACFD6F07708CCDE225F30"
-                  },
-                  {
-                      "Path":  "experiments/sculpt-extended-20261016/AGGIORNA-GITHUB.ps1",
-                      "SHA256":  "914F773B830418CEAF494A294ED7842DC4F3213DDD04BB2919F1DAF22FB5041F"
-                  },
-                  {
-                      "Path":  "experiments/sculpt-extended-20261016/LEGGIMI.md",
-                      "SHA256":  "CCE693C6089094D9ADC37C0B0E7562889DD4651B046A68768B93C7F36365F059"
-                  }
-              ]
+  "Timestamp": "2026-10-16T06:12:17.793502+00:00",
+  "BaseCheckpoint": "646596f92498c449600b2b09aeee11a7a117b04d",
+  "Branch": "checkpoint/sculpt-extended-20261015",
+  "ObservedExecutableSHA256": null,
+  "Profile": "weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-pbvh-factor1",
+  "Files": [
+    {
+      "Path": "source/blender/blenkernel/intern/multires.cc",
+      "SHA256": "18448595385002C01C4D363C4B429406C4DC4CD3A64DE1D12EC70EFA4927690D"
+    },
+    {
+      "Path": "source/blender/blenkernel/intern/multires_weight_multi_cache_v01.hh",
+      "SHA256": "77B5EDE1D6EFC3A22546E1F0A034B30891B03E8DCB4416ABFAB7BDDA667F6703"
+    },
+    {
+      "Path": "source/blender/blenkernel/intern/paint.cc",
+      "SHA256": "DC2F3A6E65328C2ACE4EBE5106BB536CA0689616A633DDA579CA04074EDF38A0"
+    },
+    {
+      "Path": "source/blender/blenkernel/intern/subdiv_ccg.cc",
+      "SHA256": "C23299D0D31D2ED20FCC35A505B34F9AF3CEA47267574AE12A499F154DB4F0FA"
+    },
+    {
+      "Path": "source/blender/blenkernel/intern/pbvh.cc",
+      "SHA256": "5313992E3B333D29765CE3FC2230E571D3BD769A5DE2A6A544E73499C08BE69C"
+    },
+    {
+      "Path": "source/blender/blenkernel/intern/multires_pbvh_group_probe_v01.hh",
+      "SHA256": "4581EF66435C07253208678B08FD067BC2572D4943C04E85F18D32BA38EF37A6"
+    },
+    {
+      "Path": "source/blender/blenkernel/BKE_sculpt_cold_start_profile.hh",
+      "SHA256": "E16F79C82F4B19BFCF22A046A10BA2027CABC1A1CB0A32E9DF78D9641775AA10"
+    },
+    {
+      "Path": "source/blender/modifiers/intern/MOD_multires.cc",
+      "SHA256": "7D9A3C0AE5D6D05C9C2853089180C589CE384680813D596122B756EF709C02CC"
+    },
+    {
+      "Path": "source/blender/draw/intern/draw_sculpt.cc",
+      "SHA256": "2B15D6713F5B9E4BB2F65305E8C2A7671D782BA389E735203451FBB444C57F3C"
+    },
+    {
+      "Path": "source/blender/draw/intern/draw_sculpt.hh",
+      "SHA256": "F696C0C35F3BF2516A3442BC64B2385877B2A2080285C32F62E0690F582FF4A0"
+    },
+    {
+      "Path": "source/blender/draw/intern/multires_overlay_neutral_v01.hh",
+      "SHA256": "C368BB964E0C8E35C05CD7DBE4FA0401F123D74D5337B50D42E9E97A9B96B664"
+    },
+    {
+      "Path": "source/blender/draw/engines/overlay/overlay_sculpt.hh",
+      "SHA256": "D1A0ACE01DCB9474C2000BF410E3EF617AE2A84CDCAF1C5DC5DFFBADD7FF073B"
+    },
+    {
+      "Path": "source/blender/editors/sculpt_paint/mesh/sculpt.cc",
+      "SHA256": "C7AFABC9FFB2C89902DCB3DA34B766618260DEEFD33C83F6727228765513E0E7"
+    },
+    {
+      "Path": "source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc",
+      "SHA256": "92f8d48b986e104b08978df778dcb928e2e14e19c6964ea77a171149a693ebeb"
+    },
+    {
+      "Path": "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc",
+      "SHA256": "349E3EDD63C75EDE02109B7280AD6995773AFAE8796B27335B63E17E971E1890"
+    },
+    {
+      "Path": "experiments/sculpt-extended-20261016/AVVIA-ESPERIMENTO.ps1",
+      "SHA256": "F9C16B67071CAEC6B63DC4813161FE9622D070D64E92E84D76CAC0A75FC2DB0E"
+    },
+    {
+      "Path": "experiments/sculpt-extended-20261016/LOAD-SIDEBAR.py",
+      "SHA256": "3E1A86415DF65EB74B928B592346FC25E006611CFAAF15A4ABD3F0B3E30DB1D3"
+    },
+    {
+      "Path": "experiments/sculpt-extended-20261016/addon/__init__.py",
+      "SHA256": "74C2B0963767CE65CDACC19B3A6FE01DAAB34F26C337AC33C41139F6EF68D527"
+    },
+    {
+      "Path": "experiments/sculpt-extended-20261016/experiment-tools/AVVIA-ESPERIMENTO.ps1",
+      "SHA256": "4E384EF820E74F3E73805A2E16FA68B2B5E0AD2375E1E4B97F699257EC21AC3E"
+    },
+    {
+      "Path": "experiments/sculpt-extended-20261016/experiment-tools/LAYER-DIAGNOSTICS.py",
+      "SHA256": "3F4AA3F4D12F148716A9AA4D3A8A4F43FC7E0524CC0EEC463BB791D199A83EB6"
+    },
+    {
+      "Path": "experiments/sculpt-extended-20261016/experiment-tools/POLYPAINT-BAKE.py",
+      "SHA256": "3C088E5B4388C94A0DFBC40DF98D0E7149F57F83B89520DA1352CB64C818AC5B"
+    },
+    {
+      "Path": "experiments/sculpt-extended-20261016/experiment-tools/PROVA-POLYPAINT.py",
+      "SHA256": "066EAB8F9EA0644D7653D11CBBFCFB6804BC29F7AE1FECE9C18755C54B282D09"
+    },
+    {
+      "Path": "experiments/sculpt-extended-20261016/AVVIA-COMPLETO.ps1",
+      "SHA256": "38abbff287e4235daa005474a29410f6af8c0882474a40f7d7785d110c0bbcef"
+    },
+    {
+      "Path": "experiments/sculpt-extended-20261016/AGGIORNA-GITHUB.ps1",
+      "SHA256": "ac9df0d98bddccda688708824e38bf8adad03a0959a0c2171855298d90e90433"
+    },
+    {
+      "Path": "experiments/sculpt-extended-20261016/LEGGIMI.md",
+      "SHA256": "ed9ef55768b3f815fb94bf3304f04aa5b82478539f60c5be466a65bbbb0996d4"
+    },
+    {
+      "Path": "source/blender/editors/include/ED_sculpt.hh",
+      "SHA256": "a234444e234c521e4dcf81dc236676530afbe0c3a486e96d8b22bb17b95c8602"
+    },
+    {
+      "Path": "source/blender/editors/util/ed_util.cc",
+      "SHA256": "144af57a5bb808902c0add556e847376f7a813f694c28d0cb77962c8ede44268"
+    }
+  ],
+  "PreviousObservedExecutableSHA256": "4BDC85FEA5BCD54CAE390C99D71F87D4B1B8464CB847E0A19F7AA1C9C03DEE41",
+  "ExecutableHashNote": "Latest Windows binary not supplied; source reconstruction is parent checkpoint plus tested Startup Reuse V01/V02 blocks.",
+  "Validation": {
+    "Log": "Cold-Start-20261016-080816.zip",
+    "Mode": "REUSE",
+    "CCGBuilds": 1,
+    "SculptInitMS": 1270.905,
+    "RecordedUndoMS": 4.911
+  }
 }

@@ -7,6 +7,7 @@ $ErrorActionPreference = 'Stop'
 $outer = Join-Path $PSScriptRoot 'AVVIA-ESPERIMENTO.ps1'
 if (!(Test-Path -LiteralPath $outer)) { throw "Launcher esterno non trovato: $outer" }
 $flags = @{
+    BLENDER_MULTIRES_STARTUP_REUSE = '1'
     BLENDER_SCULPT_OPEN_FILE_ANCHOR = '1'
     BLENDER_SCULPT_COLD_START_LOG = $null
     BLENDER_SCULPT_STROKE_PROFILE_LOG = $null
@@ -34,3 +35,4 @@ try {
 finally {
     foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
 }
+
