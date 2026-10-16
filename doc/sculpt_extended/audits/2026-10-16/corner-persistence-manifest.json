@@ -1,0 +1,15 @@
+{
+  "audited_reference_commit": "01194d089eb5b324b125d0ef6ebaf877dd13f326",
+  "scope": "Real remap_after_topology_edit and remap_surviving_corners bodies and identity kernel; minimal Mesh attribute/storage adapters; L0 and ID-property wrappers stubbed; no BMesh or Blender build",
+  "functions": {
+    "static void free_layer(": "bbe2efb8b023eb29558961be00f650ec286ee169d39f7100ba11537c488ebe8b",
+    "void polypaint_clear(": "b79ea11626c53f9692a04038d74af5b7d1f303f7560096fbac79d818793a3625",
+    "void faceset_clear(": "339647efcc960423c6438f72da0ead5e7bbdd0f400b8b0a68174882fadb3abd8",
+    "bool remap_surviving_corners(": "c55d83e60ffb1233765c4028236b9e2eac202835069765fe888e7f7b3475d9d2",
+    "static bool initialize_missing_base_grid(": "99f7383b3d32d2145561fc00e3378216696d8ec100e1d580d688eed4478ecea4",
+    "bool remap_after_topology_edit(": "18fad6d26612dd887517495afe4f490772162aba9e39d09e0fdf6e7d93b5eb75"
+  },
+  "editmesh_guard_sha256": "7b1f7bcc0f9e5cef497c29f55b61a95342f24320ef6621cb6db27e985d0c42e5",
+  "checks": "5 cases: noncanonical/default, explicit-ID, canonical-ID, two-step remap, inactive Polypaint guard",
+  "sanitizers": "ASan/UBSan no diagnostics; LeakSanitizer disabled for executor /proc restriction"
+}

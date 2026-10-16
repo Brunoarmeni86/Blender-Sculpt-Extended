@@ -1,5 +1,7 @@
 # Approfondimento dell'audit — 16 ottobre 2026
 
+**Seguito:** [terzo approfondimento — animazione, gruppi e identità dopo Edit](ANIMATION-TOPOLOGY-REVIEW.md).
+
 Segue il [primo report](README.md). Rimane valido il riferimento `01194d089eb5b324b125d0ef6ebaf877dd13f326`, checkpoint `checkpoint/sculpt-extended-20261015`. Il ramo è stato ricontrollato prima dell'approfondimento: non è cambiato. Main contiene la prima pubblicazione delle note, non nuove correzioni al codice.
 
 Questo seguito approfondisce chiamanti, trasformazioni, conteggio Undo e lettura/scrittura sparse. I risultati precedenti restano aperti. **Nessun fix al codice applicato.** Non è una certificazione delle successive patch HR Face Sets distribuite fuori da questi commit.

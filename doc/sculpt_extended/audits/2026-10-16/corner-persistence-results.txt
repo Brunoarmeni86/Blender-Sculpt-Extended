@@ -1,0 +1,5 @@
+T1 unchanged quad IDs 5/6/7/8, default old IDs: all four real layer payloads discarded
+T2 explicit stable-ID control: same quad and payloads retained
+T3 canonical-ID control: default old IDs retain all payloads
+T4 real two-step remap: retain IDs 5-8 from old 1-8, then default unchanged-topology call discards retained detail
+T5 extracted Edit gate: stored inactive Polypaint alone is skipped; adding a layer enables the gate

@@ -1,0 +1,9 @@
+A1 evaluated-ID control: scalar updated, no Commit, REC preserved
+A2 animation copy-back to original Sculpt ID: Commit=1, refresh=1, REC 1->0
+A3 unchanged-value control: copy-back skips setter side effects
+A4 original Object Mode control: scalar updated without Commit or REC change
+A5 simulated Commit refusal: original copy-back leaves old scalar, rebuild requested
+G1 remove middle member: group IDs 7/0/7; Merge Group rejected as non-contiguous
+G2 endpoint-removal control: remaining contiguous members merge successfully
+G3 merge hidden group into visible group: member stays hidden; next hide/show loses saved visibility
+G4 Add Active to Group control: same hidden->visible transition restores member visibility

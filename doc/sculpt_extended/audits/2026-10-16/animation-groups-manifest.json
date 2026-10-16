@@ -1,0 +1,27 @@
+{
+  "audited_reference_commit": "01194d089eb5b324b125d0ef6ebaf877dd13f326",
+  "scope": "Original setters/animation dispatch/group bodies; RNA path resolution, Commit and refresh are adapters; no Blender playback",
+  "functions": {
+    "static void rna_MultiresSculptLayer_strength_set(": "5acf36e18ac23e26414194f707847f50a78ea5b1cf6adfb14e33aab135a68956",
+    "bool BKE_animsys_write_to_rna_path(": "032a11121f7014ae4060db93f49d2a2efc603def0d94b2ca9cbc077a9e0f00be",
+    "static bool animsys_construct_orig_pointer_rna(": "c3bfad34031ba50f071ab3d9c025c3e01a0bfb81de09b1bfe2ec33c23f29a178",
+    "static void animsys_write_orig_anim_rna(": "11bd23563a2a8ec12b04d327809630f14ee3b7b9f20aa22cf28009f2288ddbf5"
+  },
+  "group_functions": {
+    "bool base_deltas_ensure(": "4ffcb51f3b9ed471e4a0bf9d4c45608a4a56a977341013e6289074ecfa704f3e",
+    "static void free_layer(": "bbe2efb8b023eb29558961be00f650ec286ee169d39f7100ba11537c488ebe8b",
+    "MultiresSculptLayer *active(MultiresModifierData &mmd)": "38c018de3f9702f2ed2a2b6cef67fe3d535ab03735da03ad6126da6d90197a98",
+    "float (*grid_ensure(": "cecb46b5b474b172a54e745becbed9be9be7a929c5e6e2e4bb2151f1c3f0e303",
+    "bool merge_down(": "2f267d1d0116bbfa6dc80b2fe8758b0cb94890efa3bbea6ffe07c8420819d5ea",
+    "bool group_merge(": "5c0efc4f36b593d5ba320d01f007bf3a08528b761d50118b47e7b40ce99767b6",
+    "void faceset_clear(": "339647efcc960423c6438f72da0ead5e7bbdd0f400b8b0a68174882fadb3abd8",
+    "static int group_next_id(": "488229a43d94137b766a52e2ce1043226b85ed40fae542c76217a1e04e9f79f9",
+    "static void group_assign(": "6a8e5c60960974bd00a8c7b32f580d5f06de8145635f5fd4a47e40ac90803f3b",
+    "bool group_with_below(": "513adc638144f384af9052572a501e348b25b36839ccdaa67b3d36d0d8bb2f38",
+    "bool group_add_active(": "638505da68e8c962f4ff183f0c727944238387f27c6a231b4d2acba0c254975e",
+    "bool group_remove_active(": "2f46e81e2da36d3a0096956ffc167b8a4b98d11631c266e56f29a98f7632853a",
+    "bool group_toggle_visibility(": "ee8ee713adffdf4b471bcfe9d8cd60f70277b5cc44a58ca58e11bd5f0cf91387"
+  },
+  "checks": "9 observations and controls: A1-A5, G1-G4",
+  "sanitizers": "ASan/UBSan; no diagnostics; LeakSanitizer disabled due to executor /proc restriction"
+}

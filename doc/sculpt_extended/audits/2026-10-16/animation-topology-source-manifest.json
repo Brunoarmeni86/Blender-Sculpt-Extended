@@ -1,0 +1,30 @@
+[
+  {
+    "path": "source/blender/blenkernel/intern/anim_sys.cc",
+    "git_blob_sha": "6b906ccdcdd23339e28da1cf690938e04b07f33f"
+  },
+  {
+    "path": "source/blender/makesrna/intern/rna_access.cc",
+    "git_blob_sha": "24e0f0814a75303c7a99fa7ab1e854a1e9fc03de"
+  },
+  {
+    "path": "source/blender/makesrna/intern/rna_key.cc",
+    "git_blob_sha": "25c1f6990e63bc6e8d5c8ba925c8a4f93b9f349f"
+  },
+  {
+    "path": "source/blender/editors/mesh/editmesh_utils.cc",
+    "git_blob_sha": "2a90c063f70585623713e9c6eea5c7329272a046"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_layer_corner_identity.hh",
+    "git_blob_sha": "406f775bb664ebc0e542f2eb4048c1e07061970c"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_reshape.cc",
+    "git_blob_sha": "194ba50ff92d72dcf48860320ca27a6d0017139c"
+  },
+  {
+    "path": "source/blender/makesrna/intern/rna_modifier.cc",
+    "git_blob_sha": "76f28a051d1a264d918184ca5a6eb118ca7d480c"
+  }
+]
