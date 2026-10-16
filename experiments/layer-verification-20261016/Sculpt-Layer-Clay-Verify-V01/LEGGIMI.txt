@@ -1,0 +1,79 @@
+SCULPT LAYER CLAY VERIFY V01
+Verifica Clay e Clay Strips esistenti. Nessuna patch C++, nessuna compilazione.
+Usa la build attuale con Smooth Guard V02 gia applicato e tutte le ottimizzazioni.
+
+INSTALLAZIONE
+Estrarre la cartella Sculpt-Layer-Clay-Verify-V01 in C:\BlenderDev.
+Chiudere Blender, quindi in PowerShell:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Layer-Clay-Verify-V01\AVVIA.ps1"
+Aprire una copia del file. Pannello N > Multires > Verifica Clay.
+I pulsanti leggono soltanto impronte. Non cambiano pennello, layer, REC o mesh,
+non eseguono Commit/Undo/Redo/Save e non aggiungono passaggi alla cronologia Undo.
+Le letture complete su mesh dense richiedono tempo soltanto quando richieste.
+
+PROVA SEMPLICE (fare una sequenza distinta per ciascun pennello)
+Due layer: A con dettaglio evidente, B vuoto e attivo, entrambi visibili.
+Usare il massimo livello Multires, forza layer B = 1, REC acceso.
+Per isolare il test iniziale: Auto Smooth 0, niente texture/live displacement/
+shrinkwrap o modifiche L0. Partire da una zona senza mirror clipping.
+1. Commit di eventuali modifiche precedenti, poi riattivare REC.
+2. Selezionare Clay o Clay Strips e il rispettivo pulsante Prima: layer vuoto.
+   Il pannello rifiuta un pennello diverso; ogni nuova misura Prima e numerata.
+3. Una pennellata, poi Dopo pennellata. Per Clay Strips TRASCINARE il pennello:
+   il codice non deforma se il movimento iniziale e nullo.
+4. Undo normale -> Dopo Undo; Redo normale -> Dopo Redo.
+5. Commit normale -> Dopo Commit.
+6. Cambiare layer, tornare a B -> Dopo cambio layer e ritorno.
+7. Salvare con un nuovo nome e riaprire nello STESSO Blender -> Dopo riapertura.
+   La sessione del pannello rimane aperta; se si chiude il programma si riparte
+   da una nuova prova. REC puo spegnersi con Undo/Commit: riattivarlo prima
+   di iniziare una nuova pennellata o una nuova sequenza.
+
+CONTROLLI SUCCESSIVI, UNO ALLA VOLTA
+Ripetere su B gia scolpito, poi separatamente con forza layer B = 0.5.
+Infine riattivare Auto Smooth (es. 0.25) e fare una nuova sequenza Prima/Dopo:
+deve ammorbidire il contributo attivo, inclusa la pennellata appena aggiunta,
+preservando i dati degli altri layer. Il log annota pennello e Auto Smooth.
+Non cambiare forza, visibilita, pennello o impostazioni a meta sequenza.
+Maschere, simmetria e mirror clipping sono casi aggiuntivi: non certificati
+dal solo test base. Il kit non introduce modifiche al clipping nativo.
+
+COMPORTAMENTO ATTESO
+Clay e Clay Strips costruiscono il piano dalla superficie composta visibile;
+usano il dettaglio degli altri layer come riferimento per orientamento/falloff.
+La registrazione deve scrivere soltanto nel layer attivo. Non sono pennelli
+isolati dal contesto geometrico degli altri layer.
+Su un layer vuoto devono aggiungere deformazione. La superficie puo quindi
+attenuare visivamente del dettaglio altrui, ma disattivando B quel dettaglio
+deve tornare: il payload di A deve essere rimasto invariato.
+Undo deve restituire Prima, Redo Dopo; Commit e cambio layer non devono
+produrre salti. La base nativa e i payload non attivi devono mantenere l'hash.
+Il payload attivo puo rimanere invariato finche la pennellata e pending:
+diventa persistente al Commit. La sua impronta deve poi conservarsi al riavvio.
+Una rivalutazione puo introdurre minime differenze float nella superficie:
+un hash superficie diverso dopo riapertura richiede esame, da solo non basta
+a dimostrare un difetto visibile. Confrontare anche i payload persistenti.
+
+CODICE ESAMINATO
+Repository Brunoarmeni86/Blender-Sculpt-Extended, checkpoint 72dae3ab28b5:
+brushes/clay.cc: calc_grids, proiezione sul piano, fattori, apply_translations.
+brushes/clay_strips.cc: calc_grids, fattori locali z/trim, offset e apply_translations.
+sculpt.cc: journal dei campioni modificati, acquisizione riferimento prima
+del pennello, Auto Smooth dopo il pennello attraverso il percorso delta.
+multires.cc: solver sottrae base/altri layer, divide per forza attiva e pubblica
+soltanto nei campioni del layer attivo. Non e emersa una patch necessaria
+per la registrazione standard; le prove reali sul PC restano da eseguire.
+
+RACCOLTA
+Chiudere Blender, poi:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Layer-Clay-Verify-V01\RACCOGLI-LOG.ps1"
+Inviare lo ZIP indicato. Il raccoglitore usa solo i log della sessione avviata
+da questo pacchetto e richiede almeno una misura Clay/Clay Strips.
+Il kit non modifica i sorgenti, il runtime installato o i file di scena.
+Per rimuoverlo basta chiudere Blender e usare il proprio avvio completo normale.
+
+VALIDAZIONE LOCALE DEL KIT
+Sintassi e operatore Python verificati con API bpy simulata: famiglie, numeri,
+REC/modalita/pennello richiesti, nessun avanzamento su lettura fallita.
+Non equivalgono a una prova di Blender, del suo Undo o del salvataggio.
+Il codice dei pennelli e del Commit resta identico alla build installata.

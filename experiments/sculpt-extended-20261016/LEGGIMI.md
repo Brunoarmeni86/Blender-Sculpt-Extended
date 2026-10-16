@@ -122,3 +122,55 @@ coordinates and masks match bit-for-bit, including singular-derivative correctio
 Normal-stage inputs and fallback/opt-in behavior are checked; actual OpenSubdiv
 and full Blender Windows validation require runtime tests. The user compiled
 and ran this Windows build. Latest executable hash was not supplied.
+
+
+
+## Isolated Smooth guard V02 and brush verification (2026-10-16)
+
+Isolated delta Smooth now preserves exactly zero translations through native
+Mirror clipping. Native clipping may otherwise snap stationary or fully masked
+samples to the mirror plane. Only the existing isolated layer Smooth path uses
+this guard. Moving samples retain native clipping and axis locks; without mirror
+clipping the native helper is called directly with no additional sample scan.
+The existing BLENDER_SCULPT_LAYER_DELTA_SMOOTH=1 in AVVIA-COMPLETO already enables
+this path. No new launch flag, dense cache, layer-write lock or general brush
+rewrite is introduced. Native brush change is limited to brushes/smooth.cc.
+
+Local validation used the actual native clipping function plus the wrapper with
+simulated Blender/math APIs: 1280 ASan/UBSan cases, including rotated mirror
+planes, stationary/masked samples and moving samples. This is not a full Blender
+build. The user compiled the patch on Windows and confirmed working Smooth.
+
+Available read-only, session-only test kits are under
+experiments/layer-verification-20261016/. Each folder can be copied to C:/BlenderDev
+and launched using its AVVIA.ps1 with PowerShell ExecutionPolicy Bypass. Their
+launch profiles retain the validated optimization flags and use the installed
+SculptExtended runtime. No verification panel is loaded by the normal complete
+launcher. Grab/Clay kits have no installer and make no native source changes.
+
+Evidence and scope:
+- Smooth log risultati-20261016-090344-751.zip: the empty-active-layer BEFORE/AFTER
+  surface hash is identical; native base, cage and nonactive payloads are unchanged
+  in empty and populated captures. The populated BEFORE had pending coordinates;
+  it is not a clean full Undo/Commit/save sequence. User subsequently confirmed
+  working Smooth. This log alone does not certify the full sequence.
+- Grab log risultati-20261016-091601-378.zip: empty active layer, weight 1. Native
+  base, cage and nonactive payload hashes unchanged across BEFORE, AFTER, UNDO,
+  REDO, COMMIT and SWITCH. Undo surface matches BEFORE, Redo matches AFTER;
+  COMMIT/SWITCH match AFTER, and only active persistent payload changes at Commit.
+  REC becomes off after Undo/Redo; re-enable it before further sculpting.
+- The user reported the populated-active-layer Grab test at weight 0.5 and
+  save/reopen working. These follow-up checks were visual, without supplied
+  fingerprint logs.
+- The user reported the Clay/Clay Strips verification working. No new Clay logs
+  were supplied. Draw uses the shared recording path but has not been separately
+  tested in this sequence. Pose, Cloth and global filters remain under review.
+
+The kits' Python verification operators were exercised with simulated bpy APIs;
+they only call the native read-only fingerprint operator, require REC/mode at
+the beginning, preserve sequence state on failed reads, and do not create Undo
+steps. Actual Blender integration remains the Windows user's runtime validation.
+
+Evaluator Trace V01 is a separate diagnostic patch and is not included in this
+functional checkpoint. No latest Windows executable hash was supplied; this
+commit is the previous checkpoint plus the exact validated Smooth guard source.

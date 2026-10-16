@@ -1,0 +1,79 @@
+Sculpt Layer Smooth Guard V02 - consolidamento Smooth sul layer attivo.
+
+COMPORTAMENTO CONCORDATO
+Smooth Laplacian elabora il contributo del layer attivo. Su un layer vuoto
+non deve muovere la superficie. I dati di base e degli altri layer rimangono
+protetti dal percorso di registrazione esistente. La superficie completa resta
+visibile per pennellata, maschere, orientamento e valutazione del risultato.
+Le limitazioni V01 rimangono: massimo livello Multires, REC, layer attivo visibile
+con forza non nulla; niente live displacement/shrinkwrap, active L0 cage edits,
+Surface Smooth o inversione. Non si estende il comportamento a Grab o altri brush.
+
+CORREZIONE CIRCOSCRITTA
+Il clipping Mirror nativo puo trasformare uno spostamento nullo in uno snap al
+piano di simmetria. Il solo Smooth sul delta ora conserva i campioni a spostamento
+nullo anche dopo clipping: layer vuoto e campioni completamente mascherati restano
+fermi. Per gli spostamenti non nulli clipping e blocchi assi rimangono nativi.
+Con clipping spento non aggiunge scansioni o buffer di protezione. La reference
+sparse dello Smooth V01 e la separazione Jacobi letture/scritture sono conservate.
+
+INSTALLAZIONE
+Richiede le patch gia applicate fino al Full CCG Batch V01. Estrarre questa
+cartella in C:\BlenderDev. Chiudere Blender e APPLICA.ps1 con ExecutionPolicy Bypass.
+Modifica un solo blocco in source/blender/editors/sculpt_paint/mesh/brushes/smooth.cc.
+Verifica il blocco prima di scrivere, backup sorgente/eseguibile e compilazione.
+Build fallita: non avviare la vecchia build. DISAPPLICA.ps1 rimuove solo la correzione.
+
+AVVIO DI VERIFICA
+AVVIA.ps1 mantiene il profilo completo: Undo Open File, Startup Reuse V02, Full
+CCG Batch V01, cache 1024 MB, Smooth delta e correzioni viewport. Profili Cold/
+Stroke/Draw spenti. Non cambia gli script di avvio installati: usa un bootstrap
+locale che carica il kit esistente e registra un pannello temporaneo di verifica.
+Pannello: N > Multires > Verifica Smooth (temporanea).
+I pulsanti leggono impronte complete di base, tutti i layer e superficie. NON
+eseguono Smooth, Undo, Redo, Commit o salvataggio. Nessun parametro viene salvato
+nella scena. La lettura puo richiedere tempo su mesh molto dense; e solo esplicita.
+
+PROVA 1 - LAYER VUOTO
+Usare una COPIA di una scena semplice, massimo livello (ad es. 3-4), almeno due
+layer. Mettere dettaglio evidente in un layer e creare un secondo layer vuoto.
+Selezionare quello vuoto, visibile, REC attivo, forza 1. Commit prima della misura
+per sistemare eventuali pennellate precedenti. Scegliere Smooth Laplacian normale.
+1. Pannello verifica: Prima: layer vuoto.
+2. Fare una pennellata Smooth. Pannello: Dopo Smooth.
+3. Eseguire Undo normalmente. Pannello: Dopo Undo.
+4. Eseguire Redo normalmente. Pannello: Dopo Redo.
+5. Commit dal pannello Multires esistente. Pannello verifica: Dopo Commit.
+Risultato atteso: la superficie non si muove, base e layer non attivi invariati.
+Se si usa gia una configurazione supportata con Mirror/Clipping, ripetere vicino
+al piano senza introdurre modifiche di topologia durante la prova.
+
+PROVA 2 - LAYER CON DEFORMAZIONE
+Nel layer attivo creare una deformazione evidente sopra il dettaglio degli altri.
+Commit, poi Prima: layer con deformazione. Smooth deve levigare quella deformazione
+senza eliminare il contributo degli altri layer. Ripetere Dopo Smooth, Undo, Redo,
+Commit come sopra. I pulsanti non aggiungono step Undo. Per la prova iniziale usare
+pennello senza texture Noise, Auto Smooth di altri brush e filtri disattivati.
+Dopo Commit selezionare un altro layer e tornare a quello iniziale; riattivare REC
+se necessario. Premere Dopo cambio layer e ritorno. Salvare con un nuovo nome,
+riaprire nello STESSO Blender e premere Dopo riapertura. Lo stato del pannello
+persiste durante la sessione; chiudendo Blender si azzera.
+
+RACCOLTA
+Chiudere Blender e RACCOGLI-LOG.ps1. Inviare lo ZIP: consente di confrontare
+native_hash, cage_hash, payload di ciascun layer e superficie per i passi marcati.
+Undo deve ripristinare la superficie Prima; Redo quella Dopo Smooth. Dopo Commit
+possono cambiare i dati del layer attivo, base e altri layer devono restare uguali.
+Dopo cambio layer/riapertura confrontiamo soprattutto i payload memorizzati:
+il ricalcolo della superficie puo introdurre differenze float minime.
+
+VALIDAZIONE QUI
+C++17 ASan/UBSan: 1280 confronti del codice nativo reale di clipping e del wrapper
+con API matematiche simulate, piani ruotati, cache presente/assente e blocchi assi.
+Riprodotto lo snap nativo di delta zero; campioni nulli protetti, campioni mossi
+bit-identici al clipping precedente. Modello patcher: rollback, idempotenza e
+conflitti. 275 invarianti matematici su layer vuoto, pesi anche negativi, Auto Smooth,
+Jacobi, reference sparse e duplicati alle cuciture. UI Python compilata e testata
+con bpy simulato: sole chiamate di fingerprint, nessun Undo/Commit automatico.
+Non eseguiti qui Blender Windows reale, Undo/Redo o salvataggio/riapertura:
+la verifica integrata e affidata alle impronte della prova sul PC.

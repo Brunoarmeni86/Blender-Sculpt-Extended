@@ -1,0 +1,67 @@
+Sculpt Layer Grab Verify V01 - verifica del percorso esistente, SENZA PATCH C++.
+
+COMPORTAMENTO ATTESO
+Grab sposta la superficie visibile (base + layer visibili), usando posizioni e
+normali di inizio pennellata. Commit ricava il delta per il solo layer attivo,
+sottraendo base e altri layer e dividendo per la forza del layer attivo.
+Su un layer vuoto Grab DEVE spostare la superficie e registrare lo spostamento li.
+Questa e una semantica diversa da Smooth sul delta, che su layer vuoto resta fermo.
+I dati degli altri layer devono restare invariati: questo non significa che il
+loro dettaglio rimanga fermo in viewport mentre si trascina la superficie completa.
+
+CODICE ESAMINATO
+brushes/grab.cc: calc_grids usa OrigPositionData e applica traslazioni al CCG.
+sculpt.cc: Grab legge la superficie originale e la ripristina prima dei successivi
+dab, prima delle passate di simmetria. multires.cc: il solver sottrae i contributi
+non attivi e pubblica soltanto nei payload del layer attivo.
+Non abbiamo individuato in questi punti una modifica necessaria prima del test.
+Nessuna compilazione, nessuna modifica ai sorgenti o al kit installato.
+
+INSTALLAZIONE E AVVIO
+Estrarre la cartella in C:\BlenderDev. Usare la build attuale con Smooth Guard V02,
+Startup Reuse V02, Full CCG Batch V01 e Open File Undo gia applicati.
+Chiudere Blender e AVVIA.ps1 con ExecutionPolicy Bypass. Mantiene il profilo completo
+e registra il pannello temporaneo N > Multires > Verifica Grab.
+I pulsanti leggono soltanto impronte: non eseguono Grab, Commit, Undo/Redo o Save.
+Le impronte complete possono richiedere tempo su mesh molto dense; sono esplicite,
+mai eseguite durante la pennellata. Nessuna proprieta viene salvata nella scena.
+
+PRIMA PROVA - DUE LAYER, FORZA 1
+Usare una COPIA semplice del file, massimo livello Multires, senza live displacement,
+shrinkwrap o modifiche L0. Layer A con dettaglio evidente, layer B vuoto e attivo.
+REC acceso, B visibile, forza 1. Grab normale, Auto Smooth 0, silhouette e texture
+spente per la prima prova. Maschere/simmetria si verificano dopo il caso semplice.
+1. Commit delle modifiche precedenti. RIATTIVARE REC se il Commit lo ha spento.
+2. Premere Prima Grab: layer vuoto. Ogni nuova misura Prima ha un numero progressivo.
+3. Eseguire una pennellata Grab e premere Dopo Grab. La superficie deve muoversi.
+4. Eseguire Undo normale, poi pulsante Dopo Undo. Redo normale, poi Dopo Redo.
+5. Eseguire Commit normale, poi Dopo Commit. La forma deve conservare lo spostamento;
+   i dati di base e del layer A devono mantenere le impronte precedenti.
+6. Cambiare layer e tornare a B, poi Dopo cambio layer e ritorno.
+7. Salvare con un nuovo nome, riaprire nello STESSO Blender e Dopo riapertura.
+
+SECONDA PROVA - LAYER GIA POPOLATO
+Fare una nuova misura Prima Grab: layer con deformazione, su B gia contenente
+dettaglio, poi ripetere Grab -> Undo/Redo -> Commit -> cambio layer -> riapertura.
+Se la prima prova e corretta, ripetere separatamente con forza 0.5: Grab deve
+registrare il delta corretto rispetto al peso. Mai cambiare forza durante la
+pennellata o tra Prima e Dopo Grab. Ogni prova nuova inizia con Commit e REC acceso.
+
+COSA CONFRONTIAMO
+Prima/Dopo: base (native_hash), cage e payload di tutti i layer non attivi uguali.
+La superficie Dopo Grab deve differire da Prima; Undo ripristina Prima, Redo Dopo.
+Il layer attivo puo essere ancora pending prima di Commit: il payload memorizzato
+non deve necessariamente cambiare subito dopo il trascinamento.
+Dopo Commit il solo layer attivo deve contenere il nuovo spostamento. I payload
+memorizzati devono conservarsi con cambio layer e salvataggio/riapertura.
+Una rivalutazione puo introdurre minime differenze float nella superficie: un
+hash superficie diverso dopo riapertura non dimostra da solo un difetto visibile.
+
+RACCOLTA E LIMITI
+Chiudere Blender, RACCOGLI-LOG.ps1 e inviare lo ZIP. Raccoglie i log della sessione
+attuale; preserva tutte le misure Prima numerate e le relative rilevazioni.
+Test del kit: sintassi Python e operatore reale con bpy simulato, etichette, REC e
+Sculpt Mode richiesti all'inizio, sole chiamate native read-only di fingerprint.
+Controllato anche il modello matematico di registrazione per pesi 1/0.5/-1/2,
+maschere e contributi sovrapposti. Non sono prove reali di Blender Undo/salvataggio:
+quelle richiedono le impronte del test sul PC. Grab e il Commit rimangono nativi.

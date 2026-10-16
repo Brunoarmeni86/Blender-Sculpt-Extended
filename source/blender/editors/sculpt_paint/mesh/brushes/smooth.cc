@@ -227,6 +227,31 @@ static void calc_grids(const Depsgraph &depsgraph,
 /* DELTA_SMOOTH_V01: fixed sparse reference, Jacobi reads followed by separate writes.
  * Reads delta = live CCG - (stroke-start CCG - stitched weighted active-layer delta).
  * Thus no curvature from base/other layers enters the smoothing average. */
+/* LAYER_DELTA_SMOOTH_GUARD_V02
+ * Mirror clipping may snap a stationary point to its plane. For isolated
+ * Smooth, a zero layer delta must stay stationary, including masked samples. */
+static void clip_layer_delta_translations(const Sculpt &sd,
+                                          const SculptSession &ss,
+                                          const Span<float3> positions,
+                                          const MutableSpan<float3> translations)
+{
+  if (!ss.cache || ss.cache->mirror_modifier_clip.flag == 0) {
+    clip_and_lock_translations(sd, ss, positions, translations);
+    return;
+  }
+  Vector<int, 64> stationary;
+  for (const int i : translations.index_range()) {
+    const float3 &delta = translations[i];
+    if (delta.x == 0.0f && delta.y == 0.0f && delta.z == 0.0f) {
+      stationary.append(i);
+    }
+  }
+  clip_and_lock_translations(sd, ss, positions, translations);
+  for (const int i : stationary) {
+    translations[i] = float3(0.0f);
+  }
+}
+
 static bool do_layer_delta_smooth(const Depsgraph &depsgraph,
                                  const Sculpt &sd,
                                  const Brush &brush,
@@ -306,7 +331,7 @@ static bool do_layer_delta_smooth(const Depsgraph &depsgraph,
           }
         }
       }
-      clip_and_lock_translations(sd, ss, positions, node_changes);
+      clip_layer_delta_translations(sd, ss, positions, node_changes);
     }, exec_mode::grain_size(1));
     /* A barrier separates all neighbor reads from all position writes, including other nodes. */
     node_mask.foreach_index([&](const int i, const int pos) {
@@ -422,3 +447,4 @@ void do_smooth_brush(const Depsgraph &depsgraph,
 }
 
 }  // namespace blender::ed::sculpt_paint::brushes
+

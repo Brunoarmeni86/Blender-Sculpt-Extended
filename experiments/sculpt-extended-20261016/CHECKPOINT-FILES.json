@@ -1,9 +1,9 @@
 {
-  "Timestamp": "2026-10-16T06:28:02.003035+00:00",
-  "BaseCheckpoint": "77547303508031e1209a3d0bd0e114d7dd490884",
+  "Timestamp": "2026-10-16T07:33:21.218170+00:00",
+  "BaseCheckpoint": "72dae3ab28b5abafc0fe5156f9a47e484aaab26c",
   "Branch": "checkpoint/sculpt-extended-20261015",
   "ObservedExecutableSHA256": null,
-  "Profile": "weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-full-ccg-batch-v01-pbvh-factor1",
+  "Profile": "weight-cache-1024-overlay-neutral-open-file-undo-startup-reuse-v02-full-ccg-batch-v01-pbvh-factor1-smooth-guard-v02",
   "Files": [
     {
       "Path": "source/blender/blenkernel/intern/multires.cc",
@@ -99,11 +99,11 @@
     },
     {
       "Path": "experiments/sculpt-extended-20261016/AGGIORNA-GITHUB.ps1",
-      "SHA256": "cea90b714cdad1d3448db8eeb0670dadc633f21e52fdb5a3672f2ba84dabbbaa"
+      "SHA256": "808180962e41454df8f28f4e0451d391886388529375a70b69d2e4e45d4da120"
     },
     {
       "Path": "experiments/sculpt-extended-20261016/LEGGIMI.md",
-      "SHA256": "acf924f3619293f491bbbb089f228bba455e28aef1372d0e23cf8ac9d6343a48"
+      "SHA256": "0d96da1578f5a29bf9b3f55f98186df1705db74b1180efd515c7bd175d553172"
     },
     {
       "Path": "source/blender/editors/include/ED_sculpt.hh",
@@ -112,11 +112,114 @@
     {
       "Path": "source/blender/editors/util/ed_util.cc",
       "SHA256": "144af57a5bb808902c0add556e847376f7a813f694c28d0cb77962c8ede44268"
+    },
+    {
+      "Path": "source/blender/editors/sculpt_paint/mesh/brushes/smooth.cc",
+      "SHA256": "d2fabd2d81a73f9bcea235d67049c9be5dcca1d36789b37a5f626f37a08aabdc"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Smooth-Guard-V02/APPLICA.ps1",
+      "SHA256": "8d1f81e7a5d3bdd2055d7fc7167ec3a28d3c22650008cd7011226e37dbf31fa2"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Smooth-Guard-V02/AVVIA.ps1",
+      "SHA256": "7e9f6c7b7954938deb09b7b1f484c11353ff7bb0a93f291da6f483e64472bac5"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Smooth-Guard-V02/DISAPPLICA.ps1",
+      "SHA256": "6eadbc12311c8b1e5ac68af94df1d1f387466cc43c37f225783d55d76addcf42"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Smooth-Guard-V02/LEGGIMI.txt",
+      "SHA256": "2f1cfe0e8ae0cea8ededfd4214bffa519169d5523956b806ad134d8fd634e12c"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Smooth-Guard-V02/RACCOGLI-LOG.ps1",
+      "SHA256": "a9bc47c3085dcfacb9c89656a9076dc58946c0909a741be8934668637aede1e8"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Smooth-Guard-V02/VERIFICA-SMOOTH.py",
+      "SHA256": "2fafb94ab1b369dec01f343f24e8d505723748cd2ca2d970f696cf8c1da88130"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Smooth-Guard-V02/blocks.json",
+      "SHA256": "57a1e6f34c93dd67bf2e7472b8adfa5bfe6f49a5f8403ffd0f62a4bb75b03239"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Smooth-Guard-V02/experiment-tools/AVVIA-ESPERIMENTO.ps1",
+      "SHA256": "aac2eeaf2c9fc82e4d505e962063e212befda7665234f0370ed94079dba39ad0"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Smooth-Guard-V02/experiment-tools/PROVA-POLYPAINT.py",
+      "SHA256": "a8bcf376a5a01a48883d1f89e654ad3c9bd7cd195869c6b12082ca1713b62a2e"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Grab-Verify-V01/AVVIA.ps1",
+      "SHA256": "7e9f6c7b7954938deb09b7b1f484c11353ff7bb0a93f291da6f483e64472bac5"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Grab-Verify-V01/LEGGIMI.txt",
+      "SHA256": "d3fbb89ce6dfd42f1dd6a7dec66c3652ebdcbd935344d37c039faed6bec4b686"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Grab-Verify-V01/RACCOGLI-LOG.ps1",
+      "SHA256": "c068c987a6926665c43ea41d1856c80ce3694c2f607bb6fc69b4efd23d9e3baf"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Grab-Verify-V01/VERIFICA-GRAB.py",
+      "SHA256": "4fcde99179fffc092fb38752b7e2c339ac52647455bb5b98d4f40a9513e613b0"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Grab-Verify-V01/experiment-tools/AVVIA-ESPERIMENTO.ps1",
+      "SHA256": "aac2eeaf2c9fc82e4d505e962063e212befda7665234f0370ed94079dba39ad0"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Grab-Verify-V01/experiment-tools/PROVA-POLYPAINT.py",
+      "SHA256": "cbcdd3933bd3c2413ebf6518bbd4506f1f6888122d0b2a0e01c5689fe8ddfd8f"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Clay-Verify-V01/AVVIA.ps1",
+      "SHA256": "7e9f6c7b7954938deb09b7b1f484c11353ff7bb0a93f291da6f483e64472bac5"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Clay-Verify-V01/LEGGIMI.txt",
+      "SHA256": "c1e8ee91337d23bf1480891dd2f1ae19d499732ddcd41fdc0fec2c203838470f"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Clay-Verify-V01/RACCOGLI-LOG.ps1",
+      "SHA256": "280e2609e075ffa117ae836e8c3f0728ba494da497f04b24d27d9845f67d4ef0"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Clay-Verify-V01/VERIFICA-CLAY.py",
+      "SHA256": "8e58909e0a01f45a5b9f8133521f0b3ec353f2b1a67a8b814362f56ce6a149a8"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Clay-Verify-V01/experiment-tools/AVVIA-ESPERIMENTO.ps1",
+      "SHA256": "aac2eeaf2c9fc82e4d505e962063e212befda7665234f0370ed94079dba39ad0"
+    },
+    {
+      "Path": "experiments/layer-verification-20261016/Sculpt-Layer-Clay-Verify-V01/experiment-tools/PROVA-POLYPAINT.py",
+      "SHA256": "da22d193dca6e00f24e59182c2c3694951caee2547dc0d91118bdc9c71c00515"
     }
   ],
   "PreviousObservedExecutableSHA256": "4BDC85FEA5BCD54CAE390C99D71F87D4B1B8464CB847E0A19F7AA1C9C03DEE41",
-  "ExecutableHashNote": "Latest Windows binary not supplied; source reconstruction is parent checkpoint plus tested Full CCG Batch V01 exact blocks.",
+  "ExecutableHashNote": "Latest Windows binary not supplied; parent checkpoint plus exact user-compiled Smooth Guard V02 source. Evaluator Trace diagnostic patch excluded.",
   "Validation": {
+    "SmoothGuard": {
+      "WindowsBuild": "user compiled and reported working",
+      "FingerprintLog": "risultati-20261016-090344-751.zip",
+      "Scope": "empty layer surface unchanged; protected payloads unchanged; full sequence not captured"
+    },
+    "Grab": {
+      "FingerprintLog": "risultati-20261016-091601-378.zip",
+      "Scope": "empty layer weight 1, before/after/undo/redo/commit/switch protected hashes preserved; expected exact surface hashes",
+      "FollowUp": "user visually confirmed populated layer weight 0.5 and save/reopen; no follow-up fingerprints"
+    },
+    "ClayClayStrips": "user reported working; no fingerprint logs supplied",
+    "Draw": "shared recording path; not separately verified",
+    "PoseClothGlobalFilters": "under review; no changes published"
+  },
+  "PreviousValidation": {
     "Log": "Cold-Start-20261016-082324.zip",
     "DuplicateLog": "Cold-Start-20261016-082404.zip",
     "StartupMode": "REUSE",
