@@ -1,0 +1,30 @@
+[
+  {
+    "path": "source/blender/blenkernel/intern/multires.cc",
+    "git_blob_sha": "a9fc9cc09759088abf0f980a3e2c892dcc8db08c"
+  },
+  {
+    "path": "source/blender/editors/object/object_transform.cc",
+    "git_blob_sha": "7b292f43984c32e771fad22a9b4328011dd310b6"
+  },
+  {
+    "path": "source/blender/editors/mesh/mesh_join.cc",
+    "git_blob_sha": "f4e58881a8ecb696d10b563c66cf0a7a42438bd0"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/undo_system.cc",
+    "git_blob_sha": "f5967fea2684b44553fc373a95ba0c1e080a2648"
+  },
+  {
+    "path": "source/blender/editors/undo/ed_undo.cc",
+    "git_blob_sha": "dd3fe76795520c48e1d382d086a21f25763a1eb3"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_subdiv.cc",
+    "git_blob_sha": "f750a7e63ca2add0678de7e8e5320d2221d29131"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_inline.hh",
+    "git_blob_sha": "ddfb63647c891ed43719c573f8179d680b36b45a"
+  }
+]

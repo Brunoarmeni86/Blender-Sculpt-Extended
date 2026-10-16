@@ -1,0 +1,51 @@
+=================================================================
+==19==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x502000000054 at pc 0x5584eaa3cd33 bp 0x7ffca3fd0530 sp 0x7ffca3fd0520
+READ of size 4 at 0x502000000054 thread T0
+    #0 0x5584eaa3cd32 in restore_face_sets_grids /workspace/scratch/fc7da3ae444f/audit/build-deep/deep.cc:330
+    #1 0x5584eaa3cd32 in main /workspace/scratch/fc7da3ae444f/audit/build-deep/deep.cc:379
+    #2 0x7f3cc48ae1c9  (/lib/x86_64-linux-gnu/libc.so.6+0x2a1c9) (BuildId: 274eec488d230825a136fa9c4d85370fed7a0a5e)
+    #3 0x7f3cc48ae28a in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x2a28a) (BuildId: 274eec488d230825a136fa9c4d85370fed7a0a5e)
+    #4 0x5584eaa34664 in _start (/workspace/scratch/fc7da3ae444f/audit/build-deep/deep+0x23664) (BuildId: 0ec016e3576c825ce9e0809554223d039327ab96)
+
+0x502000000054 is located 0 bytes after 4-byte region [0x502000000050,0x502000000054)
+allocated by thread T0 here:
+    #0 0x7f3cc5540340 in calloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:77
+    #1 0x5584eaa3c7a8 in int* MEM_new_array_zeroed<int>(unsigned long, char const*) /workspace/scratch/fc7da3ae444f/audit/build-deep/deep.cc:16
+    #2 0x5584eaa3c7a8 in main /workspace/scratch/fc7da3ae444f/audit/build-deep/deep.cc:376
+    #3 0x7f3cc48ae1c9  (/lib/x86_64-linux-gnu/libc.so.6+0x2a1c9) (BuildId: 274eec488d230825a136fa9c4d85370fed7a0a5e)
+    #4 0x7f3cc48ae28a in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x2a28a) (BuildId: 274eec488d230825a136fa9c4d85370fed7a0a5e)
+    #5 0x5584eaa34664 in _start (/workspace/scratch/fc7da3ae444f/audit/build-deep/deep+0x23664) (BuildId: 0ec016e3576c825ce9e0809554223d039327ab96)
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow /workspace/scratch/fc7da3ae444f/audit/build-deep/deep.cc:330 in restore_face_sets_grids
+Shadow bytes around the buggy address:
+  0x501ffffffd80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x501ffffffe00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x501ffffffe80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x501fffffff00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x501fffffff80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x502000000000: fa fa 04 fa fa fa 00 00 fa fa[04]fa fa fa fa fa
+  0x502000000080: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x502000000100: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x502000000180: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x502000000200: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x502000000280: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==19==ABORTING

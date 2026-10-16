@@ -1,0 +1,1 @@
+/workspace/scratch/fc7da3ae444f/audit/build-deep/deep.cc:218:55: runtime error: load of null pointer of type 'float'

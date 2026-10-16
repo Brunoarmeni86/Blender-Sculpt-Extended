@@ -1,0 +1,21 @@
+{
+  "audited_reference_commit": "01194d089eb5b324b125d0ef6ebaf877dd13f326",
+  "scope": "Real function bodies; API/storage adapters; delayed worker completion simulated; not Blender runtime",
+  "functions": {
+    "bool is_effective(": "230b0129c21c2fa330f48eee097c645749e05ae5fbbc8c89afb5efeca533a6d2",
+    "bool base_deltas_ensure(": "4ffcb51f3b9ed471e4a0bf9d4c45608a4a56a977341013e6289074ecfa704f3e",
+    "bool base_deltas_apply(": "adbb2ce9c973fc0989f5103a46f2a2ff0669c0ab08c59b718b554328262d032a",
+    "bool compatible(": "d9cc3984de56697b1253531eb43ce1b4c4958d30db8283c494db38ead132ebd7",
+    "bool bake_visible_to_base(": "a83df8ca4e3916f7248592bcda4e9505974117a08305b080e10ab00b50cab5fd",
+    "static void free_layer(": "bbe2efb8b023eb29558961be00f650ec286ee169d39f7100ba11537c488ebe8b",
+    "void faceset_clear(": "339647efcc960423c6438f72da0ead5e7bbdd0f400b8b0a68174882fadb3abd8",
+    "int *faceset_grid_ensure_dense(": "0a19b0a6d0072086d988b293c579299bb18bbdc89adae4c576e37b2e08907b43",
+    "static void multires_apply_uniform_scale(": "3687032c65231fd6a8716e16c4901ff0b6b0a22db5f484f033552226d875166d",
+    "static bool restore_face_sets_grids(": "899dba043b638c2e5b9d7cc7e0d1d3260d5f2df6647cc461b5064e3f90e125a7",
+    "static bool step_encode(": "f4aef54e9d54ce7f45110d805eea8b8b4510d1027f802a6be7aba4fc16a1f649",
+    "size_t step_memory_size_get(": "4e3dcd6bb1fa4e06f15c884c47d9df8f214ade0b5c1ccd84ceeefd41e9473045",
+    "dense_sample_threshold expression": "bbb67bec97a175b739e8f30065d1d97f2612d2d1bb2f25042b9b4a402690baef"
+  },
+  "sanitizers": "ASan+UBSan; detect_leaks=0 for executor /proc restriction",
+  "checks": "8 child cases: 5 successful observations/controls and 3 expected sanitizer failures"
+}

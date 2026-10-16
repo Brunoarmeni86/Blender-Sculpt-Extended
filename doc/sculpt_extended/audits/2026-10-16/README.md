@@ -1,5 +1,7 @@
 # Audit Sculpt Extended — 16 ottobre 2026
 
+**Seguito:** [approfondimento con ulteriori riscontri, chiamanti e riproduzioni](DEEP-REVIEW.md).
+
 ## Versione, ambito e limiti
 
 Revisione richiesta da Bruno per raccogliere difetti e ottimizzazioni in un riferimento GitHub condivisibile tra chat.

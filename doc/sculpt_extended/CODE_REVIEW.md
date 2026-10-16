@@ -2,7 +2,9 @@
 
 Punto d'ingresso per le chat che lavorano su `Brunoarmeni86/Blender-Sculpt-Extended`.
 
-**Ultimo audit:** [16 ottobre 2026 — difetti, ottimizzazioni e verifiche](audits/2026-10-16/README.md).
+**Ultimo approfondimento:** [16 ottobre 2026 — Bake sparse, Apply Scale, Undo asincrono e master HR](audits/2026-10-16/DEEP-REVIEW.md).
+
+**Audit iniziale:** [16 ottobre 2026 — difetti, ottimizzazioni e verifiche](audits/2026-10-16/README.md).
 
 Il report distingue difetti riprodotti su funzioni estratte, rischi da verificare nell'eseguibile e opportunità da misurare. Contiene permalink al commit esaminato, riproduzioni e priorità. Non contiene fix già applicati.
 
