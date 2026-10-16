@@ -1,0 +1,14 @@
+[
+  {
+    "path": "source/blender/blenkernel/intern/multires_sculpt_layers.cc",
+    "git_blob_sha": "79b0c38916eadf246924b3fe34b83d58a2a2cfb8"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_layer_base_math.hh",
+    "git_blob_sha": "9570e0b261fb78dfed79945a2a2bbfca9090c520"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc",
+    "git_blob_sha": "77b2966ade961cf307be8ca7bf94b05550dd0e35"
+  }
+]

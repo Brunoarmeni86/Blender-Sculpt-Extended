@@ -1,0 +1,35 @@
+{
+  "commit": "01194d089eb5b324b125d0ef6ebaf877dd13f326",
+  "scope": "Extracted production function bodies; simulated storage/API adapters; not full Blender",
+  "source_sha256": "22e85830f2580a55a625ef455608d04db65d366850ef828a932bdd934dc442f8",
+  "functions": {
+    "bool base_deltas_ensure(": "4ffcb51f3b9ed471e4a0bf9d4c45608a4a56a977341013e6289074ecfa704f3e",
+    "static void free_layer(": "bbe2efb8b023eb29558961be00f650ec286ee169d39f7100ba11537c488ebe8b",
+    "MultiresSculptLayer *active(MultiresModifierData &mmd)": "38c018de3f9702f2ed2a2b6cef67fe3d535ab03735da03ad6126da6d90197a98",
+    "float (*grid_ensure(": "cecb46b5b474b172a54e745becbed9be9be7a929c5e6e2e4bb2151f1c3f0e303",
+    "bool merge_down(": "2f267d1d0116bbfa6dc80b2fe8758b0cb94890efa3bbea6ffe07c8420819d5ea",
+    "void flatten(": "13fd3e8d58e675ec2732cef69bbb92a276fe168e97853244bd244a117484157d",
+    "bool group_merge(": "5c0efc4f36b593d5ba320d01f007bf3a08528b761d50118b47e7b40ce99767b6",
+    "void faceset_clear(": "339647efcc960423c6438f72da0ead5e7bbdd0f400b8b0a68174882fadb3abd8",
+    "bool faceset_resample_up(": "782fc469d5a52b22e8612a0047ee370967a36b507a34250fe7344dbb236422ee",
+    "static size_t node_size_in_bytes(": "85cfd3d19caa3855439617f26468a3ff3589b956df6fceafe0af46dc1c805fa8"
+  },
+  "compiler_command": [
+    "g++",
+    "-std=c++17",
+    "-O1",
+    "-g",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-fsanitize=address,undefined",
+    "-fno-omit-frame-pointer",
+    "-I",
+    "/workspace/scratch/fc7da3ae444f/audit",
+    "/workspace/scratch/fc7da3ae444f/audit/build/functions.cc",
+    "-o",
+    "/workspace/scratch/fc7da3ae444f/audit/build/verify"
+  ],
+  "ASAN_OPTIONS": "detect_leaks=0 (executor /proc restriction)",
+  "result": "8 checks passed; expected defects reproduced"
+}

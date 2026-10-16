@@ -1,0 +1,8 @@
+R1 merge_down: sum=5, active=unrelated third layer (expected destination)
+R2 group_merge: success=1, remaining=2 (expected 1), residual group member=1
+R3 group_merge: failure returned after two source layers already merged
+R4 flatten sparse: source detail 7 deleted, destination remains implicit zero
+C1 flatten dense control: expected sum 9 preserved
+R5 faceset resample: failure leaves master level 1 but first grid level 2
+R6 merge finite overflow: success=1, merged high-resolution sample=Inf
+R7 Undo accounting: allocated 4 MiB Face Set master snapshot, reported size delta=0
