@@ -362,6 +362,12 @@ struct StepData {
 
   Mutex nodes_mutex;
 
+  /* K01: the Face Set master belongs to the modifier, not an Undo node.
+   * First push may happen on any worker; once completion publishes the master
+   * before other workers copy it. Subsequent nodes only pay the once check. */
+  std::once_flag face_set_master_once;
+  bool face_set_master_ready = false;
+
   /**
    * #undo::Node is stored per #pbvh::Node to reduce data storage needed for changes only impacting
    * small portions of the mesh. During undo step creation and brush evaluation we often need to
@@ -2843,11 +2849,28 @@ static void store_sculpt_layer_disps(const Object &object,
   }
 }
 
+/* K01: a failed ensure is also a completed attempt for this Undo step. Avoid
+ * racing another worker or retrying while snapshots of the same step are read. */
+static bool prepare_face_set_master_for_undo(const Object &object, StepData &step_data)
+{
+  std::call_once(step_data.face_set_master_once, [&]() {
+    const SculptSession &ss = *object.runtime->sculpt_session;
+    MultiresModifierData *mmd = ss.multires_modifier;
+    if (mmd && mmd->totlvl > 0) {
+      const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+      step_data.face_set_master_ready =
+          bke::multires_layers::faceset_ensure_from_mesh(*mmd, mesh, mmd->totlvl);
+    }
+  });
+  return step_data.face_set_master_ready;
+}
+
 static void fill_node_data_grids(const Object &object,
                                  const bke::pbvh::GridsNode &node,
                                  const Type type,
                                  Node &unode,
-                                 const bool persistent_snapshot_valid)
+                                 const bool persistent_snapshot_valid,
+                                 const bool face_set_master_ready)
 {
   const SculptSession &ss = *object.runtime->sculpt_session;
   const Mesh &base_mesh = *id_cast<const Mesh *>(object.data);
@@ -2953,9 +2976,7 @@ static void fill_node_data_grids(const Object &object,
       store_face_sets(base_mesh, unode);
 
       MultiresModifierData *mmd = ss.multires_modifier;
-      if (mmd && mmd->totlvl > 0 &&
-          bke::multires_layers::faceset_ensure_from_mesh(*mmd, base_mesh, mmd->totlvl))
-      {
+      if (mmd && face_set_master_ready) {
         unode.grid_face_set_side = bke::subdiv::grid_size_from_level(mmd->sculpt_face_set_level);
         const int master_area = unode.grid_face_set_side * unode.grid_face_set_side;
         unode.grid_face_sets.reinitialize(unode.grids.size() * master_area);
@@ -3120,7 +3141,9 @@ void push_node(const Depsgraph &depsgraph,
                            static_cast<const bke::pbvh::GridsNode &>(*node),
                            type,
                            *unode,
-                           step_data->layer_persistent_snapshot_valid);
+                           step_data->layer_persistent_snapshot_valid,
+                           type == Type::FaceSet &&
+                               prepare_face_set_master_for_undo(object, *step_data));
       break;
     case bke::pbvh::Type::BMesh:
       BLI_assert_unreachable();
@@ -3177,10 +3200,18 @@ void push_nodes(const Depsgraph &depsgraph,
           nodes_to_fill.append({&nodes[i], unode});
         }
       });
+      /* Prepare shared modifier storage once on the caller thread, before
+       * workers access its grid descriptors or the base Face Set attribute. */
+      const bool face_set_master_ready = type == Type::FaceSet && !nodes_to_fill.is_empty() &&
+                                         prepare_face_set_master_for_undo(object, *step_data);
       threading::parallel_for(nodes_to_fill.index_range(), 1, [&](const IndexRange range) {
         for (const auto &[node, unode] : nodes_to_fill.as_span().slice(range)) {
-          fill_node_data_grids(
-              object, *node, type, *unode, step_data->layer_persistent_snapshot_valid);
+          fill_node_data_grids(object,
+                               *node,
+                               type,
+                               *unode,
+                               step_data->layer_persistent_snapshot_valid,
+                               face_set_master_ready);
         }
       });
       break;

@@ -66,7 +66,9 @@ reopen includono le correzioni applicate durante i precedenti test.
 
 - B06/B07: fix integrati e verificati con fixture native mirate; dettagli e limiti in
   [B06-B07-VERIFICATION.md](B06-B07-VERIFICATION.md).
-- K01/K02: revisione concorrenza Undo e invalidazione completa della cache Subdiv.
+- K01: inizializzazione master Face Set Undo protetta e verifica nativa mirata;
+  dettagli in [K01-VERIFICATION.md](K01-VERIFICATION.md).
+- K02: resta la verifica della chiave cache rispetto all'evaluatore Subdiv.
 - B11: manca prova nativa del solo master Polypaint inattivo durante Edit.
 - Apply Scale con layer rifiuta rotazione, scala non uniforme/riflessioni,
   mesh condivise, Shape Keys, storage esterno, Multires multipli e payload invalidi.
