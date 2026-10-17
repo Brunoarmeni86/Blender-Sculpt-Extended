@@ -423,6 +423,15 @@ UndoStep *BKE_undosys_stack_init_or_active_with_type(UndoStack *ustack, const Un
   return BKE_undosys_stack_active_with_type(ustack, ut);
 }
 
+/* UNDO_MEMORY_ASYNC_V01: only the main thread publishes the generic cached size. */
+size_t BKE_undosys_step_data_size_get(UndoStep *us)
+{
+  if (us->type->step_memory_size_get) {
+    us->data_size = us->type->step_memory_size_get(us);
+  }
+  return us->data_size;
+}
+
 void BKE_undosys_stack_limit_steps_and_memory(UndoStack *ustack, int steps, size_t memory_limit)
 {
   UNDO_NESTED_ASSERT(false);
@@ -438,7 +447,7 @@ void BKE_undosys_stack_limit_steps_and_memory(UndoStack *ustack, int steps, size
   size_t us_count = 0;
   for (us = static_cast<UndoStep *>(ustack->steps.last); us && us->prev; us = us->prev) {
     if (memory_limit) {
-      data_size_all += us->data_size;
+      data_size_all += BKE_undosys_step_data_size_get(us);
       if (data_size_all > memory_limit) {
         CLOG_DEBUG(&LOG,
                    "At step %zu: data_size_all=%zu >= memory_limit=%zu",

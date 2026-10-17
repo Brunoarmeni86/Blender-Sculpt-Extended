@@ -1465,10 +1465,13 @@ static void rna_MultiresSculptLayer_strength_set(PointerRNA *ptr, float value)
   auto *layer=static_cast<MultiresSculptLayer *>(ptr->data);
   if (ob==nullptr || layer==nullptr || !std::isfinite(value)) return;
 
-  /* Animation and drivers write into the evaluated object. Evaluation must
-   * only change its scalar weight, never commit a stroke or edit original REC
-   * state. Geometry is scheduled by PROP_FORCE_GEOMETRY_EVAL below. */
-  if (DEG_is_evaluated_id(ptr->owner_id) || (ob->mode & OB_MODE_SCULPT) == 0) {
+  /* Evaluated writes and animation flush into the original are scalar-only.
+   * The latter also invokes this RNA setter while the original is in Sculpt.
+   * Its graph evaluation is already in progress; do not commit an interactive
+   * stroke, disable REC or rebuild the live CCG for every animated keyframe.
+   * UI/Python edits retain the existing transactional and local refresh path. */
+  if (DEG_is_evaluated_id(ptr->owner_id) || BKE_animsys_is_copying_to_original() ||
+      (ob->mode & OB_MODE_SCULPT) == 0) {
     layer->strength = value;
     return;
   }

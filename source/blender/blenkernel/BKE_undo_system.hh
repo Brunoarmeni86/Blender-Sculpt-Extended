@@ -143,6 +143,11 @@ struct UndoType {
    */
   void (*step_free)(UndoStep *us);
 
+  /** UNDO_MEMORY_ASYNC_V01: optional dynamic byte count, queried on the main thread.
+   * Must not wait for background work or read unpublished worker-owned buffers.
+   * Return a conservative reservation while pending and retained bytes when complete. */
+  size_t (*step_memory_size_get)(UndoStep *us);
+
   /**
    * This callback ensures data-block (ID) references are valid before use.
    *
@@ -220,6 +225,10 @@ UndoStep *BKE_undosys_stack_init_or_active_with_type(UndoStack *ustack, const Un
  * \param steps: Limit the number of undo steps.
  * \param memory_limit: Limit the amount of memory used by the undo stack.
  */
+/** Refresh the cached byte count through the optional non-blocking type callback.
+ * Main-thread only; other undo types retain their existing cached size. */
+size_t BKE_undosys_step_data_size_get(UndoStep *us);
+
 void BKE_undosys_stack_limit_steps_and_memory(UndoStack *ustack, int steps, size_t memory_limit);
 #define BKE_undosys_stack_limit_steps_and_memory_defaults(ustack) \
   BKE_undosys_stack_limit_steps_and_memory(ustack, U.undosteps, size_t(U.undomemory) * 1024 * 1024)

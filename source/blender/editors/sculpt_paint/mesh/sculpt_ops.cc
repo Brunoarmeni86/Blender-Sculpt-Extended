@@ -3575,6 +3575,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_multires_layer_solo);
   WM_operatortype_append(face_set::SCULPT_OT_face_sets_create);
   WM_operatortype_append(SCULPT_OT_multires_face_sets_audit);
+  WM_operatortype_append(undo::SCULPT_OT_undo_memory_audit_v01);
   WM_operatortype_append(SCULPT_OT_multires_face_sets_from_base);
   WM_operatortype_append(face_set::SCULPT_OT_face_set_change_visibility); /* HR tools V02 */
   WM_operatortype_append(face_set::SCULPT_OT_multires_face_sets_hr_mask);

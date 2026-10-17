@@ -82,6 +82,30 @@ static CLG_LogRef LOG_ANIM_FCURVE = {"anim.fcurve"};
 static CLG_LogRef LOG_ANIM_KEYINGSET = {"anim.keyingset"};
 static CLG_LogRef LOG_ANIM_NLA = {"anim.nla"};
 
+/* B07: animation flush can call custom RNA setters on the original Object.
+ * A thread-local, scoped marker avoids a global state/race and preserves the
+ * existing behavior of user-initiated writes on another thread. */
+static thread_local bool animsys_copying_to_original = false;
+
+bool BKE_animsys_is_copying_to_original()
+{
+  return animsys_copying_to_original;
+}
+
+class AnimsysCopyToOriginalScope {
+  const bool previous_ = animsys_copying_to_original;
+
+ public:
+  AnimsysCopyToOriginalScope()
+  {
+    animsys_copying_to_original = true;
+  }
+  ~AnimsysCopyToOriginalScope()
+  {
+    animsys_copying_to_original = previous_;
+  }
+};
+
 /* *********************************** */
 /* KeyingSet API */
 
@@ -534,6 +558,14 @@ bool BKE_animsys_write_to_rna_path(PathResolvedRNA *anim_rna,
   return true;
 }
 
+/* Shared by legacy F-Curves/NLA and layered Actions. Keep the marker scoped
+ * to the actual original-ID write, never the evaluated write or path resolution. */
+bool BKE_animsys_write_to_original_rna_path(PathResolvedRNA *anim_rna, const float value)
+{
+  const AnimsysCopyToOriginalScope copy_scope;
+  return BKE_animsys_write_to_rna_path(anim_rna, value);
+}
+
 static bool animsys_construct_orig_pointer_rna(const PointerRNA *ptr, PointerRNA *ptr_orig)
 {
   *ptr_orig = *ptr;
@@ -570,7 +602,7 @@ static void animsys_write_orig_anim_rna(PointerRNA *ptr,
   PathResolvedRNA orig_anim_rna;
   /* TODO(sergey): Should be possible to cache resolved path in dependency graph somehow. */
   if (BKE_animsys_rna_path_resolve(&ptr_orig, rna_path, array_index, &orig_anim_rna)) {
-    BKE_animsys_write_to_rna_path(&orig_anim_rna, value);
+    BKE_animsys_write_to_original_rna_path(&orig_anim_rna, value);
   }
 }
 

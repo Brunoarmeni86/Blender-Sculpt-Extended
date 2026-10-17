@@ -64,8 +64,8 @@ reopen includono le correzioni applicate durante i precedenti test.
 
 ## Limiti e lavoro aperto
 
-- B06: conteggio Undo asincrono/limite cronologia ancora da correggere.
-- B07: copy-back animazione Strength attraverso setter interattivo ancora aperto.
+- B06/B07: fix integrati e verificati con fixture native mirate; dettagli e limiti in
+  [B06-B07-VERIFICATION.md](B06-B07-VERIFICATION.md).
 - K01/K02: revisione concorrenza Undo e invalidazione completa della cache Subdiv.
 - B11: manca prova nativa del solo master Polypaint inattivo durante Edit.
 - Apply Scale con layer rifiuta rotazione, scala non uniforme/riflessioni,

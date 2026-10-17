@@ -140,7 +140,7 @@ static void animsys_write_orig_anim_rna(PointerRNA *ptr,
   PathResolvedRNA orig_anim_rna;
   /* TODO(sergey): Should be possible to cache resolved path in dependency graph somehow. */
   if (BKE_animsys_rna_path_resolve(&ptr_orig, rna_path, array_index, &orig_anim_rna)) {
-    BKE_animsys_write_to_rna_path(&orig_anim_rna, value);
+    BKE_animsys_write_to_original_rna_path(&orig_anim_rna, value);
   }
 }
 
