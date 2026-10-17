@@ -86,13 +86,23 @@ bool resample_all(MultiresModifierData &mmd, int new_level, int grids_num);
 bool remap_surviving_corners(MultiresModifierData &mmd,
                             int old_corners_num,
                             Span<int> new_to_old);
+/** Whether any geometric layer, active/inactive Polypaint master or HR Face Set
+ * owns companion data that topology operations must preserve. */
+bool has_persistent_companions(const MultiresModifierData &mmd);
 /** Keep a hidden per-corner identity attribute used to conservatively preserve
  * layer grids across Edit Mode topology changes. */
 void ensure_corner_ids(MultiresModifierData &mmd, Mesh &mesh);
+/** Bind newly initialized grids in current Mesh order. ONLY call immediately
+ * after initializing fresh payload arrays, never to repair an unknown remap. */
+bool bind_initialized_corner_grids(MultiresModifierData &mmd, const Mesh &mesh);
 /** Remap layer grids from the hidden identity attribute after a topology edit.
  * Duplicated or invalid identities are treated as new corners with zero delta.
  * old_corner_ids is captured from the mesh BEFORE replacing it from BMesh and
- * describes the existing modifier grid order. Empty uses the legacy canonical order. */
+ * describes the existing modifier grid order. Empty uses the legacy canonical order
+ * only for verified legacy canonical IDs; otherwise the serialized modifier
+ * binding supplies the old order. Explicit IDs must agree with an existing
+ * binding. Non-canonical legacy files migrate via captured pre-Edit IDs.
+ * Binding is copied/freed/serialized with the modifier, not the Mesh. */
 bool remap_after_topology_edit(MultiresModifierData &mmd,
                                Mesh &mesh,
                                BitVector<> *r_reset_corners = nullptr,
@@ -138,6 +148,14 @@ bool bake_shrinkwrap_to_active(Depsgraph *depsgraph,
                               bool respect_mask,
                               bool &r_used_mask);
 
+/** DETAIL_TRANSFER_V01: import point translations scattered using native
+ * Multires vertex order into a staged new layer. Caller validates the frozen
+ * preview topology/positions and establishes Object Mode Memfile Undo first.
+ * Existing base/mask/color/Face Set/layer numeric payloads are never written. */
+const char *detail_delta_import_to_new_layer(Object &object,
+                                            const Mesh &delta_mesh,
+                                            const char *name);
+
 MultiresSculptLayer *add(MultiresModifierData &mmd, const char *name, int level, int grids_num);
 void remove(MultiresModifierData &mmd, MultiresSculptLayer &layer);
 MultiresSculptLayer *active(MultiresModifierData &mmd);
@@ -158,7 +176,9 @@ bool group_toggle_collapsed(MultiresModifierData &mmd, int group_id);
 MultiresSculptLayer *duplicate(MultiresModifierData &mmd, const MultiresSculptLayer &source);
 MultiresSculptLayer *previous(MultiresModifierData &mmd, const MultiresSculptLayer &layer);
 bool merge_down(MultiresModifierData &mmd);
-void flatten(MultiresModifierData &mmd);
+/** Merge visible layer contributions into the first layer; reject invalid input
+ * without deleting or modifying source payloads. Keeps zero grids sparse. */
+bool flatten(MultiresModifierData &mmd);
 void set_solo(MultiresModifierData &mmd, int index);
 void set_visible(MultiresSculptLayer &layer, bool visible);
 void clear(MultiresModifierData &mmd);
@@ -250,6 +270,19 @@ int faceset_sample(const MultiresModifierData &mmd,
                    float grid_v,
                    int fallback_id);
 
+/* MULTIRES_FACESETS_DRAW_V01: categorical master editing, with serial preflight
+ * before paint/Undo workers. Changes only Face Set IDs, never geometry. */
+bool faceset_high_resolution_enabled();
+bool faceset_master_valid(const MultiresModifierData &mmd, int grids_num);
+int faceset_next_available_id(const MultiresModifierData &mmd, int base_next_id);
+bool faceset_paint_grid(MultiresModifierData &mmd,
+                       int corner,
+                       int paint_side,
+                       Span<float> factors,
+                       float threshold,
+                       int id);
+bool faceset_grid_swap(MultiresModifierData &mmd, int corner, MutableSpan<int> undo_values);
+
 /** Add the layer displacement to a tangent-space displacement vector.
  * Returns false when the layer cannot be evaluated at the requested level.
  */
@@ -286,5 +319,3 @@ bool visible_direct_delta(Object &object,
 
 }  // namespace bke::multires_layers
 }  // namespace blender
-
-

@@ -177,6 +177,10 @@ static void blend_write(BlendWriter *writer, const ID * /*id_owner*/, const Modi
 {
   const MultiresModifierData *mmd = reinterpret_cast<const MultiresModifierData *>(md);
   writer->write_struct(mmd);
+  /* CORNER_STORAGE_IO_B10_V02: same owner and memfile lifetime as payloads. */
+  if (mmd->sculpt_corner_ids && mmd->sculpt_corner_ids_num > 0) {
+    writer->write_int32_array(mmd->sculpt_corner_ids_num, mmd->sculpt_corner_ids);
+  }
   writer->write_struct_list(&mmd->sculpt_layers);
   for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
     if (layer.base_deltas && layer.base_verts_num > 0) {
@@ -228,6 +232,18 @@ static void blend_write(BlendWriter *writer, const ID * /*id_owner*/, const Modi
 static void blend_read(BlendDataReader *reader, ModifierData *md)
 {
   MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
+  /* Old DNA defaults to null/zero. Invalid new storage must not silently
+   * become legacy canonical order after a failed array read. */
+  if (mmd->sculpt_corner_ids_num > 0 && mmd->sculpt_corner_ids) {
+    if (!BLO_read_array(reader, &mmd->sculpt_corner_ids, mmd->sculpt_corner_ids_num)) {
+      mmd->sculpt_corner_ids = nullptr;
+      mmd->sculpt_corner_ids_num = -1;
+    }
+  }
+  else if (mmd->sculpt_corner_ids_num != 0 || mmd->sculpt_corner_ids) {
+    mmd->sculpt_corner_ids = nullptr;
+    mmd->sculpt_corner_ids_num = -1;
+  }
   BLO_read_struct_list(reader, MultiresSculptLayer, &mmd->sculpt_layers);
   for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
     if (layer.base_deltas && layer.base_verts_num > 0) {

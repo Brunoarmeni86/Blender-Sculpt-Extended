@@ -1,4 +1,4 @@
-﻿/* SPDX-FileCopyrightText: 2020 Blender Authors
+/* SPDX-FileCopyrightText: 2020 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -743,6 +743,10 @@ void multiresModifier_subdivide_to_level(Object *object,
     if (mmd->totlvl == top_level) {
       bke::multires_layers::initialize_layer_grids(*mmd, top_level, mesh->corners_num);
       bke::multires_layers::ensure_corner_ids(*mmd, *mesh);
+      if (!bke::multires_layers::bind_initialized_corner_grids(*mmd, *mesh)) {
+        BKE_modifier_set_error(object, &mmd->modifier,
+                               "Could not bind initialized Sculpt Layer grids");
+      }
     }
     return;
   }
@@ -755,7 +759,7 @@ void multiresModifier_subdivide_to_level(Object *object,
   }
   if (!bke::multires_layers::remap_after_topology_edit(*mmd, *mesh)) {
     BKE_modifier_set_error(object, &mmd->modifier,
-                           "Cannot remap Sculpt Layers after the base topology edit");
+                           "Cannot preserve Sculpt Layers: invalid corner storage binding; legacy non-canonical IDs require an Edit round-trip");
     return;
   }
   if (top_level > 13 || ID_REAL_USERS(&mesh->id) > 1 ||
@@ -1273,8 +1277,3 @@ void multiresModifier_base_apply(Depsgraph *depsgraph,
 /** \} */
 
 }  // namespace blender
-
-
-
-
-

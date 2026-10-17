@@ -7,7 +7,14 @@
 #include "editors/sculpt_paint/mesh/sculpt_automask.hh"
 
 #include "DNA_brush_types.h"
+#include "DNA_modifier_types.h"
 
+#include <cstdio>
+#include <variant>
+
+#include "BKE_multires_sculpt_layers.hh"
+#include "BKE_ccg.hh"
+#include "BKE_subdiv.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint_bvh.hh"
@@ -29,6 +36,55 @@
 
 namespace blender::ed::sculpt_paint::brushes {
 inline namespace draw_face_sets_cc {
+
+/* MULTIRES_FACESETS_DRAW_V01: callers initialize/validate the master serially,
+ * before Undo workers or paint workers can touch its descriptors. */
+static bool use_high_resolution_face_sets(const Object &object)
+{
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  return bke::multires_layers::faceset_high_resolution_enabled() &&
+         bke::object::pbvh_get(object)->type() == bke::pbvh::Type::Grids &&
+         ss.multires_modifier && ss.subdiv_ccg;
+}
+
+static bool prepare_high_resolution_face_sets(Object &object)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  MultiresModifierData &mmd = *ss.multires_modifier;
+  const Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss.subdiv_ccg);
+  if (mmd.totlvl < 1 || mmd.totlvl > 13 || key.grid_size < 2 ||
+      ss.subdiv_ccg->grids_num != mesh.corners_num ||
+      !bke::multires_layers::faceset_ensure_from_mesh(mmd, mesh, mmd.totlvl) ||
+      !bke::multires_layers::faceset_master_valid(mmd, mesh.corners_num))
+  {
+    return false;
+  }
+  const int side = bke::subdiv::grid_size_from_level(mmd.sculpt_face_set_level);
+  return key.grid_size <= side && (side - 1) % (key.grid_size - 1) == 0;
+}
+
+static int pick_high_resolution_face_set(const Object &object)
+{
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const int fallback = face_set::active_face_set_get(object);
+  const auto active_vert = ss.active_vert();
+  const int *active = std::get_if<int>(&active_vert);
+  if (!active || *active < 0) {
+    return fallback;
+  }
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss.subdiv_ccg);
+  if (int64_t(*active) >= int64_t(ss.subdiv_ccg->grids_num) * key.grid_area) {
+    return fallback;
+  }
+  const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, *active);
+  return bke::multires_layers::faceset_sample(*ss.multires_modifier,
+                                             coord.grid_index,
+                                             float(coord.x) / float(key.grid_size - 1),
+                                             float(coord.y) / float(key.grid_size - 1),
+                                             fallback);
+}
+
 
 struct MeshLocalData {
   Vector<float3> positions;
@@ -201,9 +257,18 @@ static void calc_grids(const Depsgraph &depsgraph,
   calc_brush_texture_factors(ss, brush, positions, factors);
   scale_factors(factors, strength);
 
+  if (use_high_resolution_face_sets(object)) {
+    const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+    for (const int i : grids.index_range()) {
+      bke::multires_layers::faceset_paint_grid(
+          *ss.multires_modifier, grids[i], key.grid_size,
+          factors.slice(bke::ccg::grid_range(key, i)), face_set::FACE_SET_MIN_FADE, face_set_id);
+    }
+    return;
+  }
+
   tls.face_indices.resize(positions.size());
   MutableSpan<int> face_indices = tls.face_indices;
-
   face_set::calc_face_indices_grids(subdiv_ccg, grids, face_indices);
   apply_face_set(face_set_id, face_indices, factors, face_sets);
 }
@@ -335,16 +400,24 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
   PRF_scope(ProfileCategory::Editor);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
 
+  const bool high_resolution = use_high_resolution_face_sets(object);
   if (object.runtime->sculpt_session->cache->paint_face_set == face_set_none_id) {
+    if (high_resolution && !prepare_high_resolution_face_sets(object)) {
+      std::fprintf(stderr, "[FACESETS_HR_V01] invalid master/layout; no Face Set painted\n");
+      return;
+    }
     if (object.runtime->sculpt_session->cache->toggle_settings.invert) {
-      /* When inverting the brush, pick the paint face mask ID from the mesh. */
-      object.runtime->sculpt_session->cache->paint_face_set = face_set::active_face_set_get(
-          object);
+      object.runtime->sculpt_session->cache->paint_face_set = high_resolution ?
+          pick_high_resolution_face_set(object) : face_set::active_face_set_get(object);
     }
     else {
-      /* By default, create a new Face Sets. */
-      object.runtime->sculpt_session->cache->paint_face_set = face_set::find_next_available_id(
-          object);
+      object.runtime->sculpt_session->cache->paint_face_set = high_resolution ?
+          bke::multires_layers::faceset_next_available_id(
+              *object.runtime->sculpt_session->multires_modifier, 2) :
+          face_set::find_next_available_id(object);
+    }
+    if (object.runtime->sculpt_session->cache->paint_face_set <= 0) {
+      return;
     }
   }
 

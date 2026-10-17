@@ -1,0 +1,65 @@
+﻿param(
+    [string]$BlenderExe = 'C:\BlenderDev\build_windows_x64_shareable\bin\Release\blender.exe',
+    [string]$BlendFile = '',
+    [string]$ScriptAvvio = (Join-Path $PSScriptRoot 'experiment-tools\AVVIA-ESPERIMENTO.ps1'),
+    [ValidateRange(0, 32768)][int]$CacheMB = 512,
+    [switch]$MeshColorOff,
+    [switch]$ReferencePaint,
+    [switch]$ParallelOff,
+    [switch]$UndoCopyOff,
+    [switch]$LocalRedrawOff,
+    [switch]$LazyOff,
+    [switch]$SubdivideOff,
+    [switch]$UndoProfile,
+    [switch]$TestPolypaint,
+    [switch]$PublishOff,
+    [switch]$CompactOff,
+    [switch]$NoPolypaint,
+    [switch]$UndoOff
+)
+$ErrorActionPreference = 'Stop'
+if (!(Test-Path -LiteralPath $ScriptAvvio)) { throw "Avvio incluso nel kit mancante: $ScriptAvvio" }
+if (!$BlenderExe) {
+    $paths = Join-Path $PSScriptRoot 'experiment-paths.json'
+    if (!(Test-Path -LiteralPath $paths)) { throw 'Esegui prima APPLICA-SULLA-BUILD-ATTUALE.ps1.' }
+    $BlenderExe = (Get-Content -LiteralPath $paths -Raw | ConvertFrom-Json).BlenderExe
+}
+$flags = @{
+    BLENDER_SCULPT_LAYER_UNDO_CACHE_GUARD = '1'
+    BLENDER_SCULPT_LAYER_BAKE_BASE = '1'
+    BLENDER_SCULPT_LAYER_SELECT_ANCHOR = '0'
+    BLENDER_SCULPT_LAYER_COMMIT_ANCHOR = '0'
+    BLENDER_SCULPT_POLYPAINT_PREPARED_V2 = '1'
+    BLENDER_SCULPT_POLYPAINT_PARALLEL_V3 = $(if ($ReferencePaint -or $ParallelOff) { '0' } else { '1' })
+    BLENDER_SCULPT_POLYPAINT_UNDO_COPY_V3 = $(if ($ReferencePaint -or $UndoCopyOff) { '0' } else { '1' })
+    BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3 = $(if ($ReferencePaint -or $LocalRedrawOff) { '0' } else { '1' })
+    BLENDER_SCULPT_POLYPAINT_MULTI_ATTRIBUTE = '1'
+    BLENDER_SCULPT_POLYPAINT_LAZY_MASTER = $(if ($LazyOff) { '0' } else { '1' })
+    BLENDER_SCULPT_POLYPAINT_MESH_COLOR = $(if ($MeshColorOff) { '0' } else { '1' })
+    BLENDER_SCULPT_SUBDIVIDE_PRESERVE_RETAINED = '1'
+    BLENDER_SCULPT_SUBDIVIDE_COMPACT = $(if ($SubdivideOff) { '0' } else { '1' })
+    BLENDER_SCULPT_EMPTY_LAYER_SUBDIVIDE = '1'
+    BLENDER_SCULPT_WEIGHT_SUPPORT_COMPACT = '0'
+    BLENDER_SCULPT_LAYER_SPARSE_READ = '0'
+    BLENDER_SCULPT_POLYPAINT_PREPARED_GRID = '0'
+    BLENDER_SCULPT_SUBDIVIDE_PROFILE = '1'
+    BLENDER_SCULPT_UNDO_COMPRESSION_PROFILE = $(if ($UndoProfile) { '1' } else { '0' })
+    BLENDER_SCULPT_LAYER_UNDO_TRACE = $(if ($UndoProfile) { '1' } else { '0' })
+}
+$saved = @{}
+foreach ($name in $flags.Keys) { $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+try {
+    foreach ($name in $flags.Keys) { [Environment]::SetEnvironmentVariable($name, $flags[$name], 'Process') }
+    Write-Host "Suddivisione compatta: $env:BLENDER_SCULPT_SUBDIVIDE_COMPACT; precisione: 1; Undo profile: $env:BLENDER_SCULPT_UNDO_COMPRESSION_PROFILE"
+    Write-Host "Paint V03 parallel: $env:BLENDER_SCULPT_POLYPAINT_PARALLEL_V3; Undo copy: $env:BLENDER_SCULPT_POLYPAINT_UNDO_COPY_V3; redraw: $env:BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3; ReferencePaint usa Prepared V02"
+    Write-Host "Master colore indipendente: $env:BLENDER_SCULPT_POLYPAINT_LAZY_MASTER; Strength/Paint V01: disattivati"
+    $parameters = @{
+        BlenderExe = $BlenderExe; BlendFile = $BlendFile; CacheMB = $CacheMB
+        TestPolypaint = [bool]$TestPolypaint; PublishOff = [bool]$PublishOff
+        CompactOff = [bool]$CompactOff; NoPolypaint = [bool]$NoPolypaint; UndoOff = [bool]$UndoOff
+    }
+    Write-Host "Color Attribute sulla mesh valutata: $env:BLENDER_SCULPT_POLYPAINT_MESH_COLOR"
+    & $ScriptAvvio @parameters
+} finally {
+    foreach ($name in $flags.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
+}

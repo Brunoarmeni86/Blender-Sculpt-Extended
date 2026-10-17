@@ -1313,6 +1313,13 @@ struct MultiresModifierData {
   int sculpt_face_set_grids_num = 0;
   int sculpt_face_set_level = 0;
 
+  /* CORNER_STORAGE_BINDING_B10_V02: IDs in modifier payload array order.
+   * Independent of the current Mesh/BMesh corner array and serialized with
+   * the payloads. Null/zero is legacy, null/negative is invalid read state. */
+  int *sculpt_corner_ids = nullptr;
+  int sculpt_corner_ids_num = 0;
+  int _pad_sculpt_corner_ids = 0;
+
   /* Optional procedural texture displacement evaluated directly by Multires. */
   struct Tex *sculpt_displacement_texture = nullptr;
   char sculpt_displacement_uv_layer[/*MAX_CUSTOMDATA_LAYER_NAME*/ 68] = "";

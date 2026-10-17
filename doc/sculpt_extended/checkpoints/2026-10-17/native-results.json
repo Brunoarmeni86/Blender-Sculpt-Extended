@@ -1,0 +1,70 @@
+[
+  {
+    "log": "verifica-20261016-221412-795.log",
+    "sha256": "69874eaa75eea8f53e7b2ecb470ae71ec838a9450cf84709ebd3cd2424ff9f39",
+    "native_results": [
+      {
+        "status": "PASS",
+        "edit_preserves_detail": true,
+        "subdivide_noncanonical": true,
+        "undo_redo_subdivide": true,
+        "save_reopen_then_subdivide": true,
+        "duplicate_then_subdivide": true,
+        "scope": "Small native geometry-layer fixture; other companions and legacy migration require separate checks"
+      }
+    ]
+  },
+  {
+    "log": "verifica-20261016-223336-192.log",
+    "sha256": "f97ed79b596390001211d4ca1e9cc0fb447e93c9a346131ddd68da930db2285e",
+    "native_results": [
+      {
+        "status": "PASS",
+        "mask_extract": true,
+        "face_set_extract": true,
+        "welded_vertices": 25,
+        "quads": 16,
+        "source_cage_unchanged": true,
+        "zero_strength_layer_retained": true,
+        "undo_redo": true,
+        "output_limit_rejected": true,
+        "save_reopen": true
+      }
+    ]
+  },
+  {
+    "log": "verifica-20261016-223440-994.log",
+    "sha256": "ef2bceb7628950917ea8376f0f25b8a7d44cdd6d539ae40b93bd764d4aef513f",
+    "native_results": [
+      {
+        "status": "PASS",
+        "flatten_error": 0.0,
+        "flatten_undo_redo": true,
+        "merge_down_error": 0.0,
+        "group_merge_error": 0.0,
+        "group_remove_merge_error": 0.0,
+        "folder_visibility_preserved": true,
+        "legacy_sparse_bake_error": 0.0,
+        "save_reopen": true,
+        "scope": "Small native fixtures; geometry-layer merge/group/Bake only; not the HR extraction test"
+      }
+    ]
+  },
+  {
+    "log": "verifica-20261017-052035-971.log",
+    "sha256": "138803cbd949b011b52bc91cc219290490585b099fa8910d26e8e53f548172e5",
+    "native_results": [
+      {
+        "status": "PASS",
+        "scale_world_error": 0.0,
+        "undo_redo": true,
+        "hidden_layer_error": 0.0,
+        "nonuniform_selection_unchanged": true,
+        "join_guard": true,
+        "ordinary_join": true,
+        "save_reopen": true,
+        "scope": "Small native HR geometry fixtures; L0 tested separately with extracted C++; no dense mesh benchmark"
+      }
+    ]
+  }
+]

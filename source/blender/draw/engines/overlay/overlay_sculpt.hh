@@ -10,6 +10,8 @@
 
 #include <cstdlib>
 
+#include "DNA_modifier_types.h" /* FACESETS_HR_DISPLAY_V04: master is an overlay source. */
+
 #include "BKE_attribute.hh"
 #include "BKE_curves.hh"
 #include "BKE_mesh.hh"
@@ -201,7 +203,12 @@ class Sculpts : Overlay {
       case bke::pbvh::Type::Grids: {
         const SubdivCCG &subdiv_ccg = *sculpt_session->subdiv_ccg;
         const Mesh &base_mesh = DRW_object_get_data_for_drawing<Mesh>(*object_orig);
-        if (subdiv_ccg.masks.is_empty() && !base_mesh.attributes().contains(".sculpt_face_set")) {
+        /* FACESETS_HR_DISPLAY_V04: gestures can create a master without a base
+         * Face Set attribute. Do not suppress the overlay in that state. */
+        const MultiresModifierData *mmd = sculpt_session->multires_modifier;
+        const bool has_hr_face_sets = mmd && mmd->sculpt_face_set_grids;
+        if (subdiv_ccg.masks.is_empty() && !base_mesh.attributes().contains(".sculpt_face_set") &&
+            !has_hr_face_sets) {
           return;
         }
         break;

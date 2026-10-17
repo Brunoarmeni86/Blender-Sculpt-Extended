@@ -1104,27 +1104,35 @@ static bool restore_face_sets_grids(Object &object, Node &unode)
     return false;
   }
 
+  /* MULTIRES_FACESETS_DRAW_V01: avoid invalid-level shifts and preflight
+   * before swapping any of this undo node's grids. */
+  if (mmd->sculpt_face_set_level < 1 || mmd->sculpt_face_set_level > 13 ||
+      unode.grid_face_set_side > 4097) {
+    return false;
+  }
   const int area = unode.grid_face_set_side * unode.grid_face_set_side;
+  /* The snapshot uses the retained master side, not the live Sculpt Level. */
   if (unode.grid_face_sets.size() != unode.grids.size() * area ||
       bke::subdiv::grid_size_from_level(mmd->sculpt_face_set_level) != unode.grid_face_set_side)
   {
     return false;
   }
 
-  bool modified = false;
-  int offset = 0;
   for (const int grid : unode.grids) {
-    int *ids = bke::multires_layers::faceset_grid_ensure_dense(*mmd, grid);
-    if (!ids) {
-      offset += area;
-      continue;
+    if (grid < 0 || grid >= mmd->sculpt_face_set_grids_num) {
+      return false;
     }
-    for (int i = 0; i < area; i++, offset++) {
-      if (ids[i] != unode.grid_face_sets[offset]) {
-        std::swap(ids[i], unode.grid_face_sets[offset]);
-        modified = true;
-      }
+    const MultiresFaceSetGrid &stored = mmd->sculpt_face_set_grids[grid];
+    if (stored.level != mmd->sculpt_face_set_level ||
+        (stored.ids ? stored.totid != area : stored.totid != 0)) {
+      return false;
     }
+  }
+  bool modified = false;
+  for (const int i : unode.grids.index_range()) {
+    modified |= bke::multires_layers::faceset_grid_swap(
+        *mmd, unode.grids[i],
+        unode.grid_face_sets.as_mutable_span().slice(int64_t(i) * area, area));
   }
   return modified;
 }
@@ -3490,6 +3498,8 @@ static size_t node_size_in_bytes(const Node &node)
   size += node.grids.as_span().size_in_bytes();
   size += node.grid_hidden.all_bits().size() / 8;
   size += node.face_sets.as_span().size_in_bytes();
+  /* MULTIRES_FACESETS_DRAW_V01: count retained HR IDs in Blender's Undo budget. */
+  size += node.grid_face_sets.as_span().size_in_bytes();
   size += node.face_indices.as_span().size_in_bytes();
   return size;
 }
@@ -4309,8 +4319,3 @@ std::optional<Span<float>> orig_mask_data_lookup_grids(const Object & /*object*/
 }  // namespace ed::sculpt_paint
 
 }  // namespace blender
-
-
-
-
-
