@@ -1505,7 +1505,7 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
   const char *dense_sample_env = BLI_getenv("BLENDER_SCULPT_DENSE_SAMPLE_BYPASS");
   const bool dense_sample_bypass_enabled =
       dense_sample_env == nullptr || dense_sample_env[0] == '\0' || dense_sample_env[0] != '0';
-  const int dense_sample_threshold = (area * 975 + 999) / 1000;
+  const int dense_sample_threshold = int((int64_t(area) * 975 + 999) / 1000);
   Array<int> exact_sample_counts(grids.size(), area);
 
   std::unique_lock<std::mutex> exact_sample_lock;

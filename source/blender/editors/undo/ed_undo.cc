@@ -1211,12 +1211,8 @@ size_t ED_undosys_total_memory_calc(UndoStack *ustack)
   size_t total_memory = 0;
 
   for (UndoStep *us = static_cast<UndoStep *>(ustack->steps.first); us != nullptr; us = us->next) {
-    if (us->type == BKE_UNDOSYS_TYPE_SCULPT) {
-      total_memory += ed::sculpt_paint::undo::step_memory_size_get(us);
-    }
-    else if (us->data_size > 0) {
-      total_memory += us->data_size;
-    }
+    /* Same non-blocking count as history trimming, including Sculpt metadata. */
+    total_memory += BKE_undosys_step_data_size_get(us);
   }
 
   return total_memory;

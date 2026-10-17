@@ -35,6 +35,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_mesh_runtime.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object.hh"
 #include "BKE_object_deform.h"
 #include "BKE_report.hh"
@@ -556,6 +557,19 @@ wmOperatorStatus join_objects_exec(bContext *C, wmOperator *op)
   Vector<Object *> objects_to_join;
   CTX_DATA_BEGIN (C, Object *, ob_iter, selected_editable_objects) {
     if (ob_iter->type == OB_MESH) {
+      /* SCULPT_JOIN_COMPANIONS_GUARD_V01: Join only migrates native Mesh data.
+       * Reject before level synchronization, source deletion or geometry writes. */
+      for (const ModifierData &md : ob_iter->modifiers) {
+        if (md.type == eModifierType_Multires &&
+            bke::multires_layers::has_persistent_companions(
+                reinterpret_cast<const MultiresModifierData &>(md))) {
+          BKE_reportf(op->reports, RPT_ERROR,
+                      "Cannot join '%s': Multires layer/color/Face Set data requires explicit "
+                      "migration; use a baked duplicate without these masters",
+                      ob_iter->id.name + 2);
+          return OPERATOR_CANCELLED;
+        }
+      }
       objects_to_join.append(ob_iter);
     }
   }

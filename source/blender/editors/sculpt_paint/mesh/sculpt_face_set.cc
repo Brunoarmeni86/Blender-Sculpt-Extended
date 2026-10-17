@@ -7,7 +7,9 @@
  */
 #include "sculpt_face_set.hh"
 
+#include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <queue>
 
@@ -20,6 +22,8 @@
 #include "BLI_function_ref.hh"
 #include "BLI_hash.h"
 #include "BLI_math_matrix.h"
+#include "BLI_math_matrix.hh"
+#include "BLI_map.hh"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
@@ -30,6 +34,10 @@
 #include "BLT_translation.hh"
 
 #include "DNA_customdata_types.h"
+#include "DNA_modifier_types.h"
+#include "DNA_mesh_types.h"
+#include "DNA_userdef_types.h"
+#include "DNA_view3d_types.h"
 #include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
@@ -39,8 +47,12 @@
 #include "BKE_customdata.hh"
 #include "BKE_layer.hh"
 #include "BKE_mesh.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_mesh_fair.hh"
+#include "BKE_lib_id.hh"
 #include "BKE_mesh_mapping.hh"
+#include "BKE_multires.hh"
+#include "BKE_report.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
@@ -49,11 +61,14 @@
 #include "BKE_subdiv_ccg.hh"
 
 #include "DEG_depsgraph.hh"
+#include "DEG_depsgraph_build.hh"
 
 #include "WM_api.hh"
 #include "WM_types.hh"
 
 #include "ED_sculpt.hh"
+#include "ED_object.hh"
+#include "ED_undo.hh"
 
 #include "mesh_brush_common.hh"
 #include "paint_hide.hh"
@@ -69,6 +84,31 @@
 #include "bmesh.hh"
 
 namespace blender::ed::sculpt_paint::face_set {
+
+/* MULTIRES_FACESETS_DRAW_V01: base-only tools must not silently overwrite or
+ * ignore the retained HR groups. HR isolation/masking are a separate stage. */
+static bool base_face_sets_poll(bContext *C)
+{
+  if (!sculpt_mode_poll(C)) {
+    return false;
+  }
+  const Object *object = CTX_data_active_object(C);
+  const SculptSession *ss = object ? object->runtime->sculpt_session : nullptr;
+  if (bke::multires_layers::faceset_high_resolution_enabled() && ss &&
+      ss->multires_modifier && ss->multires_modifier->sculpt_face_set_grids)
+  {
+    CTX_wm_operator_poll_msg_set(C,
+        "HR Face Sets V01 supports Draw Face Sets and Multires Face Sets from Base; "
+        "this tool still uses base faces");
+    return false;
+  }
+  return true;
+}
+
+static bool base_face_sets_poll_view3d(bContext *C)
+{
+  return sculpt_mode_poll_view3d(C) && base_face_sets_poll(C);
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Public API
@@ -580,7 +620,7 @@ void SCULPT_OT_face_sets_create(wmOperatorType *ot)
   ot->description = "Create a new face set";
 
   ot->exec = create_op_exec;
-  ot->poll = sculpt_mode_poll;
+  ot->poll = base_face_sets_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
@@ -845,7 +885,7 @@ void SCULPT_OT_face_sets_init(wmOperatorType *ot)
   ot->description = "Initializes all face sets in the mesh";
 
   ot->exec = init_op_exec;
-  ot->poll = sculpt_mode_poll;
+  ot->poll = base_face_sets_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
 
@@ -910,6 +950,354 @@ enum class VisibilityMode {
   ShowActive = 1,
   HideActive = 2,
 };
+
+/* MULTIRES_FACESETS_VISIBILITY_V02: IDs remain read-only. Visibility and masks
+ * use Blender's CCG storage/Undo, never a second copy of the Face Set master. */
+static bool hr_tools_enabled()
+{
+  const char *value = std::getenv("BLENDER_MULTIRES_FACESETS_VISIBILITY_V02");
+  return value && value[0] == '1' && value[1] == '\0' &&
+         bke::multires_layers::faceset_high_resolution_enabled();
+}
+
+static bool hr_tools_have_master(const Object &object)
+{
+  const SculptSession *ss = object.runtime->sculpt_session;
+  return hr_tools_enabled() && ss && ss->multires_modifier &&
+         ss->multires_modifier->sculpt_face_set_grids;
+}
+
+static bool hr_tools_valid(const Object &object)
+{
+  const SculptSession *ss = object.runtime->sculpt_session;
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+  if (!hr_tools_have_master(object) || !pbvh || pbvh->type() != bke::pbvh::Type::Grids ||
+      !ss->subdiv_ccg) {
+    return false;
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss->subdiv_ccg);
+  return key.grid_size > 1 && ss->subdiv_ccg->grids_num == mesh.corners_num &&
+         bke::multires_layers::faceset_master_valid(*ss->multires_modifier, mesh.corners_num);
+}
+
+static bool hr_tools_poll(bContext *C)
+{
+  return sculpt_mode_poll(C) && hr_tools_valid(*CTX_data_active_object(C));
+}
+
+static bool visibility_hr_or_base_poll(bContext *C)
+{
+  return hr_tools_enabled() ? sculpt_mode_poll(C) : base_face_sets_poll(C);
+}
+
+static int hr_id_at_sample(const Object &object, const CCGKey &key, const int grid, const int i)
+{
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  return bke::multires_layers::faceset_sample(*ss.multires_modifier, grid,
+      float(i % key.grid_size) / float(key.grid_size - 1),
+      float(i / key.grid_size) / float(key.grid_size - 1), 1);
+}
+
+static bool hr_id_present(const Object &object, const int id)
+{
+  const SubdivCCG &ccg = *object.runtime->sculpt_session->subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
+  for (const int grid : IndexRange(ccg.grids_num)) {
+    for (const int i : IndexRange(key.grid_area)) {
+      if (hr_id_at_sample(object, key, grid, i) == id) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+static int hr_id_at_cursor(const Object &object)
+{
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  const auto active_vert = ss.active_vert();
+  const int *active = std::get_if<int>(&active_vert);
+  if (!active || *active < 0) {
+    return 0;
+  }
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss.subdiv_ccg);
+  if (int64_t(*active) >= int64_t(ss.subdiv_ccg->grids_num) * key.grid_area) {
+    return 0;
+  }
+  const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, *active);
+  return hr_id_at_sample(object, key, coord.grid_index, coord.y * key.grid_size + coord.x);
+}
+
+static bool hr_any_hidden(const SubdivCCG &ccg)
+{
+  if (ccg.grid_hidden.is_empty()) {
+    return false;
+  }
+  for (const int grid : IndexRange(ccg.grids_num)) {
+    if (bits::any_bit_set(ccg.grid_hidden[grid])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Pure decisions shared by the native operations and the extracted unit test. */
+static bool hr_hide_value(const int mode, const bool old_hidden, const bool matches)
+{
+  switch (mode) {
+    case 0: return !matches; /* Isolate. Toggle-to-show-all is handled once globally. */
+    case 1: return matches ? false : old_hidden;
+    case 2: return matches ? true : old_hidden;
+  }
+  return old_hidden;
+}
+
+static float hr_mask_value(const int mode, const float old_mask, const bool matches)
+{
+  switch (mode) {
+    case 0: return matches ? 1.0f : 0.0f; /* Replace visible mask. */
+    case 1: return matches ? 1.0f : old_mask; /* Add. */
+    case 2: return matches ? 0.0f : old_mask; /* Remove. */
+    case 3: return matches ? 0.0f : 1.0f; /* Protect others. */
+  }
+  return old_mask;
+}
+
+static void hr_visibility_update(Depsgraph &depsgraph,
+                                 Object &object,
+                                 const IndexMask &nodes,
+                                 const int mode,
+                                 const int active_id)
+{
+  const SubdivCCG &ccg = *object.runtime->sculpt_session->subdiv_ccg;
+  if (mode == 0 && hr_any_hidden(ccg)) {
+    hide::grids_show_all(depsgraph, object, nodes);
+    return;
+  }
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
+  hide::grid_hide_update(depsgraph, object, nodes,
+      [&](const int grid, MutableBoundedBitSpan hidden) {
+        for (const int i : IndexRange(key.grid_area)) {
+          const bool matches = hr_id_at_sample(object, key, grid, i) == active_id;
+          hidden[i].set(hr_hide_value(mode, bool(hidden[i]), matches));
+        }
+      });
+}
+
+/* Stitch scalar masks only. Never run geometry/normals averaging for a mask edit.
+ * The lowest visible duplicate owns each seam group; hidden masks are retained. */
+static void hr_average_visible_masks(SubdivCCG &ccg, const CCGKey &key)
+{
+  SubdivCCGNeighbors neighbors;
+  for (const int grid : IndexRange(ccg.grids_num)) {
+    for (const int y : IndexRange(key.grid_size)) {
+      for (const int x : IndexRange(key.grid_size)) {
+        if (x != 0 && y != 0 && x != key.grid_size - 1 && y != key.grid_size - 1) {
+          continue;
+        }
+        const int local = y * key.grid_size + x;
+        if (!ccg.grid_hidden.is_empty() && ccg.grid_hidden[grid][local]) {
+          continue;
+        }
+        const SubdivCCGCoord coord = {grid, short(x), short(y)};
+        const int owner = coord.to_index(key);
+        BKE_subdiv_ccg_neighbor_coords_get(ccg, coord, true, neighbors);
+        bool is_owner = true;
+        int count = 1;
+        double sum = ccg.masks[owner];
+        for (const SubdivCCGCoord &other : neighbors.duplicates()) {
+          const int index = other.to_index(key);
+          const int i = other.y * key.grid_size + other.x;
+          if (!ccg.grid_hidden.is_empty() && ccg.grid_hidden[other.grid_index][i]) {
+            continue;
+          }
+          if (index < owner) {
+            is_owner = false;
+            break;
+          }
+          sum += ccg.masks[index];
+          count++;
+        }
+        if (!is_owner || count == 1) {
+          continue;
+        }
+        const float value = float(sum / count);
+        ccg.masks[owner] = value;
+        for (const SubdivCCGCoord &other : neighbors.duplicates()) {
+          const int i = other.y * key.grid_size + other.x;
+          if (ccg.grid_hidden.is_empty() || !ccg.grid_hidden[other.grid_index][i]) {
+            ccg.masks[other.to_index(key)] = value;
+          }
+        }
+      }
+    }
+  }
+}
+
+static wmOperatorStatus hr_mask_exec(bContext *C, wmOperator *op)
+{
+  Object &object = *CTX_data_active_object(C);
+  Depsgraph &depsgraph = *CTX_data_ensure_evaluated_depsgraph(C);
+  BKE_sculpt_update_object_for_edit(&depsgraph, &object, false);
+  if (!hr_tools_valid(object)) {
+    BKE_report(op->reports, RPT_ERROR, "A valid HR Face Set master and Multires grids are required");
+    return OPERATOR_CANCELLED;
+  }
+  const int active_id = RNA_int_get(op->ptr, "active_face_set");
+  const int mode = RNA_enum_get(op->ptr, "mode");
+  if (active_id <= 0 || mode < 0 || mode > 3 || !hr_id_present(object, active_id)) {
+    BKE_report(op->reports, RPT_ERROR, "Choose an HR Face Set ID represented at the current sculpt level");
+    return OPERATOR_CANCELLED;
+  }
+  /* HR_MASK_STORAGE_LIFETIME_FIX_V01: adding the native grid-mask layer
+   * may reevaluate the object and replace its CCG/PBVH. Never keep tree,
+   * node-mask, session or grid references across that call. */
+  MultiresModifierData *mask_modifier = object.runtime->sculpt_session->multires_modifier;
+  BKE_sculpt_mask_layers_ensure(&depsgraph, CTX_data_main(C), &object, mask_modifier);
+  BKE_sculpt_update_object_for_edit(&depsgraph, &object, false);
+  if (!hr_tools_valid(object) || !hr_id_present(object, active_id)) {
+    BKE_report(op->reports, RPT_ERROR, "HR Face Set grids unavailable after mask preparation");
+    return OPERATOR_CANCELLED;
+  }
+  SculptSession &ss = *object.runtime->sculpt_session;
+  SubdivCCG &ccg = *ss.subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
+  if (int64_t(ccg.masks.size()) != int64_t(ccg.grids_num) * key.grid_area) {
+    BKE_report(op->reports, RPT_ERROR, "Native Multires mask storage has an invalid size");
+    return OPERATOR_CANCELLED;
+  }
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  IndexMaskMemory memory;
+  const IndexMask nodes = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  if (nodes.is_empty()) {
+    return OPERATOR_CANCELLED;
+  }
+  Scene &scene = *CTX_data_scene(C);
+  undo::push_begin(scene, object, op);
+  MutableSpan<float> masks = ccg.masks;
+  undo::push_nodes(depsgraph, object, nodes, undo::Type::Mask);
+  MutableSpan<bke::pbvh::GridsNode> pbvh_nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+  nodes.foreach_index([&](const int node) {
+    for (const int grid : pbvh_nodes[node].grids()) {
+      MutableSpan<float> grid_mask = masks.slice(bke::ccg::grid_range(key, grid));
+      BKE_subdiv_ccg_foreach_visible_grid_vert(key, ccg.grid_hidden, grid, [&](const int i) {
+        grid_mask[i] = hr_mask_value(mode, grid_mask[i],
+                                   hr_id_at_sample(object, key, grid, i) == active_id);
+      });
+    }
+  }, exec_mode::grain_size(1));
+  hr_average_visible_masks(ccg, key);
+  nodes.foreach_index([&](const int node) {
+    bke::pbvh::node_update_mask_grids(key, masks, pbvh_nodes[node]);
+  }, exec_mode::grain_size(1));
+  pbvh.tag_masks_changed(nodes);
+  multires_mark_as_modified(&depsgraph, &object, MULTIRES_MASK_MODIFIED);
+  undo::push_end(object);
+  mask_overlay_check(*C, *op);
+  tag_update_overlays(C);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus hr_mask_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  Object &object = *CTX_data_active_object(C);
+  const float mouse[2] = {float(event->mval[0]), float(event->mval[1])};
+  vert_random_access_ensure(object);
+  cursor_geometry_info_update(C, mouse, false);
+  const int id = hr_id_at_cursor(object);
+  if (id <= 0) {
+    BKE_report(op->reports, RPT_ERROR, "Place the cursor over a visible HR Face Set");
+    return OPERATOR_CANCELLED;
+  }
+  RNA_int_set(op->ptr, "active_face_set", id);
+  return hr_mask_exec(C, op);
+}
+
+void SCULPT_OT_multires_face_sets_hr_mask(wmOperatorType *ot)
+{
+  ot->name = "Mask from Multires HR Face Set";
+  ot->idname = "SCULPT_OT_multires_face_sets_hr_mask";
+  ot->description = "Create or edit the visible sculpt mask using high-resolution Face Set IDs";
+  ot->poll = hr_tools_poll;
+  ot->exec = hr_mask_exec;
+  ot->invoke = hr_mask_invoke;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
+  static const EnumPropertyItem modes[] = {
+      {0, "REPLACE", 0, "Mask Group", "Replace the visible mask with this group"},
+      {1, "ADD", 0, "Add Group", "Mask this group and retain other mask values"},
+      {2, "REMOVE", 0, "Unmask Group", "Clear this group and retain other mask values"},
+      {3, "OTHERS", 0, "Mask Others", "Unmask this group and mask the other visible groups"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  RNA_def_enum(ot->srna, "mode", modes, 0, "Mode", "Mask operation");
+  PropertyRNA *prop = RNA_def_int(ot->srna, "active_face_set", 1, 1, INT_MAX,
+                                 "Face Set ID", "HR group to mask", 1, INT_MAX);
+  RNA_def_property_flag(prop, PROP_SKIP_SAVE);
+}
+
+/* Read-only per-ID CCG audit for manual level/Undo checks. */
+static wmOperatorStatus hr_state_exec(bContext *C, wmOperator *op)
+{
+  const Object &object = *CTX_data_active_object(C);
+  const SubdivCCG &ccg = *object.runtime->sculpt_session->subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
+  const int id = RNA_int_get(op->ptr, "active_face_set");
+  int64_t matched = 0, hidden_matched = 0, hidden_other = 0;
+  double mask_sum_matched = 0, mask_sum_other = 0;
+  for (const int grid : IndexRange(ccg.grids_num)) {
+    for (const int i : IndexRange(key.grid_area)) {
+      const bool match = hr_id_at_sample(object, key, grid, i) == id;
+      const bool hidden = !ccg.grid_hidden.is_empty() && ccg.grid_hidden[grid][i];
+      const float mask = ccg.masks.is_empty() ? 0.0f : ccg.masks[grid * key.grid_area + i];
+      matched += match;
+      hidden_matched += hidden && match;
+      hidden_other += hidden && !match;
+      mask_sum_matched += match ? mask : 0.0;
+      mask_sum_other += match ? 0.0 : mask;
+    }
+  }
+  std::printf("[FACESETS_HR_STATE] {\"id\":%d,\"side\":%d,\"samples\":%lld,"
+              "\"matched\":%lld,\"hidden_matched\":%lld,\"hidden_other\":%lld,"
+              "\"mask_sum_matched\":%.9g,\"mask_sum_other\":%.9g}\n",
+              id, key.grid_size, (long long)ccg.grids_num * key.grid_area,
+              (long long)matched, (long long)hidden_matched, (long long)hidden_other,
+              mask_sum_matched, mask_sum_other);
+  std::fflush(stdout);
+  BKE_reportf(op->reports, RPT_INFO, "HR Face Set %d: %lld samples; visibility/mask counts in the log",
+              id, (long long)matched);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus hr_state_invoke(bContext *C, wmOperator *op, const wmEvent *event)
+{
+  Object &object = *CTX_data_active_object(C);
+  const float mouse[2] = {float(event->mval[0]), float(event->mval[1])};
+  vert_random_access_ensure(object);
+  cursor_geometry_info_update(C, mouse, false);
+  const int id = hr_id_at_cursor(object);
+  if (id <= 0) {
+    BKE_report(op->reports, RPT_ERROR, "Place the cursor over a visible HR Face Set");
+    return OPERATOR_CANCELLED;
+  }
+  RNA_int_set(op->ptr, "active_face_set", id);
+  return hr_state_exec(C, op);
+}
+
+void SCULPT_OT_multires_face_sets_hr_state(wmOperatorType *ot)
+{
+  ot->name = "Multires HR Face Set Visibility and Mask Audit";
+  ot->idname = "SCULPT_OT_multires_face_sets_hr_state";
+  ot->description = "Read-only counts at the current sculpt level; master IDs are unchanged";
+  ot->poll = hr_tools_poll;
+  ot->exec = hr_state_exec;
+  ot->invoke = hr_state_invoke;
+  ot->flag = OPTYPE_DEPENDS_ON_CURSOR;
+  RNA_def_int(ot->srna, "active_face_set", 1, 1, INT_MAX, "Face Set ID", "Group to inspect", 1, INT_MAX);
+}
+
+/* MULTIRES_HR_EXTRACT_V05: implementation shares read-only HR sampling helpers. */
+#include "sculpt_multires_hr_extract_v05.hh"
 
 static void face_hide_update(const Depsgraph &depsgraph,
                              Object &object,
@@ -1020,65 +1408,78 @@ static wmOperatorStatus change_visibility_exec(bContext *C, wmOperator *op)
 
   const VisibilityMode mode = VisibilityMode(RNA_enum_get(op->ptr, "mode"));
   const int active_face_set = RNA_int_get(op->ptr, "active_face_set");
+  const bool use_hr = hr_tools_have_master(object);
+  if (use_hr && (!hr_tools_valid(object) ||
+      ((active_face_set <= 0 || !hr_id_present(object, active_face_set)) &&
+       !(mode == VisibilityMode::Toggle && hr_any_hidden(*ss.subdiv_ccg))))) {
+    BKE_report(op->reports, RPT_ERROR, "A valid HR master and a Face Set under the cursor are required");
+    return OPERATOR_CANCELLED;
+  }
 
   undo::push_begin(scene, object, op);
 
   IndexMaskMemory memory;
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
-  const bke::AttributeAccessor attributes = mesh->attributes();
-  const VArraySpan<bool> hide_poly = *attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face);
-  const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
-                                                            bke::AttrDomain::Face);
+  if (use_hr) {
+    hr_visibility_update(depsgraph, object, node_mask, int(mode), active_face_set);
+  }
+  else {
+    const bke::AttributeAccessor attributes = mesh->attributes();
+    const VArraySpan<bool> hide_poly = *attributes.lookup<bool>(".hide_poly", bke::AttrDomain::Face);
+    const VArraySpan<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
+                                                              bke::AttrDomain::Face);
 
-  switch (mode) {
-    case VisibilityMode::Toggle: {
-      if (hide_poly.contains(true) || face_sets.is_empty()) {
-        show_all(depsgraph, object, node_mask);
+    switch (mode) {
+      case VisibilityMode::Toggle: {
+        if (hide_poly.contains(true) || face_sets.is_empty()) {
+          show_all(depsgraph, object, node_mask);
+        }
+        else {
+          face_hide_update(
+              depsgraph, object, node_mask, [&](const Span<int> faces, MutableSpan<bool> hide) {
+                for (const int i : hide.index_range()) {
+                  hide[i] = face_sets[faces[i]] != active_face_set;
+                }
+              });
+        }
+        break;
       }
-      else {
-        face_hide_update(
-            depsgraph, object, node_mask, [&](const Span<int> faces, MutableSpan<bool> hide) {
-              for (const int i : hide.index_range()) {
-                hide[i] = face_sets[faces[i]] != active_face_set;
-              }
-            });
-      }
-      break;
+      case VisibilityMode::ShowActive:
+        if (face_sets.is_empty()) {
+          show_all(depsgraph, object, node_mask);
+        }
+        else {
+          face_hide_update(
+              depsgraph, object, node_mask, [&](const Span<int> faces, MutableSpan<bool> hide) {
+                for (const int i : hide.index_range()) {
+                  if (face_sets[faces[i]] == active_face_set) {
+                    hide[i] = false;
+                  }
+                }
+              });
+        }
+        break;
+      case VisibilityMode::HideActive:
+        if (face_sets.is_empty()) {
+          face_hide_update(
+              depsgraph, object, node_mask, [&](const Span<int> /*faces*/, MutableSpan<bool> hide) {
+                hide.fill(true);
+              });
+        }
+        else {
+          face_hide_update(
+              depsgraph, object, node_mask, [&](const Span<int> faces, MutableSpan<bool> hide) {
+                for (const int i : hide.index_range()) {
+                  if (face_sets[faces[i]] == active_face_set) {
+                    hide[i] = true;
+                  }
+                }
+              });
+        }
+        break;
     }
-    case VisibilityMode::ShowActive:
-      if (face_sets.is_empty()) {
-        show_all(depsgraph, object, node_mask);
-      }
-      else {
-        face_hide_update(
-            depsgraph, object, node_mask, [&](const Span<int> faces, MutableSpan<bool> hide) {
-              for (const int i : hide.index_range()) {
-                if (face_sets[faces[i]] == active_face_set) {
-                  hide[i] = false;
-                }
-              }
-            });
-      }
-      break;
-    case VisibilityMode::HideActive:
-      if (face_sets.is_empty()) {
-        face_hide_update(
-            depsgraph, object, node_mask, [&](const Span<int> /*faces*/, MutableSpan<bool> hide) {
-              hide.fill(true);
-            });
-      }
-      else {
-        face_hide_update(
-            depsgraph, object, node_mask, [&](const Span<int> faces, MutableSpan<bool> hide) {
-              for (const int i : hide.index_range()) {
-                if (face_sets[faces[i]] == active_face_set) {
-                  hide[i] = true;
-                }
-              }
-            });
-      }
-      break;
+
   }
 
   /* For modes that use the cursor active vertex, update the rotation origin for viewport
@@ -1125,7 +1526,12 @@ static wmOperatorStatus change_visibility_invoke(bContext *C, wmOperator *op, co
   vert_random_access_ensure(ob);
   cursor_geometry_info_update(C, mval_fl, false);
 
-  const int active_face_set = active_face_set_get(ob);
+  const bool use_hr = hr_tools_have_master(ob);
+  if (use_hr && !hr_tools_valid(ob)) {
+    BKE_report(op->reports, RPT_ERROR, "Invalid HR Face Set master; no visibility changed");
+    return OPERATOR_CANCELLED;
+  }
+  const int active_face_set = use_hr ? hr_id_at_cursor(ob) : active_face_set_get(ob);
   RNA_int_set(op->ptr, "active_face_set", active_face_set);
 
   return change_visibility_exec(C, op);
@@ -1139,7 +1545,7 @@ void SCULPT_OT_face_set_change_visibility(wmOperatorType *ot)
 
   ot->exec = change_visibility_exec;
   ot->invoke = change_visibility_invoke;
-  ot->poll = sculpt_mode_poll;
+  ot->poll = visibility_hr_or_base_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
 
@@ -1616,7 +2022,7 @@ void SCULPT_OT_face_sets_edit(wmOperatorType *ot)
 
   ot->invoke = edit_op_invoke;
   ot->exec = edit_op_exec;
-  ot->poll = sculpt_mode_poll;
+  ot->poll = base_face_sets_poll;
 
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO | OPTYPE_DEPENDS_ON_CURSOR;
 
@@ -1788,7 +2194,114 @@ struct FaceSetOperation {
   gesture::Operation op;
 
   int new_face_set_id;
+  bool high_resolution;
+  /* FACESETS_HR_DISPLAY_V04: union across symmetry passes, freed at gesture_end. */
+  bool *hr_changed_nodes;
+  int hr_changed_nodes_num;
 };
+
+/* MULTIRES_FACESETS_GESTURES_V03: gestures edit categorical IDs per CCG sample,
+ * never the coarse face attribute. Master/ID preflight runs before Undo workers. */
+static bool hr_gestures_enabled()
+{
+  const char *value = std::getenv("BLENDER_MULTIRES_FACESETS_GESTURES_V03");
+  return value && value[0] == '1' && value[1] == '\0' && hr_tools_enabled();
+}
+
+static bool hr_gesture_requested(const Object &object)
+{
+  const SculptSession *ss = object.runtime->sculpt_session;
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+  return hr_gestures_enabled() && ss && ss->multires_modifier && ss->subdiv_ccg &&
+         pbvh && pbvh->type() == bke::pbvh::Type::Grids;
+}
+
+static bool hr_gesture_poll(bContext *C)
+{
+  if (!sculpt_mode_poll_view3d(C)) {
+    return false;
+  }
+  return hr_gesture_requested(*CTX_data_active_object(C)) || base_face_sets_poll(C);
+}
+
+static bool hr_gesture_prepare(Object &object, wmOperator &op)
+{
+  SculptSession &ss = *object.runtime->sculpt_session;
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  MultiresModifierData &mmd = *ss.multires_modifier;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss.subdiv_ccg);
+  if (key.grid_size < 2 || ss.subdiv_ccg->grids_num != mesh.corners_num ||
+      !bke::multires_layers::faceset_ensure_from_mesh(mmd, mesh, mmd.totlvl) ||
+      !bke::multires_layers::faceset_master_valid(mmd, mesh.corners_num)) {
+    BKE_report(op.reports, RPT_ERROR, "Invalid HR Face Set master/layout; gesture cancelled");
+    return false;
+  }
+  const int master_side = (1 << (mmd.sculpt_face_set_level - 1)) + 1;
+  if (key.grid_size > master_side || (master_side - 1) % (key.grid_size - 1) != 0) {
+    BKE_report(op.reports, RPT_ERROR, "HR Face Set and sculpt levels are incompatible");
+    return false;
+  }
+  return true;
+}
+
+static void gesture_apply_hr(gesture::GestureData &gesture_data, const IndexMask &node_mask)
+{
+  Object &object = *gesture_data.vc.obact;
+  SculptSession &ss = *object.runtime->sculpt_session;
+  SubdivCCG &ccg = *ss.subdiv_ccg;
+  MultiresModifierData &mmd = *ss.multires_modifier;
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
+  const Depsgraph &depsgraph = *gesture_data.vc.depsgraph;
+  auto &operation = *reinterpret_cast<FaceSetOperation *>(gesture_data.operation);
+  struct TLS {
+    Vector<float3> positions;
+    Vector<float3> normals;
+    Vector<float> factors;
+  };
+  threading::EnumerableThreadSpecific<TLS> all_tls;
+  Array<bool> changed(node_mask.min_array_size(), false);
+  node_mask.foreach_index([&](const int node) {
+    TLS &tls = all_tls.local();
+    const Span<int> grids = nodes[node].grids();
+    const MutableSpan positions = gather_grids_positions(ccg, grids, tls.positions);
+    tls.factors.resize(positions.size());
+    const MutableSpan<float> factors = tls.factors;
+    ed::sculpt_paint::fill_factor_from_hide_and_mask(ccg, grids, factors);
+    filter_region_clip_factors(ss, positions, factors);
+    tls.normals.resize(positions.size());
+    if (ccg.normals.is_empty()) {
+      tls.normals.as_mutable_span().fill(float3(0.0f));
+    }
+    else {
+      gather_grids_normals(ccg, grids, tls.normals.as_mutable_span());
+    }
+    gesture::filter_factors(gesture_data, positions, tls.normals.as_span(), factors);
+    bool touched = false;
+    for (const float factor : factors) {
+      if (factor >= FACE_SET_MIN_FADE) {
+        touched = true;
+        break;
+      }
+    }
+    if (!touched) {
+      return;
+    }
+    undo::push_node(depsgraph, object, &nodes[node], undo::Type::FaceSet);
+    for (const int i : grids.index_range()) {
+      changed[node] = bke::multires_layers::faceset_paint_grid(
+          mmd, grids[i], key.grid_size, factors.slice(bke::ccg::grid_range(key, i)),
+          FACE_SET_MIN_FADE, operation.new_face_set_id) || changed[node];
+    }
+    if (operation.hr_changed_nodes && node < operation.hr_changed_nodes_num && changed[node]) {
+      operation.hr_changed_nodes[node] = true;
+    }
+  }, exec_mode::grain_size(1));
+  IndexMaskMemory memory;
+  pbvh.tag_face_sets_changed(IndexMask::from_bools(changed, memory));
+}
+
 
 static void gesture_begin(bContext &C, wmOperator &op, gesture::GestureData &gesture_data)
 {
@@ -1981,6 +2494,11 @@ static void gesture_apply_bmesh(gesture::GestureData &gesture_data, const IndexM
 
 static void gesture_apply_for_symmetry_pass(bContext & /*C*/, gesture::GestureData &gesture_data)
 {
+  const auto &operation = *reinterpret_cast<FaceSetOperation *>(gesture_data.operation);
+  if (operation.high_resolution) {
+    gesture_apply_hr(gesture_data, gesture_data.node_mask);
+    return;
+  }
   switch (bke::object::pbvh_get(*gesture_data.vc.obact)->type()) {
     case bke::pbvh::Type::Grids:
     case bke::pbvh::Type::Mesh:
@@ -1992,14 +2510,51 @@ static void gesture_apply_for_symmetry_pass(bContext & /*C*/, gesture::GestureDa
   }
 }
 
-static void gesture_end(bContext & /*C*/, gesture::GestureData &gesture_data)
-{
-  undo::push_end(*gesture_data.vc.obact);
-}
-
-static void init_operation(gesture::GestureData &gesture_data, wmOperator & /*op*/)
+static void gesture_end(bContext &C, gesture::GestureData &gesture_data)
 {
   Object &object = *gesture_data.vc.obact;
+  auto &operation = *reinterpret_cast<FaceSetOperation *>(gesture_data.operation);
+  undo::push_end(object);
+  if (operation.high_resolution && operation.hr_changed_nodes) {
+    /* FACESETS_HR_DISPLAY_V04: publish after Undo finalization as well. Reuse
+     * the union of actual changed nodes; no full-mesh geometry invalidation. */
+    bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+    if (pbvh && pbvh->nodes_num() == operation.hr_changed_nodes_num) {
+      IndexMaskMemory memory;
+      const IndexMask changed = IndexMask::from_bools(
+          Span<bool>(operation.hr_changed_nodes, operation.hr_changed_nodes_num), memory);
+      if (!changed.is_empty()) {
+        pbvh->tag_face_sets_changed(changed);
+        WM_event_add_notifier(&C, NC_OBJECT | ND_DRAW, &object);
+        WM_event_add_notifier(&C, NC_SPACE | ND_SPACE_VIEW3D, nullptr);
+        std::printf("[FACESETS_HR_PUBLISH_V04] nodes=%lld; master_only=1\n",
+                    (long long)changed.size());
+        std::fflush(stdout);
+      }
+    }
+    MEM_SAFE_DELETE(operation.hr_changed_nodes);
+    operation.hr_changed_nodes_num = 0;
+  }
+}
+
+static bool init_operation(gesture::GestureData &gesture_data, wmOperator &op)
+{
+  Object &object = *gesture_data.vc.obact;
+  const bool high_resolution = hr_gesture_requested(object);
+  if (high_resolution && !hr_gesture_prepare(object, op)) {
+    return false;
+  }
+  if (high_resolution && gesture_data.front_faces_only &&
+      object.runtime->sculpt_session->subdiv_ccg->normals.is_empty()) {
+    BKE_report(op.reports, RPT_ERROR, "Front-face HR gesture requires evaluated grid normals");
+    return false;
+  }
+  const int new_id = high_resolution ? bke::multires_layers::faceset_next_available_id(
+      *object.runtime->sculpt_session->multires_modifier, 2) : face_set::find_next_available_id(object);
+  if (new_id <= 0) {
+    BKE_report(op.reports, RPT_ERROR, "No unused Face Set ID is available");
+    return false;
+  }
   gesture_data.operation = reinterpret_cast<gesture::Operation *>(
       MEM_new_zeroed<FaceSetOperation>(__func__));
 
@@ -2010,7 +2565,14 @@ static void init_operation(gesture::GestureData &gesture_data, wmOperator & /*op
   face_set_operation->op.apply_for_symmetry_pass = gesture_apply_for_symmetry_pass;
   face_set_operation->op.end = gesture_end;
 
-  face_set_operation->new_face_set_id = face_set::find_next_available_id(object);
+  face_set_operation->new_face_set_id = new_id;
+  face_set_operation->high_resolution = high_resolution;
+  if (high_resolution) {
+    face_set_operation->hr_changed_nodes_num = bke::object::pbvh_get(object)->nodes_num();
+    face_set_operation->hr_changed_nodes = MEM_new_array_zeroed<bool>(
+        face_set_operation->hr_changed_nodes_num, __func__);
+  }
+  return true;
 }
 
 static wmOperatorStatus gesture_box_invoke(bContext *C, wmOperator *op, const wmEvent *event)
@@ -2030,7 +2592,9 @@ static wmOperatorStatus gesture_box_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
-  init_operation(*gesture_data, *op);
+  if (!init_operation(*gesture_data, *op)) {
+    return OPERATOR_CANCELLED;
+  }
   ed::sculpt_paint::face_set_overlay_check(*C, *op);
   gesture::apply(*C, *gesture_data, *op);
   return OPERATOR_FINISHED;
@@ -2053,7 +2617,9 @@ static wmOperatorStatus gesture_lasso_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
-  init_operation(*gesture_data, *op);
+  if (!init_operation(*gesture_data, *op)) {
+    return OPERATOR_CANCELLED;
+  }
   ed::sculpt_paint::face_set_overlay_check(*C, *op);
   gesture::apply(*C, *gesture_data, *op);
   return OPERATOR_FINISHED;
@@ -2076,7 +2642,9 @@ static wmOperatorStatus gesture_line_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
-  init_operation(*gesture_data, *op);
+  if (!init_operation(*gesture_data, *op)) {
+    return OPERATOR_CANCELLED;
+  }
   ed::sculpt_paint::face_set_overlay_check(*C, *op);
   gesture::apply(*C, *gesture_data, *op);
   return OPERATOR_FINISHED;
@@ -2099,7 +2667,9 @@ static wmOperatorStatus gesture_polyline_exec(bContext *C, wmOperator *op)
   if (!gesture_data) {
     return OPERATOR_CANCELLED;
   }
-  init_operation(*gesture_data, *op);
+  if (!init_operation(*gesture_data, *op)) {
+    return OPERATOR_CANCELLED;
+  }
   ed::sculpt_paint::face_set_overlay_check(*C, *op);
   gesture::apply(*C, *gesture_data, *op);
   return OPERATOR_FINISHED;
@@ -2115,7 +2685,7 @@ void SCULPT_OT_face_set_polyline_gesture(wmOperatorType *ot)
   ot->modal = WM_gesture_polyline_modal;
   ot->exec = gesture_polyline_exec;
 
-  ot->poll = sculpt_mode_poll_view3d;
+  ot->poll = hr_gesture_poll;
 
   ot->flag = OPTYPE_DEPENDS_ON_CURSOR;
 
@@ -2133,7 +2703,7 @@ void SCULPT_OT_face_set_box_gesture(wmOperatorType *ot)
   ot->modal = WM_gesture_box_modal;
   ot->exec = gesture_box_exec;
 
-  ot->poll = sculpt_mode_poll_view3d;
+  ot->poll = hr_gesture_poll;
 
   ot->flag = OPTYPE_REGISTER;
 
@@ -2151,7 +2721,7 @@ void SCULPT_OT_face_set_lasso_gesture(wmOperatorType *ot)
   ot->modal = WM_gesture_lasso_modal;
   ot->exec = gesture_lasso_exec;
 
-  ot->poll = sculpt_mode_poll_view3d;
+  ot->poll = hr_gesture_poll;
 
   ot->flag = OPTYPE_DEPENDS_ON_CURSOR;
 
@@ -2169,7 +2739,7 @@ void SCULPT_OT_face_set_line_gesture(wmOperatorType *ot)
   ot->modal = WM_gesture_straightline_oneshot_modal;
   ot->exec = gesture_line_exec;
 
-  ot->poll = sculpt_mode_poll_view3d;
+  ot->poll = hr_gesture_poll;
 
   ot->flag = OPTYPE_REGISTER;
 

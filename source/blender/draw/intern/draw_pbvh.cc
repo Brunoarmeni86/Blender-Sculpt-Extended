@@ -1147,16 +1147,17 @@ BLI_NOINLINE static void fill_face_sets_grids(const Object &object,
   const bke::AttributeAccessor attributes = orig_mesh_data.attributes;
   const MultiresModifierData *mmd = object.runtime->sculpt_session->multires_modifier;
   ensure_vbos_allocated_grids(object, face_set_format(), use_flat_layout, node_mask, vbos);
-  if (const VArray<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
-                                                            bke::AttrDomain::Face))
-  {
-    const VArraySpan<int> face_sets_span(face_sets);
+  /* FACESETS_HR_DISPLAY_V04: the categorical HR master is authoritative even
+   * when no coarse attribute exists. Never synthesize base IDs while drawing. */
+  const VArray<int> face_sets = *attributes.lookup<int>(".sculpt_face_set",
+                                                       bke::AttrDomain::Face);
+  if (face_sets || (mmd && mmd->sculpt_face_set_grids)) {
     node_mask.foreach_index(
         [&](const int i) {
           const Span<int> grids = nodes[i].grids();
           uchar4 *data = vbos[i]->data<uchar4>().data();
           for (const int grid : grids) {
-            const int fallback = face_sets[grid_to_face_map[grid]];
+            const int fallback = face_sets ? face_sets[grid_to_face_map[grid]] : color_default;
             auto color_for_xy = [&](const int x, const int y) {
               const float u = key.grid_size > 1 ? float(x) / float(key.grid_size - 1) : 0.0f;
               const float v = key.grid_size > 1 ? float(y) / float(key.grid_size - 1) : 0.0f;

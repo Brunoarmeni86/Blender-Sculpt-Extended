@@ -328,7 +328,8 @@ static void vert_hide_update(const Depsgraph &depsgraph,
   }
 }
 
-static void grid_hide_update(Depsgraph &depsgraph,
+/* MULTIRES_FACESETS_VISIBILITY_V02: public native writer, behavior unchanged. */
+void grid_hide_update(Depsgraph &depsgraph,
                              Object &object,
                              const IndexMask &node_mask,
                              const FunctionRef<void(const int, MutableBoundedBitSpan)> calc_hide)

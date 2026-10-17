@@ -21,6 +21,7 @@ struct Mesh;
 struct Object;
 struct Scene;
 struct wmOperator;
+struct wmOperatorType;
 namespace bke::pbvh {
 class Node;
 }
@@ -41,6 +42,9 @@ enum class Type : int8_t {
 };
 
 struct StepData;
+
+/** Read-only opt-in native verification operator. */
+void SCULPT_OT_undo_memory_audit_v01(wmOperatorType *ot);
 
 /**
  * Store undo data of the given type for a pbvh::Tree node. This function can be called by multiple

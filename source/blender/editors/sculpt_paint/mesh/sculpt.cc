@@ -7921,6 +7921,46 @@ static bool sculpt_polypaint_skips_geometry_rec(bContext *C)
   return mmd && mmd->sculptlvl > 0;
 }
 
+/* FACESETS_REC_INDEPENDENT_V05: allow ID painting, never a geometric side effect.
+ * Relax (Shift), alternate Mask, Auto Smooth, cloth and gravity keep the REC guard. */
+static bool sculpt_face_sets_skips_geometry_rec(bContext *C, const wmOperator &op)
+{
+  const ToolSettings *settings = CTX_data_tool_settings(C);
+  const Sculpt *sd = settings ? settings->sculpt : nullptr;
+  const Brush *brush = sd ? BKE_paint_brush_for_read(&sd->paint) : nullptr;
+  if (!brush || brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS ||
+      !std::isfinite(brush->autosmooth_factor) || brush->autosmooth_factor > 0.0f ||
+      brush->deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM) {
+    return false;
+  }
+  const BrushSwitchMode mode = BrushSwitchMode(RNA_enum_get(op.ptr, "brush_toggle"));
+  if (mode == BrushSwitchMode::Smooth || mode == BrushSwitchMode::Mask ||
+      (sd->gravity_factor > 0.0f && bke::brush::supports_gravity(*brush))) {
+    return false;
+  }
+  const Object *object = CTX_data_active_object(C);
+  const SculptSession *ss = object ? object->runtime->sculpt_session : nullptr;
+  return object && (!ss || !ss->bm);
+}
+
+/* Mask painting/smoothing changes a separate scalar domain. In particular,
+ * Shift on a Mask brush is mask smoothing, not geometric Delta Smooth. */
+static bool sculpt_mask_skips_geometry_rec(bContext *C, const wmOperator &op)
+{
+  const ToolSettings *settings = CTX_data_tool_settings(C);
+  const Sculpt *sd = settings ? settings->sculpt : nullptr;
+  const Brush *brush = sd ? BKE_paint_brush_for_read(&sd->paint) : nullptr;
+  if (!brush || brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK ||
+      brush->deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM ||
+      BrushSwitchMode(RNA_enum_get(op.ptr, "brush_toggle")) == BrushSwitchMode::Mask ||
+      (sd->gravity_factor > 0.0f && bke::brush::supports_gravity(*brush))) {
+    return false;
+  }
+  const Object *object = CTX_data_active_object(C);
+  const SculptSession *ss = object ? object->runtime->sculpt_session : nullptr;
+  return object && (!ss || !ss->bm);
+}
+
 /* POLYPAINT_MERGE_STABLE1904: A coarse master inherited from before
  * Subdivide cannot be migrated safely inside the first new brush dab. The
  * V0.2b code did an all-grid resample while Color Undo captured dense data,
@@ -8070,13 +8110,16 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
 
   cold_trace.mark("polypaint_preflight");
   SculptPaintStroke *stroke;
-  if (!sculpt_polypaint_skips_geometry_rec(C) &&
+  const bool non_geometric_brush = sculpt_face_sets_skips_geometry_rec(C, *op) ||
+                                   sculpt_mask_skips_geometry_rec(C, *op);
+  if (!sculpt_polypaint_skips_geometry_rec(C) && !non_geometric_brush &&
       !sculpt_layers_editable(C, op->reports))
   {
     return OPERATOR_CANCELLED;
   }
   const Brush *delta_brush = BKE_paint_brush_for_read(&CTX_data_tool_settings(C)->sculpt->paint);
-  if (delta_brush && !layer_delta_smooth_v01::begin(
+  if (non_geometric_brush) { layer_delta_smooth_v01::reset(); }
+  else if (delta_brush && !layer_delta_smooth_v01::begin(
           *CTX_data_active_object(C), *delta_brush, op->reports,
           BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")) == BrushSwitchMode::Smooth))
   {
@@ -8214,13 +8257,16 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  if (!sculpt_polypaint_skips_geometry_rec(C) &&
+  const bool non_geometric_brush = sculpt_face_sets_skips_geometry_rec(C, *op) ||
+                                   sculpt_mask_skips_geometry_rec(C, *op);
+  if (!sculpt_polypaint_skips_geometry_rec(C) && !non_geometric_brush &&
       !sculpt_layers_editable(C, op->reports))
   {
     return OPERATOR_CANCELLED;
   }
   const Brush *delta_brush = BKE_paint_brush_for_read(&CTX_data_tool_settings(C)->sculpt->paint);
-  if (delta_brush && !layer_delta_smooth_v01::begin(
+  if (non_geometric_brush) { layer_delta_smooth_v01::reset(); }
+  else if (delta_brush && !layer_delta_smooth_v01::begin(
           *CTX_data_active_object(C), *delta_brush, op->reports,
           BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")) == BrushSwitchMode::Smooth))
   {

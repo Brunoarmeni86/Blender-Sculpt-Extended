@@ -6,6 +6,7 @@
  * \ingroup edobj
  */
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
@@ -16,7 +17,9 @@
 #include "DNA_grease_pencil_types.h"
 #include "DNA_lattice_types.h"
 #include "DNA_light_types.h"
+#include "DNA_meshdata_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_meta_types.h"
 #include "DNA_object_types.h"
 #include "DNA_pointcloud_types.h"
@@ -35,6 +38,7 @@
 #include "BKE_armature.hh"
 #include "BKE_context.hh"
 #include "BKE_curve.hh"
+#include "BKE_customdata.hh"
 #include "BKE_curves.hh"
 #include "BKE_editmesh.hh"
 #include "BKE_grease_pencil.hh"
@@ -47,6 +51,7 @@
 #include "BKE_mball.hh"
 #include "BKE_mesh.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object.hh"
 #include "BKE_report.hh"
 #include "BKE_scene.hh"
@@ -652,6 +657,64 @@ static bool apply_objects_internal_need_single_user(bContext *C)
   return (ID_REAL_USERS(ob->data) > CTX_DATA_COUNT(C, selected_editable_objects));
 }
 
+/* SCULPT_LAYER_APPLY_SCALE_V01: validate all payloads before any object is changed.
+ * Positive uniform scale preserves the normalized tangent frames. Hidden/zero-weight
+ * layers are included; null displacement payloads remain implicit zero. */
+static bool sculpt_layer_scale_payloads(MultiresModifierData &mmd,
+                                       const int verts_num,
+                                       const int corners_num,
+                                       const float scale,
+                                       const bool publish)
+{
+  if (!std::isfinite(scale) || scale <= 0.0f) {
+    return false;
+  }
+  for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (layer.level < 0 || layer.level > 13 || layer.grids_num < 0 ||
+        (layer.level == 0 && layer.grids_num != 0) ||
+        (layer.level > 0 && layer.grids_num != corners_num) ||
+        bool(layer.disps) != (layer.grids_num > 0) ||
+        layer.base_verts_num < 0 ||
+        bool(layer.base_deltas) != (layer.base_verts_num > 0) ||
+        (layer.base_deltas && layer.base_verts_num != verts_num)) {
+      return false;
+    }
+    const int side = layer.level > 0 ? (1 << (layer.level - 1)) + 1 : 0;
+    for (int g = 0; g < layer.grids_num; g++) {
+      MDisps &grid = layer.disps[g];
+      if (grid.level != layer.level || grid.totdisp != side * side) {
+        return false;
+      }
+      if (!grid.disps) {
+        continue;
+      }
+      for (int i = 0; i < grid.totdisp; i++) {
+        for (int axis = 0; axis < 3; axis++) {
+          const float value = grid.disps[i][axis] * scale;
+          if (!std::isfinite(value)) {
+            return false;
+          }
+          if (publish) {
+            grid.disps[i][axis] = value;
+          }
+        }
+      }
+    }
+    for (int i = 0; i < layer.base_verts_num; i++) {
+      for (int axis = 0; axis < 3; axis++) {
+        const float value = layer.base_deltas[i][axis] * scale;
+        if (!std::isfinite(value)) {
+          return false;
+        }
+        if (publish) {
+          layer.base_deltas[i][axis] = value;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 static wmOperatorStatus apply_objects_internal(bContext *C,
                                                ReportList *reports,
                                                bool apply_loc,
@@ -696,6 +759,72 @@ static wmOperatorStatus apply_objects_internal(bContext *C,
       }
     }
   }
+
+  /* SCULPT_LAYER_APPLY_SCALE_V01: full selection preflight, before make-single-user
+   * or mesh publication. Complex transforms need an explicit frame migration. */
+  CTX_DATA_BEGIN (C, Object *, ob, selected_editable_objects) {
+    if (ob->type != OB_MESH || (!apply_scale && !apply_rot)) {
+      continue;
+    }
+    Mesh *mesh = id_cast<Mesh *>(ob->data);
+    MultiresModifierData *layer_mmd = nullptr;
+    int multires_count = 0;
+    for (ModifierData &md : ob->modifiers) {
+      if (md.type == eModifierType_Multires) {
+        multires_count++;
+        auto &mmd = reinterpret_cast<MultiresModifierData &>(md);
+        if (!BLI_listbase_is_empty(&mmd.sculpt_layers)) {
+          layer_mmd = &mmd;
+        }
+      }
+    }
+    if (!layer_mmd) {
+      continue;
+    }
+    float smat[3][3];
+    BKE_object_scale_to_mat3(ob, smat);
+    const float factor = smat[0][0];
+    bool valid = !apply_rot && multires_count == 1 && ID_REAL_USERS(&mesh->id) == 1 &&
+                 !mesh->key && !CustomData_external_test(&mesh->corner_data, CD_MDISPS) &&
+                 std::isfinite(factor) && factor > 0.0f &&
+                 smat[1][1] == factor && smat[2][2] == factor;
+    for (int row = 0; row < 3; row++) {
+      for (int col = 0; col < 3; col++) {
+        valid &= row == col || smat[row][col] == 0.0f;
+      }
+    }
+    if (valid) {
+      valid = sculpt_layer_scale_payloads(
+          *layer_mmd, mesh->verts_num, mesh->corners_num, factor, false);
+    }
+    const MDisps *native = static_cast<const MDisps *>(
+        CustomData_get_layer(&mesh->corner_data, CD_MDISPS));
+    if (valid && layer_mmd->totlvl > 0 && !native) {
+      valid = false;
+    }
+    if (valid && native) {
+      for (int g = 0; g < mesh->corners_num && valid; g++) {
+        valid = native[g].totdisp >= 0 && (native[g].totdisp == 0 || native[g].disps);
+        if (!valid) {
+          break;
+        }
+        for (int i = 0; i < native[g].totdisp && valid; i++) {
+          for (int axis = 0; axis < 3; axis++) {
+            valid &= std::isfinite(native[g].disps[i][axis] * factor);
+          }
+        }
+      }
+    }
+    if (!valid) {
+      BKE_reportf(reports, RPT_ERROR,
+                  "Object '%s': Sculpt Layers support Apply Scale only with positive uniform "
+                  "scale, one Multires, local single-user mesh, no shape keys/external grids "
+                  "and valid finite payloads; apply Rotation separately after baking",
+                  ob->id.name + 2);
+      changed = false;
+    }
+  }
+  CTX_DATA_END;
 
   /* first check if we can execute */
   CTX_DATA_BEGIN (C, Object *, ob, selected_editable_objects) {
@@ -866,7 +995,24 @@ static wmOperatorStatus apply_objects_internal(bContext *C,
       Mesh *mesh = id_cast<Mesh *>(ob->data);
 
       if (apply_scale) {
+        float layer_smat[3][3];
+        BKE_object_scale_to_mat3(ob, layer_smat);
         multiresModifier_scale_disp(depsgraph, scene, ob);
+        for (ModifierData &md : ob->modifiers) {
+          if (md.type != eModifierType_Multires) {
+            continue;
+          }
+          auto &mmd = reinterpret_cast<MultiresModifierData &>(md);
+          if (!BLI_listbase_is_empty(&mmd.sculpt_layers)) {
+            /* Preflight succeeded for the complete selection; no intervening payload edits. */
+            const bool ok = sculpt_layer_scale_payloads(
+                mmd, mesh->verts_num, mesh->corners_num, layer_smat[0][0], true);
+            BLI_assert(ok);
+            (void)ok;
+            bke::multires_layers::weight_hot_delta_cache_invalidate();
+            bke::multires_layers::shape_key_fast_cache_invalidate();
+          }
+        }
       }
 
       /* adjust data */

@@ -24,10 +24,14 @@ struct Mesh;
 struct Object;
 struct SubdivCCG;
 struct SubdivCCGCoord;
+struct wmOperatorType; /* MULTIRES_FACESETS_VISIBILITY_V02 */
 
 namespace ed::sculpt_paint::face_set {
 
-int active_face_set_get(const Object &object);
+void SCULPT_OT_multires_face_sets_hr_mask(wmOperatorType *ot);
+void SCULPT_OT_multires_face_sets_hr_state(wmOperatorType *ot);
+void SCULPT_OT_multires_hr_extract_v05(wmOperatorType *ot);
+int active_face_set_get(const Object &object); /* Native HR visibility/mask tools. */
 
 /* TODO: vert_face_set_max_get should likely be avoided and existing usages cleaned up, since by
  * definition, a vertex can be associated to more than a single face set. */
