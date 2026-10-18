@@ -1,0 +1,11 @@
+VALIDAZIONE V06
+PASS: 100000 confronti trasformazioni; 86400 confronti kernel con riferimento
+V04, patch piane/curve, maschere, Strength zero, quattro thread; errore nullo.
+L adattatore della ricerca applica esclusione conservativa tramite AABB
+per verificare il nuovo limite di distanza, senza usare la BVH Blender reale.
+PASS: pipeline capture e move effettive su 90 frame, 36000 confronti posizioni,
+errore nullo, seriale/parallelo identici; 14 riusi SS; annullamento Undo simulato.
+I test sono C++ standalone con adattatori delle API Blender. Non sostituiscono
+compilazione Windows o test reali layer/Undo. La V06 non e compilata qui contro
+Blender; non e stato eseguito un benchmark Blender.
+Face Sets HR resta isolato e sospeso.

@@ -1,0 +1,18 @@
+[DRAW_TRANSPORT_V05] UI pronta: pulsante Draw Transport nell intestazione Sculpt; F3 > Draw Transport
+[DRAW_TRANSPORT_V05_CAPTURE] total_ms=187.434 balance_ms=44.114 triangles=961811 source_samples=656608 sparse_restore_samples=537361 reference=0 parallel=1
+[DRAW_TRANSPORT_V05] captured samples=656608 triangles=961811 radius=0.257688
+[DRAW_TRANSPORT_V05_FRAME] frame=1 mode=MOVE restored=537361 samples=1005720 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=0.889 surface_ms=15.842 map_ms=77.936 write_ms=9.929 update_ms=0.668 total_ms=105.263
+[DRAW_TRANSPORT_V05_FRAME] frame=2 mode=MOVE restored=548876 samples=1025372 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=1.071 surface_ms=16.352 map_ms=83.495 write_ms=9.333 update_ms=0.814 total_ms=111.064
+[DRAW_TRANSPORT_V05_FRAME] frame=3 mode=MOVE restored=552859 samples=1027684 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=0.944 surface_ms=9.342 map_ms=85.217 write_ms=9.458 update_ms=0.580 total_ms=105.542
+[DRAW_TRANSPORT_V05_FRAME] frame=4 mode=MOVE restored=557502 samples=1035776 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=0.979 surface_ms=9.031 map_ms=88.285 write_ms=9.944 update_ms=0.589 total_ms=108.827
+[DRAW_TRANSPORT_V05_FRAME] frame=5 mode=MOVE restored=559098 samples=1024216 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=0.918 surface_ms=8.933 map_ms=83.197 write_ms=7.525 update_ms=0.602 total_ms=101.175
+[DRAW_TRANSPORT_V05_FRAME] frame=6 mode=MOVE restored=553419 samples=1017280 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=1.039 surface_ms=8.881 map_ms=76.857 write_ms=7.527 update_ms=0.590 total_ms=94.895
+[DRAW_TRANSPORT_V05_FRAME] frame=7 mode=MOVE restored=548966 samples=1005720 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=0.928 surface_ms=9.093 map_ms=72.696 write_ms=7.481 update_ms=0.592 total_ms=90.790
+[DRAW_TRANSPORT_V05_FRAME] frame=8 mode=MOVE restored=547458 samples=1017280 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=0.928 surface_ms=8.819 map_ms=73.666 write_ms=7.802 update_ms=0.633 total_ms=91.847
+[DRAW_TRANSPORT_V05_FRAME] frame=15 mode=MOVE restored=541174 samples=999940 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=0.876 surface_ms=8.555 map_ms=71.673 write_ms=7.566 update_ms=0.606 total_ms=89.275
+[DRAW_TRANSPORT_V05_FRAME] frame=30 mode=SS restored=550916 samples=1017280 reuse_region=1 reuse_mapping=1 parallel=1 restore_ms=0.939 surface_ms=0.000 map_ms=0.000 write_ms=8.929 update_ms=0.635 total_ms=10.504
+[DRAW_TRANSPORT_V05_FRAME] frame=45 mode=R restored=1255741 samples=2149004 reuse_region=1 reuse_mapping=0 parallel=1 restore_ms=1.569 surface_ms=0.001 map_ms=774.750 write_ms=17.028 update_ms=1.827 total_ms=795.175
+[DRAW_TRANSPORT_V05] confirm
+[DRAW_TRANSPORT_V05_SUMMARY] frames=52 avg_restore_ms=1.463 avg_surface_ms=6.334 avg_map_ms=210.131 avg_write_ms=10.491 avg_update_ms=0.897
+[DRAW_TRANSPORT_V05_END] cancel=0 done_ms=13.754
+[LAYER_COMMIT_LOCAL] grids=4927/98304 samples=1370004/1423903 area=289 sample_mode=EXACT parallel=1 publish_parallel=1 context=0.149ms alloc=0.028ms solve=26.352ms publish=1.159ms total=29.998ms
