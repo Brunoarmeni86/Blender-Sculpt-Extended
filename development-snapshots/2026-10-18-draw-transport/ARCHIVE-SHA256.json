@@ -1,0 +1,47 @@
+[
+  {
+    "path": "archives/Sculpt-Draw-Transport-Anchored-V01.zip",
+    "sha256": "C6CF4C8B0D2C1307CDC7A3D2D9122524E3C54760773F96E327DB784E24E75324",
+    "bytes": 104044
+  },
+  {
+    "path": "archives/Sculpt-Draw-Transport-Anchored-V02.zip",
+    "sha256": "21473A8B87002D306611E38D8C0457F3CA8601D4D08DF143DCF3620FBC26F9D7",
+    "bytes": 106144
+  },
+  {
+    "path": "archives/Sculpt-Draw-Transport-Anchored-V03.zip",
+    "sha256": "FCB8D1DF57DA1DEF17B6232104E935E9137BF69E068104BB3E79113FC0BCB0BF",
+    "bytes": 138266
+  },
+  {
+    "path": "archives/Sculpt-Draw-Transport-Anchored-V04.zip",
+    "sha256": "173A97ED2AD68B6A49E58BF68E0C0E9F11095972A5D997D3626D8672C6FA4536",
+    "bytes": 139134
+  },
+  {
+    "path": "archives/Sculpt-Draw-Transport-Anchored-V05.zip",
+    "sha256": "45E707AFD61E50D734A50E0F2EF3B399CC3340637AAB48F734023AFD9385C0AF",
+    "bytes": 168378
+  },
+  {
+    "path": "archives/Sculpt-Draw-Transport-Anchored-V06.zip",
+    "sha256": "E0ADA072A6F489AC694E9E8B0912CE2C2146C238B1D8DB2471FDDA8D0FACFECE",
+    "bytes": 159956
+  },
+  {
+    "path": "archives/Sculpt-Draw-Transport-Anchored-V07.zip",
+    "sha256": "44D384662434ACDEB0F7CF7C184D1F26632E264FC2E713AE8515C45E5945A91F",
+    "bytes": 164200
+  },
+  {
+    "path": "archives/Sculpt-Detail-Transport-Copy-V01.zip",
+    "sha256": "AB03524735790DC9ADD2FA00C7975C699A1D13DDD8FF6B6225A3DF12CA673C9D",
+    "bytes": 12917
+  },
+  {
+    "path": "archives/Draw-Transport-Sources-20261018-083152-004.zip",
+    "sha256": "1B8EBE3434D2BF501C28C045BA51F770E5F4B075E703B7DA3F6D30BFE61ACA23",
+    "bytes": 1360300
+  }
+]
