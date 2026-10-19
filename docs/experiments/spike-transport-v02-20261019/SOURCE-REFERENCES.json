@@ -1,0 +1,14 @@
+[
+  {
+    "reference": "current-build/compact/multires_reshape_smooth(1).cc",
+    "sha256": "2255b42d840a2ce50b8dd2efbd9f47ae99ccfa7b0cf06f95aa59888ac0bc2a45"
+  },
+  {
+    "reference": "audit/multires_reshape_smooth.cc",
+    "sha256": "292a6744bd41158ba37c9551e751df8dbb2585c69d8a4fac5894d417d8ca6240"
+  },
+  {
+    "reference": "audit/multires_reshape_smooth_18.cc",
+    "sha256": "e7081a609223d011d9f034ee714f0c79b2690643b5f2a434280759573f72ea65"
+  }
+]
