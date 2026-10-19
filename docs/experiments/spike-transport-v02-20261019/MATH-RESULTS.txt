@@ -1,0 +1,3 @@
+skew case: native gain=932.599, stable gain=1
+PASS: identity, rotation, inverse, collapse, nonfinite frames, skew, 100000 random pairs, intentional spike
+Blender runtime/full compilation: NOT RUN
