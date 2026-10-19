@@ -1,0 +1,6 @@
+multires_reshape_smooth(1).cc b'\n': PASS dry-run/apply/restore, V06d payloads byte-identical
+multires_reshape_smooth(1).cc b'\r\n': PASS dry-run/apply/restore, V06d payloads byte-identical
+multires_reshape_smooth.cc b'\n': PASS dry-run/apply/restore, V06d payloads byte-identical
+multires_reshape_smooth.cc b'\r\n': PASS dry-run/apply/restore, V06d payloads byte-identical
+multires_reshape_smooth_18.cc b'\n': PASS dry-run/apply/restore, V06d payloads byte-identical
+multires_reshape_smooth_18.cc b'\r\n': PASS dry-run/apply/restore, V06d payloads byte-identical
