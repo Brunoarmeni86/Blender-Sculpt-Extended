@@ -1,0 +1,54 @@
+--- a/source/blender/blenkernel/intern/multires_reshape_smooth.cc
++++ b/source/blender/blenkernel/intern/multires_reshape_smooth.cc
+@@ -7,6 +7,9 @@
+  */
+ 
+ #include "multires_reshape.hh"
++#include "multires_stable_detail_transport.hh"
++#include <cstring>
++#include <cstdlib>
+ 
+ #include "MEM_guardedalloc.h"
+ 
+@@ -1240,6 +1243,9 @@
+ static void evaluate_higher_grid_positions_with_details(
+     MultiresReshapeSmoothContext *reshape_smooth_context)
+ {
++  const char *transport_mode = std::getenv("BLENDER_MULTIRES_DETAIL_TRANSPORT");
++  const bool stable_detail_transport = transport_mode &&
++                                      std::strcmp(transport_mode, "rotation") == 0;
+   const MultiresReshapeContext *reshape_context = reshape_smooth_context->reshape_context;
+   foreach_toplevel_grid_coord(
+       reshape_smooth_context, [&](const PTexCoord *ptex_coord, const GridCoord *grid_coord) {
+@@ -1256,10 +1262,11 @@
+ 
+         /* Difference between original top level and original sculpt level in tangent space of
+          * original sculpt level. */
+-        const float3x3 original_sculpt_tangent_matrix_inv = math::invert(
+-            orig_sculpt_point->tangent_matrix);
+-        float3 original_detail_delta_tangent = math::transform_direction(
+-            original_sculpt_tangent_matrix_inv, original_detail_delta);
++        float3 original_detail_delta_tangent(0.0f);
++        if (!stable_detail_transport) {
++          const float3x3 inverse = math::invert(orig_sculpt_point->tangent_matrix);
++          original_detail_delta_tangent = math::transform_direction(inverse, original_detail_delta);
++        }
+ 
+         /* Limit surface of smoothed (subdivided) edited sculpt level. */
+         float3 smooth_limit_P;
+@@ -1268,8 +1275,13 @@
+             reshape_smooth_context, ptex_coord, grid_coord, smooth_limit_P, smooth_tangent_matrix);
+ 
+         /* Add original detail to the smoothed surface. */
+-        float3 smooth_delta = math::transform_direction(smooth_tangent_matrix,
+-                                                        original_detail_delta_tangent);
++        /* SPIKE_DETAIL_ROTATION_V02: opt-in A/B experiment. Native remains default.
++         * Preserve residual magnitude without smoothing away intentional peaks. */
++        float3 smooth_delta = stable_detail_transport ?
++            multires_stable_detail::transport(orig_sculpt_point->tangent_matrix,
++                                              smooth_tangent_matrix,
++                                              original_detail_delta) :
++            math::transform_direction(smooth_tangent_matrix, original_detail_delta_tangent);
+ 
+         /* Grid element of the result.
+          *
