@@ -1,0 +1,54 @@
+--- a/source/blender/blenkernel/intern/multires_reshape_smooth.cc
++++ b/source/blender/blenkernel/intern/multires_reshape_smooth.cc
+@@ -7,6 +7,9 @@
+  */
+ 
+ #include "multires_reshape.hh"
++#include "multires_stable_detail_transport.hh"
++#include <cstring>
++#include <cstdlib>
+ 
+ #include "MEM_guardedalloc.h"
+ 
+@@ -116,6 +119,11 @@
+ 
+ struct MultiresReshapeSmoothContext : NonCopyable, NonMovable {
+   const MultiresReshapeContext *reshape_context;
++  /* SPIKE_DETAIL_ROTATION_V02: sample mode once for both cache stages. */
++  const bool stable_detail_transport = []() {
++    const char *mode = std::getenv("BLENDER_MULTIRES_DETAIL_TRANSPORT");
++    return mode && std::strcmp(mode, "rotation") == 0;
++  }();
+ 
+   /* Geometry at a reshape multires level. */
+   struct {
+@@ -302,9 +310,14 @@
+   float3 orig_final_P;
+   evaluate_final_original_point(reshape_smooth_context, grid_coord, orig_final_P);
+   const float3 original_detail_delta = orig_final_P - P;
+-  const float3x3 original_sculpt_tangent_matrix_inv = math::invert(tangent_matrix);
+-  point->detail_delta_tangent = math::transform_direction(
+-      original_sculpt_tangent_matrix_inv, original_detail_delta);
++  if (reshape_smooth_context->stable_detail_transport) {
++    point->detail_delta_tangent = multires_stable_detail::encode(
++        tangent_matrix, original_detail_delta);
++  }
++  else {
++    const float3x3 inverse = math::invert(tangent_matrix);
++    point->detail_delta_tangent = math::transform_direction(inverse, original_detail_delta);
++  }
+ }
+ 
+ /** \} */
+@@ -1281,8 +1294,9 @@
+             reshape_smooth_context, ptex_coord, grid_coord, smooth_limit_P, smooth_tangent_matrix);
+ 
+         /* Add original detail to the smoothed surface. */
+-        float3 smooth_delta = math::transform_direction(smooth_tangent_matrix,
+-                                                        original_detail_delta_tangent);
++        float3 smooth_delta = reshape_smooth_context->stable_detail_transport ?
++            multires_stable_detail::decode(smooth_tangent_matrix, original_detail_delta_tangent) :
++            math::transform_direction(smooth_tangent_matrix, original_detail_delta_tangent);
+ 
+         /* Grid element of the result.
+          *
