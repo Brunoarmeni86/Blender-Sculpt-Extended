@@ -1,0 +1,153 @@
+{
+  "reference_drift": {
+    "pixels": 8503,
+    "angle_rms_degrees": 7.353465169068117e-05,
+    "angle_max_degrees": 0.0020764603558899577,
+    "rgb_rms": 3.7012909034363526e-07,
+    "max_abs_rgba": 1.58846378326416e-05,
+    "rgba_rms": 1.1701677557306505e-07,
+    "channels_over_1e_6": 82,
+    "alpha_max_abs": 0.0,
+    "fixture_hashes": {
+      "previous": "d5462b0154ce81a4bc94c8725f739483b97332559e43e7e5047d3d271ec47943",
+      "corrected": "bd63521c72c2bd346b4581b0c1597a251456124680200c826949e42b9388093a"
+    },
+    "geometry_and_camera_match": false
+  },
+  "validation_status": "needs_scene_mismatch_review",
+  "normal-only": {
+    "previous_vs_high": {
+      "pixels": 8503,
+      "angle_rms_degrees": 11.380154148552286,
+      "angle_max_degrees": 51.60007949817574,
+      "rgb_rms": 0.05685126178439099
+    },
+    "corrected_vs_high": {
+      "pixels": 8503,
+      "angle_rms_degrees": 11.700174941194435,
+      "angle_max_degrees": 52.19807139553926,
+      "rgb_rms": 0.058439555424075404
+    },
+    "previous_vs_corrected": {
+      "pixels": 8503,
+      "angle_rms_degrees": 0.8329718791217978,
+      "angle_max_degrees": 1.9581745230829746,
+      "rgb_rms": 0.004196408106421555
+    },
+    "previous_vs_corrected_high_control": {
+      "pixels": 8503,
+      "angle_rms_degrees": 11.380148635130709,
+      "angle_max_degrees": 51.60007949817574,
+      "rgb_rms": 0.056851234846188814
+    },
+    "corrected_vs_previous_high_control": {
+      "pixels": 8503,
+      "angle_rms_degrees": 11.700180773885814,
+      "angle_max_degrees": 52.19807139553926,
+      "rgb_rms": 0.05843958380749997
+    }
+  },
+  "paired-object": {
+    "previous_vs_high": {
+      "pixels": 8498,
+      "angle_rms_degrees": 21.08314311249114,
+      "angle_max_degrees": 53.839851909023004,
+      "rgb_rms": 0.10508419822968577
+    },
+    "corrected_vs_high": {
+      "pixels": 8498,
+      "angle_rms_degrees": 21.276384673737514,
+      "angle_max_degrees": 55.020447499323176,
+      "rgb_rms": 0.10601306778791825
+    },
+    "previous_vs_corrected": {
+      "pixels": 8498,
+      "angle_rms_degrees": 0.81390367287464,
+      "angle_max_degrees": 2.267729490907195,
+      "rgb_rms": 0.0040974952215133455
+    },
+    "previous_vs_corrected_high_control": {
+      "pixels": 8498,
+      "angle_rms_degrees": 21.08314342191836,
+      "angle_max_degrees": 53.839851909023004,
+      "rgb_rms": 0.10508419976074765
+    },
+    "corrected_vs_previous_high_control": {
+      "pixels": 8498,
+      "angle_rms_degrees": 21.27638439765881,
+      "angle_max_degrees": 55.020447499323176,
+      "rgb_rms": 0.10601306643174507
+    }
+  },
+  "paired-tangent": {
+    "previous_vs_high": {
+      "pixels": 8422,
+      "angle_rms_degrees": 38.47109789703911,
+      "angle_max_degrees": 173.98625866596035,
+      "rgb_rms": 0.157263511676794
+    },
+    "corrected_vs_high": {
+      "pixels": 8422,
+      "angle_rms_degrees": 38.5614029808264,
+      "angle_max_degrees": 173.95492681263244,
+      "rgb_rms": 0.15782290434826077
+    },
+    "previous_vs_corrected": {
+      "pixels": 8422,
+      "angle_rms_degrees": 0.8632385209411776,
+      "angle_max_degrees": 2.4497083624996643,
+      "rgb_rms": 0.0042983965463777914
+    },
+    "previous_vs_corrected_high_control": {
+      "pixels": 8422,
+      "angle_rms_degrees": 38.47109800534501,
+      "angle_max_degrees": 173.98625866596035,
+      "rgb_rms": 0.15726351261317817
+    },
+    "corrected_vs_previous_high_control": {
+      "pixels": 8422,
+      "angle_rms_degrees": 38.56140285761633,
+      "angle_max_degrees": 173.95492681263244,
+      "rgb_rms": 0.1578229033308972
+    }
+  },
+  "seams": {
+    "previous": {
+      "normal_angle_degrees": {
+        "samples": 90,
+        "rms": 0.9356021804923491,
+        "maximum": 2.870928845052335
+      },
+      "vector_object_units": {
+        "samples": 90,
+        "rms": 0.05168519295532287,
+        "maximum": 0.30710219347206447
+      },
+      "scalar_normalized": {
+        "samples": 90,
+        "rms": 0.019127100645975184,
+        "maximum": 0.07319799918496034
+      },
+      "scope": "Bilinear shared-edge jumps after padding; no zero-error assertion and no scalar physical scale assumption."
+    },
+    "corrected": {
+      "normal_angle_degrees": {
+        "samples": 90,
+        "rms": 0.4994499288340567,
+        "maximum": 1.553153317951269
+      },
+      "vector_object_units": {
+        "samples": 90,
+        "rms": 0.0516851941806358,
+        "maximum": 0.30710218975445414
+      },
+      "scalar_normalized": {
+        "samples": 90,
+        "rms": 0.019127100620781552,
+        "maximum": 0.07319799918496034
+      },
+      "scope": "Bilinear shared-edge jumps after padding; no zero-error assertion and no scalar physical scale assumption."
+    }
+  },
+  "scope": "Diagnostic only. Each mode uses its own high reference; cross-control metrics and reference drift are reported separately. Reference drift must be reviewed before concluding an A/B improvement. Screen-space geometry correspondence and scalar scale remain unvalidated."
+}

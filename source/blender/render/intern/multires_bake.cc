@@ -2612,3 +2612,4 @@ void RE_multires_bake_images(MultiresBakeRender &bake)
 }
 
 }  // namespace blender
+
