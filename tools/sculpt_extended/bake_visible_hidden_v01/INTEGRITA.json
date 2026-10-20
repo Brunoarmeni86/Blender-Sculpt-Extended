@@ -1,0 +1,26 @@
+{
+  "files": {
+    "PROVA.py": "2b0726ab1338a0a36512f8e54b729bd9652adcfbe99bb07c642363f60ae3b5e2",
+    "VERIFICHE-LOCALI.json": "133f24a08f75a20d9d2ba56cbc3e0afb9eea4a4dadafc7e5c38b516ac7a9bb34",
+    "WORKER.py": "51d740ca916672cfcaa9c8d9ba2a9628ccb2e2e03151f0633bdf2827160e7b33",
+    "BUILD_HELPER.py": "cdcb06b6fadeb98d0b8c6128f3f937a23ab105184f25949cc46dc618425a0bac",
+    "PATCH.json": "cadce4092bf3fa8d38af2dea824e0a9d83853059e68ddfe43de7208ced6da5a6",
+    "MODIFICHE-COMPLETE.diff": "283f2af2c1391faf7a4eb8fffb16cefb6eaefc7671e9475178f7e299ceb4b2c2",
+    "MODIFICHE-BAKE.diff": "a72f8ec5d3481208b2a77028992af6f4f2b0929e95212e169cc6095d849c8605",
+    "LEGGIMI.txt": "3a8fa00c78f57aab2b90cf3827cfef313e355d1a978c8f43ba752d78e70d1b1e",
+    "verifiche/harness_suffix.cc": "964391e8a98c7fcb436681d37b8d5a5148a03a251586e301c638ba2cab718624",
+    "verifiche/check_restore.py": "0db43e426ec0932c61de42bd57612b463de199b1944f807b201d10cb3d925859",
+    "verifiche/multires_layer_base_math.hh": "bebc488d77bcc2c8972af076edd76b3a031092a876fb17b6aa5aa9981da1a92c",
+    "verifiche/harness_prefix.cc": "745178a04fc21e8ac66a1a32d35444206f8f78adb54c54aeaf5398d2067562f9",
+    "verifiche/harness.cc": "a81de6f67300071094df9f7e674b7c92873f356f36129473ebe578e2b60dc719",
+    "payload/multires_reshape.cc": "d6bb379fdbefe3aaaf9fdb9767c4d53377d66a080182f8723eed08a1764bdf60",
+    "payload/multires_subdivide_support_v03.hh": "2fd4ce3619b6ec7eab52df2fe79dd96d3bbeac6305f0fa3b27740aed3d5792b2",
+    "payload/multires_sculpt_layers.cc": "fe9d403d668c53ab5a936f8ae6ab03a190c7b317c01b529478c2a4c58650fb99",
+    "payload/multires_subdivide_work_v01.hh": "55de6910ba95ebcdc4cfd8c99abd1d9935af310ef6dd1dafacd8c11819ba0d16",
+    "payload/multires_reshape_smooth.cc": "a8afb5f995197b79f19f5eaac230bb7e931032a2f5663d36add9a2951f87f4ab",
+    "payload/space_view3d_sculpt_extended.py": "9a728db830fa61f538dfb13c17d6bb4b14dfeae89f78f7e93f38ed4236e16bbc",
+    "payload/sculpt_ops.cc": "a0714956616d647552f1e08dc2f7a4ed3e447f0a3f13fc20ae01e6f2cb83072f",
+    "payload/sculpt_extended_profile.hh": "3833e16d3caed65feccb24c6e18dc9453debce657b0def7b1da63cb6d13e0a36",
+    "payload/multires_reshape.hh": "ae553fb3f10770933e0937c51513cb09ec10a9c5eea655c105b970e071e84442"
+  }
+}

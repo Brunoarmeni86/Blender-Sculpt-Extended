@@ -1,0 +1,658 @@
+--- source/blender/blenkernel/intern/multires_reshape.cc
++++ source/blender/blenkernel/intern/multires_reshape.cc
+@@ -20,6 +20,7 @@
+ #include "BKE_subdiv.hh"
+ 
+ #include <vector>
++#include <cstring>
+ #include <algorithm>
+ #include <cmath>
+ #include "BLI_bitmap.h"
+@@ -449,7 +450,8 @@
+                                               const MultiresSculptLayer *layer,
+                                               const int top_level,
+                                               const MultiresSubdivideModeType mode,
+-                                              MultiresSubdivideCoarseV02 *coarse = nullptr)
++                                              MultiresSubdivideCoarseV02 *coarse = nullptr,
++                                              MutableSpan<int8_t> regional_grids = {})
+ {
+   const Mesh &source = *id_cast<Mesh *>(object->data);
+   const char *profile_role = layer ? "layer" : "base";
+@@ -515,6 +517,14 @@
+     }
+     context.subdivide_smooth_cache_v03 = coarse->smooth_cache_v03;
+   }
++  if (layer && regional_grids.size() == source.corners_num &&
++      mode == MultiresSubdivideModeType::CatmullClark &&
++      multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_REGIONAL_V03") &&
++      !multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_PRESERVE_RETAINED"))
++  {
++    context.regional_source_layer_v03 = layer;
++    context.regional_output_grids_v03 = regional_grids;
++  }
+   {
+   MultiresSubdivisionPhaseTimer timer("grid_allocate_assign", profile_role, top_level, source.corners_num);
+   if (!multires_subdivide_move_original_v02(context)) {
+@@ -535,7 +545,9 @@
+   }
+   {
+   MultiresSubdivisionPhaseTimer timer("tangent_conversion", profile_role, top_level, source.corners_num);
+-  multires_reshape_object_grids_to_tangent_displacement(&context);
++  if (!multires_reshape_regional_object_to_tangent_v03(&context)) {
++    multires_reshape_object_grids_to_tangent_displacement(&context);
++  }
+   multires_reshape_context_free(&context);
+   }
+ 
+@@ -887,13 +899,38 @@
+     if (std::find(empty.begin(), empty.end(), &layer) != empty.end()) {
+       continue;
+     }
+-    Mesh *surface = multires_subdivide_layer_surface(object, *mmd, &layer, top_level, mode, &coarse);
++    Array<int8_t> regional_grids(
++        multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_REGIONAL_V03") ? mesh->corners_num : 0,
++        int8_t(1));
++    Mesh *surface = multires_subdivide_layer_surface(
++        object, *mmd, &layer, top_level, mode, &coarse, regional_grids);
+     if (!surface) {
+       valid = false;
+       break;
+     }
+     MDisps *grids = static_cast<MDisps *>(CustomData_get_layer_for_write(
+         &surface->corner_data, CD_MDISPS, surface->corners_num));
++    if (!regional_grids.is_empty()) {
++      /* Exact base bytes produce exact zero deltas in unchanged native staging. */
++      const int side = bke::subdiv::grid_size_from_level(top_level);
++      for (int g = 0; g < mesh->corners_num; ++g) {
++        if (!regional_grids[g]) {
++          if (!grids[g].disps || !base_grids[g].disps ||
++              grids[g].level != top_level || base_grids[g].level != top_level ||
++              grids[g].totdisp != side * side || base_grids[g].totdisp != side * side)
++          {
++            valid = false;
++            break;
++          }
++          std::memcpy(grids[g].disps, base_grids[g].disps,
++                      sizeof(float[3]) * grids[g].totdisp);
++        }
++      }
++    }
++    if (!valid) {
++      BKE_id_free(nullptr, surface);
++      break;
++    }
+     {
+     MultiresSubdivisionPhaseTimer timer("extract_delta", "layer", top_level, mesh->corners_num);
+     valid = multires_stage_subdivided_layer(
+--- source/blender/blenkernel/intern/multires_reshape.hh
++++ source/blender/blenkernel/intern/multires_reshape.hh
+@@ -24,6 +24,7 @@
+ struct MDisps;
+ struct Mesh;
+ struct MultiresModifierData;
++struct MultiresSculptLayer;
+ struct Object;
+ namespace bke::subdiv {
+ struct Subdiv;
+@@ -35,6 +36,10 @@
+ void multires_subdivide_smooth_cache_free_v03(MultiresSubdivideSmoothCacheV03 *cache);
+ 
+ struct MultiresReshapeContext {
++  const MultiresSculptLayer *regional_source_layer_v03 = nullptr;
++  MutableSpan<int8_t> regional_output_grids_v03 = {};
++  mutable bool regional_active_v03 = false;
++
+   /* NOTE: Only available when context is initialized from object. */
+   Depsgraph *depsgraph;
+   Object *object;
+@@ -429,3 +434,7 @@
+ /** \} */
+ 
+ }  // namespace blender
++
++namespace blender {
++bool multires_reshape_regional_object_to_tangent_v03(const MultiresReshapeContext *context);
++}
+--- source/blender/blenkernel/intern/multires_reshape_smooth.cc
++++ source/blender/blenkernel/intern/multires_reshape_smooth.cc
+@@ -10,11 +10,14 @@
+ #include "multires_stable_detail_transport.hh"
+ #include <cstring>
+ #include <memory>
++#include <vector>
+ #include <cstdlib>
+ 
+ #include "MEM_guardedalloc.h"
+ 
+ #include "DNA_mesh_types.h"
++#include "DNA_meshdata_types.h"
++#include "DNA_modifier_types.h"
+ 
+ #include "BLI_function_ref.hh"
+ #include "BLI_math_matrix.h"
+@@ -38,6 +41,9 @@
+ #include "opensubdiv_converter_capi.hh"
+ #ifdef WITH_OPENSUBDIV
+ #  include "opensubdiv_evaluator.hh"
++#  include "opensubdiv_topology_refiner.hh"
++#  include <opensubdiv/far/patchTableFactory.h>
++#  include "multires_subdivide_support_v03.hh"
+ #endif
+ #include "opensubdiv_evaluator_capi.hh"
+ 
+@@ -387,7 +393,9 @@
+   reshape_smooth_context->base_surface_grids.reinitialize(num_grids);
+ 
+   for (const int i : reshape_smooth_context->base_surface_grids.index_range()) {
+-    reshape_smooth_context->base_surface_grids[i].points.reinitialize(grid_area);
++    if (!reshape_context->regional_active_v03 || reshape_context->regional_output_grids_v03[i]) {
++      reshape_smooth_context->base_surface_grids[i].points.reinitialize(grid_area);
++    }
+   }
+ }
+ 
+@@ -538,6 +546,11 @@
+   threading::parallel_for(faces.index_range(), 1, [&](const IndexRange range) {
+     for (const int face_index : range) {
+       const IndexRange face = faces[face_index];
++      if (reshape_context->regional_active_v03 &&
++          !reshape_context->regional_output_grids_v03[get_face_grid_index(reshape_smooth_context, face)])
++      {
++        continue;
++      }
+       std::array<std::optional<GridCoord>, 4> face_grid_coords = grid_coords_from_face_verts(
+           reshape_smooth_context, face);
+ 
+@@ -1417,7 +1430,9 @@
+         *grid_element.displacement = smooth_limit_P + smooth_delta;
+ 
+         /* Propagate non-coordinate data. */
+-        propagate_linear_data_delta(reshape_smooth_context, &grid_element, grid_coord);
++        if (!reshape_context->regional_active_v03) {
++          propagate_linear_data_delta(reshape_smooth_context, &grid_element, grid_coord);
++        }
+       });
+ }
+ 
+@@ -1441,6 +1456,108 @@
+         propagate_linear_data_delta(reshape_smooth_context, &grid_element, grid_coord);
+       });
+ }
++
++/* SUBDIVIDE_REGIONAL_EXECUTE_V03: only compact Subdivide unit-layer work.
++ * Coordinate calculations are native. We skip whole grids only after deriving
++ * a conservative closure from the actual evaluator's topology. */
++static bool subdivide_regional_prepare_v03(MultiresReshapeSmoothContext *work)
++{
++  const auto &r = *work->reshape_context;
++  const MultiresSculptLayer *layer = r.regional_source_layer_v03;
++  if (!layer || r.regional_output_grids_v03.size() != r.num_grids ||
++      !work->reshape_subdiv->settings.is_adaptive || r.orig.mdisps ||
++      r.orig.grid_paint_masks || r.top.level != r.reshape.level + 1 ||
++      layer->level != r.reshape.level || layer->grids_num != r.num_grids || !layer->disps)
++  {
++    return false;
++  }
++  const int old_side = bke::subdiv::grid_size_from_level(layer->level);
++  for (int g = 0; g < r.num_grids; ++g) {
++    const MDisps &grid = layer->disps[g];
++    if (grid.level != layer->level || grid.totdisp != old_side * old_side) {
++      return false;
++    }
++  }
++  std::vector<unsigned char> changed(work->geometry.vertices.size(), 0);
++  for (int v = 0; v < int(work->geometry.vertices.size()); ++v) {
++    for (const GridCoord &coord : work->geometry.vertices[v].grid_coords) {
++      if (coord.grid_index < 0 || coord.grid_index >= r.num_grids) {
++        return false;
++      }
++      const MDisps &grid = layer->disps[coord.grid_index];
++      if (!grid.disps) {
++        continue;
++      }
++      const int x = int(std::lround(coord.u * (old_side - 1)));
++      const int y = int(std::lround(coord.v * (old_side - 1)));
++      if (x < 0 || y < 0 || x >= old_side || y >= old_side) {
++        return false;
++      }
++      const float *delta = grid.disps[y * old_side + x];
++      for (int a = 0; a < 3; ++a) {
++        if (!std::isfinite(delta[a])) {
++          return false;
++        }
++        if (delta[a] != 0.0f) {
++          changed[v] = 1;
++        }
++      }
++    }
++  }
++  const auto &refiner = *work->reshape_subdiv->topology_refiner->topology_refiner;
++  const auto *patches = work->reshape_subdiv->evaluator->patch_table;
++  if (!patches) {
++    return false;
++  }
++  std::vector<unsigned char> faces;
++  if (!multires_subdivide_support_v03::detect(refiner, *patches, changed, faces) ||
++      faces.size() != size_t(work->geometry.faces().size()))
++  {
++    return false;
++  }
++  std::vector<int8_t> grids(r.num_grids, 0);
++  int affected_faces = 0;
++  for (int f = 0; f < int(faces.size()); ++f) {
++    if (!faces[f]) {
++      continue;
++    }
++    const int grid = get_face_grid_index(work, work->geometry.faces()[f]);
++    if (grid < 0 || grid >= r.num_grids) {
++      return false;
++    }
++    grids[grid] = 1;
++    ++affected_faces;
++  }
++  const int active = int(std::count(grids.begin(), grids.end(), int8_t(1)));
++  if (active * int64_t(5) > int64_t(r.num_grids) * 3) {
++    return false; /* Dense support: preserve the full native path. */
++  }
++  for (int g = 0; g < r.num_grids; ++g) {
++    r.regional_output_grids_v03[g] = grids[g];
++  }
++  r.regional_active_v03 = true;
++  std::printf("[SUBDIVIDE_REGIONAL_V03] state=ACTIVE grids=%d/%d faces=%d/%d\n",
++               active, r.num_grids, affected_faces, int(faces.size()));
++  return true;
++}
++
++static void subdivide_regional_smooth_v03(MultiresReshapeSmoothContext *work)
++{
++  geometry_create(work);
++  reshape_subdiv_create(work);
++  if (!subdivide_regional_prepare_v03(work)) {
++    std::printf("[SUBDIVIDE_REGIONAL_V03] state=FALLBACK\n");
++    evaluate_linear_delta_grids(work);
++  }
++  /* Unit-layer masks are discarded by compact Subdivide; the base surface's
++   * complete mask propagation and final publication remain unchanged. */
++  base_surface_grids_allocate(work);
++  reshape_subdiv_refine_orig(work);
++  evaluate_base_surface_grids(work);
++  reshape_subdiv_refine_final(work);
++  evaluate_higher_grid_positions_with_details(work);
++}
++
+ 
+ #endif
+ 
+@@ -1484,6 +1601,10 @@
+                                                        MultiresSubdivideModeType::Simple :
+                                                        MultiresSubdivideModeType::CatmullClark;
+   MultiresReshapeSmoothContext reshape_smooth_context(reshape_context, smoothing_type);
++  if (reshape_context->regional_source_layer_v03) {
++    subdivide_regional_smooth_v03(&reshape_smooth_context);
++    return;
++  }
+   MultiresSubdivideLeaseV03 shared(reshape_smooth_context, true);
+   if (!shared.topology_hit) {
+     geometry_create(&reshape_smooth_context);
+@@ -1535,3 +1656,41 @@
+ /** \} */
+ 
+ }  // namespace blender
++
++namespace blender {
++bool multires_reshape_regional_object_to_tangent_v03(const MultiresReshapeContext *r)
++{
++#ifdef WITH_OPENSUBDIV
++  if (!r->regional_active_v03) {
++    return false;
++  }
++  const int side = r->top.grid_size;
++  const float inv = 1.0f / float(side - 1);
++  threading::parallel_for(IndexRange(r->num_grids), 1, [&](const IndexRange range) {
++    for (const int grid : range) {
++      if (!r->regional_output_grids_v03[grid]) {
++        continue;
++      }
++      for (int y = 0; y < side; ++y) {
++        for (int x = 0; x < side; ++x) {
++          GridCoord coord;
++          coord.grid_index = grid;
++          coord.u = float(x) * inv;
++          coord.v = float(y) * inv;
++          float3 p;
++          float3x3 frame;
++          multires_reshape_evaluate_base_mesh_limit_at_grid(r, &coord, p, frame);
++          ReshapeGridElement element = multires_reshape_grid_element_for_grid_coord(r, &coord);
++          const float3 delta = *element.displacement - p;
++          *element.displacement = math::transform_direction(math::invert(frame), delta);
++        }
++      }
++    }
++  });
++  return true;
++#else
++  UNUSED_VARS(r);
++  return false;
++#endif
++}
++}  // namespace blender
+--- source/blender/blenkernel/intern/multires_subdivide_support_v03.hh
++++ source/blender/blenkernel/intern/multires_subdivide_support_v03.hh
+@@ -0,0 +1,76 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#pragma once
++#include <opensubdiv/far/patchTable.h>
++#include <opensubdiv/far/primvarRefiner.h>
++#include <opensubdiv/far/stencilTable.h>
++#include <vector>
++
++/* Conservative dependency propagation. OR nonzero-weight contributions without
++ * arithmetic cancellation, then include every affected patch's complete face.
++ * This includes dependencies of positions AND derivatives at arbitrary UVs. */
++namespace blender::multires_subdivide_support_v03 {
++struct Influence {
++  unsigned char hit = 0;
++  void Clear(void * = nullptr) { hit = 0; }
++  void AddWithWeight(const Influence &source, const float weight)
++  {
++    if (weight != 0.0f && source.hit) {
++      hit = 1;
++    }
++  }
++};
++inline bool detect(const OpenSubdiv::Far::TopologyRefiner &refiner,
++                   const OpenSubdiv::Far::PatchTable &patches,
++                   const std::vector<unsigned char> &changed,
++                   std::vector<unsigned char> &affected)
++{
++  const int base_count = refiner.GetLevel(0).GetNumVertices();
++  if (int(changed.size()) != base_count) {
++    return false;
++  }
++  const int refined_count = refiner.GetNumVerticesTotal() - base_count;
++  if (refined_count < 0) {
++    return false;
++  }
++  std::vector<Influence> coarse(base_count);
++  std::vector<Influence> refined(refined_count + patches.GetNumLocalPoints());
++  for (int i = 0; i < base_count; ++i) {
++    coarse[i].hit = changed[i] != 0;
++  }
++  OpenSubdiv::Far::PrimvarRefiner interpolation(refiner);
++  const Influence *source = coarse.data();
++  Influence *target = refined.data();
++  for (int level = 1; level < refiner.GetNumLevels(); ++level) {
++    interpolation.Interpolate(level, source, target);
++    source = target;
++    target += refiner.GetLevel(level).GetNumVertices();
++  }
++  if (patches.GetNumLocalPoints()) {
++    patches.GetLocalPointStencilTable()->UpdateValues(coarse.data(), base_count,
++                                                      refined.data(),
++                                                      refined.data() + refined_count);
++  }
++  affected.assign(refiner.GetLevel(0).GetNumFaces(), 0);
++  for (int array = 0; array < patches.GetNumPatchArrays(); ++array) {
++    for (int patch = 0; patch < patches.GetNumPatches(array); ++patch) {
++      const auto ids = patches.GetPatchVertices(array, patch);
++      for (int i = 0; i < ids.size(); ++i) {
++        const int id = ids[i];
++        if (id < 0 || id >= base_count + int(refined.size())) {
++          return false;
++        }
++        const bool hit = id < base_count ? coarse[id].hit : refined[id - base_count].hit;
++        if (hit) {
++          const int face = patches.GetPatchParam(array, patch).GetFaceId();
++          if (face < 0 || face >= int(affected.size())) {
++            return false; /* This entry point deliberately accepts all-quad reshape topology. */
++          }
++          affected[face] = 1;
++          break;
++        }
++      }
++    }
++  }
++  return true;
++}
++}  // namespace blender::multires_subdivide_support_v03
+--- source/blender/blenkernel/intern/multires_sculpt_layers.cc
++++ source/blender/blenkernel/intern/multires_sculpt_layers.cc
+@@ -1866,7 +1866,8 @@
+   }
+   Vector<MultiresSculptLayer *> visible;
+   for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+-    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE)) {
++    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
++        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN)) {
+       continue;
+     }
+     visible.append(&layer);
+@@ -1936,7 +1937,9 @@
+     }
+   }
+   const MultiresSculptLayer *selected = active(mmd);
+-  const bool keep_selected = selected && !(selected->flag & MULTIRES_SCULPT_LAYER_VISIBLE);
++  const bool keep_selected = selected &&
++      (!(selected->flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
++       (selected->group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN));
+   for (MultiresSculptLayer *layer : visible) {
+     if (remove_layers) {
+       remove(mmd, *layer);
+@@ -1960,28 +1963,49 @@
+ {
+   if (!compatible(mmd, mesh) || mesh.id.lib || ID_REAL_USERS(&mesh.id) > 1 || mesh.key) {
+     return false;
+-  }
+-  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+-    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
+-        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN)) {
+-      return false;
+-    }
+   }
+   if (mmd.totlvl > 0) {
+     /* BAKE_SPARSE_B04_V01: same-cage HR bake shares the sparse/finite preflight
+      * and rejects effective L0 edits that would need tangent-frame rebasing. */
+     return merge_visible_to_base(mmd, mesh, false, false) == nullptr;
+   }
+-  /* At L0 there are no tangent-space grids to rebase. Preserve the old cage
+-   * bake behavior, with all results staged before positions are written. */
++  /* BAKE_VISIBLE_HIDDEN_V01: hidden offsets remain independent of the baked
++   * base. At L0 there are no tangent frames to rebase. Validate and stage only
++   * visible contributions, then clear only those same layers. */
++  std::vector<base_math::LayerView> visible;
++  bool has_visible = false;
++  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
++    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
++        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN))
++    {
++      continue;
++    }
++    has_visible = true;
++    if ((!layer.base_deltas && layer.base_verts_num == 0) || !is_effective(layer)) {
++      continue;
++    }
++    visible.push_back({layer.base_deltas, layer.base_verts_num, layer.strength, true});
++  }
++  if (!has_visible) {
++    return false;
++  }
+   Array<float3> baked_positions(mesh.vert_positions());
+-  if (!base_deltas_apply(mmd, baked_positions)) {
++  if (!base_math::compose(reinterpret_cast<const float (*)[3]>(baked_positions.data()),
++                          int(baked_positions.size()),
++                          visible,
++                          reinterpret_cast<float (*)[3]>(baked_positions.data())))
++  {
+     return false;
+   }
+   weight_hot_delta_cache_invalidate();
+   mesh.vert_positions_for_write().copy_from(baked_positions);
+   mesh.tag_positions_changed();
+   for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
++    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
++        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN))
++    {
++      continue;
++    }
+     MEM_SAFE_DELETE(layer.base_deltas);
+     layer.base_verts_num = 0;
+   }
+--- source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc
++++ source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc
+@@ -1006,7 +1006,7 @@
+   if (!mmd || !mesh || mmd->sculpt_layers.is_empty()) return OPERATOR_CANCELLED;
+   if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+   if (!bke::multires_layers::bake_visible_to_base(*mmd, *mesh)) {
+-    BKE_report(op->reports, RPT_ERROR, "Cannot bake: hidden layers, shared data, shape keys, invalid grids or HR cage edits needing frame rebasing");
++    BKE_report(op->reports, RPT_ERROR, "Cannot bake: no visible layers, shared or linked data, shape keys, external or invalid grids, or HR cage edits needing frame rebasing");
+     return OPERATOR_CANCELLED;
+   }
+   multires_force_sculpt_rebuild(ob);
+@@ -1019,7 +1019,7 @@
+ {
+   ot->name = "Bake Visible Layers into Base";
+   ot->idname = "SCULPT_OT_multires_base_capture";
+-  ot->description = "Merge contributions into the base and clear layer offsets. Hidden layers and shared mesh data are rejected. Save a copy first";
++  ot->description = "Bake visible contributions into the base and clear only their offsets; retain hidden layers. Shared mesh data is rejected";
+   ot->exec = sculpt_multires_base_capture_exec;
+   ot->invoke = WM_operator_confirm;
+   ot->poll = sculpt_mode_poll;
+--- scripts/startup/bl_ui/space_view3d_sculpt_extended.py
++++ scripts/startup/bl_ui/space_view3d_sculpt_extended.py
+@@ -140,7 +140,100 @@
+ 
+ 
+ 
++class SCULPT_OT_extended_prepare_transport(bpy.types.Operator):
++    bl_idname = 'sculpt.extended_prepare_transport'
++    bl_label = 'Draw Transport'
++    bl_description = 'Activate Draw with Anchored transport; R rotate, S scale, SS strength'
++    bl_options = {'REGISTER', 'UNDO'}
++
++    @classmethod
++    def poll(cls, context):
++        return context.object is not None and context.object.mode == 'SCULPT'
++
++    def execute(self, context):
++        result = bpy.ops.brush.asset_activate(asset_library_type='ESSENTIALS',
++            relative_asset_identifier='brushes/essentials_brushes-mesh_sculpt.blend/Brush/Draw')
++        if result != {'FINISHED'}:
++            return {'CANCELLED'}
++        brush = context.tool_settings.sculpt.brush
++        brush.stroke_method = 'ANCHORED'
++        brush.falloff_shape = 'SPHERE'
++        brush.use_edge_to_edge = False
++        brush.sculpt_draw_transport_v01 = True
++        return {'FINISHED'}
++
++
++class VIEW3D_PT_sculpt_extended_multires(bpy.types.Panel):
++    bl_label = 'Sculpt Extended · Multires'
++    bl_idname = 'VIEW3D_PT_sculpt_extended_multires'
++    bl_space_type = 'VIEW_3D'
++    bl_region_type = 'UI'
++    bl_category = 'Multires'
++    bl_order = -20
++
++    @classmethod
++    def poll(cls, context):
++        return context.object is not None and context.object.type == 'MESH'
++
++    def draw(self, context):
++        layout = self.layout
++        mods = [m for m in context.object.modifiers if m.type == 'MULTIRES']
++        if len(mods) != 1:
++            layout.label(text='Select a mesh with one Multires modifier', icon='INFO')
++            return
++        m = mods[0]
++        col = layout.column(align=True)
++        col.prop(m, 'levels', text='Viewport')
++        col.prop(m, 'sculpt_levels', text='Sculpt')
++        col.prop(m, 'render_levels', text='Render')
++        row = layout.row(align=True)
++        row.operator('object.multires_subdivide', text='Subdivide').modifier = m.name
++        layout.prop(m, 'use_sculpt_base_mesh')
++        if context.object.mode == 'SCULPT':
++            from .space_view3d_sculpt_destination import draw_controls
++            _, target = draw_controls(layout, context, m)
++            layout.label(text=target, icon='INFO')
++        layout.separator()
++        layout.label(text='Sculpt Layers', icon='MOD_MULTIRES')
++        sculpt = context.object.mode == 'SCULPT'
++        tools = layout.column(align=True)
++        tools.enabled = sculpt
++        row = tools.row(align=True)
++        row.operator('sculpt.multires_layer_add', text='Add', icon='ADD')
++        row.operator('sculpt.multires_layer_duplicate', text='Duplicate')
++        row.operator('sculpt.multires_layer_delete', text='Delete', icon='X')
++        for i, layer in enumerate(m.sculpt_layers):
++            box = layout.box()
++            row = box.row(align=True)
++            select = row.row(align=True)
++            select.enabled = sculpt
++            select.operator('sculpt.multires_layer_set_active', text='',
++                icon='RADIOBUT_ON' if i == m.active_sculpt_layer_index else 'RADIOBUT_OFF').index = i
++            row.prop(layer, 'name', text='')
++            row.prop(layer, 'visible', text='', icon='HIDE_OFF' if layer.visible else 'HIDE_ON')
++            box.prop(layer, 'strength')
++        row = tools.row(align=True)
++        row.operator('sculpt.multires_layer_move', text='Up').direction = 'UP'
++        row.operator('sculpt.multires_layer_move', text='Down').direction = 'DOWN'
++        tools.operator('sculpt.multires_layer_commit', text='Commit Pending Changes')
++        tools.operator('sculpt.multires_layer_snapshot', text='Create Hidden Copy')
++        tools.operator_context = 'INVOKE_REGION_WIN'
++        tools.operator('sculpt.multires_base_capture', text='Bake Visible into Base...')
++        layout.separator()
++        transport = layout.column(align=True)
++        transport.enabled = sculpt
++        transport.operator('sculpt.extended_prepare_transport', text='Activate Draw Transport')
++        settings = context.tool_settings.sculpt
++        brush = settings.brush if settings else None
++        if sculpt and brush:
++            transport.prop(brush, 'sculpt_draw_transport_v01', text='Draw Transport')
++            transport.label(text='R rotate · S scale · SS strength')
++            transport.label(text='Use at the highest Multires level')
++
++
+ classes = (
++    SCULPT_OT_extended_prepare_transport,
++    VIEW3D_PT_sculpt_extended_multires,
+     SCULPT_OT_color_v03_clear_confirm,
+     VIEW3D_PT_facesets_rc1,
+     VIEW3D_PT_polypaint_blur_v01,
+@@ -148,13 +241,25 @@
+ )
+ 
+ 
++_owns_transport_property = False
++
+ def register_props():
++    global _owns_transport_property
++    if not hasattr(bpy.types.Brush, 'sculpt_draw_transport_v01'):
++        bpy.types.Brush.sculpt_draw_transport_v01 = bpy.props.BoolProperty(
++            name='Draw Transport', default=False,
++            description='Translate Anchored Draw detail with R rotation, S scale and SS strength')
++        _owns_transport_property = True
+     bpy.types.Scene.facesets_rc2_id=bpy.props.IntProperty(name='ID Face Set',default=2,min=1)
+     bpy.types.Scene.facesets_rc10_solidify=bpy.props.BoolProperty(default=False)
+     bpy.types.Scene.facesets_rc10_limit=bpy.props.IntProperty(default=250000,min=4,max=4000000)
+ 
+ 
+ def unregister_props():
++    global _owns_transport_property
++    if _owns_transport_property and hasattr(bpy.types.Brush, 'sculpt_draw_transport_v01'):
++        del bpy.types.Brush.sculpt_draw_transport_v01
++    _owns_transport_property = False
+     for name in ('facesets_rc2_id', 'facesets_rc10_solidify', 'facesets_rc10_limit'):
+         if hasattr(bpy.types.Scene, name):
+             delattr(bpy.types.Scene, name)
+--- source/creator/sculpt_extended_profile.hh
++++ source/creator/sculpt_extended_profile.hh
+@@ -11,6 +11,7 @@
+   if (native && std::strcmp(native, "0") == 0) {
+     return;
+   }
++  BLI_setenv_if_new("BLENDER_SCULPT_DRAW_TRANSPORT_V01", "1");
+   BLI_setenv_if_new("BLENDER_SCULPT_POLYPAINT_V04", "1");
+   BLI_setenv_if_new("BLENDER_SCULPT_POLYPAINT_L0_TRACE", "0");
+   BLI_setenv_if_new("BLENDER_SCULPT_POLYPAINT_L0_DRAW_V04D", "1");

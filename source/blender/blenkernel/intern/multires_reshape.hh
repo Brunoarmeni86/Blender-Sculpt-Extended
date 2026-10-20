@@ -24,13 +24,22 @@ struct GridPaintMask;
 struct MDisps;
 struct Mesh;
 struct MultiresModifierData;
+struct MultiresSculptLayer;
 struct Object;
 namespace bke::subdiv {
 struct Subdiv;
 }
 struct SubdivCCG;
+/* Owned by one compact Subdivide transaction; never by a reshape context. */
+struct MultiresSubdivideSmoothCacheV03;
+MultiresSubdivideSmoothCacheV03 *multires_subdivide_smooth_cache_create_v03();
+void multires_subdivide_smooth_cache_free_v03(MultiresSubdivideSmoothCacheV03 *cache);
 
 struct MultiresReshapeContext {
+  const MultiresSculptLayer *regional_source_layer_v03 = nullptr;
+  MutableSpan<int8_t> regional_output_grids_v03 = {};
+  mutable bool regional_active_v03 = false;
+
   /* NOTE: Only available when context is initialized from object. */
   Depsgraph *depsgraph;
   Object *object;
@@ -52,6 +61,7 @@ struct MultiresReshapeContext {
    * leading multires applied on it. */
   bke::subdiv::Subdiv *subdiv;
   bool need_free_subdiv;
+  MultiresSubdivideSmoothCacheV03 *subdivide_smooth_cache_v03 = nullptr;
 
   struct {
     /* Level at which displacement is being assigned to.
@@ -424,3 +434,7 @@ void multires_reshape_apply_base_refine_from_deform(MultiresReshapeContext *resh
 /** \} */
 
 }  // namespace blender
+
+namespace blender {
+bool multires_reshape_regional_object_to_tangent_v03(const MultiresReshapeContext *context);
+}

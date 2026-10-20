@@ -1,0 +1,1569 @@
+{
+  "status": "PASS_BAKE_VISIBLE_HIDDEN",
+  "candidate_sha256": "da235eb28ff27873414ca095104bf325e11a04413f6ac63cae36ba76c8cd9f5d",
+  "exe": "C:\\BlenderDev\\Sculpt-Bake-Visible-Hidden-V01\\prova-20261020-165018\\Blender-Sculpt-Bake-Visible-Hidden-V01\\blender.exe",
+  "source_changes": false,
+  "compilation": false,
+  "results": {
+    "HR": {
+      "seed": {
+        "states": {
+          "seed": {
+            "colors_hash": "15158757888338291134",
+            "base_color_hash": "12342180871152426998",
+            "mask_hash": "1469598103934665603",
+            "face_sets_hash": "14827177206278271875",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 38400,
+            "level": 3,
+            "layer_hash": "6913387084450517659",
+            "positions_hash": "2212847773639333766",
+            "total": 3,
+            "sculpt": 3,
+            "active": 0,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          }
+        },
+        "timings_ms": [],
+        "max_errors": {},
+        "stroke_diagnostics": [
+          {
+            "dx": -40,
+            "before": "5451739741631077243",
+            "after_draw": "10363301559589309496",
+            "after_commit": "15255037214921693129",
+            "layer_before": "4749387955377259403",
+            "layer_after": "3224657153014331160",
+            "samples": [
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  -0.13772182166576385,
+                  -0.04602546989917755,
+                  0.9508376121520996
+                ],
+                "mouse": [
+                  1511.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1511.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 328.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.0,
+                "is_start": true
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  -0.11577896773815155,
+                  -0.04602546989917755,
+                  0.9579566717147827
+                ],
+                "mouse": [
+                  1523.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1523.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 328.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.1,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  -0.09383611381053925,
+                  -0.04602546989917755,
+                  0.9650756120681763
+                ],
+                "mouse": [
+                  1535.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1535.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 328.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.2,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  -0.07189325243234634,
+                  -0.04602546989917755,
+                  0.9721946716308594
+                ],
+                "mouse": [
+                  1547.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1547.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 328.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.30000000000000004,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  -0.04995039105415344,
+                  -0.04602546989917755,
+                  0.9793136119842529
+                ],
+                "mouse": [
+                  1559.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1559.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 328.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.4,
+                "is_start": false
+              }
+            ]
+          },
+          {
+            "dx": 40,
+            "before": "2042070005699986731",
+            "after_draw": "11794924611802276152",
+            "after_commit": "17329319825817421510",
+            "layer_before": "13924266760631873652",
+            "layer_after": "16584003600340567199",
+            "samples": [
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  0.008563894778490067,
+                  -0.04602546989917755,
+                  0.9948505163192749
+                ],
+                "mouse": [
+                  1591.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1591.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 328.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.0,
+                "is_start": true
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  0.03050675429403782,
+                  -0.04602546989917755,
+                  0.9961738586425781
+                ],
+                "mouse": [
+                  1603.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1603.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 328.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.1,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  0.05244961380958557,
+                  -0.04602546989917755,
+                  0.9974973201751709
+                ],
+                "mouse": [
+                  1615.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1615.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 328.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.2,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  0.07439246773719788,
+                  -0.04602546989917755,
+                  0.9988206624984741
+                ],
+                "mouse": [
+                  1627.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1627.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 328.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.30000000000000004,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  0.09633532166481018,
+                  -0.04602546989917755,
+                  1.0001438856124878
+                ],
+                "mouse": [
+                  1639.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1639.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 328.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.4,
+                "is_start": false
+              }
+            ]
+          }
+        ],
+        "fixture_detail": {
+          "Detail_A": {
+            "max_abs": 0.22562319040298462,
+            "threshold": 1e-05
+          },
+          "Detail_B": {
+            "max_abs": 0.21889996528625488,
+            "threshold": 1e-05
+          }
+        },
+        "ui_audit": {
+          "status": "PASS_NATIVE_RNA_AND_PANEL_CALLBACK",
+          "calls": [
+            [
+              "prop",
+              "levels"
+            ],
+            [
+              "prop",
+              "sculpt_levels"
+            ],
+            [
+              "prop",
+              "render_levels"
+            ],
+            [
+              "operator",
+              "object.multires_subdivide"
+            ],
+            [
+              "operator_property",
+              "modifier",
+              "Multires"
+            ],
+            [
+              "prop",
+              "use_sculpt_base_mesh"
+            ],
+            [
+              "operator",
+              "sculpt.destination_v01"
+            ],
+            [
+              "operator_property",
+              "target",
+              "BASE"
+            ],
+            [
+              "operator",
+              "sculpt.destination_v01"
+            ],
+            [
+              "operator_property",
+              "target",
+              "LAYER"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_add"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_duplicate"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_delete"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_set_active"
+            ],
+            [
+              "operator_property",
+              "index",
+              "0"
+            ],
+            [
+              "prop",
+              "name"
+            ],
+            [
+              "prop",
+              "visible"
+            ],
+            [
+              "prop",
+              "strength"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_set_active"
+            ],
+            [
+              "operator_property",
+              "index",
+              "1"
+            ],
+            [
+              "prop",
+              "name"
+            ],
+            [
+              "prop",
+              "visible"
+            ],
+            [
+              "prop",
+              "strength"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_set_active"
+            ],
+            [
+              "operator_property",
+              "index",
+              "2"
+            ],
+            [
+              "prop",
+              "name"
+            ],
+            [
+              "prop",
+              "visible"
+            ],
+            [
+              "prop",
+              "strength"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_set_active"
+            ],
+            [
+              "operator_property",
+              "index",
+              "3"
+            ],
+            [
+              "prop",
+              "name"
+            ],
+            [
+              "prop",
+              "visible"
+            ],
+            [
+              "prop",
+              "strength"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_move"
+            ],
+            [
+              "operator_property",
+              "direction",
+              "UP"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_move"
+            ],
+            [
+              "operator_property",
+              "direction",
+              "DOWN"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_commit"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_snapshot"
+            ],
+            [
+              "operator",
+              "sculpt.multires_base_capture"
+            ],
+            [
+              "operator",
+              "sculpt.extended_prepare_transport"
+            ],
+            [
+              "prop",
+              "sculpt_draw_transport_v01"
+            ]
+          ],
+          "limitation": "Validates panel draw callback and actual RNA/operator availability; visual layout requires manual check."
+        },
+        "status": "PASS_SEED"
+      },
+      "exercise": {
+        "states": {
+          "visible_before": {
+            "colors_hash": "15158757888338291134",
+            "base_color_hash": "12342180871152426998",
+            "mask_hash": "1469598103934665603",
+            "face_sets_hash": "14827177206278271875",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 38400,
+            "level": 3,
+            "layer_hash": "6913387084450517659",
+            "positions_hash": "11832435869571899382",
+            "total": 3,
+            "sculpt": 3,
+            "active": 0,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          },
+          "before_bake": {
+            "colors_hash": "15158757888338291134",
+            "base_color_hash": "12342180871152426998",
+            "mask_hash": "1469598103934665603",
+            "face_sets_hash": "14827177206278271875",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 38400,
+            "level": 3,
+            "layer_hash": "6913387084450517659",
+            "positions_hash": "11832435869571899382",
+            "total": 3,
+            "sculpt": 3,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          },
+          "after_bake": {
+            "colors_hash": "15158757888338291134",
+            "base_color_hash": "12342180871152426998",
+            "mask_hash": "1469598103934665603",
+            "face_sets_hash": "14827177206278271875",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 38400,
+            "level": 3,
+            "layer_hash": "12160893738520248056",
+            "positions_hash": "11832435869571899382",
+            "total": 3,
+            "sculpt": 3,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          },
+          "undo": {
+            "colors_hash": "15158757888338291134",
+            "base_color_hash": "12342180871152426998",
+            "mask_hash": "1469598103934665603",
+            "face_sets_hash": "14827177206278271875",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 38400,
+            "level": 3,
+            "layer_hash": "6913387084450517659",
+            "positions_hash": "11832435869571899382",
+            "total": 3,
+            "sculpt": 3,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          },
+          "redo": {
+            "colors_hash": "15158757888338291134",
+            "base_color_hash": "12342180871152426998",
+            "mask_hash": "1469598103934665603",
+            "face_sets_hash": "14827177206278271875",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 38400,
+            "level": 3,
+            "layer_hash": "12160893738520248056",
+            "positions_hash": "11832435869571899382",
+            "total": 3,
+            "sculpt": 3,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          },
+          "saved": {
+            "colors_hash": "15158757888338291134",
+            "base_color_hash": "12342180871152426998",
+            "mask_hash": "1469598103934665603",
+            "face_sets_hash": "14827177206278271875",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 38400,
+            "level": 3,
+            "layer_hash": "12160893738520248056",
+            "positions_hash": "6374752996706055120",
+            "total": 3,
+            "sculpt": 3,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                true
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          }
+        },
+        "timings_ms": [],
+        "max_errors": {
+          "bake_visible_surface": {
+            "max_abs": 0.0,
+            "tolerance": 2.23226523399353e-06
+          },
+          "undo_bake": {
+            "max_abs": 0.0,
+            "tolerance": 2.23226523399353e-06
+          },
+          "redo_bake": {
+            "max_abs": 0.0,
+            "tolerance": 2.23226523399353e-06
+          },
+          "hidden_detail_retained": {
+            "max_abs": 0.0,
+            "tolerance": 2.11576771736145e-06
+          },
+          "visible_baked_into_native_base": {
+            "max_abs": 0.0,
+            "tolerance": 2.23226523399353e-06
+          },
+          "all_hidden_cancel_preserves_base": {
+            "max_abs": 0.0,
+            "tolerance": 2.23226523399353e-06
+          },
+          "repeat_bake_no_double_application": {
+            "max_abs": 0.0,
+            "tolerance": 2.23226523399353e-06
+          }
+        },
+        "status": "PASS_BAKE_VISIBLE_HIDDEN"
+      },
+      "reopen": {
+        "states": {
+          "reopen": {
+            "colors_hash": "15158757888338291134",
+            "base_color_hash": "12342180871152426998",
+            "mask_hash": "1469598103934665603",
+            "face_sets_hash": "14827177206278271875",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 38400,
+            "level": 3,
+            "layer_hash": "12160893738520248056",
+            "positions_hash": "6374752996706055120",
+            "total": 3,
+            "sculpt": 3,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                true
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          }
+        },
+        "timings_ms": [],
+        "max_errors": {
+          "reopen_saved": {
+            "max_abs": 0.0,
+            "tolerance": 2.11576771736145e-06
+          }
+        },
+        "status": "PASS_REOPEN"
+      }
+    },
+    "L0": {
+      "seed": {
+        "states": {
+          "seed": {
+            "colors_hash": "5982575756990443291",
+            "base_color_hash": "7811578463649453887",
+            "mask_hash": "12927802183248474595",
+            "face_sets_hash": "18181724795068662659",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 24576,
+            "level": 0,
+            "layer_hash": "15979375448854558896",
+            "positions_hash": "12460160627717105800",
+            "total": 0,
+            "sculpt": 0,
+            "active": 0,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          }
+        },
+        "timings_ms": [],
+        "max_errors": {},
+        "stroke_diagnostics": [
+          {
+            "dx": -40,
+            "before": "12460160627717105800",
+            "after_draw": "12460160627717105800",
+            "after_commit": "12460160627717105800",
+            "layer_before": "8223711055732901291",
+            "layer_after": "14748456620061005070",
+            "samples": [
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  -0.13772182166576385,
+                  -0.04602546989917755,
+                  0.9581490755081177
+                ],
+                "mouse": [
+                  1511.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1511.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 96.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.0,
+                "is_start": true
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  -0.11577896773815155,
+                  -0.04602546989917755,
+                  0.965869665145874
+                ],
+                "mouse": [
+                  1523.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1523.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 96.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.1,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  -0.09383611381053925,
+                  -0.04602546989917755,
+                  0.971855640411377
+                ],
+                "mouse": [
+                  1535.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1535.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 96.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.2,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  -0.07189325243234634,
+                  -0.04602546989917755,
+                  0.9778417348861694
+                ],
+                "mouse": [
+                  1547.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1547.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 96.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.30000000000000004,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  -0.04995039105415344,
+                  -0.04602546989917755,
+                  0.9838278293609619
+                ],
+                "mouse": [
+                  1559.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1559.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 96.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.4,
+                "is_start": false
+              }
+            ]
+          },
+          {
+            "dx": 40,
+            "before": "12460160627717105800",
+            "after_draw": "12460160627717105800",
+            "after_commit": "12460160627717105800",
+            "layer_before": "2842088925704658758",
+            "layer_after": "2780995643620922392",
+            "samples": [
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  0.008563894778490067,
+                  -0.04602546989917755,
+                  1.1042759418487549
+                ],
+                "mouse": [
+                  1591.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1591.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 96.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.0,
+                "is_start": true
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  0.03050675429403782,
+                  -0.04602546989917755,
+                  1.0945303440093994
+                ],
+                "mouse": [
+                  1603.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1603.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 96.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.1,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  0.05244961380958557,
+                  -0.04602546989917755,
+                  1.0847848653793335
+                ],
+                "mouse": [
+                  1615.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1615.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 96.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.2,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  0.07439246773719788,
+                  -0.04602546989917755,
+                  1.0749366283416748
+                ],
+                "mouse": [
+                  1627.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1627.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 96.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.30000000000000004,
+                "is_start": false
+              },
+              {
+                "name": "SubdivideTest",
+                "location": [
+                  0.09633532166481018,
+                  -0.04602546989917755,
+                  1.065001368522644
+                ],
+                "mouse": [
+                  1639.0,
+                  916.0
+                ],
+                "mouse_event": [
+                  1639.0,
+                  916.0
+                ],
+                "pressure": 1.0,
+                "size": 96.0,
+                "x_tilt": 0.0,
+                "y_tilt": 0.0,
+                "time": 0.4,
+                "is_start": false
+              }
+            ]
+          }
+        ],
+        "fixture_detail": {
+          "Detail_A": {
+            "max_abs": 0.21391302347183228,
+            "threshold": 1e-05
+          },
+          "Detail_B": {
+            "max_abs": 0.2199474573135376,
+            "threshold": 1e-05
+          }
+        },
+        "ui_audit": {
+          "status": "PASS_NATIVE_RNA_AND_PANEL_CALLBACK",
+          "calls": [
+            [
+              "prop",
+              "levels"
+            ],
+            [
+              "prop",
+              "sculpt_levels"
+            ],
+            [
+              "prop",
+              "render_levels"
+            ],
+            [
+              "operator",
+              "object.multires_subdivide"
+            ],
+            [
+              "operator_property",
+              "modifier",
+              "Multires"
+            ],
+            [
+              "prop",
+              "use_sculpt_base_mesh"
+            ],
+            [
+              "operator",
+              "sculpt.destination_v01"
+            ],
+            [
+              "operator_property",
+              "target",
+              "BASE"
+            ],
+            [
+              "operator",
+              "sculpt.destination_v01"
+            ],
+            [
+              "operator_property",
+              "target",
+              "LAYER"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_add"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_duplicate"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_delete"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_set_active"
+            ],
+            [
+              "operator_property",
+              "index",
+              "0"
+            ],
+            [
+              "prop",
+              "name"
+            ],
+            [
+              "prop",
+              "visible"
+            ],
+            [
+              "prop",
+              "strength"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_set_active"
+            ],
+            [
+              "operator_property",
+              "index",
+              "1"
+            ],
+            [
+              "prop",
+              "name"
+            ],
+            [
+              "prop",
+              "visible"
+            ],
+            [
+              "prop",
+              "strength"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_set_active"
+            ],
+            [
+              "operator_property",
+              "index",
+              "2"
+            ],
+            [
+              "prop",
+              "name"
+            ],
+            [
+              "prop",
+              "visible"
+            ],
+            [
+              "prop",
+              "strength"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_set_active"
+            ],
+            [
+              "operator_property",
+              "index",
+              "3"
+            ],
+            [
+              "prop",
+              "name"
+            ],
+            [
+              "prop",
+              "visible"
+            ],
+            [
+              "prop",
+              "strength"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_move"
+            ],
+            [
+              "operator_property",
+              "direction",
+              "UP"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_move"
+            ],
+            [
+              "operator_property",
+              "direction",
+              "DOWN"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_commit"
+            ],
+            [
+              "operator",
+              "sculpt.multires_layer_snapshot"
+            ],
+            [
+              "operator",
+              "sculpt.multires_base_capture"
+            ],
+            [
+              "operator",
+              "sculpt.extended_prepare_transport"
+            ],
+            [
+              "prop",
+              "sculpt_draw_transport_v01"
+            ]
+          ],
+          "limitation": "Validates panel draw callback and actual RNA/operator availability; visual layout requires manual check."
+        },
+        "status": "PASS_SEED"
+      },
+      "exercise": {
+        "states": {
+          "visible_before": {
+            "colors_hash": "5982575756990443291",
+            "base_color_hash": "7811578463649453887",
+            "mask_hash": "12927802183248474595",
+            "face_sets_hash": "18181724795068662659",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 24576,
+            "level": 0,
+            "layer_hash": "15979375448854558896",
+            "positions_hash": "12460160627717105800",
+            "total": 0,
+            "sculpt": 0,
+            "active": 0,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          },
+          "before_bake": {
+            "colors_hash": "5982575756990443291",
+            "base_color_hash": "7811578463649453887",
+            "mask_hash": "12927802183248474595",
+            "face_sets_hash": "18181724795068662659",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 24576,
+            "level": 0,
+            "layer_hash": "15979375448854558896",
+            "positions_hash": "12460160627717105800",
+            "total": 0,
+            "sculpt": 0,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          },
+          "after_bake": {
+            "colors_hash": "5982575756990443291",
+            "base_color_hash": "7811578463649453887",
+            "mask_hash": "12927802183248474595",
+            "face_sets_hash": "18181724795068662659",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 24576,
+            "level": 0,
+            "layer_hash": "14950557480328313213",
+            "positions_hash": "11696813610648098667",
+            "total": 0,
+            "sculpt": 0,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          },
+          "undo": {
+            "colors_hash": "5982575756990443291",
+            "base_color_hash": "7811578463649453887",
+            "mask_hash": "12927802183248474595",
+            "face_sets_hash": "18181724795068662659",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 24576,
+            "level": 0,
+            "layer_hash": "15979375448854558896",
+            "positions_hash": "12460160627717105800",
+            "total": 0,
+            "sculpt": 0,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          },
+          "redo": {
+            "colors_hash": "5982575756990443291",
+            "base_color_hash": "7811578463649453887",
+            "mask_hash": "12927802183248474595",
+            "face_sets_hash": "18181724795068662659",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 24576,
+            "level": 0,
+            "layer_hash": "14950557480328313213",
+            "positions_hash": "11696813610648098667",
+            "total": 0,
+            "sculpt": 0,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                false
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          },
+          "saved": {
+            "colors_hash": "5982575756990443291",
+            "base_color_hash": "7811578463649453887",
+            "mask_hash": "12927802183248474595",
+            "face_sets_hash": "18181724795068662659",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 24576,
+            "level": 0,
+            "layer_hash": "14950557480328313213",
+            "positions_hash": "11696813610648098667",
+            "total": 0,
+            "sculpt": 0,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                true
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          }
+        },
+        "timings_ms": [],
+        "max_errors": {
+          "bake_visible_surface": {
+            "max_abs": 0.0,
+            "tolerance": 2.259472608566284e-06
+          },
+          "undo_bake": {
+            "max_abs": 0.0,
+            "tolerance": 2.259472608566284e-06
+          },
+          "redo_bake": {
+            "max_abs": 0.0,
+            "tolerance": 2.259472608566284e-06
+          },
+          "hidden_detail_retained": {
+            "max_abs": 0.0,
+            "tolerance": 2.1507079601287842e-06
+          },
+          "visible_baked_into_native_base": {
+            "max_abs": 0.0,
+            "tolerance": 2.259472608566284e-06
+          },
+          "all_hidden_cancel_preserves_base": {
+            "max_abs": 0.0,
+            "tolerance": 2.259472608566284e-06
+          },
+          "repeat_bake_no_double_application": {
+            "max_abs": 0.0,
+            "tolerance": 2.259472608566284e-06
+          }
+        },
+        "status": "PASS_BAKE_VISIBLE_HIDDEN"
+      },
+      "reopen": {
+        "states": {
+          "reopen": {
+            "colors_hash": "5982575756990443291",
+            "base_color_hash": "7811578463649453887",
+            "mask_hash": "12927802183248474595",
+            "face_sets_hash": "18181724795068662659",
+            "protection_hash": "1469598103934665603",
+            "sample_count": 24576,
+            "level": 0,
+            "layer_hash": "14950557480328313213",
+            "positions_hash": "11696813610648098667",
+            "total": 0,
+            "sculpt": 0,
+            "active": 1,
+            "layers": [
+              [
+                "Detail_A",
+                0.6499999761581421,
+                true
+              ],
+              [
+                "Detail_B_Hidden",
+                -0.4000000059604645,
+                true
+              ],
+              [
+                "Empty_Visible",
+                1.0,
+                true
+              ],
+              [
+                "Empty_Hidden",
+                1.0,
+                false
+              ]
+            ]
+          }
+        },
+        "timings_ms": [],
+        "max_errors": {
+          "reopen_saved": {
+            "max_abs": 0.0,
+            "tolerance": 2.1507079601287842e-06
+          }
+        },
+        "status": "PASS_REOPEN"
+      }
+    }
+  }
+}

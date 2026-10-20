@@ -9,11 +9,15 @@
 #include "multires_reshape.hh"
 #include "multires_stable_detail_transport.hh"
 #include <cstring>
+#include <memory>
+#include <vector>
 #include <cstdlib>
 
 #include "MEM_guardedalloc.h"
 
 #include "DNA_mesh_types.h"
+#include "DNA_meshdata_types.h"
+#include "DNA_modifier_types.h"
 
 #include "BLI_function_ref.hh"
 #include "BLI_math_matrix.h"
@@ -37,6 +41,9 @@
 #include "opensubdiv_converter_capi.hh"
 #ifdef WITH_OPENSUBDIV
 #  include "opensubdiv_evaluator.hh"
+#  include "opensubdiv_topology_refiner.hh"
+#  include <opensubdiv/far/patchTableFactory.h>
+#  include "multires_subdivide_support_v03.hh"
 #endif
 #include "opensubdiv_evaluator_capi.hh"
 
@@ -199,6 +206,115 @@ MultiresReshapeSmoothContext::~MultiresReshapeSmoothContext()
 
 /** \} */
 
+/* V03 cache contains only immutable topology and the base-only detail
+ * phase, plus a sequentially reused evaluator. All new coarse positions are
+ * uploaded before EVERY final refine. No layer's output positions are cached.
+ * A null parent pointer in saved prevents retaining a dead work context. */
+struct MultiresSubdivideSmoothCacheV03 {
+  std::unique_ptr<MultiresReshapeSmoothContext> saved;
+  int verts = 0, edges = 0, faces = 0, corners = 0;
+  int old_level = 0, top_level = 0;
+  MultiresSubdivideModeType mode{};
+  bool busy = false;
+};
+
+static bool subdivide_flag_v03(const char *name)
+{
+  const char *value = std::getenv(name);
+  return value && value[0] == '1' && value[1] == '\0';
+}
+
+static int64_t subdivide_base_budget_v03()
+{
+  long mb = 256;
+  const char *value = std::getenv("BLENDER_SCULPT_SUBDIVIDE_BASE_CACHE_MB_V03");
+  if (value && value[0]) {
+    char *end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end != value && *end == '\0' && parsed >= 0 && parsed <= 4096) {
+      mb = parsed;
+    }
+  }
+  return int64_t(mb) * 1024 * 1024;
+}
+
+struct MultiresSubdivideLeaseV03 {
+  MultiresReshapeSmoothContext &work;
+  MultiresSubdivideSmoothCacheV03 *cache = nullptr;
+  bool topology_hit = false;
+  bool base_hit = false;
+  bool keep_base = false;
+
+  MultiresSubdivideLeaseV03(MultiresReshapeSmoothContext &work, const bool with_details)
+      : work(work)
+  {
+    const MultiresReshapeContext &r = *work.reshape_context;
+    auto *candidate = r.subdivide_smooth_cache_v03;
+    if (!candidate || candidate->busy ||
+        !subdivide_flag_v03("BLENDER_SCULPT_SUBDIVIDE_TOPOLOGY_V03")) {
+      return;
+    }
+    const Mesh &mesh = *r.base_mesh;
+    if (candidate->saved &&
+        (candidate->verts != mesh.verts_num || candidate->edges != mesh.edges_num ||
+         candidate->faces != mesh.faces_num || candidate->corners != mesh.corners_num ||
+         candidate->old_level != r.reshape.level || candidate->top_level != r.top.level ||
+         candidate->mode != work.smoothing_type)) {
+      return;
+    }
+    cache = candidate;
+    if (!cache->saved) {
+      cache->saved = std::make_unique<MultiresReshapeSmoothContext>(nullptr, work.smoothing_type);
+      cache->verts = mesh.verts_num;
+      cache->edges = mesh.edges_num;
+      cache->faces = mesh.faces_num;
+      cache->corners = mesh.corners_num;
+      cache->old_level = r.reshape.level;
+      cache->top_level = r.top.level;
+      cache->mode = work.smoothing_type;
+    }
+    cache->busy = true;
+    std::swap(work.geometry, cache->saved->geometry);
+    std::swap(work.loose_base_edges, cache->saved->loose_base_edges);
+    std::swap(work.reshape_subdiv, cache->saved->reshape_subdiv);
+    topology_hit = work.reshape_subdiv != nullptr;
+
+    /* The cached detail phase is base-only ONLY after original snapshots were
+     * freed. Never share it with Commit/reshape contexts holding old sculpt data. */
+    const int64_t side = r.top.grid_size;
+    const int64_t bytes = int64_t(r.num_grids) *
+                          (side * side * sizeof(SurfacePoint) + sizeof(SurfaceGrid));
+    keep_base = with_details && !r.orig.mdisps && !r.orig.grid_paint_masks &&
+                subdivide_flag_v03("BLENDER_SCULPT_SUBDIVIDE_BASE_PHASE_V03") &&
+                bytes <= subdivide_base_budget_v03();
+    if (keep_base) {
+      std::swap(work.base_surface_grids, cache->saved->base_surface_grids);
+      base_hit = !work.base_surface_grids.is_empty();
+    }
+    if (std::getenv("BLENDER_SCULPT_SUBDIVIDE_PROFILE")) {
+      std::printf("[SUBDIVIDE_SHARED_V03] topology=%s base=%s retained_mib=%.3f\n",
+                  topology_hit ? "HIT" : "BUILD",
+                  keep_base ? (base_hit ? "HIT" : "BUILD") : "BYPASS",
+                  keep_base ? double(bytes) / (1024.0 * 1024.0) : 0.0);
+    }
+  }
+  ~MultiresSubdivideLeaseV03()
+  {
+    if (!cache) {
+      return;
+    }
+    std::swap(work.geometry, cache->saved->geometry);
+    std::swap(work.loose_base_edges, cache->saved->loose_base_edges);
+    std::swap(work.reshape_subdiv, cache->saved->reshape_subdiv);
+    if (keep_base) {
+      std::swap(work.base_surface_grids, cache->saved->base_surface_grids);
+    }
+    cache->busy = false;
+  }
+  MultiresSubdivideLeaseV03(const MultiresSubdivideLeaseV03 &) = delete;
+  MultiresSubdivideLeaseV03 &operator=(const MultiresSubdivideLeaseV03 &) = delete;
+};
+
 /* -------------------------------------------------------------------- */
 /** \name Linear grids manipulation
  * \{ */
@@ -277,7 +393,9 @@ static void base_surface_grids_allocate(MultiresReshapeSmoothContext *reshape_sm
   reshape_smooth_context->base_surface_grids.reinitialize(num_grids);
 
   for (const int i : reshape_smooth_context->base_surface_grids.index_range()) {
-    reshape_smooth_context->base_surface_grids[i].points.reinitialize(grid_area);
+    if (!reshape_context->regional_active_v03 || reshape_context->regional_output_grids_v03[i]) {
+      reshape_smooth_context->base_surface_grids[i].points.reinitialize(grid_area);
+    }
   }
 }
 
@@ -428,6 +546,11 @@ static void foreach_toplevel_grid_coord(
   threading::parallel_for(faces.index_range(), 1, [&](const IndexRange range) {
     for (const int face_index : range) {
       const IndexRange face = faces[face_index];
+      if (reshape_context->regional_active_v03 &&
+          !reshape_context->regional_output_grids_v03[get_face_grid_index(reshape_smooth_context, face)])
+      {
+        continue;
+      }
       std::array<std::optional<GridCoord>, 4> face_grid_coords = grid_coords_from_face_verts(
           reshape_smooth_context, face);
 
@@ -1307,7 +1430,9 @@ static void evaluate_higher_grid_positions_with_details(
         *grid_element.displacement = smooth_limit_P + smooth_delta;
 
         /* Propagate non-coordinate data. */
-        propagate_linear_data_delta(reshape_smooth_context, &grid_element, grid_coord);
+        if (!reshape_context->regional_active_v03) {
+          propagate_linear_data_delta(reshape_smooth_context, &grid_element, grid_coord);
+        }
       });
 }
 
@@ -1332,6 +1457,108 @@ static void evaluate_higher_grid_positions(MultiresReshapeSmoothContext *reshape
       });
 }
 
+/* SUBDIVIDE_REGIONAL_EXECUTE_V03: only compact Subdivide unit-layer work.
+ * Coordinate calculations are native. We skip whole grids only after deriving
+ * a conservative closure from the actual evaluator's topology. */
+static bool subdivide_regional_prepare_v03(MultiresReshapeSmoothContext *work)
+{
+  const auto &r = *work->reshape_context;
+  const MultiresSculptLayer *layer = r.regional_source_layer_v03;
+  if (!layer || r.regional_output_grids_v03.size() != r.num_grids ||
+      !work->reshape_subdiv->settings.is_adaptive || r.orig.mdisps ||
+      r.orig.grid_paint_masks || r.top.level != r.reshape.level + 1 ||
+      layer->level != r.reshape.level || layer->grids_num != r.num_grids || !layer->disps)
+  {
+    return false;
+  }
+  const int old_side = bke::subdiv::grid_size_from_level(layer->level);
+  for (int g = 0; g < r.num_grids; ++g) {
+    const MDisps &grid = layer->disps[g];
+    if (grid.level != layer->level || grid.totdisp != old_side * old_side) {
+      return false;
+    }
+  }
+  std::vector<unsigned char> changed(work->geometry.vertices.size(), 0);
+  for (int v = 0; v < int(work->geometry.vertices.size()); ++v) {
+    for (const GridCoord &coord : work->geometry.vertices[v].grid_coords) {
+      if (coord.grid_index < 0 || coord.grid_index >= r.num_grids) {
+        return false;
+      }
+      const MDisps &grid = layer->disps[coord.grid_index];
+      if (!grid.disps) {
+        continue;
+      }
+      const int x = int(std::lround(coord.u * (old_side - 1)));
+      const int y = int(std::lround(coord.v * (old_side - 1)));
+      if (x < 0 || y < 0 || x >= old_side || y >= old_side) {
+        return false;
+      }
+      const float *delta = grid.disps[y * old_side + x];
+      for (int a = 0; a < 3; ++a) {
+        if (!std::isfinite(delta[a])) {
+          return false;
+        }
+        if (delta[a] != 0.0f) {
+          changed[v] = 1;
+        }
+      }
+    }
+  }
+  const auto &refiner = *work->reshape_subdiv->topology_refiner->topology_refiner;
+  const auto *patches = work->reshape_subdiv->evaluator->patch_table;
+  if (!patches) {
+    return false;
+  }
+  std::vector<unsigned char> faces;
+  if (!multires_subdivide_support_v03::detect(refiner, *patches, changed, faces) ||
+      faces.size() != size_t(work->geometry.faces().size()))
+  {
+    return false;
+  }
+  std::vector<int8_t> grids(r.num_grids, 0);
+  int affected_faces = 0;
+  for (int f = 0; f < int(faces.size()); ++f) {
+    if (!faces[f]) {
+      continue;
+    }
+    const int grid = get_face_grid_index(work, work->geometry.faces()[f]);
+    if (grid < 0 || grid >= r.num_grids) {
+      return false;
+    }
+    grids[grid] = 1;
+    ++affected_faces;
+  }
+  const int active = int(std::count(grids.begin(), grids.end(), int8_t(1)));
+  if (active * int64_t(5) > int64_t(r.num_grids) * 3) {
+    return false; /* Dense support: preserve the full native path. */
+  }
+  for (int g = 0; g < r.num_grids; ++g) {
+    r.regional_output_grids_v03[g] = grids[g];
+  }
+  r.regional_active_v03 = true;
+  std::printf("[SUBDIVIDE_REGIONAL_V03] state=ACTIVE grids=%d/%d faces=%d/%d\n",
+               active, r.num_grids, affected_faces, int(faces.size()));
+  return true;
+}
+
+static void subdivide_regional_smooth_v03(MultiresReshapeSmoothContext *work)
+{
+  geometry_create(work);
+  reshape_subdiv_create(work);
+  if (!subdivide_regional_prepare_v03(work)) {
+    std::printf("[SUBDIVIDE_REGIONAL_V03] state=FALLBACK\n");
+    evaluate_linear_delta_grids(work);
+  }
+  /* Unit-layer masks are discarded by compact Subdivide; the base surface's
+   * complete mask propagation and final publication remain unchanged. */
+  base_surface_grids_allocate(work);
+  reshape_subdiv_refine_orig(work);
+  evaluate_base_surface_grids(work);
+  reshape_subdiv_refine_final(work);
+  evaluate_higher_grid_positions_with_details(work);
+}
+
+
 #endif
 
 /** \} */
@@ -1339,6 +1566,26 @@ static void evaluate_higher_grid_positions(MultiresReshapeSmoothContext *reshape
 /* -------------------------------------------------------------------- */
 /** \name Entry point
  * \{ */
+
+MultiresSubdivideSmoothCacheV03 *multires_subdivide_smooth_cache_create_v03()
+{
+#ifdef WITH_OPENSUBDIV
+  return MEM_new<MultiresSubdivideSmoothCacheV03>(__func__);
+#else
+  return nullptr;
+#endif
+}
+
+void multires_subdivide_smooth_cache_free_v03(MultiresSubdivideSmoothCacheV03 *cache)
+{
+#ifdef WITH_OPENSUBDIV
+  if (cache) {
+    MEM_delete(cache);
+  }
+#else
+  UNUSED_VARS(cache);
+#endif
+}
 
 void multires_reshape_smooth_object_grids_with_details(
     const MultiresReshapeContext *reshape_context)
@@ -1354,14 +1601,23 @@ void multires_reshape_smooth_object_grids_with_details(
                                                        MultiresSubdivideModeType::Simple :
                                                        MultiresSubdivideModeType::CatmullClark;
   MultiresReshapeSmoothContext reshape_smooth_context(reshape_context, smoothing_type);
-  geometry_create(&reshape_smooth_context);
+  if (reshape_context->regional_source_layer_v03) {
+    subdivide_regional_smooth_v03(&reshape_smooth_context);
+    return;
+  }
+  MultiresSubdivideLeaseV03 shared(reshape_smooth_context, true);
+  if (!shared.topology_hit) {
+    geometry_create(&reshape_smooth_context);
+  }
   evaluate_linear_delta_grids(&reshape_smooth_context);
-
-  reshape_subdiv_create(&reshape_smooth_context);
-
-  base_surface_grids_allocate(&reshape_smooth_context);
-  reshape_subdiv_refine_orig(&reshape_smooth_context);
-  evaluate_base_surface_grids(&reshape_smooth_context);
+  if (!shared.topology_hit) {
+    reshape_subdiv_create(&reshape_smooth_context);
+  }
+  if (!shared.base_hit) {
+    base_surface_grids_allocate(&reshape_smooth_context);
+    reshape_subdiv_refine_orig(&reshape_smooth_context);
+    evaluate_base_surface_grids(&reshape_smooth_context);
+  }
 
   reshape_subdiv_refine_final(&reshape_smooth_context);
   evaluate_higher_grid_positions_with_details(&reshape_smooth_context);
@@ -1381,10 +1637,14 @@ void multires_reshape_smooth_object_grids(const MultiresReshapeContext *reshape_
   }
 
   MultiresReshapeSmoothContext reshape_smooth_context(reshape_context, mode);
-  geometry_create(&reshape_smooth_context);
+  MultiresSubdivideLeaseV03 shared(reshape_smooth_context, false);
+  if (!shared.topology_hit) {
+    geometry_create(&reshape_smooth_context);
+  }
   evaluate_linear_delta_grids(&reshape_smooth_context);
-
-  reshape_subdiv_create(&reshape_smooth_context);
+  if (!shared.topology_hit) {
+    reshape_subdiv_create(&reshape_smooth_context);
+  }
 
   reshape_subdiv_refine_final(&reshape_smooth_context);
   evaluate_higher_grid_positions(&reshape_smooth_context);
@@ -1395,4 +1655,42 @@ void multires_reshape_smooth_object_grids(const MultiresReshapeContext *reshape_
 
 /** \} */
 
+}  // namespace blender
+
+namespace blender {
+bool multires_reshape_regional_object_to_tangent_v03(const MultiresReshapeContext *r)
+{
+#ifdef WITH_OPENSUBDIV
+  if (!r->regional_active_v03) {
+    return false;
+  }
+  const int side = r->top.grid_size;
+  const float inv = 1.0f / float(side - 1);
+  threading::parallel_for(IndexRange(r->num_grids), 1, [&](const IndexRange range) {
+    for (const int grid : range) {
+      if (!r->regional_output_grids_v03[grid]) {
+        continue;
+      }
+      for (int y = 0; y < side; ++y) {
+        for (int x = 0; x < side; ++x) {
+          GridCoord coord;
+          coord.grid_index = grid;
+          coord.u = float(x) * inv;
+          coord.v = float(y) * inv;
+          float3 p;
+          float3x3 frame;
+          multires_reshape_evaluate_base_mesh_limit_at_grid(r, &coord, p, frame);
+          ReshapeGridElement element = multires_reshape_grid_element_for_grid_coord(r, &coord);
+          const float3 delta = *element.displacement - p;
+          *element.displacement = math::transform_direction(math::invert(frame), delta);
+        }
+      }
+    }
+  });
+  return true;
+#else
+  UNUSED_VARS(r);
+  return false;
+#endif
+}
 }  // namespace blender

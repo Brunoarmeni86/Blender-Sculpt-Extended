@@ -1,0 +1,16 @@
+Correzione della misura L0 del test Bake Visible. Nessuna ricompilazione.
+
+Il log precedente conferma PASS HR completo (bake, nascosti, Undo/Redo,
+riapertura e disponibilita RNA della sidebar). Il test L0 si fermava prima del
+bake: il probe usato esporta la mesh originale senza i delta applicati dal
+modificatore. Ora la misura L0 legge i vertici della mesh valutata.
+
+La portable esistente e verificata tramite SHA256; non modifica sorgenti,
+eseguibili o progetti utente. Ripete HR e L0 su scene nuove proprie del test.
+Non elimina o modifica il log precedente. L'esito Windows L0 resta da verificare.
+
+Estrarre in C:\BlenderDev, chiudere Blender ed eseguire:
+& 'C:\Users\olias\AppData\Local\Python\pythoncore-3.15-64\python.exe' -u 'C:\BlenderDev\Sculpt-Bake-Visible-Test-Fix-V01\PROVA.py'
+
+Inviare LOG-DA-INVIARE.zip dal percorso stampato.
+Dopo PASS si puo avviare lo stesso eseguibile aggiungendo --launch al comando.

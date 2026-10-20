@@ -1,0 +1,17 @@
+{
+  "status": "PASS_LOCAL_ONLY",
+  "native_windows_status": "PENDING",
+  "actual_native_function_bodies": true,
+  "standin_blender_types": true,
+  "checks": [
+    "GCC C++17 ASan/UBSan: actual merge_visible_to_base and bake_visible_to_base bodies, HR/L0, hidden/group-hidden isolation, repeat bake, all-hidden rejection, nonfinite and shared data preflight, HR cage-rebase guard",
+    "Python syntax",
+    "Byte-exact original CRLF source and exe restore, all preflight guards, concurrent edits protection, injected native build failure restoration"
+  ],
+  "limitations": [
+    "No full Blender Windows compilation/runtime here",
+    "Native RNA/panel callback and HR/L0 Undo/Redo/save/reopen tested by bundled Windows worker",
+    "New panel visual layout and complete transport gesture require manual verification",
+    "Not an exhaustive audit of all legacy addon features"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "status": "PASS_LOCAL_ONLY",
+  "windows_status": "PENDING",
+  "checks": [
+    "Python syntax",
+    "Actual points() regression: L0 must use evaluated mesh and must not call original-mesh probe",
+    "Actual points() regression: HR retains CCG probe path"
+  ],
+  "native_candidate_unchanged": true
+}

@@ -880,6 +880,7 @@ static const EnumPropertyItem grease_pencil_build_time_mode_items[] = {
 #  include "BKE_modifier.hh"
 #  include "BKE_multires.hh"
 #  include "BKE_multires_sculpt_layers.hh"
+#  include "BKE_multires_layer_region_v01.hh"
 #  include "BKE_object.hh"
 #  include "BKE_ocean.h"
 #  include "BKE_particle.h"
@@ -1648,14 +1649,14 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
 
   /* Strength is already the NEW value here. A transition to zero still has
    * a nonzero delta and must remove the old contribution from the live CCG. */
-  if (stack_v3 &&
-      (!std::isfinite(layer.strength) || !std::isfinite(direct_weight_delta)))
-  {
+  if (!std::isfinite(layer.strength) || !std::isfinite(direct_weight_delta)) {
     r_reason = "INVALID_WEIGHT";
     return false;
   }
-  const bool metadata_only = stack_v3 ? direct_weight_delta == 0.0f :
-      (!std::isfinite(layer.strength) || std::abs(layer.strength) < 1e-6f);
+  /* LAYER_STRENGTH_ZERO_FIX_V01: zero final strength removes the previous
+   * contribution. Only a zero transaction delta can skip geometry updates,
+   * independently of the optional modifier-stack experiment. */
+  const bool metadata_only = direct_weight_delta == 0.0f;
   if (metadata_only) {
     r_reason = "METADATA_ONLY";
     return true;
@@ -1672,20 +1673,63 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
     return true;
   }
 
-  /* Sparse storage: null grid payload means exactly zero layer displacement.
-   * Include a one-vertex-adjacent coarse-face ring for shared seams/normals. */
+  /* Build the same one-vertex-adjacent face ring without scanning every
+   * coarse face for a sparse layer. Opt-in until Windows A/B is verified. */
+  const double region_start = BLI_time_now_seconds();
+  const char *region_env = BLI_getenv("BLENDER_SCULPT_LAYER_REGION_V01");
+  const bool region_requested = region_env && region_env[0] == '1' && region_env[1] == '\0';
   const OffsetIndices faces = mesh->faces();
   BitVector<> support(mesh->faces_num, false);
+  BitVector<> affected(mesh->faces_num, false);
   Vector<int> payload_grids;
+  Vector<int> affected_face_indices;
   if (!bke::multires_layers::payload_grids(layer, ccg->grids_num, payload_grids)) {
     r_reason = "LAYER_SUPPORT_LAYOUT";
     return false;
   }
-  for (const int grid : payload_grids) {
-    const int face = int(std::upper_bound(faces.data().begin(), faces.data().end(), grid) - faces.data().begin() - 1);
-    if (!support[face]) {
-      support[face].set();
-      r_support_faces++;
+  if (payload_grids.is_empty()) {
+    r_reason = "METADATA_ONLY";
+    return true;
+  }
+  /* Dense support retains the linear legacy walk instead of paying to sort
+   * most of the cage. Payload count is a conservative upper bound on support. */
+  const bool sparse_region = region_requested &&
+      int64_t(payload_grids.size()) * 4 < int64_t(mesh->faces_num);
+  const GroupedSpan<int> vert_to_face = mesh->vert_to_face_map();
+  const Span<int> corner_verts = mesh->corner_verts();
+  if (sparse_region) {
+    bke::multires_layers::region_v01::visit_ring(
+        faces, corner_verts, vert_to_face, payload_grids, support, affected,
+        [&](const int /*face*/) { r_support_faces++; },
+        [&](const int face) { affected_face_indices.append(face); });
+    /* IndexMask requires ascending indices; sorting also keeps evaluation order
+     * identical to the legacy mask. Never change seam or normal processing. */
+    std::sort(affected_face_indices.begin(), affected_face_indices.end());
+    r_updated_faces = int(affected_face_indices.size());
+  }
+  else {
+    for (const int grid : payload_grids) {
+      const int face = int(std::upper_bound(faces.data().begin(), faces.data().end(), grid) - faces.data().begin() - 1);
+      if (!support[face]) {
+        support[face].set();
+        r_support_faces++;
+      }
+    }
+    for (const int face : faces.index_range()) {
+      if (!support[face]) {
+        continue;
+      }
+      affected[face].set();
+      for (const int corner : faces[face]) {
+        for (const int adjacent : vert_to_face[corner_verts[corner]]) {
+          affected[adjacent].set();
+        }
+      }
+    }
+    for (const int face : faces.index_range()) {
+      if (affected[face]) {
+        r_updated_faces++;
+      }
     }
   }
   if (r_support_faces == 0) {
@@ -1693,33 +1737,22 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
     return true;
   }
 
-  BitVector<> affected(mesh->faces_num, false);
-  const GroupedSpan<int> vert_to_face = mesh->vert_to_face_map();
-  const Span<int> corner_verts = mesh->corner_verts();
-  for (const int face : faces.index_range()) {
-    if (!support[face]) {
-      continue;
-    }
-    affected[face].set();
-    for (const int corner : faces[face]) {
-      for (const int adjacent : vert_to_face[corner_verts[corner]]) {
-        affected[adjacent].set();
-      }
-    }
-  }
-  for (const int face : faces.index_range()) {
-    if (affected[face]) {
-      r_updated_faces++;
-    }
-  }
-
   /* First validate PBVH coverage; after evaluation no failure should leave
    * an untracked region without forcing the global fallback. */
   BitVector<> affected_grids(ccg->grids_num, false);
-  for (const int face : faces.index_range()) {
-    if (affected[face]) {
+  if (sparse_region) {
+    for (const int face : affected_face_indices) {
       for (const int grid : faces[face]) {
         affected_grids[grid].set();
+      }
+    }
+  }
+  else {
+    for (const int face : faces.index_range()) {
+      if (affected[face]) {
+        for (const int grid : faces[face]) {
+          affected_grids[grid].set();
+        }
       }
     }
   }
@@ -1744,11 +1777,19 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
   r_changed_nodes = int(changed_nodes.size());
 
   IndexMaskMemory face_memory;
-  const IndexMask face_mask = IndexMask::from_predicate(
-      IndexRange(mesh->faces_num),
-      face_memory,
-      [&](const int face) { return affected[face]; },
-      exec_mode::grain_size(64));
+  const IndexMask face_mask = sparse_region ?
+      IndexMask::from_indices(affected_face_indices.as_span(), face_memory) :
+      IndexMask::from_predicate(
+          IndexRange(mesh->faces_num),
+          face_memory,
+          [&](const int face) { return affected[face]; },
+          exec_mode::grain_size(64));
+  if (rna_multires_visible_trace_enabled()) {
+    std::printf("[LAYER_REGION_V01] mode=%s faces=%d support=%d affected=%d nodes=%d prep_ms=%.3f\n",
+                sparse_region ? "SPARSE" : "LEGACY", mesh->faces_num,
+                r_support_faces, r_updated_faces, r_changed_nodes,
+                (BLI_time_now_seconds() - region_start) * 1000.0);
+  }
 
   const double eval_start = BLI_time_now_seconds();
   BitVector<> direct_faces;

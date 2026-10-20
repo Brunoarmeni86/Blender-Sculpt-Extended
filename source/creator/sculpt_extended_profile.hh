@@ -11,6 +11,7 @@ inline void initialize_defaults()
   if (native && std::strcmp(native, "0") == 0) {
     return;
   }
+  BLI_setenv_if_new("BLENDER_SCULPT_DRAW_TRANSPORT_V01", "1");
   BLI_setenv_if_new("BLENDER_SCULPT_POLYPAINT_V04", "1");
   BLI_setenv_if_new("BLENDER_SCULPT_POLYPAINT_L0_TRACE", "0");
   BLI_setenv_if_new("BLENDER_SCULPT_POLYPAINT_L0_DRAW_V04D", "1");

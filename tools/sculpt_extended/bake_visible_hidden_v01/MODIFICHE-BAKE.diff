@@ -1,0 +1,237 @@
+--- source/blender/blenkernel/intern/multires_sculpt_layers.cc
++++ source/blender/blenkernel/intern/multires_sculpt_layers.cc
+@@ -1866,7 +1866,8 @@
+   }
+   Vector<MultiresSculptLayer *> visible;
+   for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+-    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE)) {
++    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
++        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN)) {
+       continue;
+     }
+     visible.append(&layer);
+@@ -1936,7 +1937,9 @@
+     }
+   }
+   const MultiresSculptLayer *selected = active(mmd);
+-  const bool keep_selected = selected && !(selected->flag & MULTIRES_SCULPT_LAYER_VISIBLE);
++  const bool keep_selected = selected &&
++      (!(selected->flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
++       (selected->group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN));
+   for (MultiresSculptLayer *layer : visible) {
+     if (remove_layers) {
+       remove(mmd, *layer);
+@@ -1960,28 +1963,49 @@
+ {
+   if (!compatible(mmd, mesh) || mesh.id.lib || ID_REAL_USERS(&mesh.id) > 1 || mesh.key) {
+     return false;
+-  }
+-  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+-    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
+-        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN)) {
+-      return false;
+-    }
+   }
+   if (mmd.totlvl > 0) {
+     /* BAKE_SPARSE_B04_V01: same-cage HR bake shares the sparse/finite preflight
+      * and rejects effective L0 edits that would need tangent-frame rebasing. */
+     return merge_visible_to_base(mmd, mesh, false, false) == nullptr;
+   }
+-  /* At L0 there are no tangent-space grids to rebase. Preserve the old cage
+-   * bake behavior, with all results staged before positions are written. */
++  /* BAKE_VISIBLE_HIDDEN_V01: hidden offsets remain independent of the baked
++   * base. At L0 there are no tangent frames to rebase. Validate and stage only
++   * visible contributions, then clear only those same layers. */
++  std::vector<base_math::LayerView> visible;
++  bool has_visible = false;
++  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
++    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
++        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN))
++    {
++      continue;
++    }
++    has_visible = true;
++    if ((!layer.base_deltas && layer.base_verts_num == 0) || !is_effective(layer)) {
++      continue;
++    }
++    visible.push_back({layer.base_deltas, layer.base_verts_num, layer.strength, true});
++  }
++  if (!has_visible) {
++    return false;
++  }
+   Array<float3> baked_positions(mesh.vert_positions());
+-  if (!base_deltas_apply(mmd, baked_positions)) {
++  if (!base_math::compose(reinterpret_cast<const float (*)[3]>(baked_positions.data()),
++                          int(baked_positions.size()),
++                          visible,
++                          reinterpret_cast<float (*)[3]>(baked_positions.data())))
++  {
+     return false;
+   }
+   weight_hot_delta_cache_invalidate();
+   mesh.vert_positions_for_write().copy_from(baked_positions);
+   mesh.tag_positions_changed();
+   for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
++    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
++        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN))
++    {
++      continue;
++    }
+     MEM_SAFE_DELETE(layer.base_deltas);
+     layer.base_verts_num = 0;
+   }
+--- source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc
++++ source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc
+@@ -1006,7 +1006,7 @@
+   if (!mmd || !mesh || mmd->sculpt_layers.is_empty()) return OPERATOR_CANCELLED;
+   if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+   if (!bke::multires_layers::bake_visible_to_base(*mmd, *mesh)) {
+-    BKE_report(op->reports, RPT_ERROR, "Cannot bake: hidden layers, shared data, shape keys, invalid grids or HR cage edits needing frame rebasing");
++    BKE_report(op->reports, RPT_ERROR, "Cannot bake: no visible layers, shared or linked data, shape keys, external or invalid grids, or HR cage edits needing frame rebasing");
+     return OPERATOR_CANCELLED;
+   }
+   multires_force_sculpt_rebuild(ob);
+@@ -1019,7 +1019,7 @@
+ {
+   ot->name = "Bake Visible Layers into Base";
+   ot->idname = "SCULPT_OT_multires_base_capture";
+-  ot->description = "Merge contributions into the base and clear layer offsets. Hidden layers and shared mesh data are rejected. Save a copy first";
++  ot->description = "Bake visible contributions into the base and clear only their offsets; retain hidden layers. Shared mesh data is rejected";
+   ot->exec = sculpt_multires_base_capture_exec;
+   ot->invoke = WM_operator_confirm;
+   ot->poll = sculpt_mode_poll;
+--- scripts/startup/bl_ui/space_view3d_sculpt_extended.py
++++ scripts/startup/bl_ui/space_view3d_sculpt_extended.py
+@@ -140,7 +140,96 @@
+ 
+ 
+ 
++class SCULPT_OT_extended_prepare_transport(bpy.types.Operator):
++    bl_idname = 'sculpt.extended_prepare_transport'
++    bl_label = 'Draw Transport'
++    bl_description = 'Activate Draw with Anchored transport; R rotate, S scale, SS strength'
++    bl_options = {'REGISTER', 'UNDO'}
++
++    @classmethod
++    def poll(cls, context):
++        return context.object is not None and context.object.mode == 'SCULPT'
++
++    def execute(self, context):
++        result = bpy.ops.brush.asset_activate(asset_library_type='ESSENTIALS',
++            relative_asset_identifier='brushes/essentials_brushes-mesh_sculpt.blend/Brush/Draw')
++        if result != {'FINISHED'}:
++            return {'CANCELLED'}
++        brush = context.tool_settings.sculpt.brush
++        brush.stroke_method = 'ANCHORED'
++        brush.falloff_shape = 'SPHERE'
++        brush.use_edge_to_edge = False
++        brush.sculpt_draw_transport_v01 = True
++        return {'FINISHED'}
++
++
++class VIEW3D_PT_sculpt_extended_multires(bpy.types.Panel):
++    bl_label = 'Sculpt Extended · Multires'
++    bl_idname = 'VIEW3D_PT_sculpt_extended_multires'
++    bl_space_type = 'VIEW_3D'
++    bl_region_type = 'UI'
++    bl_category = 'Multires'
++    bl_order = -20
++
++    @classmethod
++    def poll(cls, context):
++        return context.object is not None and context.object.type == 'MESH'
++
++    def draw(self, context):
++        layout = self.layout
++        mods = [m for m in context.object.modifiers if m.type == 'MULTIRES']
++        if len(mods) != 1:
++            layout.label(text='Select a mesh with one Multires modifier', icon='INFO')
++            return
++        m = mods[0]
++        col = layout.column(align=True)
++        col.prop(m, 'levels', text='Viewport')
++        col.prop(m, 'sculpt_levels', text='Sculpt')
++        col.prop(m, 'render_levels', text='Render')
++        row = layout.row(align=True)
++        row.operator('object.multires_subdivide', text='Subdivide').modifier = m.name
++        layout.prop(m, 'use_sculpt_base_mesh')
++        layout.separator()
++        layout.label(text='Sculpt Layers', icon='MOD_MULTIRES')
++        sculpt = context.object.mode == 'SCULPT'
++        tools = layout.column(align=True)
++        tools.enabled = sculpt
++        row = tools.row(align=True)
++        row.operator('sculpt.multires_layer_add', text='Add', icon='ADD')
++        row.operator('sculpt.multires_layer_duplicate', text='Duplicate')
++        row.operator('sculpt.multires_layer_delete', text='Delete', icon='X')
++        for i, layer in enumerate(m.sculpt_layers):
++            box = layout.box()
++            row = box.row(align=True)
++            select = row.row(align=True)
++            select.enabled = sculpt
++            select.operator('sculpt.multires_layer_set_active', text='',
++                icon='RADIOBUT_ON' if i == m.active_sculpt_layer_index else 'RADIOBUT_OFF').index = i
++            row.prop(layer, 'name', text='')
++            row.prop(layer, 'visible', text='', icon='HIDE_OFF' if layer.visible else 'HIDE_ON')
++            box.prop(layer, 'strength')
++        row = tools.row(align=True)
++        row.operator('sculpt.multires_layer_move', text='Up').direction = -1
++        row.operator('sculpt.multires_layer_move', text='Down').direction = 1
++        tools.operator('sculpt.multires_layer_commit', text='Commit Pending Changes')
++        tools.operator('sculpt.multires_layer_snapshot', text='Create Hidden Copy')
++        tools.operator_context = 'INVOKE_REGION_WIN'
++        tools.operator('sculpt.multires_base_capture', text='Bake Visible into Base...')
++        layout.separator()
++        transport = layout.column(align=True)
++        transport.enabled = sculpt
++        transport.operator('sculpt.extended_prepare_transport', text='Activate Draw Transport')
++        settings = context.tool_settings.sculpt
++        brush = settings.brush if settings else None
++        if sculpt and brush:
++            transport.prop(brush, 'sculpt_draw_transport_v01', text='Draw Transport')
++            transport.label(text='R rotate · S scale · SS strength')
++            transport.label(text='Use at the highest Multires level')
++
++
+ classes = (
++    SCULPT_OT_extended_prepare_transport,
++    VIEW3D_PT_sculpt_extended_multires,
+     SCULPT_OT_color_v03_clear_confirm,
+     VIEW3D_PT_facesets_rc1,
+     VIEW3D_PT_polypaint_blur_v01,
+@@ -148,13 +237,25 @@
+ )
+ 
+ 
++_owns_transport_property = False
++
+ def register_props():
++    global _owns_transport_property
++    if not hasattr(bpy.types.Brush, 'sculpt_draw_transport_v01'):
++        bpy.types.Brush.sculpt_draw_transport_v01 = bpy.props.BoolProperty(
++            name='Draw Transport', default=False,
++            description='Translate Anchored Draw detail with R rotation, S scale and SS strength')
++        _owns_transport_property = True
+     bpy.types.Scene.facesets_rc2_id=bpy.props.IntProperty(name='ID Face Set',default=2,min=1)
+     bpy.types.Scene.facesets_rc10_solidify=bpy.props.BoolProperty(default=False)
+     bpy.types.Scene.facesets_rc10_limit=bpy.props.IntProperty(default=250000,min=4,max=4000000)
+ 
+ 
+ def unregister_props():
++    global _owns_transport_property
++    if _owns_transport_property and hasattr(bpy.types.Brush, 'sculpt_draw_transport_v01'):
++        del bpy.types.Brush.sculpt_draw_transport_v01
++    _owns_transport_property = False
+     for name in ('facesets_rc2_id', 'facesets_rc10_solidify', 'facesets_rc10_limit'):
+         if hasattr(bpy.types.Scene, name):
+             delattr(bpy.types.Scene, name)
+--- source/creator/sculpt_extended_profile.hh
++++ source/creator/sculpt_extended_profile.hh
+@@ -11,6 +11,7 @@
+   if (native && std::strcmp(native, "0") == 0) {
+     return;
+   }
++  BLI_setenv_if_new("BLENDER_SCULPT_DRAW_TRANSPORT_V01", "1");
+   BLI_setenv_if_new("BLENDER_SCULPT_POLYPAINT_V04", "1");
+   BLI_setenv_if_new("BLENDER_SCULPT_POLYPAINT_L0_TRACE", "0");
+   BLI_setenv_if_new("BLENDER_SCULPT_POLYPAINT_L0_DRAW_V04D", "1");

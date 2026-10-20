@@ -199,7 +199,99 @@ class VIEW3D_PT_multires_polypaint_attributes(bpy.types.Panel):
 
 
 
+class SCULPT_OT_extended_prepare_transport(bpy.types.Operator):
+    bl_idname = 'sculpt.extended_prepare_transport'
+    bl_label = 'Draw Transport'
+    bl_description = 'Activate Draw with Anchored transport; R rotate, S scale, SS strength'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.mode == 'SCULPT'
+
+    def execute(self, context):
+        result = bpy.ops.brush.asset_activate(asset_library_type='ESSENTIALS',
+            relative_asset_identifier='brushes/essentials_brushes-mesh_sculpt.blend/Brush/Draw')
+        if result != {'FINISHED'}:
+            return {'CANCELLED'}
+        brush = context.tool_settings.sculpt.brush
+        brush.stroke_method = 'ANCHORED'
+        brush.falloff_shape = 'SPHERE'
+        brush.use_edge_to_edge = False
+        brush.sculpt_draw_transport_v01 = True
+        return {'FINISHED'}
+
+class VIEW3D_PT_sculpt_extended_multires(bpy.types.Panel):
+    bl_label = 'Sculpt Extended · Multires'
+    bl_idname = 'VIEW3D_PT_sculpt_extended_multires'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Multires'
+    bl_order = -20
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.type == 'MESH'
+
+    def draw(self, context):
+        layout = self.layout
+        mods = [m for m in context.object.modifiers if m.type == 'MULTIRES']
+        if len(mods) != 1:
+            layout.label(text='Select a mesh with one Multires modifier', icon='INFO')
+            return
+        m = mods[0]
+        col = layout.column(align=True)
+        col.prop(m, 'levels', text='Viewport')
+        col.prop(m, 'sculpt_levels', text='Sculpt')
+        col.prop(m, 'render_levels', text='Render')
+        row = layout.row(align=True)
+        row.operator('object.multires_subdivide', text='Subdivide').modifier = m.name
+        layout.prop(m, 'use_sculpt_base_mesh')
+        if context.object.mode == 'SCULPT':
+            from .space_view3d_sculpt_destination import draw_controls
+            _, target = draw_controls(layout, context, m)
+            layout.label(text=target, icon='INFO')
+        layout.separator()
+        layout.label(text='Sculpt Layers', icon='MOD_MULTIRES')
+        sculpt = context.object.mode == 'SCULPT'
+        tools = layout.column(align=True)
+        tools.enabled = sculpt
+        row = tools.row(align=True)
+        row.operator('sculpt.multires_layer_add', text='Add', icon='ADD')
+        row.operator('sculpt.multires_layer_duplicate', text='Duplicate')
+        row.operator('sculpt.multires_layer_delete', text='Delete', icon='X')
+        for i, layer in enumerate(m.sculpt_layers):
+            box = layout.box()
+            row = box.row(align=True)
+            select = row.row(align=True)
+            select.enabled = sculpt
+            select.operator('sculpt.multires_layer_set_active', text='',
+                icon='RADIOBUT_ON' if i == m.active_sculpt_layer_index else 'RADIOBUT_OFF').index = i
+            row.prop(layer, 'name', text='')
+            row.prop(layer, 'visible', text='', icon='HIDE_OFF' if layer.visible else 'HIDE_ON')
+            box.prop(layer, 'strength')
+        row = tools.row(align=True)
+        row.operator('sculpt.multires_layer_move', text='Up').direction = 'UP'
+        row.operator('sculpt.multires_layer_move', text='Down').direction = 'DOWN'
+        tools.operator('sculpt.multires_layer_commit', text='Commit Pending Changes')
+        tools.operator('sculpt.multires_layer_snapshot', text='Create Hidden Copy')
+        tools.operator_context = 'INVOKE_REGION_WIN'
+        tools.operator('sculpt.multires_base_capture', text='Bake Visible into Base...')
+        layout.separator()
+        transport = layout.column(align=True)
+        transport.enabled = sculpt
+        transport.operator('sculpt.extended_prepare_transport', text='Activate Draw Transport')
+        settings = context.tool_settings.sculpt
+        brush = settings.brush if settings else None
+        if sculpt and brush:
+            transport.prop(brush, 'sculpt_draw_transport_v01', text='Draw Transport')
+            transport.label(text='R rotate · S scale · SS strength')
+            transport.label(text='Use at the highest Multires level')
+
+
 classes = (
+    SCULPT_OT_extended_prepare_transport,
+    VIEW3D_PT_sculpt_extended_multires,
     SCULPT_OT_color_v03_clear_confirm,
     VIEW3D_PT_facesets_rc1,
     VIEW3D_PT_polypaint_blur_v01,
@@ -209,13 +301,26 @@ classes = (
 )
 
 
+_owns_transport_property = False
+
 def register_props():
+    global _owns_transport_property
+    if not hasattr(bpy.types.Brush, 'sculpt_draw_transport_v01'):
+        bpy.types.Brush.sculpt_draw_transport_v01 = bpy.props.BoolProperty(
+            name='Draw Transport', default=False,
+            description='Translate Anchored Draw detail with R rotation, S scale and SS strength')
+        _owns_transport_property = True
     bpy.types.Scene.facesets_rc2_id=bpy.props.IntProperty(name='ID Face Set',default=2,min=1)
     bpy.types.Scene.facesets_rc10_solidify=bpy.props.BoolProperty(default=False)
     bpy.types.Scene.facesets_rc10_limit=bpy.props.IntProperty(default=250000,min=4,max=4000000)
 
 
 def unregister_props():
+    global _owns_transport_property
+    if _owns_transport_property and hasattr(bpy.types.Brush, 'sculpt_draw_transport_v01'):
+        del bpy.types.Brush.sculpt_draw_transport_v01
+    _owns_transport_property = False
     for name in ('facesets_rc2_id', 'facesets_rc10_solidify', 'facesets_rc10_limit'):
         if hasattr(bpy.types.Scene, name):
             delattr(bpy.types.Scene, name)
+

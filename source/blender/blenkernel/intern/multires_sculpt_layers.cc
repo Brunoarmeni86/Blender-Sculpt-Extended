@@ -1866,7 +1866,8 @@ const char *merge_visible_to_base(MultiresModifierData &mmd, Mesh &mesh,
   }
   Vector<MultiresSculptLayer *> visible;
   for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
-    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE)) {
+    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
+        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN)) {
       continue;
     }
     visible.append(&layer);
@@ -1936,7 +1937,9 @@ const char *merge_visible_to_base(MultiresModifierData &mmd, Mesh &mesh,
     }
   }
   const MultiresSculptLayer *selected = active(mmd);
-  const bool keep_selected = selected && !(selected->flag & MULTIRES_SCULPT_LAYER_VISIBLE);
+  const bool keep_selected = selected &&
+      (!(selected->flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
+       (selected->group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN));
   for (MultiresSculptLayer *layer : visible) {
     if (remove_layers) {
       remove(mmd, *layer);
@@ -1961,27 +1964,48 @@ bool bake_visible_to_base(MultiresModifierData &mmd, Mesh &mesh)
   if (!compatible(mmd, mesh) || mesh.id.lib || ID_REAL_USERS(&mesh.id) > 1 || mesh.key) {
     return false;
   }
-  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
-    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
-        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN)) {
-      return false;
-    }
-  }
   if (mmd.totlvl > 0) {
     /* BAKE_SPARSE_B04_V01: same-cage HR bake shares the sparse/finite preflight
      * and rejects effective L0 edits that would need tangent-frame rebasing. */
     return merge_visible_to_base(mmd, mesh, false, false) == nullptr;
   }
-  /* At L0 there are no tangent-space grids to rebase. Preserve the old cage
-   * bake behavior, with all results staged before positions are written. */
+  /* BAKE_VISIBLE_HIDDEN_V01: hidden offsets remain independent of the baked
+   * base. At L0 there are no tangent frames to rebase. Validate and stage only
+   * visible contributions, then clear only those same layers. */
+  std::vector<base_math::LayerView> visible;
+  bool has_visible = false;
+  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
+        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN))
+    {
+      continue;
+    }
+    has_visible = true;
+    if ((!layer.base_deltas && layer.base_verts_num == 0) || !is_effective(layer)) {
+      continue;
+    }
+    visible.push_back({layer.base_deltas, layer.base_verts_num, layer.strength, true});
+  }
+  if (!has_visible) {
+    return false;
+  }
   Array<float3> baked_positions(mesh.vert_positions());
-  if (!base_deltas_apply(mmd, baked_positions)) {
+  if (!base_math::compose(reinterpret_cast<const float (*)[3]>(baked_positions.data()),
+                          int(baked_positions.size()),
+                          visible,
+                          reinterpret_cast<float (*)[3]>(baked_positions.data())))
+  {
     return false;
   }
   weight_hot_delta_cache_invalidate();
   mesh.vert_positions_for_write().copy_from(baked_positions);
   mesh.tag_positions_changed();
   for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (!(layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
+        (layer.group_flag & MULTIRES_SCULPT_LAYER_GROUP_HIDDEN))
+    {
+      continue;
+    }
     MEM_SAFE_DELETE(layer.base_deltas);
     layer.base_verts_num = 0;
   }

@@ -918,30 +918,31 @@ static void panel_draw(const bContext *C, Panel *panel)
     base_box.op("SCULPT_OT_multires_base_capture", IFACE_("Bake Visible into Base..."), ICON_NONE);
 
     if (const MultiresSculptLayer *active = bke::multires_layers::active(*mmd)) {
-      /* REC L0: allow recording base deltas at sculpt level zero.
-       * Level zero with REC off still edits the real base mesh. Sculpt Base Mesh
-       * mode remains a separate explicit base-edit mode and keeps REC disabled. */
+      /* Geometry routing follows effective layer visibility/selection, not REC.
+       * The destination selector uses the existing all-hidden native base path. */
       const bool sculpt_base_mesh =
           (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) != 0;
       const bool editing_base =
-          sculpt_base_mesh || (mmd->sculptlvl == 0 && !mmd->sculpt_layer_recording);
+          sculpt_base_mesh || !bke::multires_layers::base_has_visible_layers(*mmd);
       ui::Layout &active_box = layout.box();
-      ui::Layout &record_row = active_box.row(false);
-      record_row.enabled_set(!sculpt_base_mesh);
-      record_row.prop(ptr, "sculpt_layer_recording", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-      if (editing_base) {
-        active_box.label(IFACE_("Editing base mesh coordinates"), ICON_INFO);
+      active_box.label(editing_base ? IFACE_("Target: Multires Base") :
+                                     IFACE_("Target: Active Layer"), ICON_INFO);
+      if (sculpt_base_mesh) {
+        active_box.label(IFACE_("Editing base cage coordinates"), ICON_INFO);
       }
-      active_box.label(!editing_base && mmd->sculpt_layer_recording ? IFACE_("Recording into:") :
-                                                  IFACE_("Selected layer (REC off):"), ICON_RADIOBUT_ON);
-      active_box.label(active->name, ICON_NONE);
+      else if (editing_base) {
+        active_box.label(IFACE_("Native Multires surface - layers hidden"), ICON_NONE);
+      }
+      else {
+        active_box.label(active->name, ICON_RADIOBUT_ON);
+      }
       active_box.op("SCULPT_OT_multires_layer_commit", IFACE_("Commit Pending Changes"), ICON_NONE);
       active_box.op("SCULPT_OT_multires_layer_snapshot", IFACE_("Create Hidden Copy"), ICON_DUPLICATE);
       active_box.label(IFACE_("Save the .blend to keep changes on disk"), ICON_NONE);
       if (!editing_base && (!(active->flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
           !std::isfinite(active->strength) || std::abs(active->strength) < 1e-6f ||
           mmd->sculptlvl > mmd->totlvl)) {
-        active_box.label(IFACE_("Recording requires a valid sculpt level and a visible layer with non-zero strength"), ICON_ERROR);
+        active_box.label(IFACE_("Sculpting into a layer requires a valid level and a visible layer with non-zero strength"), ICON_ERROR);
       }
     }
 

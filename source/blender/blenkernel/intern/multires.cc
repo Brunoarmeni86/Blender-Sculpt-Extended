@@ -1231,14 +1231,12 @@ bool bke::multires_layers::weight_direct_delta(Object &object,
 
   r_affected_faces.resize(mesh->faces_num);
   r_affected_faces.fill(false);
-  BitVector<> affected_grids(ccg->grids_num,false);
   Vector<int> payload_grids;
   if (!bke::multires_layers::payload_grids(layer, ccg->grids_num, payload_grids)) {
     return false;
   }
   const OffsetIndices faces = mesh->faces();
   for (const int grid : payload_grids) {
-    affected_grids[grid].set();
     r_affected_faces[int(std::upper_bound(faces.data().begin(), faces.data().end(), grid) - faces.data().begin() - 1)].set();
   }
   if (payload_grids.is_empty() || std::abs(weight_delta)<1.0e-12f) return true;

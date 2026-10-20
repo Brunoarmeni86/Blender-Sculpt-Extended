@@ -1006,7 +1006,7 @@ static wmOperatorStatus sculpt_multires_base_capture_exec(bContext *C, wmOperato
   if (!mmd || !mesh || mmd->sculpt_layers.is_empty()) return OPERATOR_CANCELLED;
   if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
   if (!bke::multires_layers::bake_visible_to_base(*mmd, *mesh)) {
-    BKE_report(op->reports, RPT_ERROR, "Cannot bake: hidden layers, shared data, shape keys, invalid grids or HR cage edits needing frame rebasing");
+    BKE_report(op->reports, RPT_ERROR, "Cannot bake: no visible layers, shared or linked data, shape keys, external or invalid grids, or HR cage edits needing frame rebasing");
     return OPERATOR_CANCELLED;
   }
   multires_force_sculpt_rebuild(ob);
@@ -1019,7 +1019,7 @@ static void SCULPT_OT_multires_base_capture(wmOperatorType *ot)
 {
   ot->name = "Bake Visible Layers into Base";
   ot->idname = "SCULPT_OT_multires_base_capture";
-  ot->description = "Merge contributions into the base and clear layer offsets. Hidden layers and shared mesh data are rejected. Save a copy first";
+  ot->description = "Bake visible contributions into the base and clear only their offsets; retain hidden layers. Shared mesh data is rejected";
   ot->exec = sculpt_multires_base_capture_exec;
   ot->invoke = WM_operator_confirm;
   ot->poll = sculpt_mode_poll;

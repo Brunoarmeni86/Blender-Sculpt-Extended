@@ -20,6 +20,7 @@
 #include "BKE_subdiv.hh"
 
 #include <vector>
+#include <cstring>
 #include <algorithm>
 #include <cmath>
 #include "BLI_bitmap.h"
@@ -34,6 +35,10 @@
 #include "multires_reshape.hh"
 #include "multires_conform_rebase.hh"
 #include "BLI_memory_utils.hh"
+#include "BLI_task.hh"
+#include <atomic>
+#include <cstdlib>
+#include "multires_subdivide_work_v01.hh"
 #include "BKE_mesh.hh"
 #include "BKE_object_types.hh"
 #include "DNA_object_types.h"
@@ -74,6 +79,51 @@ struct MultiresSubdivisionPhaseTimer {
   }
 };
 
+
+/* SUBDIVIDE_WORK_V01: independent grid work only. Never run complete native
+ * subdivision/evaluator/mesh copies for multiple layers concurrently. */
+static bool multires_subdivide_flag_v01(const char *name)
+{
+  const char *value = BLI_getenv(name);
+  return value && value[0] == '1' && value[1] == '\0';
+}
+
+static int multires_subdivide_lanes_v01(const int grids, const int area)
+{
+  if (!multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_PARALLEL_V01")) {
+    return 1;
+  }
+  const char *setting = BLI_getenv("BLENDER_SCULPT_SUBDIVIDE_WORKERS_V01");
+  int workers = 4;
+  if (setting && setting[0]) {
+    char *end = nullptr;
+    const long parsed = std::strtol(setting, &end, 10);
+    if (end != setting && *end == '\0' && parsed >= 1 && parsed <= 8) {
+      workers = int(parsed);
+    }
+  }
+  return bke::multires_layers::subdivide_work_v01::lanes(
+      grids, area, workers, int64_t(16) * 1024 * 1024);
+}
+
+template<typename Fn>
+static void multires_subdivide_grids_v01(const int grids, const int area, Fn &&fn)
+{
+  const int lanes = multires_subdivide_lanes_v01(grids, area);
+  if (lanes == 1) {
+    for (int grid = 0; grid < grids; grid++) {
+      fn(grid);
+    }
+    return;
+  }
+  threading::parallel_for(IndexRange(lanes), 1, [&](const IndexRange range) {
+    for (const int lane : range) {
+      for (int grid = lane; grid < grids; grid += lanes) {
+        fn(grid);
+      }
+    }
+  });
+}
 
 /* -------------------------------------------------------------------- */
 /** \name Reshape from object
@@ -225,6 +275,7 @@ static void multiresModifier_subdivide_to_level_base(Object *object,
   }
 
   Mesh *coarse_mesh = id_cast<Mesh *>(object->data);
+  MultiresSubdivisionPhaseTimer native_timer("native_subdivide_total", "native", top_level, coarse_mesh->corners_num);
   if (coarse_mesh->corners_num == 0) {
     /* If there are no loops in the mesh implies there is no CD_MDISPS as well. So can early output
      * from here as there is nothing to subdivide. */
@@ -334,11 +385,73 @@ static bool multires_preserve_retained_samples(const MDisps &base,
   return true;
 }
 
+/* V02: scoped strictly to one synchronous compact subdivision transaction.
+ * Only the unchanged coarse-cage evaluator is shared. Each surface retains
+ * its own mutable high-resolution smoothing evaluator and scratch grids. */
+struct MultiresSubdivideCoarseV02 {
+  bke::subdiv::Subdiv *subdiv = nullptr;
+  int uses = 0;
+  MultiresSubdivideSmoothCacheV03 *smooth_cache_v03 = nullptr;
+  ~MultiresSubdivideCoarseV02()
+  {
+    multires_subdivide_smooth_cache_free_v03(smooth_cache_v03);
+    if (subdiv) {
+      bke::subdiv::free(subdiv);
+    }
+  }
+  MultiresSubdivideCoarseV02() = default;
+  MultiresSubdivideCoarseV02(const MultiresSubdivideCoarseV02 &) = delete;
+  MultiresSubdivideCoarseV02 &operator=(const MultiresSubdivideCoarseV02 &) = delete;
+};
+
+/* Work Mesh grid storage is already private after CustomData_get_layer_for_write.
+ * Transfer its OLD displacement arrays instead of duplicating them immediately
+ * before ensure_grids discards the originals. Mask copying remains unchanged.
+ * Orig hidden pointers are borrowed, as in store_original_grids; its native
+ * destructor only owns displacement/mask arrays, never the hidden bitmaps. */
+static bool multires_subdivide_move_original_v02(MultiresReshapeContext &context)
+{
+  if (!multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_MOVE_SCRATCH_V02") ||
+      !context.mdisps || context.orig.mdisps || context.orig.grid_paint_masks ||
+      context.num_grids <= 0) {
+    return false;
+  }
+  for (int grid = 0; grid < context.num_grids; grid++) {
+    if (context.mdisps[grid].level >= context.top.level) {
+      return false;
+    }
+  }
+  /* Complete descriptor/mask allocations before transferring any ownership. */
+  MDisps *original = MEM_dupalloc(context.mdisps);
+  GridPaintMask *masks = context.grid_paint_masks ? MEM_dupalloc(context.grid_paint_masks) : nullptr;
+  for (int grid = 0; masks && grid < context.num_grids; grid++) {
+    if (masks[grid].data) {
+      masks[grid].data = MEM_dupalloc(masks[grid].data);
+    }
+  }
+  int64_t samples = 0;
+  for (int grid = 0; grid < context.num_grids; grid++) {
+    if (context.mdisps[grid].disps) {
+      samples += context.mdisps[grid].totdisp;
+    }
+    context.mdisps[grid].disps = nullptr;
+  }
+  context.orig.mdisps = original;
+  context.orig.grid_paint_masks = masks;
+  if (BLI_getenv("BLENDER_SCULPT_SUBDIVIDE_PROFILE")) {
+    std::printf("[SUBDIVIDE_MOVE_V02] grids=%d avoided_copy_mib=%.3f\n",
+                context.num_grids, double(samples) * sizeof(float[3]) / (1024.0 * 1024.0));
+  }
+  return true;
+}
+
 static Mesh *multires_subdivide_layer_surface(Object *object,
                                               const MultiresModifierData &mmd,
                                               const MultiresSculptLayer *layer,
                                               const int top_level,
-                                              const MultiresSubdivideModeType mode)
+                                              const MultiresSubdivideModeType mode,
+                                              MultiresSubdivideCoarseV02 *coarse = nullptr,
+                                              MutableSpan<int8_t> regional_grids = {})
 {
   const Mesh &source = *id_cast<Mesh *>(object->data);
   const char *profile_role = layer ? "layer" : "base";
@@ -375,15 +488,48 @@ static Mesh *multires_subdivide_layer_surface(Object *object,
   MultiresReshapeContext context;
   {
   MultiresSubdivisionPhaseTimer timer("context_create", profile_role, top_level, source.corners_num);
-  if (!multires_reshape_context_create_from_modifier(
-          &context, &work_object, &work_mmd, top_level)) {
+  bool created;
+  if (coarse && multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_COARSE_REUSE_V02")) {
+    if (!coarse->subdiv) {
+      coarse->subdiv = multires_reshape_create_subdiv(nullptr, &work_object, &work_mmd);
+    }
+    created = coarse->subdiv && multires_reshape_context_create_from_subdiv(
+        &context, &work_object, &work_mmd, coarse->subdiv, top_level);
+    if (created) {
+      coarse->uses++;
+    }
+    if (BLI_getenv("BLENDER_SCULPT_SUBDIVIDE_PROFILE")) {
+      std::printf("[SUBDIVIDE_COARSE_V02] uses=%d ok=%d\n", coarse->uses, int(created));
+    }
+  }
+  else {
+    created = multires_reshape_context_create_from_modifier(
+        &context, &work_object, &work_mmd, top_level);
+  }
+  if (!created) {
     BKE_id_free(nullptr, work);
     return nullptr;
   }
   }
+  if (coarse && multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_TOPOLOGY_V03")) {
+    if (!coarse->smooth_cache_v03) {
+      coarse->smooth_cache_v03 = multires_subdivide_smooth_cache_create_v03();
+    }
+    context.subdivide_smooth_cache_v03 = coarse->smooth_cache_v03;
+  }
+  if (layer && regional_grids.size() == source.corners_num &&
+      mode == MultiresSubdivideModeType::CatmullClark &&
+      multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_REGIONAL_V03") &&
+      !multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_PRESERVE_RETAINED"))
+  {
+    context.regional_source_layer_v03 = layer;
+    context.regional_output_grids_v03 = regional_grids;
+  }
   {
   MultiresSubdivisionPhaseTimer timer("grid_allocate_assign", profile_role, top_level, source.corners_num);
-  multires_reshape_store_original_grids(&context);
+  if (!multires_subdivide_move_original_v02(context)) {
+    multires_reshape_store_original_grids(&context);
+  }
   multires_reshape_ensure_grids(work, top_level);
   multires_reshape_assign_final_elements_from_orig_mdisps(&context);
   multires_reshape_free_original_grids(&context);
@@ -399,7 +545,9 @@ static Mesh *multires_subdivide_layer_surface(Object *object,
   }
   {
   MultiresSubdivisionPhaseTimer timer("tangent_conversion", profile_role, top_level, source.corners_num);
-  multires_reshape_object_grids_to_tangent_displacement(&context);
+  if (!multires_reshape_regional_object_to_tangent_v03(&context)) {
+    multires_reshape_object_grids_to_tangent_displacement(&context);
+  }
   multires_reshape_context_free(&context);
   }
 
@@ -440,7 +588,7 @@ static Mesh *multires_subdivide_layer_surface(Object *object,
 
 /* Convert the already-subdivided unit-layer surface into final deltas in
  * scratch storage. Nothing in the live layer is modified on failure. */
-static bool multires_stage_subdivided_layer(const MultiresSculptLayer &layer,
+static bool multires_stage_subdivided_layer_serial_v01(const MultiresSculptLayer &layer,
                                            const MDisps *base,
                                            MDisps *result,
                                            const int grids_num,
@@ -499,6 +647,123 @@ static bool multires_stage_subdivided_layer(const MultiresSculptLayer &layer,
     }
   }
   return true;
+}
+
+static bool multires_stage_subdivided_layer(const MultiresSculptLayer &layer,
+                                           const MDisps *base,
+                                           MDisps *result,
+                                           const int grids_num,
+                                           const int new_level,
+                                           const bool allow_sparse = false)
+{
+  if (!multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_PARALLEL_V01")) {
+    return multires_stage_subdivided_layer_serial_v01(
+        layer, base, result, grids_num, new_level, allow_sparse);
+  }
+
+  if (!base || !result || !layer.disps || layer.grids_num != grids_num ||
+      layer.level < 1 || new_level <= layer.level || new_level > 13)
+  {
+    return false;
+  }
+  const int old_side = bke::subdiv::grid_size_from_level(layer.level);
+  const int new_side = bke::subdiv::grid_size_from_level(new_level);
+  const auto validate = [&](const int corner) {
+    const MDisps &old = layer.disps[corner];
+    const MDisps &grid = result[corner];
+    if ((!old.disps && !allow_sparse) || old.level != layer.level || old.totdisp != old_side * old_side ||
+        !base[corner].disps || base[corner].level != new_level ||
+        base[corner].totdisp != new_side * new_side || !grid.disps ||
+        grid.level != new_level || grid.totdisp != new_side * new_side)
+    {
+      return false;
+    }
+    /* Retain resample_all's validation of the old layer, including hidden layers. */
+    for (int i = 0; old.disps && i < old.totdisp; i++) {
+      for (int axis = 0; axis < 3; axis++) {
+        if (!std::isfinite(old.disps[i][axis])) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+  std::atomic<bool> valid{true};
+  {
+    MultiresSubdivisionPhaseTimer timer("validate_delta_v01", "layer", new_level, grids_num);
+    multires_subdivide_grids_v01(grids_num, new_side * new_side, [&](const int corner) {
+      if (!validate(corner)) {
+        valid.store(false, std::memory_order_relaxed);
+      }
+    });
+  }
+  if (!valid.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  multires_subdivide_grids_v01(grids_num, new_side * new_side, [&](const int corner) {
+    const MDisps &old = layer.disps[corner];
+    MDisps &grid = result[corner];
+    for (int i = 0; i < grid.totdisp; i++) {
+      for (int axis = 0; axis < 3; axis++) {
+        const float delta = grid.disps[i][axis] - base[corner].disps[i][axis];
+        if (!std::isfinite(delta)) {
+          valid.store(false, std::memory_order_relaxed);
+        }
+        grid.disps[i][axis] = delta;
+      }
+    }
+    /* The scratch surface carries the BASE hidden bitmap. Replace it with the
+     * layer's own bitmap, using exactly the old resample_all mapping. */
+    MEM_SAFE_DELETE(grid.hidden);
+    if (old.hidden) {
+      grid.hidden = BLI_BITMAP_NEW(grid.totdisp, "subdivided sculpt layer hidden");
+      for (int y = 0; y < new_side; y++) {
+        const float v = float(y) * float(old_side - 1) / float(new_side - 1);
+        const int sy = int(std::round(v));
+        for (int x = 0; x < new_side; x++) {
+          const float u = float(x) * float(old_side - 1) / float(new_side - 1);
+          const int sx = int(std::round(u));
+          BLI_BITMAP_SET(grid.hidden, y * new_side + x,
+                         BLI_BITMAP_TEST_BOOL(old.hidden, sy * old_side + sx));
+        }
+      }
+    }
+  });
+  if (BLI_getenv("BLENDER_SCULPT_SUBDIVIDE_PROFILE")) {
+    std::printf("[SUBDIVIDE_WORK_V01] grids=%d area=%d lanes=%d valid=%d\n",
+                grids_num, new_side * new_side,
+                multires_subdivide_lanes_v01(grids_num, new_side * new_side),
+                int(valid.load(std::memory_order_relaxed)));
+  }
+  return valid.load(std::memory_order_relaxed);
+}
+
+/* Subdivision propagates detail beyond the old support. Never skip old null
+ * grids locally: run the native global surface algorithm first, and release
+ * only final all-zero delta arrays after successful extraction. */
+static void multires_subdivide_prune_zero_v01(MDisps *grids,
+                                               const int count,
+                                               const int level)
+{
+  if (!multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_ZERO_V01")) {
+    return;
+  }
+  MultiresSubdivisionPhaseTimer timer("prune_exact_zero_v01", "layer", level, count);
+  std::atomic<int64_t> released{0};
+  const int side = bke::subdiv::grid_size_from_level(level);
+  multires_subdivide_grids_v01(count, side * side, [&](const int grid) {
+    if (bke::multires_layers::subdivide_work_v01::exactly_zero(
+            grids[grid].disps, grids[grid].totdisp)) {
+      MEM_SAFE_DELETE(grids[grid].disps);
+      /* Preserve the descriptor and its independent hidden bitmap. */
+      released.fetch_add(1, std::memory_order_relaxed);
+    }
+  });
+  if (BLI_getenv("BLENDER_SCULPT_SUBDIVIDE_PROFILE")) {
+    std::printf("[SUBDIVIDE_ZERO_V01] grids=%d released=%lld payload_saved_mib=%.3f\n",
+                count, static_cast<long long>(released.load()),
+                double(released.load()) * side * side * sizeof(float[3]) / (1024.0 * 1024.0));
+  }
 }
 
 /* Called only after every layer has been staged and the sculpt session flushed.
@@ -560,14 +825,10 @@ static bool multires_compact_layer_is_empty(const MultiresSculptLayer &layer)
   if (layer.level < 1 || layer.level > 13 || !layer.disps || layer.grids_num <= 0) {
     return false;
   }
-  if (layer.base_deltas) {
-    for (int vertex = 0; vertex < layer.base_verts_num; vertex++) {
-      for (int axis = 0; axis < 3; axis++) {
-        if (layer.base_deltas[vertex][axis] != 0.0f) {
-          return false;
-        }
-      }
-    }
+  if (layer.base_deltas &&
+      !bke::multires_layers::subdivide_work_v01::exactly_zero(
+          layer.base_deltas, layer.base_verts_num)) {
+    return false;
   }
   const int side = bke::subdiv::grid_size_from_level(layer.level);
   for (int corner = 0; corner < layer.grids_num; corner++) {
@@ -575,12 +836,9 @@ static bool multires_compact_layer_is_empty(const MultiresSculptLayer &layer)
     if (grid.level != layer.level || grid.totdisp != side * side || grid.hidden) {
       return false;
     }
-    for (int i = 0; grid.disps && i < grid.totdisp; i++) {
-      for (int axis = 0; axis < 3; axis++) {
-        if (grid.disps[i][axis] != 0.0f) {
-          return false;
-        }
-      }
+    if (grid.disps &&
+        !bke::multires_layers::subdivide_work_v01::exactly_zero(grid.disps, grid.totdisp)) {
+      return false;
     }
   }
   return true;
@@ -626,7 +884,8 @@ static bool multires_subdivide_compact_layers(Object *object,
     }
   }
   }
-  Mesh *base = multires_subdivide_layer_surface(object, *mmd, nullptr, top_level, mode);
+  MultiresSubdivideCoarseV02 coarse;
+  Mesh *base = multires_subdivide_layer_surface(object, *mmd, nullptr, top_level, mode, &coarse);
   BLI_SCOPED_DEFER([&]() { if (base) { BKE_id_free(nullptr, base); } });
   MultiresCompactSubdivisionStage staged(mesh->corners_num);
   staged.layers.reserve(mmd->sculpt_layers.count());
@@ -640,19 +899,45 @@ static bool multires_subdivide_compact_layers(Object *object,
     if (std::find(empty.begin(), empty.end(), &layer) != empty.end()) {
       continue;
     }
-    Mesh *surface = multires_subdivide_layer_surface(object, *mmd, &layer, top_level, mode);
+    Array<int8_t> regional_grids(
+        multires_subdivide_flag_v01("BLENDER_SCULPT_SUBDIVIDE_REGIONAL_V03") ? mesh->corners_num : 0,
+        int8_t(1));
+    Mesh *surface = multires_subdivide_layer_surface(
+        object, *mmd, &layer, top_level, mode, &coarse, regional_grids);
     if (!surface) {
       valid = false;
       break;
     }
     MDisps *grids = static_cast<MDisps *>(CustomData_get_layer_for_write(
         &surface->corner_data, CD_MDISPS, surface->corners_num));
+    if (!regional_grids.is_empty()) {
+      /* Exact base bytes produce exact zero deltas in unchanged native staging. */
+      const int side = bke::subdiv::grid_size_from_level(top_level);
+      for (int g = 0; g < mesh->corners_num; ++g) {
+        if (!regional_grids[g]) {
+          if (!grids[g].disps || !base_grids[g].disps ||
+              grids[g].level != top_level || base_grids[g].level != top_level ||
+              grids[g].totdisp != side * side || base_grids[g].totdisp != side * side)
+          {
+            valid = false;
+            break;
+          }
+          std::memcpy(grids[g].disps, base_grids[g].disps,
+                      sizeof(float[3]) * grids[g].totdisp);
+        }
+      }
+    }
+    if (!valid) {
+      BKE_id_free(nullptr, surface);
+      break;
+    }
     {
     MultiresSubdivisionPhaseTimer timer("extract_delta", "layer", top_level, mesh->corners_num);
     valid = multires_stage_subdivided_layer(
         layer, base_grids, grids, mesh->corners_num, top_level, true);
     }
     if (valid) {
+      multires_subdivide_prune_zero_v01(grids, mesh->corners_num, top_level);
       MDisps *owned = MEM_new_array_zeroed<MDisps>(mesh->corners_num, "staged compact layer grids");
       for (int corner = 0; corner < mesh->corners_num; corner++) {
         std::swap(owned[corner], grids[corner]);
@@ -722,6 +1007,7 @@ void multiresModifier_subdivide_to_level(Object *object,
     return;
   }
   Mesh *mesh = id_cast<Mesh *>(object->data);
+  MultiresSubdivisionPhaseTimer all_timer("subdivide_total", "all", top_level, mesh->corners_num);
 
   /* Capture Face Sets before subdivision. From this point onward the CCG-grid
    * master survives independently of the coarse face-domain attribute. */

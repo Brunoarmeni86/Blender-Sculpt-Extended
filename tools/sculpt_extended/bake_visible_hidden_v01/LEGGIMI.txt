@@ -1,0 +1,54 @@
+Sculpt Extended - Bake Visible con layer nascosti + controlli Multires V01
+
+Estrarre questa cartella in C:\BlenderDev. Chiudere Blender e attendere altre build.
+PowerShell:
+& 'C:\Users\olias\AppData\Local\Python\pythoncore-3.15-64\python.exe' -u 'C:\BlenderDev\Sculpt-Bake-Visible-Hidden-V01\PROVA.py'
+
+Un unico comando: backup verificato, compilazione Release, installazione portable
+separata, ripristino automatico di sorgenti ed exe precedenti, test su scene proprie.
+Log: LOG-DA-INVIARE.zip nella cartella prova stampata; ULTIMA.txt conserva il percorso.
+
+CORREZIONE BAKE
+- Il vecchio Bake Visible into Base rifiutava qualsiasi layer nascosto.
+- Ora fonde solo i visibili e svuota solo i loro offset, mantenendo le voci.
+- I layer nascosti, compresi quelli in gruppi nascosti, conservano i propri dati.
+- Lo stesso criterio vale a livello zero. Se tutti sono nascosti, annulla senza bake.
+- Restano i controlli per dati condivisi/linked, shape keys, displacement esterno,
+  griglie non valide e modifiche HR alla cage L0 che richiedono rebasing dei frame.
+- Nessuna modifica agli algoritmi Face Sets o ai formati di salvataggio.
+
+INTERFACCIA
+- Aggiunge alla scheda laterale N > Multires livelli, Subdivide, layer e strength,
+  selezione, visibilita, riordino, Commit, copia nascosta, Bake e destinazione Base/Layer.
+- Integra il controllo Python del pennello Draw Transport e il suo avvio nativo.
+  Activate Draw Transport prepara Draw, Anchored, falloff sferico senza Edge to Edge.
+  R ruota, S scala, SS strength. Si usa alla massima suddivisione, con layer valido.
+- Conserva i pannelli Face Sets e colore in Sculpt Extended e il pannello modificatore.
+- Questi sono i controlli principali mancanti nella sidebar; non e una verifica
+  esaustiva di ogni funzione dei vecchi addon esterni.
+
+VERSIONE
+- Include senza modifiche il percorso regionale V03 che ha passato il log
+  LOG-DA-INVIARE(20261020-143201).zip, exe 6d927bae... Le vecchie cache V03 restano OFF.
+- Parte dai sorgenti ed exe ripristinati da quella prova, SHA256 exe
+  a00113514db414c317fa6a535e45c8bd08931ade8f9bcf4066a883d880a5ccdd.
+- La vecchia portable regionale rimane separata e intatta.
+- Windows Blender completo NON eseguito qui: il test va effettuato sul PC Windows.
+
+TEST AUTOMATICO MIRATO
+Scene proprie HR e L0: due layer con vero Draw, strength positivo e negativo,
+uno nascosto, due layer vuoti, bake sul target nascosto, confronto delle superfici
+prima/dopo, Undo/Redo, riattivazione del layer nascosto, tutti nascosti -> CANCELLED,
+secondo bake senza doppio contributo, salvataggio/riapertura e domini indipendenti.
+Controlla anche callback del nuovo pannello contro RNA/operatori reali e preparazione
+Draw Transport. Non simula il gesto modale completo di trasporto o una verifica visiva.
+
+DOPO PASS_BAKE_VISIBLE_HIDDEN
+& 'C:\Users\olias\AppData\Local\Python\pythoncore-3.15-64\python.exe' -u 'C:\BlenderDev\Sculpt-Bake-Visible-Hidden-V01\PROVA.py' --launch
+Aggiungere --rotation solo per usare il trasporto anti-spike gia verificato.
+
+RIPRISTINO IN CASO DI CHIUSURA FORZATA DEL TERMINALE
+Il ripristino automatico avviene anche su errore ordinario/Ctrl+C; un kill del
+terminale o arresto del sistema puo impedirlo. Conservare backup e cartella prova.
+& 'C:\Users\olias\AppData\Local\Python\pythoncore-3.15-64\python.exe' -u 'C:\BlenderDev\Sculpt-Bake-Visible-Hidden-V01\PROVA.py' --restore 'C:\BlenderDev\Sculpt-Bake-Visible-Hidden-V01\prova-DATA-ORA'
+Il ripristino verifica backup e modifiche concorrenti prima di sovrascrivere.
