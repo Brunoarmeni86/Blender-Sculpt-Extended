@@ -1,0 +1,13 @@
+{
+  "archive_hashes_verified": 11973,
+  "patch_replay": "PASS",
+  "idempotence": "PASS",
+  "python_AST": "PASS",
+  "UI_import_no_side_effects": "PASS",
+  "UI_props_register_unregister": "PASS",
+  "native_windows_build": "PENDING",
+  "native_viewport_test": "PENDING",
+  "profile_helper_ASan_UBSan": "PASS 27 defaults, overrides, opt-out",
+  "release_apply_backup_restore": "PASS on fixtures",
+  "foreign_context_rejected_before_write": "PASS"
+}

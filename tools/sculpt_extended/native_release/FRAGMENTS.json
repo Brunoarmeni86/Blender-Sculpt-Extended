@@ -1,0 +1,37 @@
+[
+  {
+    "path": "source/creator/creator.cc",
+    "label": "Include native profile",
+    "before": "#include \"BLI_utildefines.h\"",
+    "after": "#include \"BLI_utildefines.h\"\n#include \"sculpt_extended_profile.hh\"",
+    "count": 1
+  },
+  {
+    "path": "source/creator/creator.cc",
+    "label": "Initialize before Blender startup",
+    "before": "  using namespace blender;\n\n  bContext *C;",
+    "after": "  using namespace blender;\n\n  sculpt_extended_release::initialize_defaults();\n\n  bContext *C;",
+    "count": 1
+  },
+  {
+    "path": "scripts/startup/bl_ui/__init__.py",
+    "label": "Install Sculpt Extended module",
+    "before": "    \"space_view3d_sidebar\",",
+    "after": "    \"space_view3d_sidebar\",\n    \"space_view3d_sculpt_extended\",",
+    "count": 1
+  },
+  {
+    "path": "scripts/startup/bl_ui/__init__.py",
+    "label": "Register persistent scene properties",
+    "before": "    properties_polypaint_bake.register_props()",
+    "after": "    properties_polypaint_bake.register_props()\n    space_view3d_sculpt_extended.register_props()",
+    "count": 1
+  },
+  {
+    "path": "scripts/startup/bl_ui/__init__.py",
+    "label": "Unregister persistent scene properties",
+    "before": "    properties_polypaint_bake.unregister_props()",
+    "after": "    space_view3d_sculpt_extended.unregister_props()\n    properties_polypaint_bake.unregister_props()",
+    "count": 1
+  }
+]

@@ -1,0 +1,9 @@
+Sculpt Extended - candidata native shareable.
+Chiudere Blender e attendere la fine di altre compilazioni.
+Eseguire RELEASE.py con Python installato sul sistema.
+Verifica i sorgenti, salva backup, compila Release, installa un runtime completo in cartella nuova, verifica avvio nativo/UI/L0/Undo/Redo/riapertura e crea ZIP solo dopo PASS.
+Avanzamento e log sono stampati per tutte le fasi.
+Nessuna modifica della configurazione GPU esistente.
+Questa integrazione nativa deve ancora essere compilata e verificata su Windows.
+Inviare RISULTATO-RELEASE.json e SHA256.txt; se fallisce, inviare il log indicato.
+Il pacchetto finale si avvia da blender.exe senza launcher.

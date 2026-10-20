@@ -1,0 +1,12 @@
+[
+  {
+    "path": "source/creator/sculpt_extended_profile.hh",
+    "name": "sculpt_extended_profile.hh",
+    "sha256": "9184a6fec2bdd26c939007188a736015b688b806e780e52df4cbaccdeb8aafd4"
+  },
+  {
+    "path": "scripts/startup/bl_ui/space_view3d_sculpt_extended.py",
+    "name": "space_view3d_sculpt_extended.py",
+    "sha256": "959346f4e0e042721c170dcdda2561dd2a742718325a567b3bd329c78a0c0129"
+  }
+]

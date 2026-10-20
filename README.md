@@ -16,6 +16,7 @@ motion tracking and video editing.
 Sculpt Extended
 ---------------
 
+- [Windows native release and verification](doc/sculpt_extended/NATIVE_RELEASE_20261020.md)
 - [Note condivise: audit del codice, difetti e ottimizzazioni](doc/sculpt_extended/CODE_REVIEW.md)
 
 Project Pages

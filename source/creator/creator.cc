@@ -39,6 +39,7 @@
 #include "BLI_task.h"
 #include "BLI_threads.h"
 #include "BLI_utildefines.h"
+#include "sculpt_extended_profile.hh"
 
 /* Mostly initialization functions. */
 #include "BKE_appdir.hh"
@@ -338,6 +339,8 @@ int main(int argc,
 )
 {
   using namespace blender;
+
+  sculpt_extended_release::initialize_defaults();
 
   bContext *C;
 #ifndef WITH_PYTHON_MODULE

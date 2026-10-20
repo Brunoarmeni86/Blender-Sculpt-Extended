@@ -1,0 +1,346 @@
+[
+  {
+    "path": "intern/opensubdiv/internal/evaluator/evaluator_impl.cc",
+    "sha256": "c1f0f269a31e3704c599f264270335fb3adaf53f9dabd1f1d4c888ce35469c0a"
+  },
+  {
+    "path": "scripts/startup/bl_ui/__init__.py",
+    "sha256": "8b7adada267fe26a1a2fdab40370e2e164586a11a38816f978233277b396cac6"
+  },
+  {
+    "path": "scripts/startup/bl_ui/properties_data_modifier.py",
+    "sha256": "9df056043988a2f114d58f5dd132e840ca7ba9800888590afd05952042513e5f"
+  },
+  {
+    "path": "scripts/startup/bl_ui/properties_paint_common.py",
+    "sha256": "59689341baa6109f4e13ba491a4d5fe3d087c8c9ff73b1157451cacca7b8b37b"
+  },
+  {
+    "path": "scripts/startup/bl_ui/properties_polypaint_bake.py",
+    "sha256": "cd3900024b18c04b2419f8424902fd7155207a828ec46d31a61b379009ada95b"
+  },
+  {
+    "path": "source/blender/animrig/intern/evaluation.cc",
+    "sha256": "08dabfeae97521baf818a35d0b3322caee567d1a31feae6c59d84f8cf1272d85"
+  },
+  {
+    "path": "source/blender/blenkernel/BKE_animsys.h",
+    "sha256": "011dec8100371c25950bb0eb79b35a41d0d9274424ea58c82b23aa2fe7b4899d"
+  },
+  {
+    "path": "source/blender/blenkernel/BKE_multires_polypaint_l0_v04d.hh",
+    "sha256": "32476146b48b20e4d98834ceeeebffbac4af0a3d3c1d3f7e2b08469ef747b28d"
+  },
+  {
+    "path": "source/blender/blenkernel/BKE_multires_sculpt_layers.hh",
+    "sha256": "70f7fc76bca2029b01015dc34be1194b96cbd59eefa3aaa12c14d9b3d83e5b47"
+  },
+  {
+    "path": "source/blender/blenkernel/BKE_sculpt_cold_start_profile.hh",
+    "sha256": "e16f79c82f4b19bfcf22a046a10ba2027cabc1a1cb0a32e9df78d9641775aa10"
+  },
+  {
+    "path": "source/blender/blenkernel/BKE_sculpt_facesets_dense_probe_v06d.hh",
+    "sha256": "1b57e0bb3dd3ecbcfa2b22bdd09d5aae4af84aab15c308894d2827ede91dc018"
+  },
+  {
+    "path": "source/blender/blenkernel/BKE_sculpt_facesets_rc1.hh",
+    "sha256": "d3c32584cdb6722c543256e3bdbf010ce57762758cad0d3d3e30dbdbdf706fbe"
+  },
+  {
+    "path": "source/blender/blenkernel/BKE_sculpt_facesets_visibility_rc2.hh",
+    "sha256": "f08330739b324da3d44f1e3ca509c5cc11db344bc749611b387fe7c8d8b5ae79"
+  },
+  {
+    "path": "source/blender/blenkernel/BKE_undo_system.hh",
+    "sha256": "113aac263f67991efaf127cdfa8c9e2cf1fa12ab4e41ab808833e24a11305a7e"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/anim_sys.cc",
+    "sha256": "1ce0661c018b9741d44ea7f4cde127f59ac81f3a808b15a83814a7e129a976cc"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires.cc",
+    "sha256": "f45850d6ef7010c1e7ab066d4044b7345f40bcfdd38283395a21d7c5e5330924"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_detail_transfer_v01.hh",
+    "sha256": "d9d86d1ad83b835bc078929cf6b90992eb9576b4a4d4fc74c762b3c565bcbb74"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_pbvh_group_probe_v01.hh",
+    "sha256": "4581ef66435c07253208678b08fd067bc2572d4943c04e85f18d32ba38ef37a6"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_reshape.cc",
+    "sha256": "be77d3f4edc3c153f9a5b682ec24089c2feaa68ae0b2907631af9bbe644e0511"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_reshape_smooth.cc",
+    "sha256": "db8595226881edc79fd2e651d8b4558dfb4e2421cd0ed74bcceaef1ead27d598"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_sculpt_layers.cc",
+    "sha256": "1f640b8d91d8e16638a2cc65192c73bd8bf34b742bd33a484802e9ebddc0cbf9"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_stable_detail_transport.hh",
+    "sha256": "aaa18395ed5ce64d1d1fdbe6085b934099179593850f93feefc7a5303b9dc880"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_weight_multi_cache_v01.hh",
+    "sha256": "77b5ede1d6efc3a22546e1f0a034b30891b03e8dcb4416abfab7bdda667f6703"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/paint.cc",
+    "sha256": "b4f82a423bcb30d2b5ff9ebe9239fe6443b4629c3378d628752135a730a92f43"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/pbvh.cc",
+    "sha256": "5313992e3b333d29765ce3fc2230e571d3bd769a5de2a6a544e73499c08be69c"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/subdiv_ccg.cc",
+    "sha256": "9bcc14df8ec63b3400d73548032ef75782c52dd01aa559725fa11fc43601e821"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/undo_system.cc",
+    "sha256": "f073516a5fc51c9ae4465d9bdd8c223f4c5277f35cb204bc72b4969c1dcee8b5"
+  },
+  {
+    "path": "source/blender/draw/engines/overlay/overlay_sculpt.hh",
+    "sha256": "634f53b4b609ecc76d5e90ad3bd040211019964d48ee5280dab0eefce2b985e4"
+  },
+  {
+    "path": "source/blender/draw/engines/workbench/workbench_state.cc",
+    "sha256": "e10831666c3882808ad4e52e07ee5fd8886847ff03b246e96aa4cbf996e99363"
+  },
+  {
+    "path": "source/blender/draw/intern/draw_cache_extract_mesh_render_data.cc",
+    "sha256": "e4df80e134dab70272cac25ebd88cc5439dd635957fca1d49052d203ab53d329"
+  },
+  {
+    "path": "source/blender/draw/intern/draw_pbvh.cc",
+    "sha256": "a8018f9d9609dbef838f67252d80c1b04d32cb8fbd0a4d2718132ca484661885"
+  },
+  {
+    "path": "source/blender/draw/intern/draw_sculpt.cc",
+    "sha256": "2b15d6713f5b9e4bb2f65305e8c2a7671d782ba389e735203451fbb444c57f3c"
+  },
+  {
+    "path": "source/blender/draw/intern/draw_sculpt.hh",
+    "sha256": "f696c0c35f3bf2516a3442bc64b2385877b2a2080285c32f62e0690f582ff4a0"
+  },
+  {
+    "path": "source/blender/draw/intern/mesh_extractors/extract_mesh.hh",
+    "sha256": "8e2fe93fcc0a6ffbeddf92d8438bb3c5f2db0603e0f0305efee88954de1a7cd2"
+  },
+  {
+    "path": "source/blender/draw/intern/mesh_extractors/extract_mesh_vbo_sculpt_data.cc",
+    "sha256": "8b40fe0d18e8cc31f8e521c2787938f652dcdf94464ee2d775dddf8d9462020a"
+  },
+  {
+    "path": "source/blender/draw/intern/multires_draw_profile_v01.hh",
+    "sha256": "ebbf4207565e80ccd26cc4335622199057fee614bb786ca8cf0d384c42c48b45"
+  },
+  {
+    "path": "source/blender/draw/intern/multires_overlay_neutral_v01.hh",
+    "sha256": "c368bb964e0c8e35c05cd7dbe4fa0401f123d74d5337b50d42e9e97a9b96b664"
+  },
+  {
+    "path": "source/blender/editors/geometry/geometry_attributes.cc",
+    "sha256": "22940c90c0850e5a51f990ca816a0b005f08b97a002ced0f33008e56b93abdb0"
+  },
+  {
+    "path": "source/blender/editors/include/ED_sculpt.hh",
+    "sha256": "a234444e234c521e4dcf81dc236676530afbe0c3a486e96d8b22bb17b95c8602"
+  },
+  {
+    "path": "source/blender/editors/mesh/editmesh_utils.cc",
+    "sha256": "b958e9466c057eddadb787a369afe460b7d364c724e1fefa7a8167b7ce8228ea"
+  },
+  {
+    "path": "source/blender/editors/mesh/mesh_join.cc",
+    "sha256": "000ab0e9576b784dc3a76fa05c6a48db3793d7dc1ae7b1fa649e6f20da1a204a"
+  },
+  {
+    "path": "source/blender/editors/object/object_transform.cc",
+    "sha256": "4c2eb67844e67ea3037ee6b763312309e5b52c0dbc9bd1607878a84626603ea3"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/brushes/draw_face_sets.cc",
+    "sha256": "9479946036cddcf898dd1541caf721729eafcc186ff88f91ea28a12bac890e5b"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/brushes/smooth.cc",
+    "sha256": "d2fabd2d81a73f9bcea235d67049c9be5dcca1d36789b37a5f626f37a08aabdc"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/paint_hide.cc",
+    "sha256": "84e5867c6edd321bd5bff0403bc20257a0d4f7b2267a0a65aba71d0b2f4da812"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/paint_hide.hh",
+    "sha256": "8e9442db453889ef3e55eaa741481e536274613d4693dc0d1317805d4656c8e8"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt.cc",
+    "sha256": "4e8545ac91dd4ad196c347abc51eefe6e0cd1295cf2512f57167c46c7c936566"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_cloth.cc",
+    "sha256": "98044715ad487ad33df6f298251b87375f8c9a09772a03a062ef8687a6896339"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_detail_transfer_v01.hh",
+    "sha256": "cb4840c69353b28f54b2e4ad4c339e0dd649055768128921df356d6f928593d9"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_draw_transport_v01.hh",
+    "sha256": "4d3d26bca0767a141e2049b3d073c8636825c3b0b37ff8da389057187897191a"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_expand.cc",
+    "sha256": "b266649e3da07614ef74a32a9fa937f134d06c37bb8d3e27938d2129919c6ae0"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_face_set.cc",
+    "sha256": "352e00ad116ed5f78389dfb73e41128d98b773d30cb3677660c69c8666d61373"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_face_set.hh",
+    "sha256": "e6851ffc284340b4bbaac642efdeb0e01a3aae5958c9d6a109741cd59a4daabe"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_facesets_brush_probe_v05.hh",
+    "sha256": "5966e84642fa1acb014c6a0fc45eaf1a3ee27003ca97725eefda285a7e047b83"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_facesets_edit_math_rc10.hh",
+    "sha256": "962c781122f98eaf6df0b9279aec375dc1ba7968eb09e05b9007c61a4bdc340d"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_facesets_l0_snapshot_v02.hh",
+    "sha256": "04da95bb5f95e3d89fa45d76473845c540d672b8f5080b26a8e4cc1b83b83fb1"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_facesets_mixed_fixture_v03.hh",
+    "sha256": "536fceddc5e6bcd9fb8f53246b698b729074874c1d4c5a28f7a9a19bbcf89baa"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_facesets_rebuild_l0_v01.hh",
+    "sha256": "8ac17f5ccb2ab459dce7493050edf50f3a37a73acbef251c0f049a4ec9e4152a"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_facesets_region_v04.hh",
+    "sha256": "a929be8b7363856756892f958afcde49690edcc3283444333370b134e9e9863b"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_facesets_sculpt_l0_v02.hh",
+    "sha256": "9a4eb4cfca2f558afcc6d7f9bd4185375171793082c6ed8eb105e3bfe7a48670"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_layer_delta_smooth_v01.hh",
+    "sha256": "4cdced69f15e66f52c8a8e25cb40cae586f7ae2ff302e96e9b4e6ab6432a8f94"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_mask_extract.cc",
+    "sha256": "8642599e7fff8214b31b5de8a984fb7756fd2c19f076bc611fd07d4b2d8e678d"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_multires_hr_extract_v05.hh",
+    "sha256": "19dd1fb371c36bf66a762648f5fbed98d162e32c93f6fefba186f349c9fd9e06"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc",
+    "sha256": "cdeef378663e8531145d660183d627e4edfd4c8228958621697981d8b8c0fd3c"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_paint_color.cc",
+    "sha256": "3942cfca99af5aa277d17dcba06ab6e310cf20603ba4ac2caf356bd6f7a71eb3"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_blur_local_v02.hh",
+    "sha256": "bb1c0c6d01283a029248c829139bbe10f1728f7a406180cf43007490f1ccf348"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_blur_v01.hh",
+    "sha256": "1de1e410a812cef14a40bb03f14c988e2980e88c8052ae772a3f782f5b306207"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_blur_v01_api.hh",
+    "sha256": "0af60622b35b9d5d7a4c949bda2e6a7f596c2dc74fd2144ac82165a11398326e"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_blur_v01_math.hh",
+    "sha256": "975e28f538b4d873ff0dde05518e727c24159decd3c6e635ededb5cfe2bdee35"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_local_v04.hh",
+    "sha256": "e1e3671d1fa5f44b99ceec6e34079fc859ecc68bbf47f59be38879957354f8db"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_smear_v03_math.hh",
+    "sha256": "c23bc7009bae2ed4ad5753286962aa1f0ffc9fdc65212bf2bbf640704181f327"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_uv_bake_v01.hh",
+    "sha256": "38d6bb8f48861ade52b82b5b89fc215440cb2c17c0eab9d69dc14e6042a0cbbe"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_v04.hh",
+    "sha256": "d5fb7a6292817294c84af38e369aeb22389dfebfa940e032c7a6948cf365f4ff"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_v04_api.hh",
+    "sha256": "06d4eeccec7512c2630496d683bad5b450993d7b0257709faab2190f4de2c971"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_v04_probe.hh",
+    "sha256": "5460c551f6aa4e9ae38cc9cf1e2734a27b25f8819e550a513109efbf6c30a053"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_v04_project.hh",
+    "sha256": "6c1570cfe22af2c379077c60a3ef7c70f94334f3ac7f11ee465cdc59e2a7a224"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_v04_snapshot.hh",
+    "sha256": "3e3755eec1de638bcb80da0cf18df45aaba1cd3efa7579cf23071ebb33aa8d5b"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_polypaint_v04_wet.hh",
+    "sha256": "395789236631ceae805968b13c18cb0227dbf45ca0ad7b599bfd21df7314a3d8"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_undo.cc",
+    "sha256": "680a8674ee9f918e0187d1bad937a4c13966fd6153d99d1efe7d18534927e0a0"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_undo.hh",
+    "sha256": "18e3c5c8f75dd79b881d816629165beaec17db5c8a6e3045225f80ec52afb43b"
+  },
+  {
+    "path": "source/blender/editors/undo/ed_undo.cc",
+    "sha256": "efd5bc56a0daa9224194582325988b7d552e84bd9fe28b23c638e37dc0ae5cc9"
+  },
+  {
+    "path": "source/blender/editors/util/ed_util.cc",
+    "sha256": "144af57a5bb808902c0add556e847376f7a813f694c28d0cb77962c8ede44268"
+  },
+  {
+    "path": "source/blender/makesdna/DNA_modifier_types.h",
+    "sha256": "387b59e78fd84a99701b7ce78dc31699a1186fccbd5c424a00939b8589ea7347"
+  },
+  {
+    "path": "source/blender/makesrna/intern/rna_modifier.cc",
+    "sha256": "92d608a0600aa82ca4c4cfa4ee6fc952e3ce62c914638aa4f934369a44de8414"
+  },
+  {
+    "path": "source/blender/modifiers/intern/MOD_multires.cc",
+    "sha256": "dbf29e6cd6bf313a4b57a0317557bf86eb0fa3256cb8ecdb20b03073a8c96b1e"
+  },
+  {
+    "path": "source/creator/creator.cc",
+    "sha256": "7faba2038c951049dfe3be5d3ff24dc183b9480d3b518b7c755ff7203b4948f7"
+  }
+]
