@@ -53,6 +53,15 @@ struct AnimationEvalContext {
   float eval_time;
 };
 
+/** True only while animation flush writes RNA values back to the original ID on this thread.
+ * Setters with interactive side effects may use this to avoid editing Sculpt transaction state.
+ * This is not true for normal UI/Python writes or writes to evaluated IDs. */
+bool BKE_animsys_is_copying_to_original();
+
+/** RNA write with scoped animation copy-back semantics. Use only when flushing
+ * the evaluated animation result to the original ID. */
+bool BKE_animsys_write_to_original_rna_path(PathResolvedRNA *anim_rna, float value);
+
 AnimationEvalContext BKE_animsys_eval_context_construct(struct Depsgraph *depsgraph,
                                                         float eval_time) ATTR_WARN_UNUSED_RESULT;
 AnimationEvalContext BKE_animsys_eval_context_construct_at(

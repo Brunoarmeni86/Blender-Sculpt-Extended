@@ -131,9 +131,25 @@ void ED_editors_init(bContext *C)
       continue;
     }
 
+    ID *ob_data = ob.data;
+    /* MULTIRES_STARTUP_REUSE_V02: the saved Sculpt mode is already evaluated.
+     * Avoid the temporary Object-mode reset/SYNC tag only after all native
+     * eligibility checks and the strict CCG preflight succeed. */
+    if (mode == OB_MODE_SCULPT && obact == &ob &&
+        BKE_id_is_editable(bmain, &ob.id) &&
+        (ob_data == nullptr || BKE_id_is_editable(bmain, ob_data)) &&
+        BKE_collection_has_object_recursive(scene->master_collection, &ob) &&
+        BKE_scene_has_object(*bmain, scene, &ob) &&
+        (ob.visibility_flag & OB_HIDE_VIEWPORT) == 0 &&
+        ed::sculpt_paint::object_sculpt_mode_restore_reuse_ready(*depsgraph, *scene, ob))
+    {
+      ed::sculpt_paint::object_sculpt_mode_enter(
+          *bmain, *depsgraph, *scene, ob, true, reports);
+      continue;
+    }
+
     /* Reset object to Object mode, so that code below can properly re-switch it to its
      * previous mode if possible, re-creating its mode data, etc. */
-    ID *ob_data = ob.data;
     ob.mode = OB_MODE_OBJECT;
     DEG_id_tag_update(&ob.id, ID_RECALC_SYNC_TO_EVAL);
 
@@ -473,3 +489,4 @@ void ED_spacedata_id_remap_single(ScrArea *area, SpaceLink *sl, ID *old_id, ID *
 }
 
 }  // namespace blender
+

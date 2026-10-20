@@ -47,6 +47,9 @@
 #include "ED_mesh.hh"
 #include "ED_object.hh"
 #include "ED_sculpt.hh"
+#include "../sculpt_paint/mesh/sculpt_polypaint_v04_api.hh"
+#include "BKE_modifier.hh"
+#include "DNA_modifier_types.h"
 
 #include "geometry_intern.hh"
 
@@ -878,6 +881,11 @@ static wmOperatorStatus geometry_color_attribute_remove_exec(bContext *C, wmOper
   const std::string active_name = BKE_id_attributes_active_color_name(id).value_or("");
   if (active_name.empty()) {
     return OPERATOR_CANCELLED;
+  }
+  if(blender::ed::sculpt_paint::color::polypaint_v04_enabled() && ob->type==OB_MESH &&
+      BKE_modifiers_findby_type(ob,eModifierType_Multires)) {
+    return blender::ed::sculpt_paint::color::remove_attribute_full_v04(C,op,active_name.c_str())?
+        OPERATOR_FINISHED:OPERATOR_CANCELLED;
   }
   AttributeOwner owner = AttributeOwner::from_id(id);
   if (!BKE_attribute_remove(owner, active_name, op->reports)) {

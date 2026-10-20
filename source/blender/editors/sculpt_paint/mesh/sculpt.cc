@@ -18,11 +18,14 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include "sculpt_layer_delta_smooth_v01.hh"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <new>
+#include <limits>
+#include <stdexcept>
 #include <queue>
 #include <unordered_map>
 #include <vector>
@@ -32,6 +35,7 @@
 #include "CLG_log.h"
 
 #include "BLI_time.h"
+#include "BLI_kdopbvh.hh"
 #include "BLI_array_utils.hh"
 #include "BLI_atomic_disjoint_set.hh"
 #include "BLI_dial_2d.h"
@@ -75,6 +79,7 @@
 #include "BKE_mesh.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
 #include "BKE_multires_sculpt_layers.hh"
 #include "BKE_node_runtime.hh"
 #include "BKE_object.hh"
@@ -110,6 +115,7 @@
 #include "sculpt_boundary.hh"
 #include "sculpt_cloth.hh"
 #include "sculpt_color.hh"
+#include "sculpt_polypaint_blur_v01_api.hh"
 #include "sculpt_dyntopo.hh"
 #include "sculpt_face_set.hh"
 #include "sculpt_filter.hh"
@@ -4932,7 +4938,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
    * Instrumentation only: no sculpt math / PBVH / undo behavior changes. */
   const Mesh *sculpt_mesh_v3_probe_mesh = BKE_object_get_original_mesh(&ob);
   const bool sculpt_mesh_v3_probe_enabled =
-      sculpt_mesh_v3_probe_mesh && sculpt_mesh_v3_probe_mesh->verts_num >= 1'000'000;
+      (sculpt_mesh_v3_probe_mesh && sculpt_mesh_v3_probe_mesh->verts_num >= 1'000'000) ||
+      (std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG") &&
+       std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG")[0]);
   const double sculpt_mesh_v3_probe_total_start = BLI_time_now_seconds();
   double sculpt_mesh_v3_probe_gather_ms = 0.0;
   double sculpt_mesh_v3_probe_undo_ms = 0.0;
@@ -5083,6 +5091,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
         (BLI_time_now_seconds() - sculpt_mesh_v3_probe_undo_start) * 1000.0;
   }
 
+  /* Capture Auto Smooth's reference before the main brush changes the CCG. */
+  if (!layer_delta_smooth_v01::prepare_region(ob, node_mask)) { return; }
+
   /* There are issues with the underlying normals cache / mesh data that can cause the data to
    * become out of date.
    *
@@ -5149,6 +5160,13 @@ static void do_brush_action(const Depsgraph &depsgraph,
       break;
     }
     case SCULPT_BRUSH_TYPE_SMOOTH:
+      if (layer_delta_smooth_v01::owns(ob) &&
+          (brush.smooth_deform_type != BRUSH_SMOOTH_DEFORM_LAPLACIAN ||
+           ss.cache->initial_direction_flipped))
+      {
+        layer_delta_smooth_v01::fail("surface_or_inverted_smooth_not_supported_v01");
+        break;
+      }
       if (brush.smooth_deform_type == BRUSH_SMOOTH_DEFORM_LAPLACIAN) {
         /* NOTE: The enhance brush needs to initialize its state on the first brush step. The
          * stroke strength can become 0 during the stroke, but it can not change sign (the sign is
@@ -5287,7 +5305,13 @@ static void do_brush_action(const Depsgraph &depsgraph,
       break;
   }
 
-  if (!ELEM(brush.sculpt_brush_type, SCULPT_BRUSH_TYPE_SMOOTH, SCULPT_BRUSH_TYPE_MASK) &&
+  /* Face Set painting changes IDs only. Do not apply Auto Smooth to geometry
+   * while recording Face Sets independently of the selected sculpt layer. */
+  if (!ELEM(brush.sculpt_brush_type,
+            SCULPT_BRUSH_TYPE_SMOOTH,
+            SCULPT_BRUSH_TYPE_MASK,
+            SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) &&
+      !(color::polypaint_blur_v01_enabled() && brush_type_is_paint(brush.sculpt_brush_type)) &&
       brush.autosmooth_factor > 0)
   {
     if (bke::brush::supports_auto_smooth_pressure(brush) &&
@@ -6714,7 +6738,12 @@ bool stroke_get_location_bvh(bContext *C,
   return stroke_get_location_bvh(*depsgraph, vc, sd, brush, out, mval, force_original);
 }
 
+/* SCULPT_DRAW_TRANSPORT_V01: only explicit opt-in Draw/Anchored uses this path. */
+#include "sculpt_draw_transport_v01.hh"
+
 struct SculptPaintStroke final : public PaintStroke {
+  std::unique_ptr<draw_transport_v01::State> draw_transport;
+  int draw_transport_event = 0;
   Main *bmain_;
   Sculpt *sculpt_;
   Base *base_;
@@ -6726,6 +6755,11 @@ struct SculptPaintStroke final : public PaintStroke {
   SculptPaintStroke(bContext *C, wmOperator *op, const wmEvent *event) : PaintStroke(C, op, event)
   {
     bmain_ = CTX_data_main(C);
+    if (event && brush && (draw_transport_v01::enabled(*brush) ||
+                          RNA_boolean_get(op->ptr, "draw_transport"))) {
+      draw_transport = std::make_unique<draw_transport_v01::State>();
+      draw_transport_event = event->type;
+    }
 
     ToolSettings *tool_settings = CTX_data_tool_settings(C);
     sculpt_ = tool_settings->sculpt;
@@ -6793,6 +6827,7 @@ static StrokeToggleSettings create_toggle_settings(const wmOperator &op, Main &b
 
 static void brush_stroke_init(bContext *C, const wmOperator *op)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.brush_init", CTX_data_active_object(C));
   Object &ob = *CTX_data_active_object(C);
   ToolSettings *tool_settings = CTX_data_tool_settings(C);
   Sculpt &sd = *tool_settings->sculpt;
@@ -6808,7 +6843,9 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
     ss.cache->toggle_settings = create_toggle_settings(*op, *CTX_data_main(C), sd.paint);
   }
 
+  cold_trace.mark("gpu_context_and_stroke_cache");
   brush_init_tex(sd, ss);
+  cold_trace.mark("brush_textures");
 
   const bool needs_colors = brush_type_is_paint(brush->sculpt_brush_type) &&
                             !SCULPT_use_image_paint_brush(tool_settings->paint_mode, ob);
@@ -6819,9 +6856,12 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
 
   /* CTX_data_ensure_evaluated_depsgraph should be used at the end to include the updates of
    * earlier steps modifying the data. */
+  cold_trace.mark("color_layer");
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  cold_trace.mark("ensure_evaluated_depsgraph");
   BKE_sculpt_update_object_for_edit(depsgraph, &ob, brush_type_is_paint(brush->sculpt_brush_type));
 
+  cold_trace.mark("sculpt_object_for_edit");
   ED_paint_brush_type_update_sticky_shading_color(C, &ob);
 }
 
@@ -6929,7 +6969,9 @@ void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_
   /* Sculpt Mesh V3 memory pressure probe: post-brush update / redraw scheduling. */
   const Mesh *sculpt_mesh_v3_flush_mesh = BKE_object_get_original_mesh(&object);
   const bool sculpt_mesh_v3_flush_enabled =
-      sculpt_mesh_v3_flush_mesh && sculpt_mesh_v3_flush_mesh->verts_num >= 1'000'000;
+      (sculpt_mesh_v3_flush_mesh && sculpt_mesh_v3_flush_mesh->verts_num >= 1'000'000) ||
+      (std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG") &&
+       std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG")[0]);
   const SculptMeshV3MemorySample sculpt_mesh_v3_flush_mem_start =
       sculpt_mesh_v3_memory_sample();
   const double sculpt_mesh_v3_flush_start = BLI_time_now_seconds();
@@ -6976,7 +7018,22 @@ void flush_update_step(ViewContext &vc, Object &object, const UpdateType update_
   const SculptSession &ss = *object.runtime->sculpt_session;
   const MultiresModifierData *mmd = ss.multires_modifier;
   if (mmd != nullptr) {
-    multires_mark_as_modified(vc.depsgraph, &object, MULTIRES_COORDS_MODIFIED);
+    /* LAYER_CCG_DIRTY_DOMAINS_V01: preserve independent edit domains. */
+    switch (update_type) {
+      case UpdateType::Position:
+        multires_mark_as_modified(vc.depsgraph, &object, MULTIRES_COORDS_MODIFIED);
+        break;
+      case UpdateType::Mask:
+        multires_mark_as_modified(vc.depsgraph, &object, MULTIRES_MASK_MODIFIED);
+        break;
+      case UpdateType::Visibility:
+        multires_mark_as_modified(vc.depsgraph, &object, MULTIRES_HIDDEN_MODIFIED);
+        break;
+      case UpdateType::Color:
+      case UpdateType::Image:
+      case UpdateType::FaceSet:
+        break;
+    }
   }
 
   if (update_type == UpdateType::Image) {
@@ -7493,8 +7550,10 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
 
 bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.test_start", this->object);
   /* Don't start the stroke until `mval` goes over the mesh. */
   if (over_mesh(*this->depsgraph, this->vc, *sculpt_, this->brush, op, mval)) {
+    cold_trace.mark("raycast_over_mesh");
     Object &ob = *this->object;
     Brush *brush = this->brush;
 
@@ -7518,10 +7577,13 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
       BKE_curvemapping_init(brush->curve_rand_value);
     }
 
+    cold_trace.mark("stroke_cache_init");
     cursor_geometry_info_update(*this->depsgraph, *paint, sculpt_, this->vc, base_, mval, false);
 
+    cold_trace.mark("cursor_geometry");
     stroke_undo_begin(*this->scene, this->brush, *this->paint_mode_settings_, *this->object, op);
 
+    cold_trace.mark("undo_begin");
     return true;
   }
   return false;
@@ -7633,8 +7695,23 @@ void SculptPaintStroke::stroke_cache_update(PointerRNA *ptr)
   cache.iteration_count++;
 }
 
+/* FACESETS_BRUSH_V05B: ID-only strokes must never dirty Multires coordinates.
+ * Feature-gated while the rebuilt Face Sets path is being validated. */
+static bool facesets_id_only_flush_v05b(const Sculpt &sd,
+                                      const Brush &brush,
+                                      const SculptSession &ss)
+{
+  const char *flag=std::getenv("BLENDER_FACESETS_BRUSH_V05");
+  return flag && flag[0]=='1' && flag[1]=='\0' &&
+      brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_DRAW_FACE_SETS &&
+      brush.deform_target!=BRUSH_DEFORM_TARGET_CLOTH_SIM &&
+      sd.gravity_factor<=0.0f && ss.cache &&
+      !ss.cache->toggle_settings.alt_smooth && !ss.cache->toggle_settings.alt_mask;
+}
+
 void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.update_step", this->object);
   const Scene &scene = *this->scene;
   Depsgraph &depsgraph = *this->depsgraph;
   Sculpt &sd = *sculpt_;
@@ -7642,11 +7719,26 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   SculptSession &ss = *ob.runtime->sculpt_session;
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   StrokeCache *cache = ss.cache;
+  if (blender::bke::sculpt_cold_v01::path()) {
+    blender::bke::sculpt_cold_v01::event("DAB", "object=%p first=%d ccg=%p pbvh=%p brush=%d",
+      static_cast<void *>(&ob), int(cache->first_time), static_cast<void *>(ss.subdiv_ccg),
+      static_cast<void *>(bke::object::pbvh_get(ob)), int(this->brush->sculpt_brush_type));
+  }
   cache->stroke_distance = this->stroke_distance();
+
+  /* SCULPT_STROKE_PROFILE_V01: opt-in, one append per update; no geometry changes. */
+  const char *stroke_profile_path = std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG");
+  const bool stroke_profile_enabled = stroke_profile_path && stroke_profile_path[0];
+  const double stroke_profile_start = stroke_profile_enabled ? BLI_time_now_seconds() : 0.0;
+  double stroke_profile_prepared = stroke_profile_start;
+  double stroke_profile_brushed = stroke_profile_start;
+  double stroke_profile_fixed = stroke_profile_start;
+
 
   stroke_modifiers_check(depsgraph, this->vc.rv3d, sd, ob, &brush);
   stroke_cache_update(itemptr);
   restore_from_undo_step_if_necessary(depsgraph, sd, ob);
+  if (stroke_profile_enabled) { stroke_profile_prepared = BLI_time_now_seconds(); }
 
   if (dyntopo::stroke_is_dyntopo(ob, brush)) {
     do_symmetrical_brush_actions(
@@ -7656,11 +7748,19 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
   do_symmetrical_brush_actions(
       depsgraph, scene, sd, ob, do_brush_action, *this->paint_mode_settings_);
 
-  /* Hack to fix noise texture tearing mesh. */
-  sculpt_fix_noise_tear(sd, ob);
+  if (stroke_profile_enabled) { stroke_profile_brushed = BLI_time_now_seconds(); }
+
+  /* ID-only Face Sets never require coordinate smoothing or a geometry flush. */
+  const bool id_only_face_sets=facesets_id_only_flush_v05b(sd,brush,ss);
+  if (!id_only_face_sets &&
+      !(color::polypaint_blur_v01_enabled() && brush_type_is_paint(brush.sculpt_brush_type))) {
+    sculpt_fix_noise_tear(sd, ob);
+  }
 
   ss.cache->first_time = false;
   copy_v3_v3(ss.cache->last_location, ss.cache->location);
+
+  if (stroke_profile_enabled) { stroke_profile_fixed = BLI_time_now_seconds(); }
 
   /* Cleanup. */
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
@@ -7674,9 +7774,33 @@ void SculptPaintStroke::update_step(wmOperator * /*op*/, PointerRNA *itemptr)
       flush_update_step(this->vc, *this->object, UpdateType::Color);
     }
   }
+  else if (id_only_face_sets) {
+    flush_update_step(this->vc, *this->object, UpdateType::FaceSet);
+  }
   else {
     flush_update_step(this->vc, *this->object, UpdateType::Position);
   }
+  if (stroke_profile_enabled) {
+    const double finished = BLI_time_now_seconds();
+    const SubdivCCG *ccg = ss.subdiv_ccg;
+    const bool pbvh_draw = BKE_sculptsession_use_pbvh_draw(&ob, this->vc.rv3d);
+    FILE *log = std::fopen(stroke_profile_path, "a");
+    if (log) {
+      std::fprintf(log,
+                   "[SCULPT_STROKE] brush=%d grids=%d area=%d pbvh_draw=%d "
+                   "prepare_ms=%.3f brush_symmetry_ms=%.3f tear_fix_ms=%.3f "
+                   "flush_ms=%.3f callback_ms=%.3f\n",
+                   int(brush.sculpt_brush_type), ccg ? ccg->grids_num : 0,
+                   ccg ? ccg->grid_area : 0, int(pbvh_draw),
+                   (stroke_profile_prepared - stroke_profile_start) * 1000.0,
+                   (stroke_profile_brushed - stroke_profile_prepared) * 1000.0,
+                   (stroke_profile_fixed - stroke_profile_brushed) * 1000.0,
+                   (finished - stroke_profile_fixed) * 1000.0,
+                   (finished - stroke_profile_start) * 1000.0);
+      std::fclose(log);
+    }
+  }
+
 }
 
 static void brush_exit_tex(Sculpt &sd)
@@ -7691,6 +7815,13 @@ static void brush_exit_tex(Sculpt &sd)
 
 void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
 {
+  const bool transport_profile=draw_transport && draw_transport->profile;
+  const double transport_done_start=transport_profile?BLI_time_now_seconds():0.0;
+  if (draw_transport) {
+    ED_workspace_status_text(this->evil_C, nullptr);
+    draw_transport.reset();
+  }
+  layer_delta_smooth_v01::reset();
   Object &ob = *this->object;
   SculptSession &ss = *ob.runtime->sculpt_session;
   Sculpt &sd = *this->sculpt_;
@@ -7719,6 +7850,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     brush = BKE_paint_brush(&sd.paint);
   }
 
+  const bool id_only_face_sets=facesets_id_only_flush_v05b(sd,*brush,ss);
   MEM_delete(ss.cache);
   ss.cache = nullptr;
 
@@ -7729,7 +7861,8 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
     flush_update_done(this->vc, *wm_, ob, UpdateType::Mask);
   }
-  else if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT) {
+  else if (brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT ||
+           (color::polypaint_blur_v01_enabled() && (brush->sculpt_brush_type==SCULPT_BRUSH_TYPE_BLUR || brush->sculpt_brush_type==SCULPT_BRUSH_TYPE_SMEAR))) {
     if (SCULPT_use_image_paint_brush(*this->paint_mode_settings_, ob)) {
       flush_update_done(this->vc, *wm_, ob, UpdateType::Image);
     }
@@ -7737,12 +7870,22 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
       flush_update_done(this->vc, *wm_, ob, UpdateType::Color);
     }
   }
+  else if (id_only_face_sets) {
+    flush_update_done(this->vc, *wm_, ob, UpdateType::FaceSet);
+    std::printf("[FACESETS_BRUSH_V05B] ID-only stroke finished; FaceSet flush, no coordinate dirty tag\n");
+    std::fflush(stdout);
+  }
   else {
     flush_update_done(this->vc, *wm_, ob, UpdateType::Position);
   }
 
   WM_event_add_notifier(this->evil_C, NC_OBJECT | ND_DRAW, &ob);
   brush_exit_tex(sd);
+  if (transport_profile) {
+    std::printf("[DRAW_TRANSPORT_V07_END] cancel=%d done_ms=%.3f\n",int(is_cancel),
+                (BLI_time_now_seconds()-transport_done_start)*1000.0);
+    std::fflush(stdout);
+  }
 }
 
 void SculptPaintStroke::redraw(bool /*final*/) {}
@@ -7779,8 +7922,8 @@ bool sculpt_layers_editable(bContext *C, ReportList *reports)
     if (!bke::multires_layers::base_has_visible_layers(*mmd)) {
       return true;
     }
-    if (!mmd->sculpt_layer_recording || !bke::multires_layers::can_record(*mmd, mesh)) {
-      BKE_report(reports, RPT_ERROR, "Enable REC on a visible layer, or disable all layers to sculpt the base");
+    if (!bke::multires_layers::can_record(*mmd, mesh)) {
+      BKE_report(reports, RPT_ERROR, "Select a valid visible layer, or disable all layers to sculpt the base");
       return false;
     }
     return bke::multires_layers::base_deltas_ensure(*bke::multires_layers::active(*mmd), mesh.verts_num);
@@ -7799,10 +7942,9 @@ bool sculpt_layers_editable(bContext *C, ReportList *reports)
   if (!bke::multires_layers::base_has_visible_layers(*mmd)) {
     return true;
   }
-  if (!mmd->sculpt_layer_recording ||
-      !bke::multires_layers::can_record(*mmd, *id_cast<Mesh *>(ob->data))) {
+  if (!bke::multires_layers::can_record(*mmd, *id_cast<Mesh *>(ob->data))) {
     BKE_report(reports, RPT_ERROR,
-               "Enable REC on a visible layer with non-zero strength and a valid sculpt "
+               "Select a visible layer with non-zero strength and a valid sculpt "
                "level; disable Sculpt Base Mesh");
     return false;
   }
@@ -7818,6 +7960,58 @@ static bool sculpt_polypaint_cpu_enabled()
   return value && value[0] == '1' && value[1] == '\0';
 }
 
+static MultiresModifierData *sculpt_polypaint_modifier_v04(Object *object)
+{
+  if(!object)return nullptr;
+  MultiresModifierData *result=nullptr;
+  for(ModifierData &md:object->modifiers)if(md.type==eModifierType_Multires){
+    if(result)return nullptr;result=reinterpret_cast<MultiresModifierData*>(&md);
+  }
+  return result;
+}
+static bool sculpt_polypaint_supported_type_v01(const int type)
+{
+  return type==SCULPT_BRUSH_TYPE_PAINT ||
+      (color::polypaint_blur_v01_enabled() && (type==SCULPT_BRUSH_TYPE_BLUR || type==SCULPT_BRUSH_TYPE_SMEAR));
+}
+/* Color V03 edits the full-resolution color surface with bounded local scratch.
+ * A lower level is rejected before stroke/cache/Undo and never downsamples data. */
+static bool sculpt_polypaint_blur_preflight_v01(bContext *C,wmOperator *op)
+{
+  if (!color::polypaint_blur_v01_enabled()) { return true; }
+  Object *object=CTX_data_active_object(C);
+  const auto *sd=CTX_data_tool_settings(C)->sculpt;
+  const Brush *brush=sd?BKE_paint_brush_for_read(&sd->paint):nullptr;
+  if (!object || !brush) { return true; }
+  const bool requested=brush->sculpt_brush_type==SCULPT_BRUSH_TYPE_BLUR ||
+      brush->sculpt_brush_type==SCULPT_BRUSH_TYPE_SMEAR ||
+      (brush_type_is_paint(brush->sculpt_brush_type) &&
+       BrushSwitchMode(RNA_enum_get(op->ptr,"brush_toggle"))==BrushSwitchMode::Smooth);
+  const auto *mmd=color::polypaint_v04_enabled()?sculpt_polypaint_modifier_v04(object):BKE_sculpt_multires_active(CTX_data_scene(C),object);
+  if ((!requested && !(color::polypaint_v04_enabled() && brush->sculpt_brush_type==SCULPT_BRUSH_TYPE_PAINT)) || !mmd) { return true; }
+  const auto &mesh=*id_cast<const Mesh *>(object->data);
+  const int level=mmd->sculptlvl;
+  if (!sculpt_polypaint_cpu_enabled() || !(U.uiflag & USER_GLOBALUNDO) || U.undosteps<=0 ||
+      (color::polypaint_v04_enabled() && (mmd->totlvl<1 || mmd->totlvl>13)) ||
+      level<(color::polypaint_v04_enabled()?0:1) || level>13 || level>mmd->totlvl ||
+      (!color::polypaint_v04_enabled() && (level!=mmd->totlvl ||
+       (mmd->sculpt_color_grids && mmd->sculpt_color_level>level))) ||
+      object->modifiers.count()!=1 || mesh.id.us!=1 || object->id.lib || mesh.id.lib ||
+      object->id.override_library || mesh.id.override_library ||
+      brush->deform_target==BRUSH_DEFORM_TARGET_CLOTH_SIM ||
+      (mmd->flags&eMultiresModifierFlag_UseSculptBaseMesh) ||
+      mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled) {
+    BKE_report(op->reports,RPT_ERROR,color::polypaint_v04_enabled()?"Color HR V04: requires Multires L1-L13, one local single-user mesh and Global Undo; no live deformers":"Color HR V03: use the highest Multires/color level, one local single-user mesh and Global Undo; no live deformers");
+    return false;
+  }
+  const int64_t side=(int64_t(1)<<(std::max(1,level)-1))+1;
+  if (int64_t(mesh.corners_num)*side*side>INT_MAX) {
+    BKE_report(op->reports,RPT_ERROR,"Color HR: sample indexing exceeds the native CCG integer range");
+    return false;
+  }
+  return true;
+}
+
 static bool sculpt_polypaint_skips_geometry_rec(bContext *C)
 {
   if (!sculpt_polypaint_cpu_enabled()) {
@@ -7830,11 +8024,50 @@ static bool sculpt_polypaint_skips_geometry_rec(bContext *C)
     return false;
   }
   const Brush *brush = BKE_paint_brush_for_read(&settings->sculpt->paint);
-  if (!brush || brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_PAINT) {
+  if (!brush || !sculpt_polypaint_supported_type_v01(brush->sculpt_brush_type)) {
     return false;
   }
-  const MultiresModifierData *mmd = BKE_sculpt_multires_active(scene, ob);
-  return mmd && mmd->sculptlvl > 0;
+  const MultiresModifierData *mmd = color::polypaint_v04_enabled()?sculpt_polypaint_modifier_v04(ob):BKE_sculpt_multires_active(scene, ob);
+  return mmd && mmd->sculptlvl >= (color::polypaint_v04_enabled()?0:1);
+}
+
+/* Face Set ID painting does not require layer REC. Shift Relax, alternate Mask,
+ * cloth and gravity remain guarded because they can modify geometry. */
+static bool sculpt_face_sets_skips_geometry_rec(bContext *C, const wmOperator &op)
+{
+  const ToolSettings *settings = CTX_data_tool_settings(C);
+  const Sculpt *sd = settings ? settings->sculpt : nullptr;
+  const Brush *brush = sd ? BKE_paint_brush_for_read(&sd->paint) : nullptr;
+  if (!brush || brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW_FACE_SETS ||
+      brush->deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM) {
+    return false;
+  }
+  const BrushSwitchMode mode = BrushSwitchMode(RNA_enum_get(op.ptr, "brush_toggle"));
+  if (mode == BrushSwitchMode::Smooth || mode == BrushSwitchMode::Mask ||
+      (sd->gravity_factor > 0.0f && bke::brush::supports_gravity(*brush))) {
+    return false;
+  }
+  const Object *object = CTX_data_active_object(C);
+  const SculptSession *ss = object ? object->runtime->sculpt_session : nullptr;
+  return object && (!ss || !ss->bm);
+}
+
+/* Mask painting/smoothing changes a separate scalar domain. In particular,
+ * Shift on a Mask brush is mask smoothing, not geometric Delta Smooth. */
+static bool sculpt_mask_skips_geometry_rec(bContext *C, const wmOperator &op)
+{
+  const ToolSettings *settings = CTX_data_tool_settings(C);
+  const Sculpt *sd = settings ? settings->sculpt : nullptr;
+  const Brush *brush = sd ? BKE_paint_brush_for_read(&sd->paint) : nullptr;
+  if (!brush || brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_MASK ||
+      brush->deform_target == BRUSH_DEFORM_TARGET_CLOTH_SIM ||
+      BrushSwitchMode(RNA_enum_get(op.ptr, "brush_toggle")) == BrushSwitchMode::Mask ||
+      (sd->gravity_factor > 0.0f && bke::brush::supports_gravity(*brush))) {
+    return false;
+  }
+  const Object *object = CTX_data_active_object(C);
+  const SculptSession *ss = object ? object->runtime->sculpt_session : nullptr;
+  return object && (!ss || !ss->bm);
 }
 
 /* POLYPAINT_MERGE_STABLE1904: A coarse master inherited from before
@@ -7844,12 +8077,13 @@ static bool sculpt_polypaint_skips_geometry_rec(bContext *C)
  * unsupported transition; never discard or downsample color data. */
 static bool sculpt_polypaint_prepare_stroke_master(bContext *C, wmOperator *op)
 {
+  if (!sculpt_polypaint_blur_preflight_v01(C,op)) { return false; }
   if (!sculpt_polypaint_skips_geometry_rec(C)) {
     return true;
   }
   Object *ob = CTX_data_active_object(C);
   Scene *scene = CTX_data_scene(C);
-  MultiresModifierData *mmd = const_cast<MultiresModifierData *>(
+  MultiresModifierData *mmd = color::polypaint_v04_enabled()?sculpt_polypaint_modifier_v04(ob):const_cast<MultiresModifierData *>(
       BKE_sculpt_multires_active(scene, ob));
   if (!bke::multires_layers::polypaint_lazy_master_enabled()) {
     if (mmd && (mmd->sculpt_color_attribute[0] || !mmd->sculpt_color_attributes.is_empty())) {
@@ -7906,13 +8140,13 @@ static bool sculpt_polypaint_prepare_stroke_master(bContext *C, wmOperator *op)
       }
     }
   }
-  if (!mmd || mmd->sculptlvl < 1 || mmd->sculptlvl > mmd->totlvl ||
+  if (!mmd || mmd->sculptlvl < (color::polypaint_v04_enabled()?0:1) || mmd->sculptlvl > mmd->totlvl ||
       mmd->sculptlvl > 13 || (ss && (ss->cache || ss->filter_cache)))
   {
     BKE_report(op->reports, RPT_ERROR, "Cannot prepare Paint resolution during another sculpt transaction");
     return false;
   }
-  if (mmd->sculpt_color_grids && mmd->sculpt_color_level >= mmd->sculptlvl &&
+  if (mmd->sculpt_color_grids && mmd->sculpt_color_level >= (color::polypaint_v04_enabled()?std::max(1,int(mmd->totlvl)):int(mmd->sculptlvl)) &&
       mmd->sculpt_color_level <= 13 && mmd->sculpt_color_grids_num == mesh->corners_num)
   {
     return true;
@@ -7920,7 +8154,7 @@ static bool sculpt_polypaint_prepare_stroke_master(bContext *C, wmOperator *op)
 
   MultiresModifierData staged{};
   const int previous_level = mmd->sculpt_color_level;
-  if (!bke::multires_layers::polypaint_stage_master(*mmd, mmd->sculptlvl,
+  if (!bke::multires_layers::polypaint_stage_master(*mmd, color::polypaint_v04_enabled()?std::max(1,int(mmd->totlvl)):int(mmd->sculptlvl),
                                                   mesh->corners_num, staged))
   {
     bke::multires_layers::polypaint_clear(staged);
@@ -7979,16 +8213,46 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
                                                    wmOperator *op,
                                                    const wmEvent *event)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.invoke", CTX_data_active_object(C));
   if (!sculpt_polypaint_prepare_stroke_master(C, op)) {
     return OPERATOR_CANCELLED;
   }
 
+  const Sculpt *transport_sd = CTX_data_tool_settings(C)->sculpt;
+  const Brush *transport_brush = transport_sd ? BKE_paint_brush_for_read(&transport_sd->paint) : nullptr;
+  const bool transport_requested = transport_brush &&
+      (draw_transport_v01::enabled(*transport_brush) || RNA_boolean_get(op->ptr, "draw_transport"));
+  if (transport_requested) {
+    const char *transport_flag = std::getenv("BLENDER_SCULPT_DRAW_TRANSPORT_V01");
+    if (!transport_flag || transport_flag[0] != '1' || transport_flag[1] != '\0') {
+      BKE_report(op->reports, RPT_ERROR, "Use the Draw Transport V01 launch profile");
+      return OPERATOR_CANCELLED;
+    }
+    if (const char *error = draw_transport_v01::preflight(C, *transport_brush, *op)) {
+      BKE_report(op->reports, RPT_ERROR, error);
+      return OPERATOR_CANCELLED;
+    }
+  }
+  cold_trace.mark("polypaint_preflight");
   SculptPaintStroke *stroke;
-  if (!sculpt_polypaint_skips_geometry_rec(C) &&
+  const bool non_geometric_brush = sculpt_face_sets_skips_geometry_rec(C, *op) ||
+                                   sculpt_mask_skips_geometry_rec(C, *op) ||
+      (color::polypaint_blur_v01_enabled() && sculpt_polypaint_skips_geometry_rec(C));
+  if (!sculpt_polypaint_skips_geometry_rec(C) && !non_geometric_brush &&
       !sculpt_layers_editable(C, op->reports))
   {
     return OPERATOR_CANCELLED;
   }
+  const Brush *delta_brush = BKE_paint_brush_for_read(&CTX_data_tool_settings(C)->sculpt->paint);
+  if (non_geometric_brush) { layer_delta_smooth_v01::reset(); }
+  else if (delta_brush && !layer_delta_smooth_v01::begin(
+          *CTX_data_active_object(C), *delta_brush, op->reports,
+          BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")) == BrushSwitchMode::Smooth))
+  {
+    return OPERATOR_CANCELLED;
+  }
+
+  cold_trace.mark("layer_checks_and_delta_smooth_begin");
   int ignore_background_click;
   Object &ob = *CTX_data_active_object(C);
   Scene &scene = *CTX_data_scene(C);
@@ -8006,7 +8270,9 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   WM_event_tablet_data(event, &pen_flip, nullptr);
 
   stroke = MEM_new<SculptPaintStroke>(__func__, C, op, event);
+  cold_trace.mark("stroke_constructor_including_depsgraph");
   brush_stroke_init(C, op);
+  cold_trace.mark("brush_stroke_init");
 
   Sculpt &sd = *CTX_data_tool_settings(C)->sculpt;
   Brush &brush = *BKE_paint_brush(&sd.paint);
@@ -8025,9 +8291,12 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
   const bke::pbvh::Tree *paint_pbvh = bke::object::pbvh_get(ob);
   const bool multires_polypaint_stroke =
       sculpt_polypaint_cpu_enabled() &&
-      brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PAINT &&
-      BKE_sculpt_multires_active(&scene, &ob) && paint_pbvh &&
-      paint_pbvh->type() == bke::pbvh::Type::Grids;
+      sculpt_polypaint_supported_type_v01(brush.sculpt_brush_type) &&
+      paint_pbvh && ((BKE_sculpt_multires_active(&scene, &ob) &&
+      paint_pbvh->type() == bke::pbvh::Type::Grids) ||
+      (color::polypaint_v04_enabled() && sculpt_polypaint_modifier_v04(&ob) &&
+       sculpt_polypaint_modifier_v04(&ob)->sculptlvl==0 &&
+       paint_pbvh->type()==bke::pbvh::Type::Mesh));
   if (brush_type_is_paint(brush.sculpt_brush_type) && !multires_polypaint_stroke &&
       !color_supported_check(scene, ob, op->reports))
   {
@@ -8075,7 +8344,9 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_PASS_THROUGH;
   }
 
+  cold_trace.mark("checks_before_first_modal");
   const wmOperatorStatus retval = op->type->modal(C, op, event);
+  cold_trace.mark("first_modal_including_first_dab");
   OPERATOR_RETVAL_CHECK(retval);
 
   if (ELEM(retval, OPERATOR_FINISHED, OPERATOR_CANCELLED)) {
@@ -8115,11 +8386,23 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  if (!sculpt_polypaint_skips_geometry_rec(C) &&
+  const bool non_geometric_brush = sculpt_face_sets_skips_geometry_rec(C, *op) ||
+                                   sculpt_mask_skips_geometry_rec(C, *op) ||
+      (color::polypaint_blur_v01_enabled() && sculpt_polypaint_skips_geometry_rec(C));
+  if (!sculpt_polypaint_skips_geometry_rec(C) && !non_geometric_brush &&
       !sculpt_layers_editable(C, op->reports))
   {
     return OPERATOR_CANCELLED;
   }
+  const Brush *delta_brush = BKE_paint_brush_for_read(&CTX_data_tool_settings(C)->sculpt->paint);
+  if (non_geometric_brush) { layer_delta_smooth_v01::reset(); }
+  else if (delta_brush && !layer_delta_smooth_v01::begin(
+          *CTX_data_active_object(C), *delta_brush, op->reports,
+          BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")) == BrushSwitchMode::Smooth))
+  {
+    return OPERATOR_CANCELLED;
+  }
+
   brush_stroke_init(C, op);
 
   SculptPaintStroke *stroke = MEM_new<SculptPaintStroke>(__func__, C, op, nullptr);
@@ -8151,6 +8434,118 @@ static void sculpt_brush_stroke_cancel(bContext *C, wmOperator *op)
 static wmOperatorStatus brush_stroke_modal(bContext *C, wmOperator *op, const wmEvent *event)
 {
   SculptPaintStroke *stroke = static_cast<SculptPaintStroke *>(op->customdata);
+  if (stroke->draw_transport) {
+    draw_transport_v01::State &transport = *stroke->draw_transport;
+    if (transport.placing) {
+      if ((ELEM(event->type, EVT_ESCKEY, RIGHTMOUSE) && event->val == KM_PRESS) ||
+          (event->type == EVT_MODAL_MAP && event->val == 1)) {
+        sculpt_brush_stroke_cancel(C, op);
+        MEM_delete(stroke);
+        op->customdata = nullptr;
+        return OPERATOR_CANCELLED;
+      }
+      if (event->type == EVT_RKEY && event->val == KM_PRESS &&
+          !(event->flag & WM_EVENT_IS_REPEAT)) {
+        if (!transport.valid && !transport.adjusting()) {
+          BKE_report(op->reports, RPT_WARNING, "Place the detail on the surface before rotating");
+          return OPERATOR_RUNNING_MODAL;
+        }
+        transport.rotating = !transport.rotating;
+        transport.scaling = transport.strength_adjust = false;
+        const float2 event_mouse(float(event->mval[0]),float(event->mval[1]));
+        if (transport.rotating) {
+          const float2 radial = event_mouse-transport.target_mouse;
+          transport.rotation_base = transport.angle;
+          transport.rotation_mouse_start = math::length_squared(radial) >= 4.0f ?
+                                              std::atan2(radial.y,radial.x) : 0.0f;
+          ED_workspace_status_text(C, "Draw Transport ROTATE: move around imprint center | Click/Enter/R: accept angle | Esc: cancel stroke");
+        }
+        else {
+          transport.mouse_offset = transport.target_mouse-event_mouse;
+          ED_workspace_status_text(C, "Draw Transport MOVE: mouse to position | R: rotate | S: scale / SS: strength | Click/Enter: confirm | Esc: cancel stroke");
+        }
+        return OPERATOR_RUNNING_MODAL;
+      }
+      if (event->type == EVT_SKEY && event->val == KM_PRESS &&
+          !(event->flag & WM_EVENT_IS_REPEAT)) {
+        if (!transport.valid && !transport.adjusting()) {
+          BKE_report(op->reports, RPT_WARNING, "Place the detail on the surface before adjusting");
+          return OPERATOR_RUNNING_MODAL;
+        }
+        const float2 event_mouse(float(event->mval[0]),float(event->mval[1]));
+        transport.rotating = false;
+        if (transport.scaling) {
+          /* Second S switches to strength; the current footprint scale remains frozen. */
+          transport.scaling = false;
+          transport.strength_adjust = true;
+          transport.strength_base = transport.imprint_strength;
+          transport.strength_mouse_start = event_mouse.x;
+          ED_workspace_status_text(C, "Draw Transport STRENGTH: mouse left/right | Click/Enter: accept | Esc: cancel stroke");
+        }
+        else {
+          transport.scaling = true;
+          transport.strength_adjust = false;
+          transport.scale_base = transport.footprint_scale;
+          transport.scale_mouse_start = std::max(8.0f,math::length(event_mouse-transport.target_mouse));
+          ED_workspace_status_text(C, "Draw Transport SCALE: move toward/away from center | S again: strength | Click/Enter: accept | Esc: cancel stroke");
+        }
+        return OPERATOR_RUNNING_MODAL;
+      }
+      if (ELEM(event->type, LEFTMOUSE, EVT_RETKEY, EVT_PADENTER) && event->val == KM_PRESS) {
+        if (transport.adjusting()) {
+          transport.rotating = transport.scaling = transport.strength_adjust = false;
+          transport.mouse_offset = transport.target_mouse-
+                                   float2(float(event->mval[0]),float(event->mval[1]));
+          ED_workspace_status_text(C, "Draw Transport MOVE: mouse to position | R: rotate | S: scale / SS: strength | Click/Enter: confirm | Esc: cancel stroke");
+          return OPERATOR_RUNNING_MODAL;
+        }
+        if (!transport.valid) {
+          BKE_report(op->reports, RPT_WARNING, "Move the detail onto a valid surface before confirming");
+          return OPERATOR_RUNNING_MODAL;
+        }
+        std::printf("[DRAW_TRANSPORT_V07] confirm\n");
+        std::fflush(stdout);
+        stroke->finish(C);
+        MEM_delete(stroke);
+        op->customdata = nullptr;
+        return OPERATOR_FINISHED;
+      }
+      if (ISMOUSE_MOTION(event->type)) {
+        bool moved = false;
+        try { moved = draw_transport_v01::move(transport, C, stroke->vc, *event); }
+        catch (const std::bad_alloc &) { transport.failure_reason = "Insufficient memory while positioning the imprint"; moved = false; }
+        catch (const std::length_error &) { transport.failure_reason = "Imprint exceeds the representable buffer size"; moved = false; }
+        if (!moved) {
+          BKE_reportf(op->reports, RPT_ERROR, "Draw Transport: %s", transport.failure_reason ? transport.failure_reason : "Cannot position the imprint");
+          sculpt_brush_stroke_cancel(C, op);
+          MEM_delete(stroke);
+          op->customdata = nullptr;
+          return OPERATOR_CANCELLED;
+        }
+      }
+      /* Keep the same open stroke/Undo transaction. No painting, navigation or mode changes. */
+      return OPERATOR_RUNNING_MODAL;
+    }
+    if (event->type == stroke->draw_transport_event && event->val == KM_RELEASE) {
+      bool captured = false;
+      try { captured = draw_transport_v01::capture(transport, *stroke->object); }
+      catch (const std::bad_alloc &) { transport.failure_reason = "Insufficient memory while capturing the imprint"; captured = false; }
+      catch (const std::length_error &) { transport.failure_reason = "Imprint exceeds the representable buffer size"; captured = false; }
+      if (!captured) {
+        BKE_reportf(op->reports, RPT_WARNING, "Draw Transport: %s; stroke cancelled", transport.failure_reason ? transport.failure_reason : "Cannot capture the imprint");
+        sculpt_brush_stroke_cancel(C, op);
+        MEM_delete(stroke);
+        op->customdata = nullptr;
+        return OPERATOR_CANCELLED;
+      }
+      transport.target_mouse = stroke->object->runtime->sculpt_session->cache->initial_mouse;
+      transport.mouse_offset = transport.target_mouse-
+                               float2(float(event->mval[0]), float(event->mval[1]));
+      ED_workspace_status_text(C, "Draw Transport MOVE: move mouse to position | R: rotate | S: scale / SS: strength | Click/Enter: confirm | Esc/Right Click: cancel");
+      ED_region_tag_redraw(CTX_wm_region(C));
+      return OPERATOR_RUNNING_MODAL;
+    }
+  }
   const wmOperatorStatus retval = stroke->modal(C, op, event);
 
   if (ELEM(retval, OPERATOR_FINISHED, OPERATOR_CANCELLED)) {
@@ -8159,6 +8554,45 @@ static wmOperatorStatus brush_stroke_modal(bContext *C, wmOperator *op, const wm
   }
 
   return retval;
+}
+
+static bool draw_transport_activate_poll_v03(bContext *C)
+{
+  return sculpt_mode_and_brush_poll(C);
+}
+static wmOperatorStatus draw_transport_activate_exec_v03(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || !ob->runtime->sculpt_session || ob->runtime->sculpt_session->cache ||
+      ob->runtime->sculpt_session->filter_cache) {
+    BKE_report(op->reports,RPT_ERROR,"Finish the current sculpt operation first");
+    return OPERATOR_CANCELLED;
+  }
+  char name[MAX_ID_NAME];
+  RNA_string_get(op->ptr,"brush_name",name);
+  Brush *brush = reinterpret_cast<Brush *>(BKE_libblock_find_name(CTX_data_main(C),ID_BR,name));
+  if (!brush || brush->id.lib || brush->sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW ||
+      brush->stroke_method != BRUSH_STROKE_ANCHORED || !draw_transport_v01::enabled(*brush)) {
+    BKE_report(op->reports,RPT_ERROR,"Choose the local Draw Transport brush created by the session UI");
+    return OPERATOR_CANCELLED;
+  }
+  Paint *paint = BKE_paint_get_active_from_context(C);
+  if (!paint || !WM_toolsystem_activate_brush_and_tool(C,paint,brush)) {
+    BKE_report(op->reports,RPT_ERROR,"Cannot activate Draw Transport in this tool context");
+    return OPERATOR_CANCELLED;
+  }
+  WM_main_add_notifier(NC_ASSET | NA_ACTIVATED,nullptr);
+  WM_main_add_notifier(NC_SCENE | ND_TOOLSETTINGS,nullptr);
+  return OPERATOR_FINISHED;
+}
+void SCULPT_OT_draw_transport_activate_v03(wmOperatorType *ot)
+{
+  ot->name = "Activate Draw Transport Brush";
+  ot->idname = "SCULPT_OT_draw_transport_activate_v03";
+  ot->description = "Activate the dedicated local Draw Transport brush";
+  ot->poll = draw_transport_activate_poll_v03;
+  ot->exec = draw_transport_activate_exec_v03;
+  RNA_def_string(ot->srna,"brush_name","Draw Transport",MAX_ID_NAME,"Brush","Local transport brush name");
 }
 
 static void redo_empty_ui(bContext * /*C*/, wmOperator * /*op*/) {}
@@ -8183,6 +8617,8 @@ void SCULPT_OT_brush_stroke(wmOperatorType *ot)
 
   /* Properties. */
 
+  RNA_def_boolean(ot->srna, "draw_transport", false, "Draw Transport",
+                  "Keep an Anchored Draw imprint movable until explicit confirmation");
   paint_stroke_operator_properties(ot);
 
   PropertyRNA *prop = RNA_def_boolean(

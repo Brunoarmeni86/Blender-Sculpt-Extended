@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 
 #include "BLI_index_mask_fwd.hh"
 #include "BLI_span.hh"
@@ -19,8 +20,10 @@ namespace blender {
 struct Depsgraph;
 struct Mesh;
 struct Object;
+struct MultiresModifierData;
 struct Scene;
 struct wmOperator;
+struct wmOperatorType;
 namespace bke::pbvh {
 class Node;
 }
@@ -41,6 +44,13 @@ enum class Type : int8_t {
 };
 
 struct StepData;
+struct FaceSetsL0MasterSnapshot;
+void attach_facesets_l0_master(std::unique_ptr<FaceSetsL0MasterSnapshot> snapshot);
+bool capture_facesets_visibility(Mesh &mesh,const MultiresModifierData &mmd);
+const char *capture_facesets_l0_master(MultiresModifierData &mmd,int corners,Span<int> indices);
+
+/** Read-only opt-in native verification operator. */
+void SCULPT_OT_undo_memory_audit_v01(wmOperatorType *ot);
 
 /**
  * Store undo data of the given type for a pbvh::Tree node. This function can be called by multiple

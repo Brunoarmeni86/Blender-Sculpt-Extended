@@ -27,6 +27,7 @@
 #include "editors/sculpt_paint/mesh/sculpt_smooth.hh"
 
 #include "bmesh.hh"
+#include "editors/sculpt_paint/mesh/sculpt_layer_delta_smooth_v01.hh"
 
 namespace blender::ed::sculpt_paint::brushes {
 
@@ -223,6 +224,123 @@ static void calc_grids(const Depsgraph &depsgraph,
   apply_translations(translations, grids, subdiv_ccg);
 }
 
+/* DELTA_SMOOTH_V01: fixed sparse reference, Jacobi reads followed by separate writes.
+ * Reads delta = live CCG - (stroke-start CCG - stitched weighted active-layer delta).
+ * Thus no curvature from base/other layers enters the smoothing average. */
+/* LAYER_DELTA_SMOOTH_GUARD_V02
+ * Mirror clipping may snap a stationary point to its plane. For isolated
+ * Smooth, a zero layer delta must stay stationary, including masked samples. */
+static void clip_layer_delta_translations(const Sculpt &sd,
+                                          const SculptSession &ss,
+                                          const Span<float3> positions,
+                                          const MutableSpan<float3> translations)
+{
+  if (!ss.cache || ss.cache->mirror_modifier_clip.flag == 0) {
+    clip_and_lock_translations(sd, ss, positions, translations);
+    return;
+  }
+  Vector<int, 64> stationary;
+  for (const int i : translations.index_range()) {
+    const float3 &delta = translations[i];
+    if (delta.x == 0.0f && delta.y == 0.0f && delta.z == 0.0f) {
+      stationary.append(i);
+    }
+  }
+  clip_and_lock_translations(sd, ss, positions, translations);
+  for (const int i : stationary) {
+    translations[i] = float3(0.0f);
+  }
+}
+
+static bool do_layer_delta_smooth(const Depsgraph &depsgraph,
+                                 const Sculpt &sd,
+                                 const Brush &brush,
+                                 Object &object,
+                                 const IndexMask &node_mask,
+                                 const float brush_strength)
+{
+  namespace delta = layer_delta_smooth_v01;
+  if (!delta::owns(object)) {
+    const SculptSession &session = *object.runtime->sculpt_session;
+    const MultiresModifierData *mmd = session.multires_modifier;
+    if (delta::enabled() && mmd && !mmd->sculpt_layers.is_empty()) {
+      delta::fail("stroke_not_prepared");
+      return true;
+    }
+    return false;
+  }
+  if (!delta::prepare_region(object, node_mask)) { return true; }
+  SculptSession &ss = *object.runtime->sculpt_session;
+  SubdivCCG &ccg = *ss.subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const OffsetIndices faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  Array<int> offset_data;
+  const OffsetIndices<int> offsets = create_node_vert_offsets(key, nodes, node_mask, offset_data);
+  Array<float3> changes(offsets.total_size());
+  threading::EnumerableThreadSpecific<LocalData> all_tls;
+  const Map<int, float3> &reference = delta::state().reference;
+  const auto read_delta = [&](const SubdivCCGCoord coord) -> float3 {
+    const int index = coord.to_index(key);
+    return ccg.positions[index] - reference.lookup(index);
+  };
+  for (const float strength : iteration_strengths(brush_strength)) {
+    if (strength <= 0.0f) { continue; }
+    node_mask.foreach_index([&](const int i, const int pos) {
+      LocalData &tls = all_tls.local();
+      const Span<int> grids = nodes[i].grids();
+      const MutableSpan positions = gather_grids_positions(ccg, grids, tls.positions);
+      calc_factors_common_grids(depsgraph, brush, object, positions, nodes[i],
+                                tls.factors, tls.distances);
+      scale_factors(tls.factors, strength);
+      MutableSpan<float3> node_changes = changes.as_mutable_span().slice(offsets[pos]);
+      int local_index = 0;
+      for (const int grid : grids) {
+        for (int y = 0; y < key.grid_size; y++) {
+          for (int x = 0; x < key.grid_size; x++, local_index++) {
+            node_changes[local_index] = float3(0.0f);
+            if (tls.factors[local_index] == 0.0f) { continue; }
+            const SubdivCCGCoord coord{grid, short(x), short(y)};
+            SubdivCCGNeighbors neighbors;
+            BKE_subdiv_ccg_neighbor_coords_get(ccg, coord, false, neighbors);
+            if (boundary::vert_is_boundary(faces, corner_verts,
+                                           ss.boundary_info_cache->verts,
+                                           ss.boundary_info_cache->edges, ccg, coord)) {
+              if (neighbors.coords.size() == 2) { neighbors.coords.clear(); }
+              else {
+                neighbors.coords.remove_if([&](const SubdivCCGCoord neighbor) {
+                  return !boundary::vert_is_boundary(faces, corner_verts,
+                      ss.boundary_info_cache->verts, ss.boundary_info_cache->edges, ccg, neighbor);
+                });
+              }
+            }
+            if (neighbors.coords.is_empty()) { continue; }
+            const float3 center = read_delta(coord);
+            float3 translation(0.0f);
+            for (const SubdivCCGCoord neighbor : neighbors.coords) {
+              translation += read_delta(neighbor) - center;
+            }
+            translation /= float(neighbors.coords.size());
+            if (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE) {
+              smooth_preserve_shape_translation(translation, ccg.normals[coord.to_index(key)]);
+            }
+            node_changes[local_index] = translation * tls.factors[local_index];
+          }
+        }
+      }
+      clip_layer_delta_translations(sd, ss, positions, node_changes);
+    }, exec_mode::grain_size(1));
+    /* A barrier separates all neighbor reads from all position writes, including other nodes. */
+    node_mask.foreach_index([&](const int i, const int pos) {
+      apply_translations(changes.as_span().slice(offsets[pos]), nodes[i].grids(), ccg);
+    }, exec_mode::grain_size(1));
+  }
+  return true;
+}
+
 static void calc_bmesh(const Depsgraph &depsgraph,
                        const Sculpt &sd,
                        Object &object,
@@ -280,6 +398,9 @@ void do_smooth_brush(const Depsgraph &depsgraph,
       do_smooth_brush_mesh(depsgraph, sd, brush, object, node_mask, brush_strength);
       break;
     case bke::pbvh::Type::Grids: {
+      if (do_layer_delta_smooth(depsgraph, sd, brush, object, node_mask, brush_strength)) {
+        break;
+      }
       const Mesh &base_mesh = *id_cast<const Mesh *>(object.data);
       const OffsetIndices faces = base_mesh.faces();
       const Span<int> corner_verts = base_mesh.corner_verts();
@@ -326,3 +447,4 @@ void do_smooth_brush(const Depsgraph &depsgraph,
 }
 
 }  // namespace blender::ed::sculpt_paint::brushes
+

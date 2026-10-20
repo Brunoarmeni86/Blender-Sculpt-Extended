@@ -48,6 +48,7 @@ enum class MeshExtractType {
 };
 
 struct MeshRenderData {
+  const Object *facesets_source_object = nullptr;
   MeshExtractType extract_type;
 
   int verts_num;

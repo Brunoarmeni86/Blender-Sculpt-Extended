@@ -5,6 +5,53 @@
  * Author: Sergey Sharybin. */
 
 #include <cassert>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
+/* MULTIRES_EVALUATOR_TRACE_V01: startup diagnostics, no per-sample timers. */
+namespace blender::opensubdiv::trace_v01 {
+class Scope {
+  using Clock = std::chrono::steady_clock;
+  const void *refiner_;
+  bool enabled_;
+  Clock::time_point start_, last_;
+ public:
+  explicit Scope(const void *refiner) : refiner_(refiner)
+  {
+    const char *path = std::getenv("BLENDER_SCULPT_COLD_START_LOG");
+    enabled_ = path && path[0];
+    if (enabled_) {
+      start_ = last_ = Clock::now();
+      std::printf("[MULTIRES_EVALUATOR_TRACE_V01] event=BEGIN scope=OSD_CREATE id=%p refiner=%p\n",
+                  static_cast<void *>(this), refiner_);
+      last_ = Clock::now();
+    }
+  }
+  Scope(const Scope &) = delete;
+  Scope &operator=(const Scope &) = delete;
+  void mark(const char *stage)
+  {
+    if (!enabled_) return;
+    const auto now = Clock::now();
+    std::printf("[MULTIRES_EVALUATOR_TRACE_V01] event=STAGE scope=OSD_CREATE id=%p "
+                "refiner=%p stage=%s dt_ms=%.3f total_ms=%.3f\n",
+                static_cast<void *>(this), refiner_, stage,
+                std::chrono::duration<double, std::milli>(now-last_).count(),
+                std::chrono::duration<double, std::milli>(now-start_).count());
+    last_ = Clock::now();
+  }
+  ~Scope()
+  {
+    if (enabled_) {
+      std::printf("[MULTIRES_EVALUATOR_TRACE_V01] event=END scope=OSD_CREATE id=%p "
+                  "refiner=%p total_ms=%.3f\n",
+                  static_cast<void *>(this), refiner_,
+                  std::chrono::duration<double, std::milli>(Clock::now()-start_).count());
+    }
+  }
+};
+}  // namespace blender::opensubdiv::trace_v01
 
 #ifdef _MSC_VER
 #  include <iso646.h>
@@ -426,6 +473,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
     eOpenSubdivEvaluator evaluator_type,
     OpenSubdiv_EvaluatorCache *evaluator_cache_descr)
 {
+  blender::opensubdiv::trace_v01::Scope eval_trace(topology_refiner);
   TopologyRefiner *refiner = topology_refiner->topology_refiner;
   if (refiner == nullptr) {
     // Happens on bad topology.
@@ -454,6 +502,8 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
     refiner->RefineUniform(options);
   }
 
+  eval_trace.mark("topology_refine");
+
   // Work around ASAN warnings, due to OpenSubdiv pretending to have an actual StencilTable
   // instance while it's really its base class.
   auto delete_stencil_table = [](const StencilTable *table) {
@@ -470,6 +520,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
   vertex_stencil_options.generateIntermediateLevels = stencil_generate_intermediate_levels;
   const StencilTable *vertex_stencils = StencilTableFactory::Create(*refiner,
                                                                     vertex_stencil_options);
+  eval_trace.mark("vertex_stencils");
   // Varying stencils.
   //
   // TODO(sergey): Seems currently varying stencils are always required in
@@ -482,6 +533,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
     varying_stencil_options.interpolationMode = StencilTableFactory::INTERPOLATE_VARYING;
     varying_stencils = StencilTableFactory::Create(*refiner, varying_stencil_options);
   }
+  eval_trace.mark("varying_stencils");
   // Face warying stencil.
   std::vector<const StencilTable *> all_face_varying_stencils;
   all_face_varying_stencils.reserve(num_face_varying_channels);
@@ -496,6 +548,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
     all_face_varying_stencils.push_back(
         StencilTableFactory::Create(*refiner, face_varying_stencil_options));
   }
+  eval_trace.mark("face_varying_stencils");
   // Generate bi-cubic patch table for the limit surface.
   PatchTableFactory::Options patch_options(level);
   patch_options.SetEndCapType(PatchTableFactory::Options::ENDCAP_GREGORY_BASIS);
@@ -503,6 +556,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
   patch_options.generateFVarTables = has_face_varying_data;
   patch_options.generateFVarLegacyLinearPatches = false;
   const PatchTable *patch_table = PatchTableFactory::Create(*refiner, patch_options);
+  eval_trace.mark("patch_table");
   // Append local points stencils.
   // Point stencils.
   const StencilTable *local_point_stencil_table = patch_table->GetLocalPointStencilTable();
@@ -539,6 +593,7 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
       all_face_varying_stencils[face_varying_channel] = table;
     }
   }
+  eval_trace.mark("append_local_stencils");
   // Create OpenSubdiv's CPU side evaluator.
   blender::opensubdiv::EvalOutputAPI::EvalOutput *eval_output = nullptr;
 
@@ -562,7 +617,9 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
         vertex_stencils, varying_stencils, all_face_varying_stencils, 2, patch_table);
   }
 
+  eval_trace.mark("backend_buffers");
   blender::opensubdiv::PatchMap *patch_map = new blender::opensubdiv::PatchMap(*patch_table);
+  eval_trace.mark("patch_map");
   // Wrap everything we need into an object which we control from our side.
   OpenSubdiv_Evaluator *evaluator = new OpenSubdiv_Evaluator();
   evaluator->type = evaluator_type;
@@ -577,5 +634,6 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
     delete_stencil_table(table);
   }
 
+  eval_trace.mark("wrap_and_cleanup");
   return evaluator;
 }

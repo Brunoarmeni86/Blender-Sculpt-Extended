@@ -320,9 +320,7 @@ void EDBM_mesh_make_from_mesh(Object *ob,
   for (ModifierData &md : ob->modifiers) {
     if (md.type == eModifierType_Multires) {
       auto *mmd = reinterpret_cast<MultiresModifierData *>(&md);
-      if (!mmd->sculpt_layers.is_empty() || mmd->sculpt_color_grids ||
-          mmd->sculpt_face_set_grids)
-      {
+      if (bke::multires_layers::has_persistent_companions(*mmd)) {
         bke::multires_layers::base_ensure_vertex_ids(*src_mesh);
         bke::multires_layers::ensure_corner_ids(*mmd, *src_mesh);
       }
@@ -398,9 +396,7 @@ void EDBM_mesh_load_ex(Main *bmain, Object *ob, bool free_data)
   for (ModifierData &md : ob->modifiers) {
     if (md.type == eModifierType_Multires) {
       auto *mmd = reinterpret_cast<MultiresModifierData *>(&md);
-      if (!mmd->sculpt_layers.is_empty() || mmd->sculpt_color_grids ||
-          mmd->sculpt_face_set_grids)
-      {
+      if (bke::multires_layers::has_persistent_companions(*mmd)) {
         BitVector<> reset_corners;
         if (!bke::multires_layers::remap_after_topology_edit(
                 *mmd, *mesh, &reset_corners, old_corner_ids.as_span())) {
@@ -2250,5 +2246,3 @@ bool EDBM_smooth_vert(BMEditMesh *em, wmOperator *op)
 }
 
 }  // namespace blender
-
-

@@ -27,6 +27,9 @@ struct wmOperator;
 
 namespace ed::sculpt_paint {
 
+/** Read-only opt-in test for retaining a completed Multires evaluation on file load. */
+bool object_sculpt_mode_restore_reuse_ready(Depsgraph &depsgraph, Scene &scene, Object &ob);
+
 void object_sculpt_mode_enter(Main &bmain,
                               Depsgraph &depsgraph,
                               Scene &scene,
@@ -123,3 +126,4 @@ void store_mesh_from_eval(const wmOperator &op,
 }  // namespace ed::sculpt_paint
 
 }  // namespace blender
+

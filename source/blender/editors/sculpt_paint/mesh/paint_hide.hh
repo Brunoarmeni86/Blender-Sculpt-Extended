@@ -8,7 +8,10 @@
 
 #pragma once
 
+#include "BLI_bit_span.hh"
+#include "BLI_function_ref.hh"
 #include "BLI_index_mask_fwd.hh"
+/* MULTIRES_FACESETS_VISIBILITY_V02: share the existing native hide writer. */
 
 namespace blender {
 
@@ -24,7 +27,12 @@ namespace ed::sculpt_paint::hide {
 void sync_all_from_faces(Object &object);
 void mesh_show_all(const Depsgraph &depsgraph, Object &object, const IndexMask &node_mask);
 void grids_show_all(Depsgraph &depsgraph, Object &object, const IndexMask &node_mask);
-void tag_update_visibility(const bContext &C);
+/** Native CCG hide writer: pushes HideVert Undo and updates PBVH visibility. */
+void grid_hide_update(Depsgraph &depsgraph,
+                      Object &object,
+                      const IndexMask &node_mask,
+                      FunctionRef<void(int, MutableBoundedBitSpan)> calc_hide);
+void tag_update_visibility(const bContext &C); /* HR tools reuse the native writer. */
 
 void PAINT_OT_hide_show_masked(wmOperatorType *ot);
 void PAINT_OT_hide_show_all(wmOperatorType *ot);

@@ -8,6 +8,10 @@
 
 #pragma once
 
+#include <cstdlib>
+
+#include "DNA_modifier_types.h" /* FACESETS_HR_DISPLAY_V04: master is an overlay source. */
+
 #include "BKE_attribute.hh"
 #include "BKE_curves.hh"
 #include "BKE_mesh.hh"
@@ -199,7 +203,12 @@ class Sculpts : Overlay {
       case bke::pbvh::Type::Grids: {
         const SubdivCCG &subdiv_ccg = *sculpt_session->subdiv_ccg;
         const Mesh &base_mesh = DRW_object_get_data_for_drawing<Mesh>(*object_orig);
-        if (subdiv_ccg.masks.is_empty() && !base_mesh.attributes().contains(".sculpt_face_set")) {
+        /* FACESETS_HR_DISPLAY_V04: gestures can create a master without a base
+         * Face Set attribute. Do not suppress the overlay in that state. */
+        const MultiresModifierData *mmd = sculpt_session->multires_modifier;
+        const bool has_hr_face_sets = mmd && mmd->sculpt_face_set_grids;
+        if (subdiv_ccg.masks.is_empty() && !base_mesh.attributes().contains(".sculpt_face_set") &&
+            !has_hr_face_sets) {
           return;
         }
         break;
@@ -223,6 +232,21 @@ class Sculpts : Overlay {
                                                                     SCULPT_BATCH_DEFAULT) |
                                                   (show_mask_ ? SCULPT_BATCH_MASK :
                                                                 SCULPT_BATCH_DEFAULT);
+
+      /* MULTIRES_OVERLAY_NEUTRAL_V01: optional, full path when disabled. */
+      const char *neutral = std::getenv("BLENDER_MULTIRES_OVERLAY_NEUTRAL_SKIP");
+      if (neutral && neutral[0] == '1' && neutral[1] == '\0' &&
+          pbvh->type() == bke::pbvh::Type::Grids)
+      {
+        /* Opacity zero is exactly neutral; do not change shader constants. */
+        if (state.overlay.sculpt_mode_mask_opacity == 0.0f) {
+          sculpt_batch_features_ &= ~SCULPT_BATCH_MASK;
+        }
+        if (state.overlay.sculpt_mode_face_sets_opacity == 0.0f) {
+          sculpt_batch_features_ &= ~SCULPT_BATCH_FACE_SET;
+        }
+        sculpt_batch_features_ |= SCULPT_BATCH_SKIP_NEUTRAL_OVERLAY;
+      }
 
       for (SculptBatch &batch : sculpt_batches_get(ob_ref.object, sculpt_batch_features_)) {
         mesh_ps_->draw(batch.batch, handle);

@@ -5,7 +5,10 @@
 /** \file
  * \ingroup edsculpt
  */
+#include <cstdlib>
 #include "sculpt_expand.hh"
+#include "BKE_sculpt_facesets_rc1.hh"
+#include "BKE_sculpt_facesets_visibility_rc2.hh"
 
 #include <cmath>
 
@@ -2914,6 +2917,14 @@ static wmOperatorStatus sculpt_expand_invoke(bContext *C, wmOperator *op, const 
   Object &ob = *CTX_data_active_object(C);
   SculptSession &ss = *ob.runtime->sculpt_session;
   Mesh *mesh = id_cast<Mesh *>(ob.data);
+  const char *rc10=std::getenv("BLENDER_FACESETS_TOOLS_RC10");
+  const auto *rc10_mmd=bke::facesets_visibility_rc2::modifier(ob);
+  if (rc10 && rc10[0]=='1' && rc10[1]=='\0' && bke::facesets_rc1::enabled() &&
+      rc10_mmd && rc10_mmd->sculpt_face_set_grids &&
+      TargetType(RNA_enum_get(op->ptr,"target"))==TargetType::FaceSets) {
+    BKE_report(op->reports,RPT_ERROR,"Expand Face Sets still edits base faces; use HR Grow/Shrink until the modal HR path is implemented");
+    return OPERATOR_CANCELLED;
+  }
 
   const View3D *v3d = CTX_wm_view3d(C);
   const Base *base = CTX_data_active_base(C);

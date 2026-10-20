@@ -7,6 +7,8 @@
  * Implements the Sculpt Mode tools.
  */
 
+#include "BKE_anim_data.hh"
+#include "ANIM_action.hh"
 #include "BLI_color.hh"
 #include "BLI_bit_vector.hh"
 #include "BLI_index_mask.hh"
@@ -14,6 +16,8 @@
 #include "BLI_time.h"
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 #include "MEM_guardedalloc.h"
 
 #include "BLI_enumerable_thread_specific.hh"
@@ -24,6 +28,7 @@
 
 #include "BLT_translation.hh"
 
+#include "DNA_anim_types.h"
 #include "DNA_brush_types.h"
 #include "DNA_listBase.h"
 #include "DNA_modifier_types.h"
@@ -43,10 +48,13 @@
 #include "BKE_main.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
+#include "BKE_mesh_runtime.hh"
 #include "BKE_mesh_mirror.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
 #include "BKE_multires_sculpt_layers.hh"
+#include "BKE_sculpt_facesets_dense_probe_v06d.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
@@ -58,6 +66,8 @@
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_subdiv.hh"
 
+#include "DEG_depsgraph_build.hh"
+#include "DEG_depsgraph_query.hh"
 #include "DEG_depsgraph.hh"
 
 #include "IMB_colormanagement.hh"
@@ -78,10 +88,15 @@
 #include "paint_mask.hh"
 #include "sculpt_automask.hh"
 #include "sculpt_color.hh"
+#include "sculpt_polypaint_blur_v01_api.hh"
+#include <vector>
+#include <string>
 #include "sculpt_dyntopo.hh"
 #include "sculpt_flood_fill.hh"
+#include "sculpt_face_set.hh"
 #include "sculpt_intern.hh"
 #include "sculpt_undo.hh"
+#include "sculpt_facesets_l0_snapshot_v02.hh"
 
 #include "RNA_access.hh"
 #include "RNA_define.hh"
@@ -96,7 +111,16 @@
 #include <cstring>
 #include <string>
 
+#include "sculpt_polypaint_uv_bake_v01.hh"
+#include "sculpt_detail_transfer_v01.hh"
+
 namespace blender::ed::sculpt_paint {
+
+#include "sculpt_facesets_rebuild_l0_v01.hh"
+#include "sculpt_facesets_sculpt_l0_v02.hh"
+#include "sculpt_facesets_mixed_fixture_v03.hh"
+#include "sculpt_facesets_region_v04.hh"
+#include "sculpt_facesets_brush_probe_v05.hh"
 
 
 static MultiresModifierData *sculpt_multires_layer_modifier(Object &ob)
@@ -194,8 +218,156 @@ static void multires_audit_json_string(const char *text)
   std::putchar('"');
 }
 
+/* MULTIRES_FACESETS_DRAW_V01: explicit base propagation and read-only audit. */
+static bool multires_face_sets_poll(bContext *C)
+{
+  const Object *object = CTX_data_active_object(C);
+  return object && object->type == OB_MESH && object->mode == OB_MODE_SCULPT &&
+         object->runtime->sculpt_session &&
+         object->runtime->sculpt_session->multires_modifier &&
+         object->runtime->sculpt_session->subdiv_ccg;
+}
+
+static wmOperatorStatus multires_face_sets_audit_exec(bContext *C, wmOperator *op)
+{
+  const Object &object = *CTX_data_active_object(C);
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  if (ss.cache || ss.filter_cache) {
+    BKE_report(op->reports, RPT_ERROR, "Release the stroke or filter before reading Face Sets");
+    return OPERATOR_CANCELLED;
+  }
+  const MultiresModifierData &mmd = *ss.multires_modifier;
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  const bool present = mmd.sculpt_face_set_grids != nullptr;
+  const bool valid = bke::multires_layers::faceset_master_valid(mmd, mesh.corners_num);
+  if (present && !valid) {
+    BKE_report(op->reports, RPT_ERROR, "Invalid Face Set master; no data changed");
+    return OPERATOR_CANCELLED;
+  }
+  char label[128];
+  RNA_string_get(op->ptr, "label", label);
+  MultiresAuditHash hash;
+  hash.word(uint32_t(mmd.sculpt_face_set_level));
+  hash.word(uint32_t(mmd.sculpt_face_set_grids_num));
+  uint64_t dense_grids = 0, payload_bytes = 0;
+  int minimum = 0, maximum = 0;
+  if (valid) {
+    const int side = bke::subdiv::grid_size_from_level(mmd.sculpt_face_set_level);
+    minimum = maximum = mmd.sculpt_face_set_grids[0].ids ?
+                            mmd.sculpt_face_set_grids[0].ids[0] :
+                            mmd.sculpt_face_set_grids[0].uniform_id;
+    for (int corner = 0; corner < mmd.sculpt_face_set_grids_num; corner++) {
+      const MultiresFaceSetGrid &grid = mmd.sculpt_face_set_grids[corner];
+      dense_grids += grid.ids != nullptr;
+      payload_bytes += grid.ids ? uint64_t(grid.totid) * sizeof(int) : 0;
+      /* Hash logical IDs, so dense -> uniform compression does not change it. */
+      for (int i = 0; i < side * side; i++) {
+        const int id = grid.ids ? grid.ids[i] : grid.uniform_id;
+        hash.word(uint32_t(id));
+        minimum = std::min(minimum, id);
+        maximum = std::max(maximum, id);
+      }
+    }
+  }
+  std::printf("[FACESETS_HR_AUDIT] {\"label\":");
+  multires_audit_json_string(label);
+  std::printf(
+      ",\"object\":");
+  multires_audit_json_string(object.id.name + 2);
+  std::printf(
+      ",\"present\":%d,\"valid\":%d,\"master_level\":%d,\"sculpt_level\":%d,"
+      "\"grids\":%d,\"dense_grids\":%llu,\"payload_bytes\":%llu,"
+      "\"min_id\":%d,\"max_id\":%d,\"hash\":\"%016llx\"}\n",
+      int(present), int(valid), mmd.sculpt_face_set_level, ss.subdiv_ccg->level,
+      mmd.sculpt_face_set_grids_num,
+      static_cast<unsigned long long>(dense_grids),
+      static_cast<unsigned long long>(payload_bytes), minimum, maximum,
+      static_cast<unsigned long long>(hash.value));
+  std::fflush(stdout);
+  BKE_report(op->reports, RPT_INFO, "Face Set master fingerprint written to the launch log");
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_OT_multires_face_sets_audit(wmOperatorType *ot)
+{
+  ot->name = "Multires Face Sets Audit";
+  ot->idname = "SCULPT_OT_multires_face_sets_audit";
+  ot->description = "Read the stored Face Set IDs without changing geometry or pushing Undo";
+  ot->poll = multires_face_sets_poll;
+  ot->exec = multires_face_sets_audit_exec;
+  RNA_def_string(ot->srna, "label", "FACESETS", 128, "Label", "Fingerprint label");
+}
+
+static wmOperatorStatus multires_face_sets_from_base_exec(bContext *C, wmOperator *op)
+{
+  Object &object = *CTX_data_active_object(C);
+  SculptSession &ss = *object.runtime->sculpt_session;
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  MultiresModifierData &mmd = *ss.multires_modifier;
+  UndoStack *stack = ED_undo_stack_get();
+  if (!bke::multires_layers::faceset_high_resolution_enabled() || ss.cache || ss.filter_cache ||
+      object.id.lib || mesh.id.lib || mesh.id.us != 1 ||
+      !(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0 || !stack ||
+      stack->step_init || stack->group_level != 0 ||
+      ss.subdiv_ccg->grids_num != mesh.corners_num)
+  {
+    BKE_report(op->reports, RPT_ERROR,
+               "Use the HR Face Sets launch profile, a local single-user mesh and Global Undo; "
+               "finish the stroke or Undo transaction first");
+    return OPERATOR_CANCELLED;
+  }
+  if (!bke::multires_layers::faceset_ensure_from_mesh(mmd, mesh, mmd.totlvl) ||
+      !bke::multires_layers::faceset_master_valid(mmd, mesh.corners_num))
+  {
+    BKE_report(op->reports, RPT_ERROR, "Invalid Face Set master; base groups were not propagated");
+    return OPERATOR_CANCELLED;
+  }
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  if (pbvh.type() != bke::pbvh::Type::Grids) {
+    return OPERATOR_CANCELLED;
+  }
+  IndexMaskMemory memory;
+  const IndexMask nodes = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  const bke::AttributeAccessor attributes = mesh.attributes();
+  const VArraySpan<int> base_ids = *attributes.lookup_or_default<int>(
+      ".sculpt_face_set", bke::AttrDomain::Face, 1);
+  const OffsetIndices<int> faces = mesh.faces();
+  undo::push_begin(*CTX_data_scene(C), object, op);
+  undo::push_nodes(*CTX_data_depsgraph_pointer(C), object, nodes, undo::Type::FaceSet);
+  /* Explicit replacement: every descendant of each original face inherits
+   * its base ID. Ordinary subdivision-level changes never call this. */
+  for (const int face : faces.index_range()) {
+    for (const int corner : faces[face]) {
+      MultiresFaceSetGrid &grid = mmd.sculpt_face_set_grids[corner];
+      MEM_SAFE_DELETE(grid.ids);
+      grid.totid = 0;
+      grid.uniform_id = base_ids[face];
+    }
+  }
+  auto writer = face_set::ensure_face_sets_mesh(mesh);
+  writer.finish();
+  pbvh.tag_face_sets_changed(nodes);
+  undo::push_end(object);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &object);
+  BKE_report(op->reports, RPT_INFO, "Base Face Sets propagated to all stored Multires samples");
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_OT_multires_face_sets_from_base(wmOperatorType *ot)
+{
+  ot->name = "Multires Face Sets from Base";
+  ot->idname = "SCULPT_OT_multires_face_sets_from_base";
+  ot->description = "Replace high-resolution Face Sets with the groups of the original faces; "
+                    "this explicitly replaces fine boundaries and can be undone";
+  ot->poll = multires_face_sets_poll;
+  ot->exec = multires_face_sets_from_base_exec;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+
 static bool sculpt_multires_base_fingerprint_poll(bContext *C)
 {
+  /* Also retained by the independent Face Set audit above. */
   const Object *object = CTX_data_active_object(C);
   return object && object->type == OB_MESH &&
          BKE_modifiers_findby_type(object, eModifierType_Multires);
@@ -394,19 +566,24 @@ static wmOperatorStatus sculpt_multires_polypaint_attribute_exec(bContext *C, wm
   const int action = RNA_enum_get(op->ptr, "action");
   const auto attributes = mesh.attributes();
   const auto meta = attributes.lookup_meta_data(name);
-  if (!name[0] || (action == 1 ? attributes.contains(name) : !bke::mesh::is_color_attribute(meta)) ||
+  bool retained = STREQ(mmd->sculpt_color_attribute, name) && name[0];
+  for (const MultiresColorAttribute &item : mmd->sculpt_color_attributes) {
+    retained |= name[0] && STREQ(item.name, name);
+  }
+  /* REMOVE may also address an orphaned named master after the native mesh
+   * attribute minus button was used. CLEAR is an explicit complete reset. */
+  if (action != 4 && (!name[0] ||
+      (action == 1 ? attributes.contains(name) :
+       !(bke::mesh::is_color_attribute(meta) || (action == 2 && !meta && retained))) ||
       (meta && !ELEM(meta->domain, bke::AttrDomain::Point, bke::AttrDomain::Corner)) ||
-      (action == 3 && (!new_name[0] || attributes.contains(new_name)))) {
-    BKE_report(op->reports, RPT_ERROR, "Choose a valid unique Color Attribute name");
+      (action == 3 && (!new_name[0] || attributes.contains(new_name))))) {
+    BKE_report(op->reports, RPT_ERROR, "Choose a valid unique Color Attribute or retained Paint master name");
     return OPERATOR_CANCELLED;
   }
   /* A removed external attribute may still own painted data. Do not reuse its
    * name silently: restore it first, or remove its master through these controls. */
-  MultiresModifierData occupied{};
-  if (action == 1 && (STREQ(mmd->sculpt_color_attribute, name) ||
-      (!mmd->sculpt_color_attribute[0] ? false :
-       bke::multires_layers::polypaint_attribute_view(*mmd, name, occupied)))) {
-    BKE_report(op->reports, RPT_ERROR, "A retained Paint master already owns this name");
+  if (action == 1 && retained) {
+    BKE_report(op->reports, RPT_ERROR, "A retained Paint master already owns this name; remove that master before reusing it");
     return OPERATOR_CANCELLED;
   }
   UndoStack *stack = ED_undo_stack_get();
@@ -423,13 +600,36 @@ static wmOperatorStatus sculpt_multires_polypaint_attribute_exec(bContext *C, wm
     return OPERATOR_CANCELLED;
   }
   /* Bind old one-master files BEFORE changing the mesh's active attribute. */
-  if (!mmd->sculpt_color_attribute[0] && mesh.active_color_attribute &&
+  if (action != 4 && !mmd->sculpt_color_attribute[0] && mesh.active_color_attribute &&
       mesh.active_color_attribute[0]) {
     if (!bke::multires_layers::polypaint_attribute_activate(*mmd, mesh.active_color_attribute)) {
       return OPERATOR_CANCELLED;
     }
   }
   auto writable = mesh.attributes_for_write();
+  std::vector<std::string> cleared_names;
+  if (action == 4) {
+    writable.foreach_attribute([&](const bke::AttributeIter &attribute) {
+      if (bke::mesh::is_color_attribute(writable.lookup_meta_data(attribute.name)) &&
+          ELEM(attribute.domain, bke::AttrDomain::Point, bke::AttrDomain::Corner)) {
+        cleared_names.push_back(std::string(attribute.name));
+      }
+    });
+    /* Color attributes are optional user data. Structural changes run outside
+     * stroke/cache/filter transactions and have a native Memfile checkpoint. */
+    for (const std::string &entry : cleared_names) {
+      if (!writable.remove(entry)) { return OPERATOR_CANCELLED; }
+    }
+    if (mmd->sculpt_color_attribute[0]) {
+      cleared_names.emplace_back(mmd->sculpt_color_attribute);
+    }
+    for (const MultiresColorAttribute &entry : mmd->sculpt_color_attributes) {
+      cleared_names.emplace_back(entry.name);
+    }
+    bke::multires_layers::polypaint_attributes_clear(*mmd);
+    BKE_id_attributes_active_color_set(&mesh.id, "");
+    BKE_id_attributes_default_color_set(&mesh.id, "");
+  }
   if (action == 1) {
     if (!writable.add(name, bke::AttrDomain::Corner, bke::AttrType::ColorFloat,
                       bke::AttributeInitDefaultValue())) {
@@ -455,7 +655,7 @@ static wmOperatorStatus sculpt_multires_polypaint_attribute_exec(bContext *C, wm
   else if (action == 2) {
     const bool was_active = mesh.active_color_attribute && STREQ(mesh.active_color_attribute, name);
     const bool was_default = mesh.default_color_attribute && STREQ(mesh.default_color_attribute, name);
-    if (!writable.remove(name)) {
+    if (meta && !writable.remove(name)) {
       return OPERATOR_CANCELLED;
     }
     bke::multires_layers::polypaint_attribute_remove(*mmd, name);
@@ -505,6 +705,9 @@ static wmOperatorStatus sculpt_multires_polypaint_attribute_exec(bContext *C, wm
       const IndexMask nodes = bke::pbvh::all_leaf_nodes(*pbvh, memory);
       if (name[0]) pbvh->tag_attribute_changed(nodes, name);
       if (new_name[0]) pbvh->tag_attribute_changed(nodes, new_name);
+      for (const std::string &entry : cleared_names) {
+        pbvh->tag_attribute_changed(nodes, entry);
+      }
     }
   }
   DEG_id_tag_update(&mesh.id, action == 0 ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
@@ -518,6 +721,19 @@ static wmOperatorStatus sculpt_multires_polypaint_attribute_exec(bContext *C, wm
   return OPERATOR_FINISHED;
 }
 
+namespace color {
+bool remove_attribute_full_v04(bContext *C,wmOperator *op,const char *name)
+{
+  PointerRNA properties = WM_operator_properties_create("SCULPT_OT_multires_polypaint_attribute");
+  RNA_enum_set(&properties,"action",2);RNA_string_set(&properties,"name",name);
+  wmOperator transaction{};
+  transaction.ptr=&properties;transaction.reports=op->reports;
+  transaction.type=WM_operatortype_find("SCULPT_OT_multires_polypaint_attribute",false);
+  const wmOperatorStatus status=sculpt_multires_polypaint_attribute_exec(C,&transaction);
+  WM_operator_properties_free(&properties);
+  return status==OPERATOR_FINISHED;
+}
+}
 static void SCULPT_OT_multires_polypaint_attribute(wmOperatorType *ot)
 {
   static const EnumPropertyItem actions[] = {
@@ -525,6 +741,7 @@ static void SCULPT_OT_multires_polypaint_attribute(wmOperatorType *ot)
       {1, "ADD", 0, "Add", "Create a white float corner Color Attribute"},
       {2, "REMOVE", 0, "Remove", "Remove the attribute and its Paint master"},
       {3, "RENAME", 0, "Rename", "Rename the attribute and its Paint master together"},
+      {4, "CLEAR", 0, "Clear All Colors", "Remove every Color Attribute and all active, inactive and orphaned Multires Paint masters; supports Undo"},
       {0, nullptr, 0, nullptr, nullptr},
   };
   ot->name = "Multires Polypaint Attribute";
@@ -557,7 +774,33 @@ static wmOperatorStatus sculpt_multires_merge_visible_to_base_exec(bContext *C, 
     BKE_report(op->reports, RPT_ERROR, "Switch to Object Mode before baking; pending Sculpt must commit in its original frame");
     return OPERATOR_CANCELLED;
   }
-  if (object->id.lib || object->adt || object->runtime->sculpt_session ||
+  /* MERGE_EMPTY_ACTION_V2 */
+  const auto merge_action_has_content = [](const bAction *dna_action) {
+    if (!dna_action) {
+      return false;
+    }
+    const animrig::Action &action = dna_action->wrap();
+    for (const animrig::Slot *slot : action.slots()) {
+      for (const FCurve *fcu :
+           animrig::fcurves_for_action_slot(action, slot->handle))
+      {
+        if (fcu->totvert > 0 || !fcu->modifiers.is_empty() || fcu->driver) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  const AnimData *merge_adt = object->adt;
+  const bool merge_has_animation = merge_adt &&
+      (merge_action_has_content(merge_adt->action) ||
+       merge_adt->tmpact != nullptr ||
+       !merge_adt->nla_tracks.is_empty() ||
+       !merge_adt->drivers.is_empty() ||
+       !merge_adt->overrides.is_empty() ||
+       merge_adt->act_track != nullptr ||
+       merge_adt->actstrip != nullptr);
+  if (object->id.lib || merge_has_animation || object->runtime->sculpt_session ||
       !(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0)
   {
     BKE_report(op->reports, RPT_ERROR,
@@ -613,6 +856,12 @@ static wmOperatorStatus sculpt_multires_merge_visible_to_base_exec(bContext *C, 
   std::printf("[LAYER_BAKE_BASE] visible_only=1 remove=%d sculpt=%d top=%d retained_layers=%d\n",
               int(remove_layers), mmd->sculptlvl, mmd->totlvl, mmd->sculpt_layers.count());
   std::fflush(stdout);
+  /* Undo already captured the original Action assignment before baking. */
+  if (object->adt && !merge_has_animation) {
+    BKE_animdata_free(&object->id, true);
+    DEG_relations_tag_update(CTX_data_main(C));
+    WM_main_add_notifier(NC_ANIMATION | ND_ANIMCHAN, object);
+  }
   BKE_report(op->reports, RPT_INFO, "Visible layers baked into native Multires; hidden layers retained");
   return OPERATOR_FINISHED;
 }
@@ -757,7 +1006,7 @@ static wmOperatorStatus sculpt_multires_base_capture_exec(bContext *C, wmOperato
   if (!mmd || !mesh || mmd->sculpt_layers.is_empty()) return OPERATOR_CANCELLED;
   if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
   if (!bke::multires_layers::bake_visible_to_base(*mmd, *mesh)) {
-    BKE_report(op->reports, RPT_ERROR, "Cannot bake: remove hidden copies, use single-user mesh data and valid finite grids");
+    BKE_report(op->reports, RPT_ERROR, "Cannot bake: hidden layers, shared data, shape keys, invalid grids or HR cage edits needing frame rebasing");
     return OPERATOR_CANCELLED;
   }
   multires_force_sculpt_rebuild(ob);
@@ -1357,16 +1606,43 @@ static void SCULPT_OT_multires_layer_duplicate(wmOperatorType *ot)
 
 static wmOperatorStatus sculpt_multires_layer_set_active_exec(bContext *C, wmOperator *op)
 {
+  /* LAYER_SELECT_OPERATOR_V02: preserve live geometry on a metadata-only switch. */
   Object *ob = CTX_data_active_object(C);
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
   const int index = RNA_int_get(op->ptr, "index");
-  if (index >= mmd->sculpt_layers.count()) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (index < 0 || index >= mmd->sculpt_layers.count()) return OPERATOR_CANCELLED;
+  if (index == mmd->sculpt_layer_active) return OPERATOR_CANCELLED;
+
+  const double started = BLI_time_now_seconds();
+  const SculptSession *ss = ob->runtime->sculpt_session;
+  const SubdivCCG *old_ccg = ss ? ss->subdiv_ccg : nullptr;
+  const bool pending = old_ccg && old_ccg->dirty.coords;
+  bool surface_preserved = false;
+  /* Pending coordinates still belong to the OLD selected layer. */
+  if (!sculpt_multires_layer_commit(*ob, *op, &surface_preserved)) {
+    return OPERATOR_CANCELLED;
+  }
+  const double committed = BLI_time_now_seconds();
+  ss = ob->runtime->sculpt_session;
+  const bool keep_surface = old_ccg && ss && ss->subdiv_ccg == old_ccg &&
+                            bke::object::pbvh_get(*ob) && (!pending || surface_preserved);
   bke::multires_layers::set_active(*mmd, index);
-  multires_force_sculpt_rebuild(ob);
-  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  if (keep_surface) {
+    DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+  }
+  else {
+    multires_force_sculpt_rebuild(ob);
+    DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  }
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  const char *trace = BLI_getenv("BLENDER_LAYER_RESP_TRACE");
+  if (trace && trace[0] == '1') {
+    std::printf("[LAYER_SELECT_OPERATOR_V02] target=%d pending=%d rebuild=%d commit_ms=%.3f total_ms=%.3f\n",
+                index, int(pending), int(!keep_surface),
+                (committed - started) * 1000.0, (BLI_time_now_seconds() - started) * 1000.0);
+  }
   return OPERATOR_FINISHED;
 }
 
@@ -1402,9 +1678,12 @@ static wmOperatorStatus sculpt_multires_layer_move_exec(bContext *C, wmOperator 
   }
 
   /* Commit pending edits against the old order before moving the list item. */
-  if (!sculpt_multires_layer_commit(*ob, *op) ||
-      !bke::multires_layers::move(*mmd, from_index, to_index))
-  {
+  if (!sculpt_multires_layer_commit(*ob, *op)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (!bke::multires_layers::move(*mmd, from_index, to_index)) {
+    BKE_report(op->reports, RPT_ERROR,
+               "Cannot move this row through a group; remove it from the group first");
     return OPERATOR_CANCELLED;
   }
 
@@ -1504,7 +1783,7 @@ static wmOperatorStatus sculpt_multires_layer_group_merge_exec(bContext *C, wmOp
   if (!bke::multires_layers::group_merge(*mmd, group_id)) {
     BKE_report(op->reports,
                RPT_ERROR,
-               "Merge Group requires at least two contiguous visible compatible layers");
+               "Merge Group requires contiguous visible compatible layers with finite results; original layers retained");
     return OPERATOR_CANCELLED;
   }
 
@@ -1675,7 +1954,11 @@ static wmOperatorStatus sculpt_multires_layer_flatten_exec(bContext *C, wmOperat
     BKE_report(op->reports, RPT_ERROR, "Cannot flatten incompatible layer grids");
     return OPERATOR_CANCELLED;
   }
-  bke::multires_layers::flatten(*mmd);
+  if (!bke::multires_layers::flatten(*mmd)) {
+    BKE_report(op->reports, RPT_ERROR,
+               "Cannot flatten: invalid or non-finite layer data; original layers retained");
+    return OPERATOR_CANCELLED;
+  }
   multires_force_sculpt_rebuild(ob);
   DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
   return OPERATOR_FINISHED;
@@ -1957,10 +2240,156 @@ static void SCULPT_OT_symmetrize(wmOperatorType *ot)
 /** \name Sculpt Mode Toggle Operator
  * \{ */
 
+/* MULTIRES_STARTUP_REUSE_V02
+ * Reuse only a completed, object-owned CCG from the active viewport graph,
+ * before creating the first SculptSession. Never cache a borrowed pointer
+ * across operations and never transfer ownership of Mesh/SubdivCCG/Subdiv. */
+static SubdivCCG *sculpt_startup_ccg_reuse_candidate(Depsgraph &depsgraph,
+                                                    Scene &scene,
+                                                    Object &object,
+                                                    Object *&r_object_eval,
+                                                    const char *&r_reason)
+{
+  r_object_eval = nullptr;
+  const auto reject = [&](const char *reason) -> SubdivCCG * {
+    r_reason = reason;
+    return nullptr;
+  };
+  const char *env = std::getenv("BLENDER_MULTIRES_STARTUP_REUSE");
+  if (!env || env[0] != '1' || env[1] != '\0') {
+    return reject("OFF");
+  }
+  if (object.type != OB_MESH || object.mode != OB_MODE_SCULPT || !object.data ||
+      object.id.lib || object.runtime->sculpt_session) {
+    return reject("OBJECT_OR_EXISTING_SESSION");
+  }
+  if (!DEG_is_active(&depsgraph)) {
+    return reject("GRAPH_INACTIVE");
+  }
+  if (DEG_is_evaluating(&depsgraph)) {
+    return reject("GRAPH_EVALUATING");
+  }
+  if (DEG_get_mode(&depsgraph) != DAG_EVAL_VIEWPORT) {
+    return reject("GRAPH_NOT_VIEWPORT");
+  }
+  if (DEG_get_input_scene(&depsgraph) != &scene) {
+    return reject("GRAPH_OTHER_SCENE");
+  }
+  if (!DEG_is_fully_evaluated(&depsgraph)) {
+    return reject("GRAPH_PENDING_UPDATES");
+  }
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  if (mesh.id.lib || ID_REAL_USERS(&mesh.id) != 1 || mesh.key ||
+      (mesh.flag & ME_SCULPT_DYNAMIC_TOPOLOGY)) {
+    return reject("MESH_FRAME");
+  }
+  /* A session changes modifier filtering. Restrict reuse to exactly one
+   * enabled modifier including virtual modifiers, so both evaluations agree. */
+  VirtualModifierData virtual_data;
+  MultiresModifierData *mmd = nullptr;
+  for (ModifierData *md = BKE_modifiers_get_virtual_modifierlist(&object, &virtual_data);
+       md; md = md->next)
+  {
+    if (!BKE_modifier_is_enabled(&scene, md, eModifierMode_Realtime)) {
+      continue;
+    }
+    if (md->type != eModifierType_Multires || mmd) {
+      return reject("MODIFIER_STACK");
+    }
+    mmd = reinterpret_cast<MultiresModifierData *>(md);
+  }
+  if (!mmd || mmd->totlvl <= 0 || mmd->totlvl > 13 ||
+      mmd->sculptlvl != mmd->totlvl || mmd->sculpt_layers.is_empty() ||
+      (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) ||
+      mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled) {
+    return reject("MULTIRES_FRAME");
+  }
+  for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    if (layer.base_deltas || layer.base_verts_num != 0) {
+      return reject("L0_LAYER");
+    }
+  }
+  if (!bke::multires_layers::compatible(*mmd, mesh)) {
+    return reject("LAYER_LAYOUT");
+  }
+  Object *object_eval = DEG_get_evaluated(&depsgraph, &object);
+  if (!object_eval || object_eval == &object || !DEG_is_evaluated(object_eval) ||
+      DEG_get_original(object_eval) != &object || object_eval->mode != object.mode ||
+      !DEG_id_is_fully_evaluated(&depsgraph, &object_eval->id) ||
+      !DEG_object_geometry_is_evaluated(*object_eval) ||
+      object_eval->runtime->sculpt_session || !object_eval->runtime->is_data_eval_owned) {
+    return reject("EVALUATED_OBJECT");
+  }
+  MultiresModifierData *eval_mmd = nullptr;
+  for (ModifierData &md : object_eval->modifiers) {
+    if (!BKE_modifier_is_enabled(&scene, &md, eModifierMode_Realtime)) {
+      continue;
+    }
+    if (md.type != eModifierType_Multires || eval_mmd) {
+      return reject("EVALUATED_STACK");
+    }
+    eval_mmd = reinterpret_cast<MultiresModifierData *>(&md);
+  }
+  if (!eval_mmd || BKE_modifier_get_original(object_eval, &eval_mmd->modifier) != &mmd->modifier ||
+      eval_mmd->totlvl != mmd->totlvl || eval_mmd->sculptlvl != mmd->sculptlvl ||
+      eval_mmd->flags != mmd->flags ||
+      eval_mmd->sculpt_displacement_enabled != mmd->sculpt_displacement_enabled ||
+      eval_mmd->sculpt_shrinkwrap_enabled != mmd->sculpt_shrinkwrap_enabled) {
+    return reject("EVALUATED_MODIFIER");
+  }
+  /* No wrapper subdivision: this query only retrieves the existing mesh. */
+  Mesh *mesh_eval = BKE_object_get_evaluated_mesh_no_subsurf(object_eval);
+  if (!mesh_eval || object_eval->runtime->data_eval != &mesh_eval->id ||
+      mesh_eval->verts_num != mesh.verts_num || mesh_eval->faces_num != mesh.faces_num ||
+      mesh_eval->corners_num != mesh.corners_num ||
+      mesh_eval->runtime->subdiv_ccg_tot_level != mmd->totlvl) {
+    return reject("EVALUATED_MESH");
+  }
+  SubdivCCG *ccg = mesh_eval->runtime->subdiv_ccg.get();
+  const int side = bke::subdiv::grid_size_from_level(mmd->totlvl);
+  const int64_t samples = int64_t(mesh.corners_num) * side * side;
+  if (!ccg || !ccg->subdiv || ccg->level != mmd->totlvl ||
+      ccg->grids_num != mesh.corners_num || ccg->grid_size != side ||
+      ccg->grid_area != side * side || ccg->positions.size() != samples ||
+      ccg->normals.size() != samples || (!ccg->masks.is_empty() && ccg->masks.size() != samples) ||
+      ccg->faces.size() != mesh.faces_num || ccg->faces.total_size() != mesh.corners_num ||
+      ccg->grid_to_face_map.size() != mesh.corners_num ||
+      ccg->dirty.coords || ccg->dirty.hidden || ccg->dirty.masks ||
+      !ccg->sculpt_dirty_position_grids.is_empty()) {
+    return reject("CCG_LAYOUT_OR_PENDING");
+  }
+  r_object_eval = object_eval;
+  r_reason = "READY";
+  return ccg;
+}
+
+/* Inspect before ED_editors_init resets the saved mode and tags SYNC_TO_EVAL.
+ * This function is read-only; init_sculpt_mode_session validates again after
+ * tool-settings initialization. A rejected second check uses native evaluation. */
+bool object_sculpt_mode_restore_reuse_ready(Depsgraph &depsgraph, Scene &scene, Object &ob)
+{
+  Object *object_eval = nullptr;
+  const char *reason = nullptr;
+  const SubdivCCG *ccg = sculpt_startup_ccg_reuse_candidate(
+      depsgraph, scene, ob, object_eval, reason);
+  if (std::string(reason) != "OFF") {
+    std::printf("[MULTIRES_STARTUP_REUSE_V02] stage=RESTORE_PREFLIGHT ready=%d reason=%s\n",
+                ccg != nullptr, reason);
+    std::fflush(stdout);
+  }
+  return ccg != nullptr;
+}
+
 static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &scene, Object &ob)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.init_session", &ob);
   /* Create persistent sculpt mode data. */
   BKE_sculpt_toolsettings_data_ensure(&bmain, &scene);
+
+  Object *reuse_eval = nullptr;
+  const char *reuse_reason = nullptr;
+  SubdivCCG *reuse_ccg = sculpt_startup_ccg_reuse_candidate(
+      depsgraph, scene, ob, reuse_eval, reuse_reason);
 
   /* Create sculpt mode session data. */
   if (ob.runtime->sculpt_session != nullptr) {
@@ -1973,13 +2402,32 @@ static void init_sculpt_mode_session(Main &bmain, Depsgraph &depsgraph, Scene &s
    * multires modifier sets .runtime.ccg in
    * the evaluated mesh.
    */
-  DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  if (reuse_ccg) {
+    /* Mirror the native copy-on-eval session alias (deg_eval_copy_on_write.cc).
+     * The evaluated object must see the new session for draw and modifier code.
+     * Mesh/CCG ownership stays entirely with the existing evaluated result. */
+    reuse_eval->runtime->sculpt_session = ob.runtime->sculpt_session;
+  }
+  else {
+    DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  }
 
+  cold_trace.mark("create_session_and_bind_or_tag_geometry");
   BKE_scene_graph_evaluated_ensure(&depsgraph, &bmain);
+  cold_trace.mark("ensure_evaluated_depsgraph");
 
   /* This function expects a fully evaluated depsgraph. */
   BKE_sculpt_update_object_for_edit(&depsgraph, &ob, false);
 
+  cold_trace.mark("sculpt_object_for_edit");
+  if (std::string(reuse_reason) != "OFF") {
+    const SubdivCCG *live_ccg = ob.runtime->sculpt_session->subdiv_ccg;
+    const bool preserved = reuse_ccg && live_ccg == reuse_ccg;
+    std::printf("[MULTIRES_STARTUP_REUSE_V02] mode=%s reason=%s candidate=%p live=%p\n",
+                preserved ? "REUSE" : (reuse_ccg ? "REEVALUATED" : "LEGACY"),
+                reuse_reason, static_cast<void *>(reuse_ccg), static_cast<const void *>(live_ccg));
+    std::fflush(stdout);
+  }
   Mesh &mesh = *id_cast<Mesh *>(ob.data);
   if (mesh.attributes().contains(".sculpt_face_set")) {
     /* Here we can detect geometry that was just added to Sculpt Mode as it has the
@@ -2028,6 +2476,7 @@ void object_sculpt_mode_enter(Main &bmain,
                               const bool force_dyntopo,
                               ReportList *reports)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("sculpt.enter_mode", &ob);
   const eObjectMode mode_flag = OB_MODE_SCULPT;
   Mesh *mesh = BKE_mesh_from_object(&ob);
 
@@ -3142,9 +3591,23 @@ static void SCULPT_OT_mask_from_boundary(wmOperatorType *ot)
 
 }  // namespace mask
 
+void SCULPT_OT_draw_transport_activate_v03(wmOperatorType *ot);
+
 void operatortypes_sculpt()
 {
+  WM_operatortype_append(SCULPT_OT_facesets_brush_activate_v05);
+  WM_operatortype_append(OBJECT_OT_facesets_brush_export_v05);
+  WM_operatortype_append(OBJECT_OT_facesets_dense_prepare_v06d);
+  WM_operatortype_append(OBJECT_OT_facesets_dense_l0_assign_v06d);
+  WM_operatortype_append(SCULPT_OT_facesets_region_assign_v04);
+  WM_operatortype_append(OBJECT_OT_facesets_region_audit_v04);
+  WM_operatortype_append(OBJECT_OT_facesets_mixed_seed_v03);
+  WM_operatortype_append(OBJECT_OT_facesets_mixed_audit_v03);
+  WM_operatortype_append(SCULPT_OT_facesets_rebuild_l0_assign_v02);
+  WM_operatortype_append(OBJECT_OT_facesets_rebuild_l0_assign_v01);
+  WM_operatortype_append(OBJECT_OT_facesets_rebuild_l0_audit_v01);
   WM_operatortype_append(SCULPT_OT_brush_stroke);
+  WM_operatortype_append(SCULPT_OT_draw_transport_activate_v03);
   WM_operatortype_append(SCULPT_OT_sculptmode_toggle);
   WM_operatortype_append(SCULPT_OT_set_persistent_base);
   WM_operatortype_append(dyntopo::SCULPT_OT_dynamic_topology_toggle);
@@ -3162,8 +3625,11 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_multires_base_fingerprint);
   WM_operatortype_append(SCULPT_OT_multires_merge_visible_to_base);
   WM_operatortype_append(SCULPT_OT_multires_polypaint_attribute);
+  WM_operatortype_append(color::SCULPT_OT_polypaint_blur_probe_v01);
+  WM_operatortype_append(SCULPT_OT_multires_polypaint_uv_bake_v01);
   WM_operatortype_append(SCULPT_OT_multires_texture_displacement_bake);
   WM_operatortype_append(SCULPT_OT_multires_shrinkwrap_bake);
+  WM_operatortype_append(SCULPT_OT_multires_detail_transfer_import_v01);
   WM_operatortype_append(SCULPT_OT_multires_layer_delete);
   WM_operatortype_append(SCULPT_OT_multires_layer_duplicate);
   WM_operatortype_append(SCULPT_OT_multires_layer_set_active);
@@ -3179,7 +3645,13 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_multires_layer_flatten);
   WM_operatortype_append(SCULPT_OT_multires_layer_solo);
   WM_operatortype_append(face_set::SCULPT_OT_face_sets_create);
-  WM_operatortype_append(face_set::SCULPT_OT_face_set_change_visibility);
+  WM_operatortype_append(SCULPT_OT_multires_face_sets_audit);
+  WM_operatortype_append(undo::SCULPT_OT_undo_memory_audit_v01);
+  WM_operatortype_append(SCULPT_OT_multires_face_sets_from_base);
+  WM_operatortype_append(face_set::SCULPT_OT_face_set_change_visibility); /* HR tools V02 */
+  WM_operatortype_append(face_set::SCULPT_OT_multires_face_sets_hr_mask);
+  WM_operatortype_append(face_set::SCULPT_OT_multires_face_sets_hr_state);
+  WM_operatortype_append(face_set::SCULPT_OT_multires_hr_extract_v05);
   WM_operatortype_append(face_set::SCULPT_OT_face_sets_randomize_colors);
   WM_operatortype_append(face_set::SCULPT_OT_face_sets_init);
   WM_operatortype_append(face_set::SCULPT_OT_face_sets_edit);

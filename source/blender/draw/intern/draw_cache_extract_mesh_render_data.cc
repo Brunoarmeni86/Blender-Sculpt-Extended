@@ -416,6 +416,7 @@ MeshRenderData mesh_render_data_create(Object &object,
                                        const ToolSettings *ts)
 {
   MeshRenderData mr{};
+  mr.facesets_source_object = &object;
   mr.toolsettings = ts;
   mr.materials_num = BKE_object_material_used_with_fallback_eval(object);
 

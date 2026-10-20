@@ -22,6 +22,7 @@
 #include "BKE_ccg.hh"
 #include "BKE_context.hh"
 #include "BKE_mesh.hh"
+#include "BKE_sculpt_facesets_visibility_rc2.hh"
 #include "BKE_multires.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
@@ -48,6 +49,46 @@
 #include "sculpt_undo.hh"
 
 namespace blender::ed::sculpt_paint::hide {
+/* RC4 uses the same full-resolution hidden bitmap and native Undo as Face Sets. */
+static bool rc4_supported(const Object &object)
+{
+  const char *flag=std::getenv("BLENDER_FACESETS_NATIVE_HIDE_RC4");
+  if (!flag || std::strcmp(flag,"1") || !bke::facesets_visibility_rc2::enabled()) { return false; }
+  const auto *mmd=bke::facesets_visibility_rc2::modifier(object);
+  const auto *pbvh=bke::object::pbvh_get(object);
+  if (!mmd || !pbvh || pbvh->type()==bke::pbvh::Type::BMesh) { return false; }
+  const Mesh &mesh=*id_cast<const Mesh *>(object.data);
+  return bke::facesets_rc1::master_valid(object,mesh,*mmd) &&
+      bke::facesets_visibility_rc2::layout(mesh,*mmd);
+}
+static bool rc4_prepare(Depsgraph &depsgraph,Object &object,const IndexMask &nodes,
+                        const undo::Type type=undo::Type::HideVert)
+{
+  if (!rc4_supported(object)) { return true; }
+  const auto *mmd=bke::facesets_visibility_rc2::modifier(object);
+  if (!undo::capture_facesets_visibility(*id_cast<Mesh *>(object.data),*mmd)) { return false; }
+  /* Always create native nodes: a change may affect fine bits invisible at L0. */
+  undo::push_nodes(depsgraph,object,nodes,type);
+  return true;
+}
+static void rc4_finish(Object &object,const int mode=0)
+{
+  if (!rc4_supported(object)) { return; }
+  Mesh &mesh=*id_cast<Mesh *>(object.data);
+  const auto *mmd=bke::facesets_visibility_rc2::modifier(object);
+  SubdivCCG *ccg=object.runtime->sculpt_session->subdiv_ccg;
+  bke::facesets_visibility_rc2::import_native(mesh,*mmd,ccg,mode);
+  if (ccg) {
+    bke::facesets_visibility_rc2::project(mesh,*mmd,*ccg);
+    BKE_pbvh_sync_visibility_from_verts(object);
+  }
+  else { bke::facesets_visibility_rc2::project_faces(mesh,*mmd); }
+  auto &pbvh=*bke::object::pbvh_get(object);
+  IndexMaskMemory memory;
+  pbvh.tag_visibility_changed(bke::pbvh::all_leaf_nodes(pbvh,memory));
+  pbvh.update_visibility(object);
+}
+
 
 /* -------------------------------------------------------------------- */
 /** \name Public API
@@ -328,7 +369,8 @@ static void vert_hide_update(const Depsgraph &depsgraph,
   }
 }
 
-static void grid_hide_update(Depsgraph &depsgraph,
+/* MULTIRES_FACESETS_VISIBILITY_V02: public native writer, behavior unchanged. */
+void grid_hide_update(Depsgraph &depsgraph,
                              Object &object,
                              const IndexMask &node_mask,
                              const FunctionRef<void(const int, MutableBoundedBitSpan)> calc_hide)
@@ -538,6 +580,7 @@ static wmOperatorStatus hide_show_all_exec(bContext *C, wmOperator *op)
 
   IndexMaskMemory memory;
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  if (!rc4_prepare(*depsgraph,ob,node_mask)) { undo::push_end(ob);return OPERATOR_CANCELLED; }
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
@@ -552,6 +595,7 @@ static wmOperatorStatus hide_show_all_exec(bContext *C, wmOperator *op)
   }
 
   /* End undo. */
+  rc4_finish(ob,action==VisAction::Show?1:2);
   undo::push_end(ob);
 
   islands::invalidate(*ob.runtime->sculpt_session);
@@ -655,6 +699,7 @@ static wmOperatorStatus hide_show_masked_exec(bContext *C, wmOperator *op)
 
   IndexMaskMemory memory;
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  if (!rc4_prepare(*depsgraph,ob,node_mask)) { undo::push_end(ob);return OPERATOR_CANCELLED; }
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
@@ -669,6 +714,7 @@ static wmOperatorStatus hide_show_masked_exec(bContext *C, wmOperator *op)
   }
 
   /* End undo. */
+  rc4_finish(ob,0);
   undo::push_end(ob);
 
   islands::invalidate(*ob.runtime->sculpt_session);
@@ -811,6 +857,7 @@ static wmOperatorStatus visibility_invert_exec(bContext *C, wmOperator *op)
   IndexMaskMemory memory;
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
   undo::push_begin(scene, object, op);
+  if (!rc4_prepare(depsgraph,object,node_mask,pbvh.type()==bke::pbvh::Type::Mesh?undo::Type::HideFace:undo::Type::HideVert)) { undo::push_end(object);return OPERATOR_CANCELLED; }
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
       invert_visibility_mesh(depsgraph, object, node_mask);
@@ -823,6 +870,7 @@ static wmOperatorStatus visibility_invert_exec(bContext *C, wmOperator *op)
       break;
   }
 
+  rc4_finish(object,3);
   undo::push_end(object);
 
   islands::invalidate(*object.runtime->sculpt_session);
@@ -1160,6 +1208,7 @@ static wmOperatorStatus visibility_filter_exec(bContext *C, wmOperator *op)
   }
 
   undo::push_begin(scene, object, op);
+  if (!rc4_prepare(depsgraph,object,node_mask)) { undo::push_end(object);return OPERATOR_CANCELLED; }
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
       grow_shrink_visibility_mesh(depsgraph, object, node_mask, mode, iterations);
@@ -1171,6 +1220,7 @@ static wmOperatorStatus visibility_filter_exec(bContext *C, wmOperator *op)
       grow_shrink_visibility_bmesh(depsgraph, object, node_mask, mode, iterations);
       break;
   }
+  rc4_finish(object,0);
   undo::push_end(object);
 
   islands::invalidate(*object.runtime->sculpt_session);
@@ -1234,6 +1284,7 @@ struct HideShowOperation {
   gesture::Operation op;
 
   VisAction action;
+  bool rc4_failed;
 };
 
 static void partialvis_gesture_update_mesh(gesture::GestureData &gesture_data)
@@ -1335,18 +1386,22 @@ static void partialvis_gesture_update_bmesh(gesture::GestureData &gesture_data)
                                 selection_test_fn);
 }
 
-static void hide_show_begin(bContext &C, wmOperator &op, gesture::GestureData & /*gesture_data*/)
+static void hide_show_begin(bContext &C, wmOperator &op, gesture::GestureData &gesture_data)
 {
   const Scene &scene = *CTX_data_scene(&C);
   Object *ob = CTX_data_active_object(&C);
   Depsgraph *depsgraph = CTX_data_ensure_evaluated_depsgraph(&C);
 
   undo::push_begin(scene, *ob, &op);
-  bke::object::pbvh_ensure(*depsgraph, *ob);
+  auto &pbvh=bke::object::pbvh_ensure(*depsgraph, *ob);
+  IndexMaskMemory memory;
+  auto *operation=reinterpret_cast<HideShowOperation *>(gesture_data.operation);
+  operation->rc4_failed=!rc4_prepare(*depsgraph,*ob,bke::pbvh::all_leaf_nodes(pbvh,memory));
 }
 
 static void hide_show_apply_for_symmetry_pass(bContext &C, gesture::GestureData &gesture_data)
 {
+  if (reinterpret_cast<HideShowOperation *>(gesture_data.operation)->rc4_failed) { return; }
   Depsgraph *depsgraph = CTX_data_depsgraph_pointer(&C);
 
   switch (bke::object::pbvh_get(*gesture_data.vc.obact)->type()) {
@@ -1363,6 +1418,9 @@ static void hide_show_apply_for_symmetry_pass(bContext &C, gesture::GestureData 
 }
 static void hide_show_end(bContext &C, gesture::GestureData &gesture_data)
 {
+  if (!reinterpret_cast<HideShowOperation *>(gesture_data.operation)->rc4_failed) {
+    rc4_finish(*gesture_data.vc.obact);
+  }
   islands::invalidate(*gesture_data.vc.obact->runtime->sculpt_session);
   tag_update_visibility(C);
   undo::push_end(*gesture_data.vc.obact);

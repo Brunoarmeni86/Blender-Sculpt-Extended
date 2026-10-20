@@ -23,6 +23,9 @@
  * it requires the undo push to have the same name as the calling operator.
  */
 #include "sculpt_undo.hh"
+#include "sculpt_facesets_l0_snapshot_v02.hh"
+#include "BKE_sculpt_facesets_visibility_rc2.hh"
+#include "BKE_modifier.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -32,6 +35,7 @@
 #include <cstring>
 #include <cstring>
 
+#include <limits>
 #include <mutex>
 #include <zstd.h>
 
@@ -68,12 +72,14 @@
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
 #include "BKE_multires.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
 #include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_types.hh"
 #include "BKE_scene.hh"
+#include "BKE_report.hh"
 #include "BKE_subdiv.hh"
 #include "BKE_subdiv_ccg.hh"
 #include "BKE_undo_system.hh"
@@ -85,6 +91,9 @@
 
 #include "WM_api.hh"
 #include "WM_types.hh"
+
+#include "RNA_access.hh"
+#include "RNA_define.hh"
 
 #include "ED_geometry.hh"
 #include "ED_object.hh"
@@ -98,6 +107,8 @@
 #include "sculpt_dyntopo.hh"
 #include "sculpt_face_set.hh"
 #include "sculpt_intern.hh"
+
+#include "sculpt_polypaint_v04_snapshot.hh"
 
 namespace blender {
 
@@ -282,6 +293,9 @@ struct StepData {
    * first undo node is pushed.
    */
   Type type = Type::None;
+  std::unique_ptr<ColorMasterSnapshotV04> color_master_v04;
+  std::unique_ptr<FaceSetsL0MasterSnapshot> facesets_l0_master;
+  std::unique_ptr<bke::facesets_visibility_rc2::Snapshot> facesets_visibility;
 
   /* Lightweight post-Add state replacing the visible Memfile history entry.
    * The preceding Memfile is retained, not decoded for the first stroke undo. */
@@ -456,6 +470,15 @@ template void filter_decompress<int>(Span<std::byte>, Vector<std::byte> &, Vecto
 
 }  // namespace compression
 
+/* UNDO_MEMORY_ASYNC_V01: saturating arithmetic for byte reservations. */
+static size_t undo_memory_add(const size_t a, const size_t b)
+{
+  return b > std::numeric_limits<size_t>::max() - a ?
+             std::numeric_limits<size_t>::max() : a + b;
+}
+
+static size_t node_size_in_bytes(const Node &node);
+
 struct PositionUndoStorage : NonMovable {
   Vector<std::unique_ptr<Node>> nodes_to_compress;
   bool multires_undo;
@@ -477,10 +500,28 @@ struct PositionUndoStorage : NonMovable {
   TaskPool *compression_task_pool;
   std::atomic<bool> compression_ready = false;
   std::atomic<bool> compression_started = false;
-  StepData *owner_step_data = nullptr;
+  /* Immutable storage overhead + atomic payload count. Workers never write StepData
+   * or UndoStep. While pending, include retained nodes and output compress bounds. */
+  size_t persistent_memory_size = 0;
+  std::atomic<size_t> tracked_memory_size = 0;
+
+  void account_recompressed_size(const size_t old_size, const size_t new_size)
+  {
+    if (new_size >= old_size) {
+      tracked_memory_size.fetch_add(new_size - old_size, std::memory_order_relaxed);
+    }
+    else {
+      tracked_memory_size.fetch_sub(old_size - new_size, std::memory_order_relaxed);
+    }
+  }
+
+  size_t memory_size_get() const
+  {
+    return tracked_memory_size.load(std::memory_order_acquire);
+  }
 
   explicit PositionUndoStorage(StepData &step_data)
-      : nodes_to_compress(std::move(step_data.nodes)), owner_step_data(&step_data)
+      : nodes_to_compress(std::move(step_data.nodes))
   {
     this->multires_undo = step_data.grids.grids_num != 0;
     if (!multires_undo) {
@@ -502,6 +543,28 @@ struct PositionUndoStorage : NonMovable {
         this->sculpt_layer_grid_area = area;
       }
     }
+
+    persistent_memory_size = sizeof(PositionUndoStorage);
+    persistent_memory_size = undo_memory_add(
+        persistent_memory_size, unique_verts_nums.as_span().size_in_bytes());
+    persistent_memory_size = undo_memory_add(
+        persistent_memory_size,
+        size_t(nodes_to_compress.size()) * sizeof(Array<std::byte>) *
+            (sculpt_layer_undo ? 3 : 2));
+    size_t reservation = persistent_memory_size;
+    for (const std::unique_ptr<Node> &node : nodes_to_compress) {
+      reservation = undo_memory_add(reservation, node_size_in_bytes(*node));
+      const Span<int> indices = multires_undo ? node->grids : node->vert_indices;
+      const Span<float3> positions = !node->orig_position.is_empty() ?
+                                         node->orig_position : node->position;
+      reservation = undo_memory_add(reservation, ZSTD_compressBound(indices.size_in_bytes()));
+      reservation = undo_memory_add(reservation, ZSTD_compressBound(positions.size_in_bytes()));
+      if (sculpt_layer_undo) {
+        reservation = undo_memory_add(
+            reservation, ZSTD_compressBound(node->sculpt_layer_disps.as_span().size_in_bytes()));
+      }
+    }
+    tracked_memory_size.store(reservation, std::memory_order_release);
 
     this->compression_task_pool = BLI_task_pool_create_background(this, TASK_PRIORITY_LOW);
     this->compression_started = true;
@@ -587,7 +650,8 @@ struct PositionUndoStorage : NonMovable {
     if (data->sculpt_layer_undo) {
       data->compressed_layer_disps = std::move(compressed_layer_data);
     }
-    data->owner_step_data->undo_size += memory_size;
+    data->tracked_memory_size.store(
+        undo_memory_add(data->persistent_memory_size, memory_size), std::memory_order_release);
 
     data->compression_ready.store(true, std::memory_order_release);
   }
@@ -605,19 +669,37 @@ struct SculptUndoStep {
   SculptAttrRef active_color_end;
 };
 
+static size_t sculpt_metadata_memory_size(const StepData &data)
+{
+  size_t size = data.base_layer_deltas.size() * sizeof(float3);
+  size = undo_memory_add(size, data.layer_frame.size() * sizeof(SculptLayerUndoFrameItem));
+  size = undo_memory_add(size, data.layer_frame_modifier.size());
+  for (const SculptLayerUndoFrameItem &item : data.layer_frame) {
+    size = undo_memory_add(size, item.name.size());
+  }
+  size = undo_memory_add(size, data.layer_metadata.size() * sizeof(SculptLayerUndoMetadata));
+  size = undo_memory_add(size, data.layer_metadata_modifier.size());
+  for (const SculptLayerUndoMetadata &saved : data.layer_metadata) {
+    size = undo_memory_add(size, saved.name.size());
+  }
+  if (data.color_master_v04) { size=undo_memory_add(size,data.color_master_v04->memory_bytes()); }
+  if (data.facesets_l0_master) { size=undo_memory_add(size,data.facesets_l0_master->memory_bytes()); }
+  if (data.facesets_visibility) { size=undo_memory_add(size,data.facesets_visibility->memory_bytes()); }
+  return size;
+}
+
 size_t step_memory_size_get(UndoStep *step)
 {
   if (step->type != BKE_UNDOSYS_TYPE_SCULPT) {
     return 0;
   }
-
-  SculptUndoStep *sculpt_step = reinterpret_cast<SculptUndoStep *>(step);
-
-  if (sculpt_step->data.position_step_storage) {
-    sculpt_step->data.position_step_storage->ensure_compression_complete();
+  const SculptUndoStep *sculpt_step = reinterpret_cast<const SculptUndoStep *>(step);
+  const StepData &data = sculpt_step->data;
+  size_t size = undo_memory_add(data.undo_size, sculpt_metadata_memory_size(data));
+  if (data.position_step_storage) {
+    size = undo_memory_add(size, data.position_step_storage->memory_size_get());
   }
-
-  return sculpt_step->data.undo_size;
+  return size;
 }
 
 static SculptUndoStep *get_active_step()
@@ -765,7 +847,9 @@ static void restore_position_mesh(Object &object,
       modified_verts.fill_indices(verts, true);
 
       compression::filter_compress<float3>(undo_positions, tls.filter_buffer, tls.compress_buffer);
+      const size_t old_compressed_size = undo_data.compressed_positions[i].as_span().size_in_bytes();
       undo_data.compressed_positions[i] = tls.compress_buffer.as_span();
+      undo_data.account_recompressed_size(old_compressed_size, tls.compress_buffer.as_span().size_in_bytes());
     }
   });
 }
@@ -810,7 +894,9 @@ static void restore_position_grids(const MutableSpan<float3> positions,
       modified_grids.fill_indices(grids, true);
 
       compression::filter_compress<float3>(node_positions, tls.filter_buffer, tls.compress_buffer);
+      const size_t old_compressed_size = undo_data.compressed_positions[i].as_span().size_in_bytes();
       undo_data.compressed_positions[i] = tls.compress_buffer.as_span();
+      undo_data.account_recompressed_size(old_compressed_size, tls.compress_buffer.as_span().size_in_bytes());
     }
   });
 }
@@ -1072,6 +1158,50 @@ static void restore_mask_grids(Object &object, Node &unode, const MutableSpan<bo
   modified_grids.fill_indices(unode.grids.as_span(), true);
 }
 
+bool capture_facesets_visibility(Mesh &mesh,const MultiresModifierData &mmd)
+{
+  StepData *data=get_step_data();
+  if (!data || !ELEM(data->type,Type::None,Type::HideVert,Type::HideFace) || data->facesets_visibility) { return false; }
+  auto saved=std::make_unique<bke::facesets_visibility_rc2::Snapshot>();
+  if (!saved->prepare(mesh,mmd)) { return false; }
+  data->facesets_visibility=std::move(saved);
+  return true;
+}
+
+bool capture_color_master_v04(Object &object,const int *grids,int count)
+{
+  StepData *data=get_step_data();
+  if(!data || data->type!=Type::Color || count<0)return false;
+  auto *md=BKE_modifiers_findby_type(&object,eModifierType_Multires);
+  if(!md)return false;
+  auto &mmd=*reinterpret_cast<MultiresModifierData*>(md);
+  if(!data->color_master_v04)data->color_master_v04=std::make_unique<ColorMasterSnapshotV04>();
+  return data->color_master_v04->capture(mmd,grids,count);
+}
+void attach_facesets_l0_master(std::unique_ptr<FaceSetsL0MasterSnapshot> snapshot)
+{
+  StepData *data=get_step_data();
+  BLI_assert(data && !data->facesets_l0_master && data->type==Type::None);
+  data->facesets_l0_master=std::move(snapshot);
+}
+
+const char *capture_facesets_l0_master(MultiresModifierData &mmd,const int corners,
+                                      const Span<int> indices)
+{
+  StepData *data=get_step_data();
+  if (!data || !ELEM(data->type,Type::None,Type::FaceSet)) {
+    return "FaceSets RC1 requires an active FaceSet Undo transaction";
+  }
+  if (data->facesets_l0_master) {
+    return data->facesets_l0_master->extend(mmd,corners,indices);
+  }
+  auto snapshot=std::make_unique<FaceSetsL0MasterSnapshot>();
+  if (const char *error=snapshot->prepare(mmd,corners,indices)) { return error; }
+  snapshot->modifier_name=mmd.modifier.name;
+  data->facesets_l0_master=std::move(snapshot);
+  return nullptr;
+}
+
 static bool restore_face_sets(Object &object,
                               Node &unode,
                               const MutableSpan<bool> modified_face_set_faces)
@@ -1103,27 +1233,35 @@ static bool restore_face_sets_grids(Object &object, Node &unode)
     return false;
   }
 
+  /* MULTIRES_FACESETS_DRAW_V01: avoid invalid-level shifts and preflight
+   * before swapping any of this undo node's grids. */
+  if (mmd->sculpt_face_set_level < 1 || mmd->sculpt_face_set_level > 13 ||
+      unode.grid_face_set_side > 4097) {
+    return false;
+  }
   const int area = unode.grid_face_set_side * unode.grid_face_set_side;
+  /* The snapshot uses the retained master side, not the live Sculpt Level. */
   if (unode.grid_face_sets.size() != unode.grids.size() * area ||
       bke::subdiv::grid_size_from_level(mmd->sculpt_face_set_level) != unode.grid_face_set_side)
   {
     return false;
   }
 
-  bool modified = false;
-  int offset = 0;
   for (const int grid : unode.grids) {
-    int *ids = bke::multires_layers::faceset_grid_ensure_dense(*mmd, grid);
-    if (!ids) {
-      offset += area;
-      continue;
+    if (grid < 0 || grid >= mmd->sculpt_face_set_grids_num) {
+      return false;
     }
-    for (int i = 0; i < area; i++, offset++) {
-      if (ids[i] != unode.grid_face_sets[offset]) {
-        std::swap(ids[i], unode.grid_face_sets[offset]);
-        modified = true;
-      }
+    const MultiresFaceSetGrid &stored = mmd->sculpt_face_set_grids[grid];
+    if (stored.level != mmd->sculpt_face_set_level ||
+        (stored.ids ? stored.totid != area : stored.totid != 0)) {
+      return false;
     }
+  }
+  bool modified = false;
+  for (const int i : unode.grids.index_range()) {
+    modified |= bke::multires_layers::faceset_grid_swap(
+        *mmd, unode.grids[i],
+        unode.grid_face_sets.as_mutable_span().slice(int64_t(i) * area, area));
   }
   return modified;
 }
@@ -1505,7 +1643,9 @@ static bool sculpt_layer_undo_persistent_payload_swap(MultiresSculptLayer &layer
     if (tls.compress_buffer.is_empty()) {
       return false;
     }
+    const size_t old_compressed_size = undo_data.compressed_layer_disps[node_i].as_span().size_in_bytes();
     undo_data.compressed_layer_disps[node_i] = tls.compress_buffer.as_span();
+    undo_data.account_recompressed_size(old_compressed_size, tls.compress_buffer.as_span().size_in_bytes());
   }
 
   return true;
@@ -2164,6 +2304,12 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       break;
     }
     case Type::HideVert: {
+      auto *visibility_mmd=bke::facesets_visibility_rc2::modifier(object);
+      Mesh &visibility_mesh=*id_cast<Mesh *>(object.data);
+      if (step_data.facesets_visibility &&
+          (!visibility_mmd || !step_data.facesets_visibility->valid(visibility_mesh,*visibility_mmd))) {
+        return;
+      }
       IndexMaskMemory memory;
       const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
@@ -2203,7 +2349,15 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         pbvh.tag_visibility_changed(changed_nodes);
       }
 
-      BKE_pbvh_sync_visibility_from_verts(object);
+      if (step_data.facesets_visibility) {
+        if (!step_data.facesets_visibility->exchange(visibility_mesh,*visibility_mmd)) { return; }
+        if (ss.subdiv_ccg) {
+          bke::facesets_visibility_rc2::project(visibility_mesh,*visibility_mmd,*ss.subdiv_ccg);
+        }
+        else { bke::facesets_visibility_rc2::project_faces(visibility_mesh,*visibility_mmd); }
+      }
+      if (step_data.facesets_visibility && !ss.subdiv_ccg) { hide::sync_all_from_faces(object); }
+      else { BKE_pbvh_sync_visibility_from_verts(object); }
       pbvh.update_visibility(object);
       if (BKE_sculpt_multires_active(scene, &object)) {
         multires_mark_as_modified(depsgraph, &object, MULTIRES_HIDDEN_MODIFIED);
@@ -2211,6 +2365,10 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       break;
     }
     case Type::HideFace: {
+      auto *visibility_mmd=bke::facesets_visibility_rc2::modifier(object);
+      Mesh &visibility_mesh=*id_cast<Mesh *>(object.data);
+      if (step_data.facesets_visibility &&
+          (!visibility_mmd || !step_data.facesets_visibility->valid(visibility_mesh,*visibility_mmd))) { return; }
       IndexMaskMemory memory;
       const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
 
@@ -2250,6 +2408,12 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         pbvh.tag_visibility_changed(changed_nodes);
       }
 
+      if (step_data.facesets_visibility) {
+        if (!step_data.facesets_visibility->exchange(visibility_mesh,*visibility_mmd)) { return; }
+        if (ss.subdiv_ccg) { bke::facesets_visibility_rc2::project(visibility_mesh,*visibility_mmd,*ss.subdiv_ccg); }
+        else { bke::facesets_visibility_rc2::project_faces(visibility_mesh,*visibility_mmd); }
+        pbvh.tag_visibility_changed(node_mask);
+      }
       hide::sync_all_from_faces(object);
       pbvh.update_visibility(object);
       break;
@@ -2307,6 +2471,16 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       }
 
       const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+      MultiresModifierData *l0_modifier=nullptr;
+      if (step_data.facesets_l0_master) {
+        l0_modifier=reinterpret_cast<MultiresModifierData *>(BKE_modifiers_findby_type(&object,eModifierType_Multires));
+        if (!l0_modifier || step_data.facesets_l0_master->modifier_name!=l0_modifier->modifier.name) {
+          std::fprintf(stderr,"[FACESETS_SCULPT_L0_V02] Undo modifier mismatch\n");return;
+        }
+        if (const char *error=step_data.facesets_l0_master->validate_live(*l0_modifier,mesh.corners_num)) {
+          std::fprintf(stderr,"[FACESETS_SCULPT_L0_V02] %s\n",error);return;
+        }
+      }
       Array<bool> modified_faces(mesh.faces_num, false);
       bool modified_face_set_grids = false;
       for (std::unique_ptr<Node> &unode : step_data.nodes) {
@@ -2314,6 +2488,13 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         if (use_multires_undo(step_data, ss)) {
           modified_face_set_grids |= restore_face_sets_grids(object, *unode);
         }
+      }
+      if (l0_modifier) {
+        step_data.facesets_l0_master->exchange(*l0_modifier);
+        std::printf("[FACESETS_SCULPT_L0_V02] Undo/Redo master exchanged present=%d level=%d bytes=%zu\n",
+            int(l0_modifier->sculpt_face_set_grids!=nullptr),l0_modifier->sculpt_face_set_level,
+            step_data.facesets_l0_master->memory_bytes());
+        std::fflush(stdout);
       }
       if (use_multires_undo(step_data, ss)) {
         MutableSpan<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
@@ -2400,6 +2581,10 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
       const Mesh &mesh = *id_cast<const Mesh *>(object.data);
       Array<bool> modified_verts(mesh.verts_num, false);
       restore_color(object, step_data, modified_verts);
+      if(step_data.color_master_v04){
+        auto *md=BKE_modifiers_findby_type(&object,eModifierType_Multires);
+        if(!md || !step_data.color_master_v04->exchange(*reinterpret_cast<MultiresModifierData*>(md)))return;
+      }
       const IndexMask changed_nodes = IndexMask::from_predicate(
           node_mask,
           memory,
@@ -3226,6 +3411,12 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
                                                        const char *&r_reason)
 {
   const UndoStep *checkpoint = ustack.step_active;
+  /* OPEN_FILE_UNDO_ANCHOR_V01: only the actual initial Memfile root.
+   * Its persistent payload is already captured in Original. Add a native,
+   * metadata-only Sculpt boundary; do not resnapshot or retain extra geometry. */
+  const char *open_env = std::getenv("BLENDER_SCULPT_OPEN_FILE_ANCHOR");
+  const bool open_file_root = open_env && open_env[0] == '1' && open_env[1] == '\0' &&
+      checkpoint && checkpoint->prev == nullptr && std::string(checkpoint->name) == "Original";
   if (ustack.step_init) {
     r_reason = "ENCODE_IN_PROGRESS";
     return false;
@@ -3235,7 +3426,7 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
     return false;
   }
   if (!checkpoint || checkpoint->type != BKE_UNDOSYS_TYPE_MEMFILE || checkpoint->skip ||
-      !checkpoint->prev)
+      (!checkpoint->prev && !open_file_root))
   {
     r_reason = "HISTORY_STATE";
     return false;
@@ -3244,7 +3435,7 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
     r_reason = "CHECKPOINT_NOT_ACTIVE";
     return false;
   }
-  if (std::string(checkpoint->name) != "Add Sculpt Layer" &&
+  if (!open_file_root && std::string(checkpoint->name) != "Add Sculpt Layer" &&
       std::string(checkpoint->name) != "Set Active Modifier")
   {
     r_reason = "CHECKPOINT_NAME";
@@ -3290,7 +3481,7 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
       ccg->positions.size() != int64_t(ccg->grids_num) * ccg->grid_area ||
       mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled ||
       mmd->sculpt_layers.is_empty() ||
-      mmd->sculpt_layer_active != mmd->sculpt_layers.count() - 1)
+      (!open_file_root && mmd->sculpt_layer_active != mmd->sculpt_layers.count() - 1))
   {
     r_reason = "MULTIRES_FRAME";
     return false;
@@ -3302,6 +3493,21 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
   {
     r_reason = "NEW_LAYER";
     return false;
+  }
+  if (open_file_root) {
+    /* An opened file can have an occupied layer at any valid stack position.
+     * Keep every frame/ownership/runtime check above, and validate the stored
+     * descriptors through can_record. Never scan/copy dense sample arrays. */
+    if (!G_MAIN || !G_MAIN->is_memfile_undo_written) {
+      r_reason = "OPEN_FILE_CHECKPOINT_NOT_WRITTEN";
+      return false;
+    }
+    if (!mmd->sculpt_layer_recording || !bke::multires_layers::can_record(*mmd, mesh)) {
+      r_reason = "OPEN_FILE_FRAME";
+      return false;
+    }
+    r_reason = "READY_OPEN_FILE";
+    return true;
   }
   /* A newly added sparse layer has no payload. Check descriptors only; never
    * scan or allocate high-resolution samples in the pre-stroke path. */
@@ -3326,15 +3532,19 @@ static void sculpt_layer_first_stroke_anchor_ensure(UndoStack &ustack, Object &o
   const double anchor_start = BLI_time_now_seconds();
   const char *reason = nullptr;
   if (!sculpt_layer_first_stroke_anchor_eligible(ustack, ob, reason)) {
+    const char *open_env = std::getenv("BLENDER_SCULPT_OPEN_FILE_ANCHOR");
+    const bool trace_open = open_env && open_env[0] == '1' && open_env[1] == '\0';
     if (ustack.step_active && ustack.step_active->type == BKE_UNDOSYS_TYPE_MEMFILE &&
         (std::string(ustack.step_active->name) == "Add Sculpt Layer" ||
-         std::string(ustack.step_active->name) == "Set Active Modifier"))
+         std::string(ustack.step_active->name) == "Set Active Modifier" ||
+         (trace_open && std::string(ustack.step_active->name) == "Original")))
     {
       std::printf("[LAYER_UNDO_ANCHOR] mode=SKIP reason=%s\n", reason);
       std::fflush(stdout);
     }
     return;
   }
+  const bool open_file_root = std::string(reason) == "READY_OPEN_FILE";
   UndoStep *checkpoint = ustack.step_active;
   SculptUndoStep *anchor = reinterpret_cast<SculptUndoStep *>(
       BKE_undosys_step_push_init_with_type(
@@ -3356,6 +3566,12 @@ static void sculpt_layer_first_stroke_anchor_ensure(UndoStack &ustack, Object &o
      * first stroke now undoes onto this native boundary. Crossing back before
      * Add still decodes the retained Memfile and the earlier scene checkpoint. */
     checkpoint->skip = true;
+    if (open_file_root) {
+      std::printf("[LAYER_OPEN_FILE_ANCHOR_V01] mode=CREATE checkpoint=Original grids=%d geometry_copies=0 total=%.3fms\n",
+                  anchor->data.grids.grids_num,
+                  (BLI_time_now_seconds() - anchor_start) * 1000.0);
+      std::fflush(stdout);
+    }
     std::printf("[LAYER_UNDO_ANCHOR] mode=CREATE version=4.1 checkpoint=%s grids=%d total=%.3fms\n",
                 checkpoint->name, anchor->data.grids.grids_num,
                 (BLI_time_now_seconds() - anchor_start) * 1000.0);
@@ -3365,8 +3581,16 @@ static void sculpt_layer_first_stroke_anchor_ensure(UndoStack &ustack, Object &o
 
 void push_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("undo.push_begin", &ob);
   UndoStack *ustack = ED_undo_stack_get();
+  if (blender::bke::sculpt_cold_v01::path()) {
+    blender::bke::sculpt_cold_v01::event("UNDO_INPUT", "object=%p active=%s memfile=%d init=%d",
+      static_cast<void *>(&ob), ustack->step_active ? ustack->step_active->name : "<none>",
+      int(ustack->step_active && ustack->step_active->type == BKE_UNDOSYS_TYPE_MEMFILE),
+      int(ustack->step_init != nullptr));
+  }
   sculpt_layer_first_stroke_anchor_ensure(*ustack, ob);
+  cold_trace.mark("first_stroke_anchor");
 
   /* If possible, we need to tag the object and its geometry data as 'changed in the future' in
    * the previous undo step if it's a memfile one. */
@@ -3382,14 +3606,21 @@ void push_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
   const SculptSession &ss = *ob.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
 
+  cold_trace.mark("undo_step_allocate");
   save_common_data(ob, us);
+  cold_trace.mark("save_common_metadata");
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
       const Mesh &mesh = *id_cast<const Mesh *>(ob.data);
       us->data.mesh.verts_num = mesh.verts_num;
       us->data.mesh.corners_num = mesh.corners_num;
-      if (MultiresSculptLayer *layer = bke::multires_layers::base_recording_layer(ob)) {
+      /* Color Undo must not materialize geometric layer deltas on the cage.
+       * The Color step stores the base attribute and its own HR color snapshot. */
+      const bool color_only_v04 = color::polypaint_v04_enabled() && ss.cache &&
+          ss.cache->brush && brush_type_is_paint(ss.cache->brush->sculpt_brush_type);
+      if (MultiresSculptLayer *layer = color_only_v04 ? nullptr :
+              bke::multires_layers::base_recording_layer(ob)) {
         if (bke::multires_layers::base_deltas_ensure(*layer, mesh.verts_num)) {
           us->data.base_modifier_name = bke::multires_layers::base_modifier(ob)->modifier.name;
           us->data.base_layer_name = layer->name;
@@ -3448,6 +3679,9 @@ static size_t node_size_in_bytes(const Node &node)
   size += node.grids.as_span().size_in_bytes();
   size += node.grid_hidden.all_bits().size() / 8;
   size += node.face_sets.as_span().size_in_bytes();
+  /* MULTIRES_FACESETS_DRAW_V01: count retained HR IDs in Blender's Undo budget. */
+  size += node.grid_face_sets.as_span().size_in_bytes();
+  size += node.sculpt_layer_disps.as_span().size_in_bytes();
   size += node.face_indices.as_span().size_in_bytes();
   return size;
 }
@@ -3579,7 +3813,7 @@ static bool step_encode(bContext * /*C*/, Main *bmain, UndoStep *us_p)
   /* Dummy, encoding is done along the way by adding tiles
    * to the current 'SculptUndoStep' added by encode_init. */
   SculptUndoStep *us = reinterpret_cast<SculptUndoStep *>(us_p);
-  us->step.data_size = us->data.undo_size + us->data.base_layer_deltas.size() * sizeof(float3);
+  us->step.data_size = step_memory_size_get(&us->step);
   if (us->data.type == Type::Color && us->data.grids.grids_num != 0) {
     const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
     if (trace && trace[0] && trace[0] != '0') {
@@ -3590,16 +3824,7 @@ static bool step_encode(bContext * /*C*/, Main *bmain, UndoStep *us_p)
       std::fflush(stdout);
     }
   }
-  us->step.data_size += us->data.layer_frame.size() * sizeof(SculptLayerUndoFrameItem);
-  us->step.data_size += us->data.layer_frame_modifier.size();
-  for (const SculptLayerUndoFrameItem &item : us->data.layer_frame) {
-    us->step.data_size += item.name.size();
-  }
-  us->step.data_size += us->data.layer_metadata.size() * sizeof(SculptLayerUndoMetadata);
-  us->step.data_size += us->data.layer_metadata_modifier.size();
-  for (const SculptLayerUndoMetadata &saved : us->data.layer_metadata) {
-    us->step.data_size += saved.name.size();
-  }
+  /* Metadata and async storage are counted by the shared callback above. */
 
   if (us->data.type == Type::DyntopoEnd) {
     us->step.use_memfile_step = true;
@@ -4058,6 +4283,72 @@ void geometry_end(Object &ob)
   }
 }
 
+static wmOperatorStatus undo_memory_audit_exec(bContext * /*C*/, wmOperator *op)
+{
+  const char *enabled = std::getenv("BLENDER_SCULPT_UNDO_MEMORY_AUDIT");
+  if (!enabled || enabled[0] != '1') {
+    BKE_report(op->reports, RPT_ERROR, "Enable the Undo memory verification profile first");
+    return OPERATOR_CANCELLED;
+  }
+  UndoStack *stack = ED_undo_stack_get();
+  if (!stack) {
+    return OPERATOR_CANCELLED;
+  }
+  int position_steps = 0, pending = 0, complete = 0;
+  size_t total = 0;
+  for (UndoStep *step = static_cast<UndoStep *>(stack->steps.first); step; step = step->next) {
+    const size_t reported = BKE_undosys_step_data_size_get(step);
+    total = undo_memory_add(total, reported);
+    if (step->data_size != reported) {
+      BKE_report(op->reports, RPT_ERROR, "Undo cached size differs from shared count");
+      return OPERATOR_CANCELLED;
+    }
+    if (step->type != BKE_UNDOSYS_TYPE_SCULPT) {
+      continue;
+    }
+    const SculptUndoStep &sculpt = *reinterpret_cast<SculptUndoStep *>(step);
+    const PositionUndoStorage *storage = sculpt.data.position_step_storage.get();
+    if (!storage) {
+      continue;
+    }
+    position_steps++;
+    if (!storage->compression_ready.load(std::memory_order_acquire)) {
+      pending++;
+      continue;
+    }
+    complete++;
+    size_t retained = storage->persistent_memory_size;
+    for (const int i : storage->compressed_indices.index_range()) {
+      retained = undo_memory_add(retained, storage->compressed_indices[i].as_span().size_in_bytes());
+      retained = undo_memory_add(retained, storage->compressed_positions[i].as_span().size_in_bytes());
+      if (storage->sculpt_layer_undo) {
+        retained = undo_memory_add(retained, storage->compressed_layer_disps[i].as_span().size_in_bytes());
+      }
+    }
+    if (retained != storage->memory_size_get()) {
+      BKE_report(op->reports, RPT_ERROR, "Undo compressed payload size mismatch");
+      return OPERATOR_CANCELLED;
+    }
+  }
+  if (RNA_boolean_get(op->ptr, "require_position") && position_steps == 0) {
+    BKE_report(op->reports, RPT_ERROR, "No position Undo step was tested");
+    return OPERATOR_CANCELLED;
+  }
+  std::printf("[UNDO_MEMORY_V01] status=PASS position_steps=%d pending=%d complete=%d bytes=%llu\n",
+              position_steps, pending, complete, static_cast<unsigned long long>(total));
+  std::fflush(stdout);
+  return OPERATOR_FINISHED;
+}
+
+void SCULPT_OT_undo_memory_audit_v01(wmOperatorType *ot)
+{
+  ot->name = "Verify Sculpt Undo Memory";
+  ot->idname = "SCULPT_OT_undo_memory_audit_v01";
+  ot->description = "Verify shared Undo byte accounting without waiting for compression";
+  ot->exec = undo_memory_audit_exec;
+  RNA_def_boolean(ot->srna, "require_position", false, "Require Position Step", "Fail if no position step exists");
+}
+
 void register_type(UndoType *ut)
 {
   ut->name = "Sculpt";
@@ -4066,6 +4357,7 @@ void register_type(UndoType *ut)
   ut->step_encode = step_encode;
   ut->step_decode = step_decode;
   ut->step_free = step_free;
+  ut->step_memory_size_get = step_memory_size_get;
 
   ut->flags = UNDOTYPE_FLAG_DECODE_ACTIVE_STEP;
 
@@ -4267,8 +4559,3 @@ std::optional<Span<float>> orig_mask_data_lookup_grids(const Object & /*object*/
 }  // namespace ed::sculpt_paint
 
 }  // namespace blender
-
-
-
-
-

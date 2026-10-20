@@ -1,0 +1,48 @@
+{
+  "status": "PASS_POLYPAINT_COLOR_V04_L0_FINAL",
+  "run": "C:\\BlenderDev\\Sculpt-Polypaint-V04-Test-L0-c\\logs\\run-20261019-221112-860",
+  "blender_sha256": "76E6E474F950D4B72FDBE4FF3C7C143FD1DF4D662AFADA1C58951DBE50E49F1E",
+  "results": [
+    {
+      "case": "l0_display",
+      "phase": "save",
+      "status": "PASS",
+      "details": {
+        "status": "PASS",
+        "case": "l0_display",
+        "phase": "save",
+        "checks": [
+          "Native Paint created a real nonuniform HR color master; geometric layer present, REC off",
+          "L0 fixture uses a six-face cube: HR color remains while legacy base attribute is unchanged",
+          "Actual L0 viewport pixels show HR color; master/base attributes, geometry, Face Sets and layers remain exact",
+          "L0: fine residual preserved, max interpolation error 1.73e-07",
+          "PAINT L0 changes actual master; separate domains retained",
+          "Exact native Undo/Redo including master presence and L0 base color",
+          "Saved independent small-mesh test"
+        ],
+        "scope": "V04 independent meshes. Paint, Blur, Smear L0-L4; delta residual; Paint controls and available blend modes; protection; native attribute removal; budget; dense master; Undo/Redo and persistence. See checks for actual covered variants."
+      },
+      "logs": "C:\\BlenderDev\\Sculpt-Polypaint-V04-Test-L0-c\\logs\\run-20261019-221112-860\\l0_display\\logs"
+    },
+    {
+      "case": "l0_display",
+      "phase": "reopen",
+      "status": "PASS",
+      "details": {
+        "status": "PASS",
+        "case": "l0_display",
+        "phase": "reopen",
+        "checks": [
+          "Reopened exact HR colors, geometry, Face Sets and geometric layer data"
+        ],
+        "scope": "V04 independent meshes. Paint, Blur, Smear L0-L4; delta residual; Paint controls and available blend modes; protection; native attribute removal; budget; dense master; Undo/Redo and persistence. See checks for actual covered variants."
+      },
+      "logs": "C:\\BlenderDev\\Sculpt-Polypaint-V04-Test-L0-c\\logs\\run-20261019-221112-860\\l0_display\\logs"
+    }
+  ],
+  "manual_pending": [
+    "Verifica visiva finale di Paint/Wet Mix e Smear su rilievo reale; fluidita su mesh grande. Test automatici su mesh indipendenti."
+  ],
+  "completed": true,
+  "scope": "L0 display from shared HR master: actual viewport pixel comparison, read-only invariant, L0 paint Undo/Redo, save/reopen; Paint L0-L4 regression passed in the previous run; this run only repeats L0 display and persistence."
+}

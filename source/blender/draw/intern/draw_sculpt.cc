@@ -7,6 +7,10 @@
  */
 
 #include <cstdio>
+#include "DNA_modifier_types.h"
+#include "DEG_depsgraph_query.hh"
+#include "multires_overlay_neutral_v01.hh"
+#include "multires_draw_profile_v01.hh"
 #include "draw_sculpt.hh"
 
 #include "DNA_mesh_types.h"
@@ -51,9 +55,46 @@ float3 SculptBatch::debug_color()
   return colors[debug_index % 9];
 }
 
+/* MULTIRES_OVERLAY_NEUTRAL_V01: filter only the extra sculpt-overlay pass. */
+static IndexMask multires_overlay_non_neutral_nodes(const Object &object,
+                                                   const bke::pbvh::Tree &tree,
+                                                   const IndexMask &visible,
+                                                   const SculptBatchFeature features,
+                                                   IndexMaskMemory &memory)
+{
+  if (tree.type() != bke::pbvh::Type::Grids) return visible;
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (!ss || !ss->subdiv_ccg || !ss->multires_modifier) return visible;
+  const SubdivCCG &ccg = *ss->subdiv_ccg;
+  const Object *original = DEG_get_original(&object);
+  const Mesh *mesh = original ? id_cast<const Mesh *>(original->data) : nullptr;
+  if (!mesh || ccg.grid_to_face_map.size() != ccg.grids_num) return visible;
+  const bool mask = bool(features & SCULPT_BATCH_MASK);
+  const bool face_set = bool(features & SCULPT_BATCH_FACE_SET);
+  /* Match the data source used by fill_face_sets_grids. No scan of dense CCG data. */
+  const VArraySpan face_sets = *mesh->attributes().lookup<int>(
+      ".sculpt_face_set", bke::AttrDomain::Face);
+  const bool high_res = ss->multires_modifier->sculpt_face_set_grids != nullptr;
+  const Span<bke::pbvh::GridsNode> nodes = tree.nodes<bke::pbvh::GridsNode>();
+  return IndexMask::from_predicate(visible, memory, [&](const int i) {
+    return overlay_neutral_v01::needs_overlay(
+        mask, !ccg.masks.is_empty(), BKE_pbvh_node_fully_unmasked_get(nodes[i]),
+        face_set, high_res, !face_sets.is_empty(), mesh->face_sets_color_default,
+        nodes[i].grids(), [&](const int grid) {
+          if (grid < 0 || grid >= ccg.grid_to_face_map.size()) {
+            return (mesh->face_sets_color_default ^ 1);
+          }
+          const int face = ccg.grid_to_face_map[grid];
+          return face >= 0 && face < face_sets.size() ? face_sets[face] :
+                                                      (mesh->face_sets_color_default ^ 1);
+        });
+  });
+}
+
 static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
                                                  const bool use_wire,
-                                                 const Span<pbvh::AttributeRequest> attrs)
+                                                 const Span<pbvh::AttributeRequest> attrs,
+                                                 const SculptBatchFeature overlay_features = SCULPT_BATCH_DEFAULT)
 {
   /* pbvh::Tree should always exist for non-empty meshes, created by depsgraph eval. */
   bke::pbvh::Tree *pbvh = ob->runtime->sculpt_session ?
@@ -103,6 +144,8 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
   const bool sculpt_mesh_v3_draw_enabled =
       pbvh->type() == bke::pbvh::Type::Mesh && sculpt_mesh_v3_draw_mesh &&
       sculpt_mesh_v3_draw_mesh->verts_num >= 1'000'000;
+  const bool multires_draw_probe = pbvh->type() == bke::pbvh::Type::Grids &&
+      multires_draw_profile_v01::path();
   const double sculpt_mesh_v3_draw_total_start = BLI_time_now_seconds();
   const double sculpt_mesh_v3_draw_normals_start = sculpt_mesh_v3_draw_total_start;  bke::pbvh::update_normals_from_eval(*const_cast<Object *>(ob), *pbvh);
   const double sculpt_mesh_v3_draw_normals_ms =
@@ -112,13 +155,30 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
   pbvh::DrawCache &draw_data = pbvh::ensure_draw_data(pbvh->draw_data);
 
   IndexMaskMemory memory;
-  const IndexMask visible_nodes = bke::pbvh::search_nodes(
+  IndexMask visible_nodes = bke::pbvh::search_nodes(
       *pbvh, memory, [&](const bke::pbvh::Node &node) {
         return !BKE_pbvh_node_fully_hidden_get(node) &&
                bke::pbvh::node_frustum_contain_aabb(node, draw_frustum_planes);
       });
   const double sculpt_mesh_v3_draw_search_ms =
       (BLI_time_now_seconds() - sculpt_mesh_v3_draw_search_start) * 1000.0;
+
+  const bool filter_overlay = bool(overlay_features & SCULPT_BATCH_SKIP_NEUTRAL_OVERLAY) &&
+                              pbvh->type() == bke::pbvh::Type::Grids;
+  if (filter_overlay) {
+    const int64_t before = visible_nodes.size();
+    const double start = BLI_time_now_seconds();
+    visible_nodes = multires_overlay_non_neutral_nodes(
+        *ob, *pbvh, visible_nodes, overlay_features, memory);
+    if (multires_draw_probe) {
+      multires_draw_profile_v01::log(
+          "[MULTIRES_OVERLAY_NEUTRAL_V01] visible=%lld kept=%lld skipped=%lld filter_ms=%.3f\n",
+          (long long)before, (long long)visible_nodes.size(),
+          (long long)(before - visible_nodes.size()),
+          (BLI_time_now_seconds() - start) * 1000.0);
+    }
+    if (visible_nodes.is_empty()) return {};
+  }
 
   /* V4.4c heavy Multires: avoid forcing VBO creation/upload for every PBVH leaf on
    * the first sculpt stroke. Large SubdivCCG surfaces keep draw preparation local
@@ -145,7 +205,7 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
       source_mesh_for_threshold->verts_num >= heavy_mesh_vertex_threshold;
 
   const IndexMask nodes_to_update =
-      (update_only_visible || heavy_multires_visible_only || heavy_mesh_visible_only) ?
+      (filter_overlay || update_only_visible || heavy_multires_visible_only || heavy_mesh_visible_only) ?
           visible_nodes :
           bke::pbvh::all_leaf_nodes(*pbvh, memory);
 
@@ -174,6 +234,20 @@ static Vector<SculptBatch> sculpt_batches_get_ex(const Object *ob,
                  sculpt_mesh_v3_draw_search_ms,
                  sculpt_mesh_v3_draw_batches_ms);
   }
+  if (multires_draw_probe) {
+    const SubdivCCG *ccg = sculpt_session ? sculpt_session->subdiv_ccg : nullptr;
+    multires_draw_profile_v01::log(
+        "[MULTIRES_DRAW] grids=%d area=%d wire=%d fast=%d painting=%d attrs=%lld "
+        "visible=%lld requested=%lld normals_ms=%.3f search_ms=%.3f batches_ms=%.3f "
+        "prepare_ms=%.3f\n",
+        ccg ? ccg->grids_num : 0, ccg ? ccg->grid_area : 0,
+        int(use_wire), int(fast_mode), int(rv3d && (rv3d->rflag & RV3D_PAINTING)),
+        static_cast<long long>(attrs.size()), static_cast<long long>(visible_nodes.size()),
+        static_cast<long long>(nodes_to_update.size()), sculpt_mesh_v3_draw_normals_ms,
+        sculpt_mesh_v3_draw_search_ms, sculpt_mesh_v3_draw_batches_ms,
+        sculpt_mesh_v3_draw_total_ms);
+  }
+
   const Span<int> material_indices = draw_data.ensure_material_indices(*ob);
 
   const int max_material = std::max(0, BKE_object_material_count_eval(ob) - 1);
@@ -217,7 +291,7 @@ Vector<SculptBatch> sculpt_batches_get(const Object *ob, SculptBatchFeature feat
     }
   }
 
-  return sculpt_batches_get_ex(ob, features & SCULPT_BATCH_WIREFRAME, attrs);
+  return sculpt_batches_get_ex(ob, features & SCULPT_BATCH_WIREFRAME, attrs, features);
 }
 
 Vector<SculptBatch> sculpt_batches_per_material_get(const Object *ob,

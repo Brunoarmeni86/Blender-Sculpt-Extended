@@ -1,4 +1,4 @@
-﻿/* SPDX-FileCopyrightText: 2020 Blender Authors
+/* SPDX-FileCopyrightText: 2020 Blender Authors
  *
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
@@ -39,6 +39,41 @@
 #include "DNA_object_types.h"
 
 namespace blender {
+
+/* SUBDIVIDE_COMPACT_PHASES_V1: diagnostic only, no geometry changes. */
+struct MultiresSubdivisionPhaseTimer {
+  const char *phase;
+  const char *role;
+  int level;
+  int corners;
+  const char *path;
+  bool enabled;
+  double start;
+  MultiresSubdivisionPhaseTimer(const char *phase, const char *role, int level, int corners)
+      : phase(phase), role(role), level(level), corners(corners),
+        path(BLI_getenv("BLENDER_SUBDIV_PROFILE_LOG")),
+        enabled((path && path[0]) || BLI_getenv("BLENDER_SCULPT_SUBDIVIDE_PROFILE")),
+        start(enabled ? BLI_time_now_seconds() : 0.0)
+  {
+  }
+  ~MultiresSubdivisionPhaseTimer()
+  {
+    if (!enabled) {
+      return;
+    }
+    const double ms = (BLI_time_now_seconds() - start) * 1000.0;
+    FILE *out = path && path[0] ? std::fopen(path, "a") : nullptr;
+    FILE *stream = out ? out : stdout;
+    std::fprintf(stream,
+                 "[SUBDIV_PHASE] phase=%s role=%s level=%d corners=%d ms=%.3f\n",
+                 phase, role, level, corners, ms);
+    std::fflush(stream);
+    if (out) {
+      std::fclose(out);
+    }
+  }
+};
+
 
 /* -------------------------------------------------------------------- */
 /** \name Reshape from object
@@ -306,9 +341,17 @@ static Mesh *multires_subdivide_layer_surface(Object *object,
                                               const MultiresSubdivideModeType mode)
 {
   const Mesh &source = *id_cast<Mesh *>(object->data);
-  Mesh *work = BKE_mesh_copy_for_eval(source);
+  const char *profile_role = layer ? "layer" : "base";
+  MultiresSubdivisionPhaseTimer surface_timer("surface_total", profile_role, top_level, source.corners_num);
+  Mesh *work;
+  {
+    MultiresSubdivisionPhaseTimer timer("mesh_copy", profile_role, top_level, source.corners_num);
+    work = BKE_mesh_copy_for_eval(source);
+  }
   MDisps *grids = static_cast<MDisps *>(
       CustomData_get_layer_for_write(&work->corner_data, CD_MDISPS, work->corners_num));
+  {
+  MultiresSubdivisionPhaseTimer timer("prepare_displacements", profile_role, top_level, source.corners_num);
   for (int corner = 0; corner < work->corners_num; corner++) {
     for (int i = 0; i < grids[corner].totdisp; i++) {
       for (int axis = 0; axis < 3; axis++) {
@@ -324,29 +367,43 @@ static Mesh *multires_subdivide_layer_surface(Object *object,
       }
     }
   }
+  }
   Object work_object = dna::shallow_copy(*object);
   work_object.data = &work->id;
   MultiresModifierData work_mmd = dna::shallow_copy(mmd);
   work_mmd.sculpt_layers = {};
   MultiresReshapeContext context;
+  {
+  MultiresSubdivisionPhaseTimer timer("context_create", profile_role, top_level, source.corners_num);
   if (!multires_reshape_context_create_from_modifier(
           &context, &work_object, &work_mmd, top_level)) {
     BKE_id_free(nullptr, work);
     return nullptr;
   }
+  }
+  {
+  MultiresSubdivisionPhaseTimer timer("grid_allocate_assign", profile_role, top_level, source.corners_num);
   multires_reshape_store_original_grids(&context);
   multires_reshape_ensure_grids(work, top_level);
   multires_reshape_assign_final_elements_from_orig_mdisps(&context);
   multires_reshape_free_original_grids(&context);
+  }
+  {
+  MultiresSubdivisionPhaseTimer timer("smooth_details", profile_role, top_level, source.corners_num);
   if (ELEM(mode, MultiresSubdivideModeType::Linear, MultiresSubdivideModeType::Simple)) {
     multires_reshape_smooth_object_grids(&context, mode);
   }
   else {
     multires_reshape_smooth_object_grids_with_details(&context);
   }
+  }
+  {
+  MultiresSubdivisionPhaseTimer timer("tangent_conversion", profile_role, top_level, source.corners_num);
   multires_reshape_object_grids_to_tangent_displacement(&context);
   multires_reshape_context_free(&context);
+  }
 
+  MultiresSubdivisionPhaseTimer hidden_timer("retained_and_hidden", profile_role, top_level, source.corners_num);
   /* ensure_grids reallocates displacement, but not the hidden bitmap. */
   const MDisps *original = static_cast<const MDisps *>(
       CustomData_get_layer(&source.corner_data, CD_MDISPS));
@@ -558,12 +615,16 @@ static bool multires_subdivide_compact_layers(Object *object,
 {
   const double started = BLI_time_now_seconds();
   Mesh *mesh = id_cast<Mesh *>(object->data);
+  MultiresSubdivisionPhaseTimer total_timer("compact_including_cleanup", "all", top_level, mesh->corners_num);
   std::vector<MultiresSculptLayer *> empty;
   empty.reserve(mmd->sculpt_layers.count());
+  {
+  MultiresSubdivisionPhaseTimer timer("classify_empty", "all", top_level, mesh->corners_num);
   for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
     if (multires_compact_layer_is_empty(layer)) {
       empty.push_back(&layer);
     }
+  }
   }
   Mesh *base = multires_subdivide_layer_surface(object, *mmd, nullptr, top_level, mode);
   BLI_SCOPED_DEFER([&]() { if (base) { BKE_id_free(nullptr, base); } });
@@ -586,8 +647,11 @@ static bool multires_subdivide_compact_layers(Object *object,
     }
     MDisps *grids = static_cast<MDisps *>(CustomData_get_layer_for_write(
         &surface->corner_data, CD_MDISPS, surface->corners_num));
+    {
+    MultiresSubdivisionPhaseTimer timer("extract_delta", "layer", top_level, mesh->corners_num);
     valid = multires_stage_subdivided_layer(
         layer, base_grids, grids, mesh->corners_num, top_level, true);
+    }
     if (valid) {
       MDisps *owned = MEM_new_array_zeroed<MDisps>(mesh->corners_num, "staged compact layer grids");
       for (int corner = 0; corner < mesh->corners_num; corner++) {
@@ -597,10 +661,17 @@ static bool multires_subdivide_compact_layers(Object *object,
     }
     /* The layer's final grids are owned by staged; discard its duplicate mesh,
      * attributes and paint-mask storage before processing the next layer. */
+    {
+    MultiresSubdivisionPhaseTimer timer("free_surface_mesh", "layer", top_level, mesh->corners_num);
     BKE_id_free(nullptr, surface);
+    }
   }
+  {
+  MultiresSubdivisionPhaseTimer timer("force_sculpt_rebuild", "all", top_level, mesh->corners_num);
   valid = valid && multires_force_sculpt_rebuild(object);
+  }
   if (valid) {
+    MultiresSubdivisionPhaseTimer timer("publish_facesets", "all", top_level, mesh->corners_num);
     for (MultiresSculptLayer *layer : empty) {
       bke::multires_layers::weight_hot_delta_cache_invalidate(layer);
       for (int corner = 0; corner < layer->grids_num; corner++) {
@@ -672,6 +743,10 @@ void multiresModifier_subdivide_to_level(Object *object,
     if (mmd->totlvl == top_level) {
       bke::multires_layers::initialize_layer_grids(*mmd, top_level, mesh->corners_num);
       bke::multires_layers::ensure_corner_ids(*mmd, *mesh);
+      if (!bke::multires_layers::bind_initialized_corner_grids(*mmd, *mesh)) {
+        BKE_modifier_set_error(object, &mmd->modifier,
+                               "Could not bind initialized Sculpt Layer grids");
+      }
     }
     return;
   }
@@ -684,7 +759,7 @@ void multiresModifier_subdivide_to_level(Object *object,
   }
   if (!bke::multires_layers::remap_after_topology_edit(*mmd, *mesh)) {
     BKE_modifier_set_error(object, &mmd->modifier,
-                           "Cannot remap Sculpt Layers after the base topology edit");
+                           "Cannot preserve Sculpt Layers: invalid corner storage binding; legacy non-canonical IDs require an Edit round-trip");
     return;
   }
   if (top_level > 13 || ID_REAL_USERS(&mesh->id) > 1 ||
@@ -1202,8 +1277,3 @@ void multiresModifier_base_apply(Depsgraph *depsgraph,
 /** \} */
 
 }  // namespace blender
-
-
-
-
-

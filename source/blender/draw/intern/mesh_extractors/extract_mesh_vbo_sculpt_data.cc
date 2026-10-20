@@ -11,6 +11,9 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_mesh.hh"
+#include "BKE_modifier.hh"
+#include "BKE_sculpt_facesets_rc1.hh"
+#include "DNA_object_types.h"
 #include "BKE_paint.hh"
 
 #include "draw_subdivision.hh"
@@ -80,12 +83,34 @@ gpu::VertBufPtr extract_sculpt_data(const MeshRenderData &mr)
     const bke::AttributeAccessor attributes = mr.mesh->attributes();
     const VArraySpan mask = *attributes.lookup<float>(".sculpt_mask", bke::AttrDomain::Point);
     const VArraySpan face_set = *attributes.lookup<int>(".sculpt_face_set", bke::AttrDomain::Face);
+    const MultiresModifierData *l0_master=nullptr;
+    const Object *object=mr.facesets_source_object;
+    if (bke::facesets_rc1::enabled() && object && (object->mode&OB_MODE_SCULPT) &&
+        object->modifiers.is_single()) {
+      const auto *md=static_cast<const ModifierData *>(object->modifiers.first);
+      if (md->type==eModifierType_Multires && (md->mode&eModifierMode_Realtime) &&
+          !(md->mode&eModifierMode_DisableTemporary)) {
+        const ModifierData *source=BKE_modifier_get_original(object,const_cast<ModifierData *>(md));
+        if (!source) { source=md; }
+        const auto *candidate=reinterpret_cast<const MultiresModifierData *>(source);
+        const Mesh &original=*id_cast<const Mesh *>(object->data);
+        if (candidate->sculptlvl==0 && mr.mesh->corners_num==original.corners_num &&
+            mr.mesh->faces_num==original.faces_num &&
+            bke::facesets_rc1::master_valid(*object,original,*candidate)) {
+          l0_master=candidate;
+        }
+      }
+    }
     threading::parallel_for(faces.index_range(), 1024, [&](const IndexRange range) {
       for (const int face_index : range) {
         const IndexRange face = faces[face_index];
         uchar4 face_set_color(UCHAR_MAX);
-        if (!face_set.is_empty()) {
-          const int face_set_id = face_set[face_index];
+        if (!face_set.is_empty() || l0_master) {
+          int face_set_id = face_set.is_empty()?default_face_set:face_set[face_index];
+          if (l0_master && !face.is_empty()) {
+            const auto &grid=l0_master->sculpt_face_set_grids[face.start()];
+            face_set_id=grid.ids?grid.ids[0]:grid.uniform_id;
+          }
           if (face_set_id != default_face_set) {
             BKE_paint_face_set_overlay_color_get(face_set_id, face_set_seed, face_set_color);
           }

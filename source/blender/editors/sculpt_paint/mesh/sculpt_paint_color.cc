@@ -49,6 +49,8 @@
 #include <cstdlib>
 #include <cstdio>
 
+#include "sculpt_polypaint_blur_v01.hh"
+
 namespace blender::ed::sculpt_paint::color {
 
 static void calc_local_positions(const float4x4 &mat,
@@ -982,6 +984,9 @@ void do_paint_brush(const Depsgraph &depsgraph,
   PRF_scope(ProfileCategory::Editor);
 
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  if(polypaint_v04_enabled() && color_v04_modifier(ob)) {
+    do_polypaint_all_v04(depsgraph,sd,ob,node_mask);return;
+  }
   if (pbvh.type() == bke::pbvh::Type::Grids) {
     do_paint_brush_grids_cpu(depsgraph, sd, ob, node_mask);
     return;
@@ -1276,6 +1281,13 @@ void do_smear_brush(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   SculptSession &ss = *ob.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  if(polypaint_v04_enabled() && color_v04_modifier(ob)) {
+    do_polypaint_all_v04(depsgraph,sd,ob,node_mask);return;
+  }
+  if (pbvh.type()==bke::pbvh::Type::Grids) {
+    do_polypaint_blur_grids_v01(depsgraph,sd,ob,node_mask,true);
+    return;
+  }
   if (pbvh.type() != bke::pbvh::Type::Mesh) {
     return;
   }
@@ -1357,6 +1369,13 @@ void do_blur_brush(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   SculptSession &ss = *ob.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
+  if(polypaint_v04_enabled() && color_v04_modifier(ob)) {
+    do_polypaint_all_v04(depsgraph,sd,ob,node_mask);return;
+  }
+  if (pbvh.type()==bke::pbvh::Type::Grids) {
+    do_polypaint_blur_grids_v01(depsgraph,sd,ob,node_mask);
+    return;
+  }
   if (pbvh.type() != bke::pbvh::Type::Mesh) {
     return;
   }

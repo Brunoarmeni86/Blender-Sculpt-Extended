@@ -48,6 +48,11 @@
 
 namespace blender::ed::sculpt_paint {
 
+namespace face_set {
+bool rc10_extract_requested(const Object &object);
+wmOperatorStatus rc10_extract_from_native(bContext *C,wmOperator *op,const wmEvent *event);
+}
+
 static bool geometry_extract_poll(bContext *C)
 {
   Object *ob = CTX_data_active_object(C);
@@ -341,6 +346,9 @@ void SCULPT_OT_paint_mask_extract(wmOperatorType *ot)
 
 static wmOperatorStatus face_set_extract_invoke(bContext *C, wmOperator *op, const wmEvent *event)
 {
+  if (face_set::rc10_extract_requested(*CTX_data_active_object(C))) {
+    return face_set::rc10_extract_from_native(C,op,event);
+  }
   using namespace blender::ed;
   if (!CTX_wm_region_view3d(C)) {
     return OPERATOR_CANCELLED;

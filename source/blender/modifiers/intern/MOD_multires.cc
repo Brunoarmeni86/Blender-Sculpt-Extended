@@ -39,6 +39,7 @@
 #include "BKE_lib_id.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
 #include "BKE_multires_sculpt_layers.hh"
 #include "BKE_paint.hh"
 #include "BKE_subdiv.hh"
@@ -80,6 +81,7 @@ static void init_data(ModifierData *md)
 
 static void copy_data(const ModifierData *md_src, ModifierData *md_dst, const int flag)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("multires.copy_modifier_payload", md_src);
   const MultiresModifierData *src = reinterpret_cast<const MultiresModifierData *>(md_src);
   MultiresModifierData *dst = reinterpret_cast<MultiresModifierData *>(md_dst);
   bke::multires_layers::clear(*dst);
@@ -175,6 +177,10 @@ static void blend_write(BlendWriter *writer, const ID * /*id_owner*/, const Modi
 {
   const MultiresModifierData *mmd = reinterpret_cast<const MultiresModifierData *>(md);
   writer->write_struct(mmd);
+  /* CORNER_STORAGE_IO_B10_V02: same owner and memfile lifetime as payloads. */
+  if (mmd->sculpt_corner_ids && mmd->sculpt_corner_ids_num > 0) {
+    writer->write_int32_array(mmd->sculpt_corner_ids_num, mmd->sculpt_corner_ids);
+  }
   writer->write_struct_list(&mmd->sculpt_layers);
   for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
     if (layer.base_deltas && layer.base_verts_num > 0) {
@@ -226,6 +232,18 @@ static void blend_write(BlendWriter *writer, const ID * /*id_owner*/, const Modi
 static void blend_read(BlendDataReader *reader, ModifierData *md)
 {
   MultiresModifierData *mmd = reinterpret_cast<MultiresModifierData *>(md);
+  /* Old DNA defaults to null/zero. Invalid new storage must not silently
+   * become legacy canonical order after a failed array read. */
+  if (mmd->sculpt_corner_ids_num > 0 && mmd->sculpt_corner_ids) {
+    if (!BLO_read_array(reader, &mmd->sculpt_corner_ids, mmd->sculpt_corner_ids_num)) {
+      mmd->sculpt_corner_ids = nullptr;
+      mmd->sculpt_corner_ids_num = -1;
+    }
+  }
+  else if (mmd->sculpt_corner_ids_num != 0 || mmd->sculpt_corner_ids) {
+    mmd->sculpt_corner_ids = nullptr;
+    mmd->sculpt_corner_ids_num = -1;
+  }
   BLO_read_struct_list(reader, MultiresSculptLayer, &mmd->sculpt_layers);
   for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
     if (layer.base_deltas && layer.base_verts_num > 0) {
@@ -639,6 +657,7 @@ static Mesh *multires_as_ccg(MultiresModifierData *mmd,
                              Mesh *mesh,
                              bke::subdiv::Subdiv *subdiv)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("multires.build_ccg", ctx->object);
   Mesh *result = mesh;
   SubdivToCCGSettings ccg_settings;
   multires_ccg_settings_init(&ccg_settings, mmd, ctx, mesh);
@@ -655,7 +674,9 @@ static Mesh *multires_as_ccg(MultiresModifierData *mmd,
                 (BLI_time_now_seconds() - attach_start) * 1000.0);
   }
   const double ccg_start = trace ? BLI_time_now_seconds() : 0.0;
+  cold_trace.mark("settings_and_displacement_attach");
   result = BKE_subdiv_to_ccg_mesh(*subdiv, ccg_settings, *mesh);
+  cold_trace.mark("evaluate_and_copy_ccg_mesh");
   if (trace) {
     std::printf("[MULTIRES_TO_CCG] faces=%d corners=%d total=%.3fms\n",
                 mesh->faces_num, mesh->corners_num,
@@ -663,6 +684,10 @@ static Mesh *multires_as_ccg(MultiresModifierData *mmd,
   }
   if (result && result->runtime->subdiv_ccg) {
     SubdivCCG &ccg = *result->runtime->subdiv_ccg;
+    blender::bke::sculpt_cold_v01::event("CCG_BUILD", "object=%p modifier=%p mesh_in=%p mesh_out=%p ccg=%p subdiv=%p level=%d grids=%d area=%d",
+      static_cast<void *>(ctx->object), static_cast<void *>(mmd), static_cast<void *>(mesh),
+      static_cast<void *>(result), static_cast<void *>(&ccg), static_cast<void *>(subdiv),
+      ccg.level, ccg.grids_num, ccg.grid_area);
     if (bke::multires_layers::shrinkwrap_ccg(
             ctx->depsgraph, *ctx->object, *mmd, *mesh, ccg))
     {
@@ -682,6 +707,7 @@ static Mesh *multires_as_ccg(MultiresModifierData *mmd,
 
 static Mesh *modify_mesh(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mesh)
 {
+  blender::bke::sculpt_cold_v01::Scope cold_trace("multires.modify_mesh", ctx->object);
   /* LAYER_VISIBLE_EVAL_TRACE_V2 */
   const char *layer_trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
   const bool layer_trace = layer_trace_env && layer_trace_env[0] && layer_trace_env[0] != '0';
@@ -693,6 +719,11 @@ static Mesh *modify_mesh(ModifierData *md, const ModifierEvalContext *ctx, Mesh 
                   (BLI_time_now_seconds() - layer_eval_start) * 1000.0);
     }
   });
+  if (blender::bke::sculpt_cold_v01::path()) {
+    blender::bke::sculpt_cold_v01::event("MODIFIER_INPUT", "object=%p modifier=%p mesh=%p mode=%d flags=%d recalc=%u",
+      static_cast<void *>(ctx->object), static_cast<void *>(md), static_cast<void *>(mesh),
+      int(ctx->object->mode), int(ctx->flag), unsigned(ctx->object->id.recalc));
+  }
   Mesh *result = mesh;
 #if !defined(WITH_OPENSUBDIV)
   BKE_modifier_set_error(ctx->object, md, "Disabled, built without OpenSubdiv");
@@ -748,7 +779,10 @@ static Mesh *modify_mesh(ModifierData *md, const ModifierEvalContext *ctx, Mesh 
   }
   MultiresRuntimeData *runtime_data = multires_ensure_runtime(mmd);
   const double descriptor_start = layer_trace ? BLI_time_now_seconds() : 0.0;
+  blender::bke::sculpt_cold_v01::event("SUBDIV_DESCRIPTOR", "modifier=%p cached=%p", static_cast<void *>(md),
+    static_cast<void *>(runtime_data->subdiv));
   bke::subdiv::Subdiv *subdiv = subdiv_descriptor_ensure(mmd, &subdiv_settings, mesh);
+  cold_trace.mark("descriptor_and_input_setup");
   if (layer_trace) {
     std::printf("[MULTIRES_DESCRIPTOR] faces=%d corners=%d total=%.3fms\n",
                 mesh->faces_num, mesh->corners_num,

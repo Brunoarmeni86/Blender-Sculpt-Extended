@@ -13,6 +13,13 @@
 #include "BKE_mesh_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
+#include "BKE_object_types.hh"
+#include "BKE_multires_sculpt_layers.hh"
+#include "BKE_multires_polypaint_l0_v04d.hh"
+#include "DNA_modifier_types.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "DEG_depsgraph_query.hh"
 
@@ -287,6 +294,54 @@ static bool mesh_has_uv_map_attribute(const Mesh &mesh)
   return bke::mesh::is_uv_map(attributes.lookup_meta_data(active_uv_map));
 }
 
+/* POLYPAINT_L0_WORKBENCH_V04E: render-only exception. Do not change
+ * BKE_sculptsession_use_pbvh_draw: sculpt/undo also depend on its result.
+ * A single L0 Multires may mark the cage deformed for geometric layers,
+ * but preserves topology. Mesh PBVH positions already use evaluated positions. */
+static bool polypaint_l0_workbench_v04e(const Object &object, const RegionView3D *rv3d)
+{
+  if (!bke::multires_polypaint_l0_v04d::enabled() || object.type != OB_MESH ||
+      (rv3d && rv3d->view_render)) {
+    return false;
+  }
+  const SculptSession *ss = object.runtime->sculpt_session;
+  const auto *tree = bke::object::pbvh_get(object);
+  if (!ss || ss->mode_type != OB_MODE_SCULPT || ss->shapekey_active || ss->bm ||
+      !tree || tree->type() != bke::pbvh::Type::Mesh) {
+    return false;
+  }
+  const Object &original = *DEG_get_original(&object);
+  if (!original.modifiers.is_single() || !object.modifiers.is_single()) {
+    return false;
+  }
+  const auto *md = static_cast<const ModifierData *>(original.modifiers.first);
+  const auto *eval_md = static_cast<const ModifierData *>(object.modifiers.first);
+  if (md->type != eModifierType_Multires || eval_md->type != eModifierType_Multires ||
+      !(md->mode & eModifierMode_Realtime) || !(eval_md->mode & eModifierMode_Realtime) ||
+      (md->mode & eModifierMode_DisableTemporary) ||
+      (eval_md->mode & eModifierMode_DisableTemporary)) {
+    return false;
+  }
+  const auto &mmd = *reinterpret_cast<const MultiresModifierData *>(md);
+  const auto &eval_mmd = *reinterpret_cast<const MultiresModifierData *>(eval_md);
+  if (mmd.sculptlvl != 0 || eval_mmd.sculptlvl != 0 || mmd.totlvl < 1 || mmd.totlvl > 13 ||
+      (mmd.flags & eMultiresModifierFlag_UseSculptBaseMesh) ||
+      (eval_mmd.flags & eMultiresModifierFlag_UseSculptBaseMesh)) {
+    return false;
+  }
+  const Mesh &base = *id_cast<const Mesh *>(original.data);
+  const Mesh &mesh = DRW_object_get_data_for_drawing<Mesh>(object);
+  if (base.key || mesh.verts_num != base.verts_num || mesh.faces_num != base.faces_num ||
+      mesh.corners_num != base.corners_num ||
+      bke::pbvh::vert_positions_eval_from_eval(object).size() != mesh.verts_num ||
+      !base.active_color_attribute || !base.active_color_attribute[0]) {
+    return false;
+  }
+  MultiresModifierData view{};
+  return bke::multires_layers::polypaint_attribute_view(mmd, base.active_color_attribute, view) &&
+      view.sculpt_color_grids && view.sculpt_color_grids_num == base.corners_num;
+}
+
 ObjectState::ObjectState(const DRWContext *draw_ctx,
                          const SceneState &scene_state,
                          const SceneResources &resources,
@@ -294,8 +349,17 @@ ObjectState::ObjectState(const DRWContext *draw_ctx,
 {
   const bool is_active = (ob == draw_ctx->obact);
 
-  sculpt_pbvh = BKE_sculptsession_use_pbvh_draw(ob, draw_ctx->rv3d) &&
+  const bool l0_polypaint = !draw_ctx->is_image_render() &&
+      polypaint_l0_workbench_v04e(*ob, draw_ctx->rv3d);
+  sculpt_pbvh = (BKE_sculptsession_use_pbvh_draw(ob, draw_ctx->rv3d) || l0_polypaint) &&
                 !draw_ctx->is_image_render();
+  if (l0_polypaint) {
+    const char *trace = std::getenv("BLENDER_SCULPT_POLYPAINT_L0_TRACE");
+    if (trace && std::strcmp(trace, "1") == 0) {
+      std::printf("[POLYPAINT_L0_WORKBENCH_V04E] sculpt_pbvh=1\n");
+      std::fflush(stdout);
+    }
+  }
   draw_shadow = scene_state.draw_shadows && (ob->dtx & OB_DRAW_NO_SHADOW_CAST) == 0 &&
                 !sculpt_pbvh && !(is_active && DRW_object_use_hide_faces(ob));
 
