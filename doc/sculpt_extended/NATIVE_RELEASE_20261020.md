@@ -20,4 +20,11 @@ Restore the integration with `python -u RELEASE.py --restore PATH_TO_BACKUP` whi
 
 The preceding Windows snapshot is verified in [VERIFIED_20261019.md](VERIFIED_20261019.md). Local checks of this new integration pass: exact patch replay/idempotence, Python parsing, UI import/property lifecycle with API doubles, and isolated compilation of the exact profile initializer under ASan/UBSan (27 defaults, explicit overrides and opt-out).
 
-**The native integration has not yet been compiled or viewport-tested on Windows.** The build/test tool records this separately and will stop before packaging if the native test fails. Local tests are not a substitute for the native build. Large-mesh performance and GPU runtime behavior are not certified by the focused L0 test.
+**Windows native shareable: PASS**, reported 20 October 2026 for source commit `de620f18a92aa4a0a1f25e90f10f96aff3447ea2`.
+
+- [Windows build/test result](native_release_20261020/RISULTATO-RELEASE.json): native defaults and distributed UI startup without launcher flags; actual L0 viewport HR color; unchanged protected domains; Paint L0 and fine residual (1.73e-7); exact Undo/Redo and save/reopen.
+- [Final checksums](native_release_20261020/SHA256.txt): executable `735f99fec04a17952d1dbbd72d8307cffe91491fc7f64e5532c9fdc2c42a78ad`; shareable ZIP `f1897de1623e598794da58059327c084b9f61ff55d7fc02a954c0cea4838227c`.
+- The executable checksum in the supplied final checksum file matches the build report. These are records supplied from the Windows run; the binary ZIP itself has not been uploaded to this GitHub branch.
+- The release tool creates the ZIP from the complete installed runtime and validates its CRC before writing the checksum file. Start the resulting runtime with its `blender.exe`.
+
+CUDA, HIP and OptiX remain configured as in the existing build; oneAPI and HIPRT are off. GPU runtime behavior, large-mesh performance and all earlier brush variants are not certified by this focused native L0 test. Earlier verification remains recorded separately; no production geometry changes were made to obtain this PASS.

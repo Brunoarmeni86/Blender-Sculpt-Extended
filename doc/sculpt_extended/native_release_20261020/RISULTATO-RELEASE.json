@@ -1,0 +1,42 @@
+{
+  "status": "PASS_NATIVE_SHAREABLE",
+  "exe_sha256": "735f99fec04a17952d1dbbd72d8307cffe91491fc7f64e5532c9fdc2c42a78ad",
+  "github_commit": "de620f18a92aa4a0a1f25e90f10f96aff3447ea2",
+  "results": [
+    {
+      "status": "PASS",
+      "case": "l0_display",
+      "phase": "save",
+      "checks": [
+        "Native Paint created a real nonuniform HR color master; geometric layer present, REC off",
+        "L0 fixture uses a six-face cube: HR color remains while legacy base attribute is unchanged",
+        "Actual L0 viewport pixels show HR color; master/base attributes, geometry, Face Sets and layers remain exact",
+        "L0: fine residual preserved, max interpolation error 1.73e-07",
+        "PAINT L0 changes actual master; separate domains retained",
+        "Exact native Undo/Redo including master presence and L0 base color",
+        "Saved independent small-mesh test"
+      ],
+      "scope": "V04 independent meshes. Paint, Blur, Smear L0-L4; delta residual; Paint controls and available blend modes; protection; native attribute removal; budget; dense master; Undo/Redo and persistence. See checks for actual covered variants."
+    },
+    {
+      "status": "PASS",
+      "case": "l0_display",
+      "phase": "reopen",
+      "checks": [
+        "Reopened exact HR colors, geometry, Face Sets and geometric layer data"
+      ],
+      "scope": "V04 independent meshes. Paint, Blur, Smear L0-L4; delta residual; Paint controls and available blend modes; protection; native attribute removal; budget; dense master; Undo/Redo and persistence. See checks for actual covered variants."
+    }
+  ],
+  "gpu_config": {
+    "WITH_CYCLES_DEVICE_CUDA": "ON",
+    "WITH_CYCLES_DEVICE_HIP": "ON",
+    "WITH_CYCLES_DEVICE_HIPRT": "OFF",
+    "WITH_CYCLES_DEVICE_ONEAPI": "OFF",
+    "WITH_CYCLES_DEVICE_OPTIX": "ON",
+    "WITH_CYCLES_DEVICE_CUDA-ADVANCED": "1",
+    "WITH_CYCLES_DEVICE_HIP-ADVANCED": "1",
+    "WITH_CYCLES_DEVICE_HIPRT-ADVANCED": "1"
+  },
+  "scope": "Native defaults/UI startup; L0 viewport, read-only invariants, Paint residual, Undo/Redo, save/reopen. Existing GPU settings retained, not GPU-runtime tested."
+}
