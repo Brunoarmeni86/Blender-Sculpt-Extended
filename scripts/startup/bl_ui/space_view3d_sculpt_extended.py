@@ -76,6 +76,29 @@ class VIEW3D_PT_facesets_rc1(bpy.types.Panel):
         self.layout.label(text='L0 dipinge la faccia e i discendenti.')
         self.layout.label(text='I piccoli ID possono sparire in basso.')
 
+def draw_polypaint_brush_controls(layout, context):
+    """Shared by Sculpt Extended and Multires; keep brush behavior in one place."""
+    col = layout.column()
+    col.label(text='Paint / Blur / Smear: L0 e livelli superiori.')
+    col.label(text='L0: anteprima sulla mesh base.')
+    col.label(text='Nessun limite globale di campioni.')
+    col.operator_context = 'EXEC_REGION_WIN'
+    for action, label in (('PAINT', 'Paint'), ('BLUR', 'Blur'), ('SMEAR', 'Smear')):
+        op = col.operator('sculpt.polypaint_blur_probe_v01', text='Attiva ' + label + ' HR')
+        op.action = action
+    col.label(text='Shift da Paint/Smear richiama Blur.')
+    brush = context.tool_settings.sculpt.brush
+    if brush:
+        col.prop(brush, 'strength', text='Intensita')
+        col.prop(brush, 'size', text='Raggio')
+        if brush.sculpt_brush_type == 'PAINT':
+            for prop, label in (('blend', 'Fusione'), ('flow', 'Flusso'), ('wet_mix', 'Wet Mix'),
+                                ('wet_persistence', 'Wet Persistence'), ('density', 'Densita')):
+                col.prop(brush, prop, text=label)
+        if brush.sculpt_brush_type == 'SMEAR':
+            col.prop(brush, 'smear_deform_type', text='Modo')
+
+
 class VIEW3D_PT_polypaint_blur_v01(bpy.types.Panel):
     bl_label='Polypaint HR'
     bl_idname='VIEW3D_PT_polypaint_blur_v01'
@@ -85,23 +108,7 @@ class VIEW3D_PT_polypaint_blur_v01(bpy.types.Panel):
     @classmethod
     def poll(cls,context):return context.object is not None and context.object.mode=='SCULPT'
     def draw(self,context):
-        col=self.layout.column()
-        col.label(text='Paint / Blur / Smear: L0 e livelli superiori.')
-        col.label(text='L0: anteprima sulla mesh base.')
-        col.label(text='Nessun limite globale di campioni.')
-        col.operator_context='EXEC_REGION_WIN'
-        op=col.operator('sculpt.polypaint_blur_probe_v01',text='Attiva Paint HR');op.action='PAINT'
-        op=col.operator('sculpt.polypaint_blur_probe_v01',text='Attiva Blur HR');op.action='BLUR'
-        op=col.operator('sculpt.polypaint_blur_probe_v01',text='Attiva Smear HR');op.action='SMEAR'
-        col.label(text='Shift da Paint/Smear richiama Blur.')
-        brush=context.tool_settings.sculpt.brush
-        if brush:
-            col.prop(brush,'strength',text='Intensita')
-            col.prop(brush,'size',text='Raggio')
-            if brush.sculpt_brush_type=='PAINT':
-                for prop,label in [('blend','Fusione'),('flow','Flusso'),('wet_mix','Wet Mix'),('wet_persistence','Wet Persistence'),('density','Densita')]:
-                    col.prop(brush,prop,text=label)
-            if brush.sculpt_brush_type=='SMEAR':col.prop(brush,'smear_deform_type',text='Modo')
+        draw_polypaint_brush_controls(self.layout, context)
 
 
 class SCULPT_OT_color_v03_clear_confirm(bpy.types.Operator):
@@ -112,6 +119,43 @@ class SCULPT_OT_color_v03_clear_confirm(bpy.types.Operator):
     def execute(self,context):
         return bpy.ops.sculpt.multires_polypaint_attribute('EXEC_DEFAULT',True,action='CLEAR')
 
+def polypaint_multires(context):
+    ob = context.object
+    if ob is None or ob.type != 'MESH':
+        return None
+    mods = [m for m in ob.modifiers if m.type == 'MULTIRES']
+    return mods[0] if len(mods) == 1 else None
+
+
+def draw_polypaint_attribute_controls(layout, context):
+    m = polypaint_multires(context)
+    if m is None:
+        return
+    ob = context.object
+    names = {a.name for a in ob.data.color_attributes}
+    if m.polypaint_attribute:
+        names.add(m.polypaint_attribute)
+    names.update(a.name for a in m.polypaint_attributes)
+    col = layout.column()
+    col.operator_context = 'EXEC_REGION_WIN'
+    for name in sorted(names):
+        row = col.row(align=True)
+        if name in ob.data.color_attributes:
+            op = row.operator('sculpt.multires_polypaint_attribute', text=name,
+                              depress=name == m.polypaint_attribute)
+            op.action = 'SELECT'
+            op.name = name
+        else:
+            row.label(text=name + ' (master residuo)')
+        op = row.operator('sculpt.multires_polypaint_attribute', text='', icon='X')
+        op.action = 'REMOVE'
+        op.name = name
+    if not names:
+        col.label(text='Nessun Color Attribute.')
+    col.operator_context = 'INVOKE_REGION_WIN'
+    col.operator('sculpt.color_v03_clear_confirm', text='Rimuovi tutti i colori HR', icon='TRASH')
+
+
 class VIEW3D_PT_color_v03_attributes(bpy.types.Panel):
     bl_label='Color Attribute HR'
     bl_idname='VIEW3D_PT_color_v03_attributes'
@@ -120,23 +164,38 @@ class VIEW3D_PT_color_v03_attributes(bpy.types.Panel):
     def poll(cls,context):
         return context.object is not None and context.object.type=='MESH' and context.object.mode in {'OBJECT','SCULPT'}
     def draw(self,context):
-        ob=context.object;mods=[m for m in ob.modifiers if m.type=='MULTIRES']
-        if len(mods)!=1:return
-        m=mods[0];names={a.name for a in ob.data.color_attributes}
-        if m.polypaint_attribute:names.add(m.polypaint_attribute)
-        names.update(a.name for a in m.polypaint_attributes)
-        col=self.layout.column();col.operator_context='EXEC_REGION_WIN'
-        for name in sorted(names):
-            row=col.row(align=True)
-            if name in ob.data.color_attributes:
-                op=row.operator('sculpt.multires_polypaint_attribute',text=name,depress=name==m.polypaint_attribute)
-                op.action='SELECT';op.name=name
-            else:row.label(text=name+' (master residuo)')
-            op=row.operator('sculpt.multires_polypaint_attribute',text='',icon='X')
-            op.action='REMOVE';op.name=name
-        if not names:col.label(text='Nessun Color Attribute.')
-        col.operator_context='INVOKE_REGION_WIN'
-        col.operator('sculpt.color_v03_clear_confirm',text='Rimuovi tutti i colori HR',icon='TRASH')
+        draw_polypaint_attribute_controls(self.layout, context)
+
+
+class VIEW3D_PT_multires_polypaint(bpy.types.Panel):
+    bl_label = 'Polypaint HR'
+    bl_idname = 'VIEW3D_PT_multires_polypaint'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Multires'
+
+    @classmethod
+    def poll(cls, context):
+        return polypaint_multires(context) is not None and context.object.mode == 'SCULPT'
+
+    def draw(self, context):
+        draw_polypaint_brush_controls(self.layout, context)
+
+
+class VIEW3D_PT_multires_polypaint_attributes(bpy.types.Panel):
+    bl_label = 'Color Attribute HR'
+    bl_idname = 'VIEW3D_PT_multires_polypaint_attributes'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Multires'
+
+    @classmethod
+    def poll(cls, context):
+        return (polypaint_multires(context) is not None and
+                context.object.mode in {'OBJECT', 'SCULPT'})
+
+    def draw(self, context):
+        draw_polypaint_attribute_controls(self.layout, context)
 
 
 
@@ -145,6 +204,8 @@ classes = (
     VIEW3D_PT_facesets_rc1,
     VIEW3D_PT_polypaint_blur_v01,
     VIEW3D_PT_color_v03_attributes,
+    VIEW3D_PT_multires_polypaint,
+    VIEW3D_PT_multires_polypaint_attributes,
 )
 
 

@@ -1,0 +1,21 @@
+{
+  "baseline": "4259a8472d3a8e99a09eea2acefe62a59f24a617",
+  "ui_sha256": "78b1f4a9a380f5c8ccdb67f986ed369ee07ff22e878bce7cb1abb0981014155b",
+  "python_checks": {
+    "passed": 13,
+    "skipped": 1,
+    "failed": 0
+  },
+  "blender_4_3_2_checks": {
+    "passed": 14,
+    "skipped": 0,
+    "failed": 0
+  },
+  "preserved_ast": [
+    "Face Sets panel",
+    "clear confirmation operator",
+    "property registration lifecycle"
+  ],
+  "native_windows_validation": "PENDING; verified portable and later source payload chain unavailable",
+  "geometry_or_performance_certification": false
+}

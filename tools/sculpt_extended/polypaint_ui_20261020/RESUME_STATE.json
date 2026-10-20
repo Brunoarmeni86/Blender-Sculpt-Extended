@@ -1,0 +1,42 @@
+{
+  "repository": "Brunoarmeni86/Blender-Sculpt-Extended",
+  "branch": "release/sculpt-extended-native-20261020",
+  "remote_baseline_verified": "4259a8472d3a8e99a09eea2acefe62a59f24a617",
+  "reported_windows_build": {
+    "archive": "Sculpt-Bake-Visible-Hidden-V01.zip",
+    "library_id": "libfile_d5ad106590148191b241e0fdf9f36dbb",
+    "exe_sha256": "da235eb28ff27873414ca095104bf325e11a04413f6ac63cae36ba76c8cd9f5d",
+    "test_archive": "Sculpt-Bake-Visible-Test-Fix-V01.zip",
+    "test_library_id": "libfile_32190adb75d88191a2e7dc31dd9f3d7b",
+    "log_archive": "LOG-DA-INVIARE(20261020-145905).zip",
+    "log_library_id": "libfile_7027c109fc388191a0a0c272b7333de4",
+    "result": "PASS_BAKE_VISIBLE_HIDDEN (HR and L0); RNA/callback panel PASS",
+    "evidence_status": "User-supplied handoff; artifacts not accessible in this session; not independently rerun",
+    "restored_shareable_exe_sha256": "a00113514db414c317fa6a535e45c8bd08931ade8f9bcf4066a883d880a5ccdd"
+  },
+  "reported_regional_v03": {
+    "archive": "Sculpt-Subdivide-Regional-Execute-V03.zip",
+    "library_id": "libfile_7c5df89162848191a5017266590badb8",
+    "log_archive": "LOG-DA-INVIARE(20261020-143201).zip",
+    "log_library_id": "libfile_ae81b55557f08191b8efeeb2dc382673",
+    "opt_in": {
+      "BLENDER_SCULPT_SUBDIVIDE_REGIONAL_V03": "1"
+    },
+    "status": "Not recovered or present in this baseline; no general speedup claim"
+  },
+  "constraints": [
+    "Recover baseline and complete payload/manifest chain before merging later verified source state",
+    "Do not infer final sources from the restored Windows shareable checkout",
+    "Keep BLENDER_SCULPT_COMMIT_KEEP_CCG=0",
+    "Keep Shared-Work V03 OFF; exact variable names require recovered payloads",
+    "Preserve verified Face Sets algorithms",
+    "Keep future subdivision optimizations in a separate version"
+  ],
+  "ui_patch_scope": "Shared brush and color attribute controls in Sculpt Extended and Multires tabs; existing UV bake unchanged",
+  "pending": [
+    "Recover later payloads/manifests, exact launch profile and Windows logs",
+    "Merge and verify later state without overwriting baseline/history",
+    "Validate updated UI on the verified Windows portable",
+    "Then create separate regional optimization version and measure phase time / peak RAM"
+  ]
+}

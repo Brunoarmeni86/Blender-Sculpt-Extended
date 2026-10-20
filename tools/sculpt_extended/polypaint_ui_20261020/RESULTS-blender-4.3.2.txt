@@ -1,0 +1,22 @@
+test_clear_keeps_native_undo_call (__main__.AttributeControls.test_clear_keeps_native_undo_call) ... ok
+test_empty_still_offers_confirmed_clear (__main__.AttributeControls.test_empty_still_offers_confirmed_clear) ... ok
+test_object_mode (__main__.AttributeControls.test_object_mode) ... ok
+test_residual_master_can_be_removed_but_not_selected (__main__.AttributeControls.test_residual_master_can_be_removed_but_not_selected) ... ok
+test_select_and_remove (__main__.AttributeControls.test_select_and_remove) ... ok
+test_register_poll_and_unregister (__main__.BlenderRegistration.test_register_poll_and_unregister) ... ok
+test_blur (__main__.BrushControls.test_blur) ... ok
+test_no_brush (__main__.BrushControls.test_no_brush) ... ok
+test_paint (__main__.BrushControls.test_paint) ... ok
+test_smear (__main__.BrushControls.test_smear) ... ok
+test_absent_or_ambiguous_multires (__main__.Eligibility.test_absent_or_ambiguous_multires) ... ok
+test_missing_or_nonmesh_object (__main__.Eligibility.test_missing_or_nonmesh_object) ... ok
+test_modes (__main__.Eligibility.test_modes) ... ok
+test_registration_list_and_categories (__main__.Eligibility.test_registration_list_and_categories) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 0.005s
+
+OK
+Blender 4.3.2
+
+Blender quit
