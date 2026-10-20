@@ -1,0 +1,10 @@
+{
+  "status": "PASS_LOCAL_ONLY",
+  "baseline_exe": "e4a9759ac3a9412130e35d69dc807d9c6f98319fed40b775fe24bba0d98b8807",
+  "staging": "Actual serial/parallel V05 function bodies: sparse implicit zero, active deltas, hidden mapping, invalid old data and nonfinite base; ASan/UBSan PASS, leak detection disabled for container restriction",
+  "unchanged": "All other V04 native payloads and UI byte-identical",
+  "topology": "Scoped existing lease reused in regional branch; global base-detail caching forcibly bypassed. Full native validation pending Windows.",
+  "python": "Syntax PASS",
+  "windows": "PENDING",
+  "performance": "PENDING; one combined A/B required"
+}

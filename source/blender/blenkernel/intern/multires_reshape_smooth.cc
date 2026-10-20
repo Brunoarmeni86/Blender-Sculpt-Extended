@@ -251,7 +251,8 @@ struct MultiresSubdivideLeaseV03 {
     const MultiresReshapeContext &r = *work.reshape_context;
     auto *candidate = r.subdivide_smooth_cache_v03;
     if (!candidate || candidate->busy ||
-        !subdivide_flag_v03("BLENDER_SCULPT_SUBDIVIDE_TOPOLOGY_V03")) {
+        !(subdivide_flag_v03("BLENDER_SCULPT_SUBDIVIDE_TOPOLOGY_V03") ||
+          subdivide_flag_v03("BLENDER_SCULPT_SUBDIVIDE_COMBINED_V05"))) {
       return;
     }
     const Mesh &mesh = *r.base_mesh;
@@ -285,6 +286,7 @@ struct MultiresSubdivideLeaseV03 {
     const int64_t bytes = int64_t(r.num_grids) *
                           (side * side * sizeof(SurfacePoint) + sizeof(SurfaceGrid));
     keep_base = with_details && !r.orig.mdisps && !r.orig.grid_paint_masks &&
+                !subdivide_flag_v03("BLENDER_SCULPT_SUBDIVIDE_COMBINED_V05") &&
                 subdivide_flag_v03("BLENDER_SCULPT_SUBDIVIDE_BASE_PHASE_V03") &&
                 bytes <= subdivide_base_budget_v03();
     if (keep_base) {
@@ -1543,8 +1545,18 @@ static bool subdivide_regional_prepare_v03(MultiresReshapeSmoothContext *work)
 
 static void subdivide_regional_smooth_v03(MultiresReshapeSmoothContext *work)
 {
-  geometry_create(work);
-  reshape_subdiv_create(work);
+  /* V05 reuses only topology/evaluator ownership within this one transaction.
+   * It never retains the global base detail buffer. Both original and final
+   * positions are still uploaded/refined for EVERY surface. */
+  MultiresSubdivideLeaseV03 shared(*work, false);
+  if (!shared.topology_hit) {
+    geometry_create(work);
+    reshape_subdiv_create(work);
+  }
+  if (subdivide_flag_v03("BLENDER_SCULPT_SUBDIVIDE_COMBINED_V05")) {
+    std::printf("[SUBDIVIDE_COMBINED_TOPOLOGY_V05] hit=%d base_cache=0\n",
+                int(shared.topology_hit));
+  }
   if (!subdivide_regional_prepare_v03(work)) {
     std::printf("[SUBDIVIDE_REGIONAL_V03] state=FALLBACK\n");
     evaluate_linear_delta_grids(work);

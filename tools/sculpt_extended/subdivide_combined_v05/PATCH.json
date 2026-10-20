@@ -1,0 +1,62 @@
+[
+  {
+    "path": "source/blender/blenkernel/intern/multires_reshape.cc",
+    "file": "multires_reshape.cc",
+    "before": "b5b1335ad9320d01569deaf07255a0dc404270046a5337356602967416321c5d",
+    "after": "f3abf3359584d3217b891d01e995ad0db208d5ff49d7563ade16d56ae114dc2f"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_reshape.hh",
+    "file": "multires_reshape.hh",
+    "before": "ab9ac7ca2eb2b13c03e5a63344508a86f14922fb3fd3d7edd877bf547318befe",
+    "after": "ae553fb3f10770933e0937c51513cb09ec10a9c5eea655c105b970e071e84442"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_reshape_smooth.cc",
+    "file": "multires_reshape_smooth.cc",
+    "before": "cc6fc789c096cf274a9f72d1680d6e3c13460863a7f082a1524d725443f782ef",
+    "after": "6c0d6e0c287c5a254a0b3eaa72348d42ebd9090aba4495039edf7d245775ef02"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_subdivide_support_v03.hh",
+    "file": "multires_subdivide_support_v03.hh",
+    "before": null,
+    "after": "2fd4ce3619b6ec7eab52df2fe79dd96d3bbeac6305f0fa3b27740aed3d5792b2"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_subdivide_work_v01.hh",
+    "file": "multires_subdivide_work_v01.hh",
+    "before": "55de6910ba95ebcdc4cfd8c99abd1d9935af310ef6dd1dafacd8c11819ba0d16",
+    "after": "55de6910ba95ebcdc4cfd8c99abd1d9935af310ef6dd1dafacd8c11819ba0d16"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_sculpt_layers.cc",
+    "file": "multires_sculpt_layers.cc",
+    "before": "1f640b8d91d8e16638a2cc65192c73bd8bf34b742bd33a484802e9ebddc0cbf9",
+    "after": "fe9d403d668c53ab5a936f8ae6ab03a190c7b317c01b529478c2a4c58650fb99"
+  },
+  {
+    "path": "source/blender/editors/sculpt_paint/mesh/sculpt_ops.cc",
+    "file": "sculpt_ops.cc",
+    "before": "cdeef378663e8531145d660183d627e4edfd4c8228958621697981d8b8c0fd3c",
+    "after": "a0714956616d647552f1e08dc2f7a4ed3e447f0a3f13fc20ae01e6f2cb83072f"
+  },
+  {
+    "path": "scripts/startup/bl_ui/space_view3d_sculpt_extended.py",
+    "file": "space_view3d_sculpt_extended.py",
+    "before": "959346f4e0e042721c170dcdda2561dd2a742718325a567b3bd329c78a0c0129",
+    "after": "9431b02b6d162ef02ef4e0e56d6236d8fba547ed805321b301f7caf15a5d7997"
+  },
+  {
+    "path": "source/creator/sculpt_extended_profile.hh",
+    "file": "sculpt_extended_profile.hh",
+    "before": "9184a6fec2bdd26c939007188a736015b688b806e780e52df4cbaccdeb8aafd4",
+    "after": "3833e16d3caed65feccb24c6e18dc9453debce657b0def7b1da63cb6d13e0a36"
+  },
+  {
+    "path": "source/blender/blenkernel/intern/multires_subdivide_scratch_v04.hh",
+    "file": "multires_subdivide_scratch_v04.hh",
+    "before": null,
+    "after": "9fed627da6cc15f0669921fbbcc4d657c92df625e36b357ff92d72fa87516fb6"
+  }
+]

@@ -1,0 +1,674 @@
+{
+  "status": "PASS_COMBINED_V05",
+  "regional_execution_opt_in": true,
+  "baseline_sha256": "a00113514db414c317fa6a535e45c8bd08931ade8f9bcf4066a883d880a5ccdd",
+  "reference_sha256": "e4a9759ac3a9412130e35d69dc807d9c6f98319fed40b775fe24bba0d98b8807",
+  "candidate_sha256": "a2b5ace84ebe7c2b6db8937938aad98f288f988cb41c38025a7f1b1c29a298e9",
+  "profiles": {
+    "affine_reference": {
+      "status": "PASS",
+      "max_errors": {
+        "undo": {
+          "max_abs": 0.0,
+          "tolerance": 2.23226523399353e-06
+        },
+        "redo": {
+          "max_abs": 0.0,
+          "tolerance": 2.230173587799072e-06
+        },
+        "strength_zero_native_base": {
+          "max_abs": 5.960464477539063e-08,
+          "tolerance": 2e-06
+        }
+      },
+      "timings_ms": [
+        {
+          "label": "layers_L4",
+          "mode": "CATMULL_CLARK",
+          "from_level": 3,
+          "to_level": 4,
+          "native_operator_ms": 184.59729999995034,
+          "process_memory": {
+            "working_set_bytes": 557113344,
+            "process_peak_working_set_bytes": 574005248,
+            "process_peak_commit_bytes": 2051543040
+          }
+        },
+        {
+          "label": "layers_L5",
+          "mode": "CATMULL_CLARK",
+          "from_level": 4,
+          "to_level": 5,
+          "native_operator_ms": 636.1995999995997,
+          "process_memory": {
+            "working_set_bytes": 624177152,
+            "process_peak_working_set_bytes": 692305920,
+            "process_peak_commit_bytes": 2086690816
+          }
+        },
+        {
+          "label": "native_L4",
+          "mode": "CATMULL_CLARK",
+          "from_level": 3,
+          "to_level": 4,
+          "native_operator_ms": 111.76620000060211,
+          "process_memory": {
+            "working_set_bytes": 962412544,
+            "process_peak_working_set_bytes": 1060900864,
+            "process_peak_commit_bytes": 2464051200
+          }
+        },
+        {
+          "label": "native_L5",
+          "mode": "CATMULL_CLARK",
+          "from_level": 4,
+          "to_level": 5,
+          "native_operator_ms": 414.977600000384,
+          "process_memory": {
+            "working_set_bytes": 1037094912,
+            "process_peak_working_set_bytes": 1060900864,
+            "process_peak_commit_bytes": 2467672064
+          }
+        }
+      ],
+      "active_regions": [
+        [
+          "49",
+          "1536",
+          "568",
+          "24576"
+        ],
+        [
+          "41",
+          "1536",
+          "467",
+          "24576"
+        ],
+        [
+          "52",
+          "1536",
+          "2464",
+          "98304"
+        ],
+        [
+          "45",
+          "1536",
+          "2052",
+          "98304"
+        ]
+      ],
+      "scratch_mask_drops": [
+        "1536",
+        "1536",
+        "1536",
+        "1536"
+      ],
+      "preparation": [
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "4"
+        ],
+        [
+          "1536",
+          "4"
+        ],
+        [
+          "1536",
+          "4"
+        ]
+      ],
+      "topology_hits": [],
+      "sparse_staging": []
+    },
+    "affine_combined_v05": {
+      "status": "PASS",
+      "max_errors": {
+        "reference_initial": {
+          "max_abs": 0.0,
+          "tolerance": 2.23226523399353e-06
+        },
+        "reference_L4": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.230173587799072e-06
+        },
+        "reference_undo_L3": {
+          "max_abs": 0.0,
+          "tolerance": 2.23226523399353e-06
+        },
+        "undo": {
+          "max_abs": 0.0,
+          "tolerance": 2.23226523399353e-06
+        },
+        "reference_redo_L4": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.230173587799072e-06
+        },
+        "redo": {
+          "max_abs": 0.0,
+          "tolerance": 2.230173587799072e-06
+        },
+        "reference_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.229955196380615e-06
+        },
+        "reference_base_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2e-06
+        },
+        "reference_A_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.229955196380615e-06
+        },
+        "reference_zero_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2e-06
+        },
+        "strength_zero_native_base": {
+          "max_abs": 5.960464477539063e-08,
+          "tolerance": 2e-06
+        },
+        "reference_negative_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2e-06
+        },
+        "reference_B_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2e-06
+        },
+        "reference_both_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.1136929988861083e-06
+        },
+        "reference_post_stroke_L5": {
+          "max_abs": 2.384185791015625e-07,
+          "tolerance": 2.507225751876831e-06
+        },
+        "reference_low_L1": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.477246522903442e-06
+        },
+        "reference_saved": {
+          "max_abs": 2.384185791015625e-07,
+          "tolerance": 2.507225751876831e-06
+        }
+      },
+      "timings_ms": [
+        {
+          "label": "layers_L4",
+          "mode": "CATMULL_CLARK",
+          "from_level": 3,
+          "to_level": 4,
+          "native_operator_ms": 165.03410000041185,
+          "process_memory": {
+            "working_set_bytes": 610369536,
+            "process_peak_working_set_bytes": 645967872,
+            "process_peak_commit_bytes": 2024763392
+          }
+        },
+        {
+          "label": "layers_L5",
+          "mode": "CATMULL_CLARK",
+          "from_level": 4,
+          "to_level": 5,
+          "native_operator_ms": 564.8353999995379,
+          "process_memory": {
+            "working_set_bytes": 696692736,
+            "process_peak_working_set_bytes": 746921984,
+            "process_peak_commit_bytes": 2173091840
+          }
+        },
+        {
+          "label": "native_L4",
+          "mode": "CATMULL_CLARK",
+          "from_level": 3,
+          "to_level": 4,
+          "native_operator_ms": 109.46659999990516,
+          "process_memory": {
+            "working_set_bytes": 1000894464,
+            "process_peak_working_set_bytes": 1127469056,
+            "process_peak_commit_bytes": 2453135360
+          }
+        },
+        {
+          "label": "native_L5",
+          "mode": "CATMULL_CLARK",
+          "from_level": 4,
+          "to_level": 5,
+          "native_operator_ms": 396.01440000024013,
+          "process_memory": {
+            "working_set_bytes": 1079414784,
+            "process_peak_working_set_bytes": 1127469056,
+            "process_peak_commit_bytes": 2460467200
+          }
+        }
+      ],
+      "active_regions": [
+        [
+          "49",
+          "1536",
+          "568",
+          "24576"
+        ],
+        [
+          "41",
+          "1536",
+          "467",
+          "24576"
+        ],
+        [
+          "52",
+          "1536",
+          "2464",
+          "98304"
+        ],
+        [
+          "45",
+          "1536",
+          "2052",
+          "98304"
+        ]
+      ],
+      "scratch_mask_drops": [
+        "1536",
+        "1536",
+        "1536",
+        "1536"
+      ],
+      "preparation": [
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "4"
+        ],
+        [
+          "1536",
+          "4"
+        ],
+        [
+          "1536",
+          "4"
+        ]
+      ],
+      "topology_hits": [
+        "1",
+        "1",
+        "1",
+        "1"
+      ],
+      "sparse_staging": [
+        [
+          "1487",
+          "1536"
+        ],
+        [
+          "1495",
+          "1536"
+        ],
+        [
+          "1484",
+          "1536"
+        ],
+        [
+          "1491",
+          "1536"
+        ]
+      ]
+    },
+    "rotation_reference": {
+      "status": "PASS",
+      "max_errors": {
+        "undo": {
+          "max_abs": 0.0,
+          "tolerance": 2.23226523399353e-06
+        },
+        "redo": {
+          "max_abs": 0.0,
+          "tolerance": 2.230173587799072e-06
+        },
+        "strength_zero_native_base": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2e-06
+        }
+      },
+      "timings_ms": [
+        {
+          "label": "layers_L4",
+          "mode": "CATMULL_CLARK",
+          "from_level": 3,
+          "to_level": 4,
+          "native_operator_ms": 193.09250000060274,
+          "process_memory": {
+            "working_set_bytes": 559144960,
+            "process_peak_working_set_bytes": 573763584,
+            "process_peak_commit_bytes": 2053820416
+          }
+        },
+        {
+          "label": "layers_L5",
+          "mode": "CATMULL_CLARK",
+          "from_level": 4,
+          "to_level": 5,
+          "native_operator_ms": 677.6349000001574,
+          "process_memory": {
+            "working_set_bytes": 632291328,
+            "process_peak_working_set_bytes": 702283776,
+            "process_peak_commit_bytes": 2103402496
+          }
+        },
+        {
+          "label": "native_L4",
+          "mode": "CATMULL_CLARK",
+          "from_level": 3,
+          "to_level": 4,
+          "native_operator_ms": 119.02680000002874,
+          "process_memory": {
+            "working_set_bytes": 944066560,
+            "process_peak_working_set_bytes": 1072893952,
+            "process_peak_commit_bytes": 2409795584
+          }
+        },
+        {
+          "label": "native_L5",
+          "mode": "CATMULL_CLARK",
+          "from_level": 4,
+          "to_level": 5,
+          "native_operator_ms": 440.80769999982294,
+          "process_memory": {
+            "working_set_bytes": 1022136320,
+            "process_peak_working_set_bytes": 1072893952,
+            "process_peak_commit_bytes": 2409795584
+          }
+        }
+      ],
+      "active_regions": [
+        [
+          "49",
+          "1536",
+          "568",
+          "24576"
+        ],
+        [
+          "41",
+          "1536",
+          "467",
+          "24576"
+        ],
+        [
+          "52",
+          "1536",
+          "2464",
+          "98304"
+        ],
+        [
+          "45",
+          "1536",
+          "2052",
+          "98304"
+        ]
+      ],
+      "scratch_mask_drops": [
+        "1536",
+        "1536",
+        "1536",
+        "1536"
+      ],
+      "preparation": [
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "4"
+        ],
+        [
+          "1536",
+          "4"
+        ],
+        [
+          "1536",
+          "4"
+        ]
+      ],
+      "topology_hits": [],
+      "sparse_staging": []
+    },
+    "rotation_combined_v05": {
+      "status": "PASS",
+      "max_errors": {
+        "reference_initial": {
+          "max_abs": 0.0,
+          "tolerance": 2.23226523399353e-06
+        },
+        "reference_L4": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.230173587799072e-06
+        },
+        "reference_undo_L3": {
+          "max_abs": 0.0,
+          "tolerance": 2.23226523399353e-06
+        },
+        "undo": {
+          "max_abs": 0.0,
+          "tolerance": 2.23226523399353e-06
+        },
+        "reference_redo_L4": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.230173587799072e-06
+        },
+        "redo": {
+          "max_abs": 0.0,
+          "tolerance": 2.230173587799072e-06
+        },
+        "reference_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.229955196380615e-06
+        },
+        "reference_base_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2e-06
+        },
+        "reference_A_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.229955196380615e-06
+        },
+        "reference_zero_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2e-06
+        },
+        "strength_zero_native_base": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2e-06
+        },
+        "reference_negative_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2e-06
+        },
+        "reference_B_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2e-06
+        },
+        "reference_both_L5": {
+          "max_abs": 1.1920928955078125e-07,
+          "tolerance": 2.11369252204895e-06
+        },
+        "reference_post_stroke_L5": {
+          "max_abs": 2.384185791015625e-07,
+          "tolerance": 2.50722599029541e-06
+        },
+        "reference_low_L1": {
+          "max_abs": 2.9802322387695312e-08,
+          "tolerance": 2.4772469997406004e-06
+        },
+        "reference_saved": {
+          "max_abs": 2.384185791015625e-07,
+          "tolerance": 2.50722599029541e-06
+        }
+      },
+      "timings_ms": [
+        {
+          "label": "layers_L4",
+          "mode": "CATMULL_CLARK",
+          "from_level": 3,
+          "to_level": 4,
+          "native_operator_ms": 173.4161000003951,
+          "process_memory": {
+            "working_set_bytes": 558575616,
+            "process_peak_working_set_bytes": 577933312,
+            "process_peak_commit_bytes": 2119725056
+          }
+        },
+        {
+          "label": "layers_L5",
+          "mode": "CATMULL_CLARK",
+          "from_level": 4,
+          "to_level": 5,
+          "native_operator_ms": 596.704900000077,
+          "process_memory": {
+            "working_set_bytes": 635469824,
+            "process_peak_working_set_bytes": 702623744,
+            "process_peak_commit_bytes": 2119725056
+          }
+        },
+        {
+          "label": "native_L4",
+          "mode": "CATMULL_CLARK",
+          "from_level": 3,
+          "to_level": 4,
+          "native_operator_ms": 125.9888000004139,
+          "process_memory": {
+            "working_set_bytes": 979501056,
+            "process_peak_working_set_bytes": 1088241664,
+            "process_peak_commit_bytes": 2433351680
+          }
+        },
+        {
+          "label": "native_L5",
+          "mode": "CATMULL_CLARK",
+          "from_level": 4,
+          "to_level": 5,
+          "native_operator_ms": 449.88869999997405,
+          "process_memory": {
+            "working_set_bytes": 1051615232,
+            "process_peak_working_set_bytes": 1088241664,
+            "process_peak_commit_bytes": 2445385728
+          }
+        }
+      ],
+      "active_regions": [
+        [
+          "49",
+          "1536",
+          "568",
+          "24576"
+        ],
+        [
+          "41",
+          "1536",
+          "467",
+          "24576"
+        ],
+        [
+          "52",
+          "1536",
+          "2464",
+          "98304"
+        ],
+        [
+          "45",
+          "1536",
+          "2052",
+          "98304"
+        ]
+      ],
+      "scratch_mask_drops": [
+        "1536",
+        "1536",
+        "1536",
+        "1536"
+      ],
+      "preparation": [
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "1"
+        ],
+        [
+          "1536",
+          "4"
+        ],
+        [
+          "1536",
+          "4"
+        ],
+        [
+          "1536",
+          "4"
+        ]
+      ],
+      "topology_hits": [
+        "1",
+        "1",
+        "1",
+        "1"
+      ],
+      "sparse_staging": [
+        [
+          "1487",
+          "1536"
+        ],
+        [
+          "1495",
+          "1536"
+        ],
+        [
+          "1484",
+          "1536"
+        ],
+        [
+          "1491",
+          "1536"
+        ]
+      ]
+    }
+  },
+  "original_restored": true
+}

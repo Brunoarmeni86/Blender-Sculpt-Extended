@@ -1,0 +1,37 @@
+Subdivide Combined V05 — un'unica patch e un unico confronto contro V04.
+
+Interventi combinati:
+- Riusa geometria di raccordo, topologia ed evaluatore nel singolo Subdivide.
+  Ricarica e raffina sempre le coordinate originali/finali per ogni superficie.
+  La vecchia cache globale del dettaglio base rimane disattivata.
+- Nelle grid dimostrate inattive dalla chiusura regionale V03 evita la copia
+  della base e la scrittura/riscan di buffer tutti-zero: pubblica zero implicito.
+  Conserva validazione dei dati precedenti, controlli finiti e bitmap nascoste.
+- Conserva ottimizzazioni V04, Bake Visible e UI Multires/Polypaint.
+
+La V05 non elimina tutte le allocazioni globali: i buffer usati prima di
+conoscere il supporto e il raffinamento globale delle coordinate restano.
+Guadagno complessivo e picco RAM devono risultare dal test.
+Face Sets e formato dati non sono modificati.
+
+Chiudi Blender. Estrai in C:\BlenderDev, ottenendo:
+C:\BlenderDev\Sculpt-Subdivide-Combined-V05\PROVA.py
+
+Esegui in PowerShell:
+& 'C:\Users\olias\AppData\Local\Python\pythoncore-3.15-64\python.exe' -u 'C:\BlenderDev\Sculpt-Subdivide-Combined-V05\PROVA.py'
+
+Richiede shareable restaurata a0011351... e sorgenti precedenti verificati.
+Riferimento: V04 e4a9759a... indicata nella sua ULTIMA.txt.
+Le guardie hash fermano la procedura su una base diversa.
+
+Una compilazione, una portable separata, un unico ciclo automatico V04/V05:
+due layer scolpiti (uno nascosto), due vuoti, maschera nonzero, livelli 3->4->5,
+trasporto affine e rotation anti-spike, geometria/colori/Face Sets/maschera,
+Undo/Redo, intensita zero/negativa, stroke e salvataggio/riapertura.
+Sorgenti/exe precedenti vengono ripristinati prima del confronto.
+
+Successo: PASS_COMBINED_V05. Invia LOG-DA-INVIARE.zip nel percorso stampato.
+Le misure di picco memoria sono cumulative del processo Windows.
+
+Solo dopo PASS, avvio manuale su mesh densa:
+& 'C:\Users\olias\AppData\Local\Python\pythoncore-3.15-64\python.exe' -u 'C:\BlenderDev\Sculpt-Subdivide-Combined-V05\PROVA.py' --launch
