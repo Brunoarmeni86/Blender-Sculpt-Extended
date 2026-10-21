@@ -1,0 +1,76 @@
+{
+  "status": "PASS_NATIVE_UNIFIED_STARTUP",
+  "base_commit": "e75798b382bbfb89b4d23107fbb84efcd50fd8a9",
+  "executable_sha256": "53b2d50df01ac0aab3c5809ea9b2f27ab7d9ff6dc6b46d029c50f771cd7aae02",
+  "source_sha256": {
+    "source/creator/sculpt_extended_profile.hh": "4e47693c681fbd035c9065031de80919620b33f9a1d53a9ad517427c19a8c09c",
+    "scripts/startup/bl_ui/__init__.py": "8841ca4dca001b5653762d58ba9de441b2b9c66ef1ae6b2fd5550263748df92f",
+    "scripts/startup/bl_ui/space_view3d_multires_sidebar.py": "7c20fcee63925399b5a23e05642f949e6955e3749c710639aa4b25820de7f544",
+    "scripts/startup/bl_ui/space_view3d_sculpt_diagnostics.py": "8e22f427eb5939cfe4d5992263d49277feb44b45fe49a56b70587abf661b561c"
+  },
+  "native_default_count": 74,
+  "modes": {
+    "normal": {
+      "mode": "normal",
+      "status": "PASS",
+      "native_defaults_checked": 74,
+      "registered_types": [
+        "VIEW3D_PT_sculpt_multires_sidebar",
+        "VIEW3D_PT_sculpt_multires_layers_sidebar",
+        "MULTIRES_OT_polypaint_manage",
+        "VIEW3D_PT_multires_polypaint_attributes",
+        "VIEW3D_PT_sculpt_extended_multires",
+        "SCULPT_OT_layer_diagnostics"
+      ],
+      "startup_external_script_required": false,
+      "geometry_smoke": "PASS: two subdivisions, layer add/duplicate, hidden layer, save/reopen"
+    },
+    "override": {
+      "mode": "override",
+      "status": "PASS",
+      "native_defaults_checked": 74,
+      "registered_types": [
+        "VIEW3D_PT_sculpt_multires_sidebar",
+        "VIEW3D_PT_sculpt_multires_layers_sidebar",
+        "MULTIRES_OT_polypaint_manage",
+        "VIEW3D_PT_multires_polypaint_attributes",
+        "VIEW3D_PT_sculpt_extended_multires",
+        "SCULPT_OT_layer_diagnostics"
+      ],
+      "startup_external_script_required": false
+    },
+    "optout": {
+      "mode": "optout",
+      "status": "PASS",
+      "native_defaults_checked": 0,
+      "registered_types": [
+        "VIEW3D_PT_sculpt_multires_sidebar",
+        "VIEW3D_PT_sculpt_multires_layers_sidebar",
+        "MULTIRES_OT_polypaint_manage",
+        "VIEW3D_PT_multires_polypaint_attributes",
+        "VIEW3D_PT_sculpt_extended_multires",
+        "SCULPT_OT_layer_diagnostics"
+      ],
+      "startup_external_script_required": false
+    }
+  },
+  "intentional_deviations": {
+    "BLENDER_SCULPT_SUBDIVIDE_PROFILE": {
+      "launcher": "1",
+      "native": "0"
+    },
+    "BLENDER_LAYER_RESP_TRACE": {
+      "launcher": "1",
+      "native": "0"
+    },
+    "BLENDER_SCULPT_COMMIT_KEEP_CCG": {
+      "launcher": "1",
+      "native": "0"
+    }
+  },
+  "build": "Windows Release incremental rebuild; geometric kernels unchanged",
+  "limitations": [
+    "No new interactive viewport or GPU test",
+    "Full stroke/Bake Undo/Redo regression not rerun; geometry kernels unchanged"
+  ]
+}

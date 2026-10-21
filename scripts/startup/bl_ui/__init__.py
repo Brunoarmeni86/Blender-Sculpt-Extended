@@ -92,6 +92,8 @@ _modules = [
     "space_view3d",
     "space_view3d_sidebar",
     "space_view3d_sculpt_extended",
+    "space_view3d_multires_sidebar",
+    "space_view3d_sculpt_diagnostics",
     "space_view3d_sculpt_destination",
     "space_view3d_toolbar",
 

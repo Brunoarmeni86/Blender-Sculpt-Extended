@@ -1,0 +1,14 @@
+{
+  "BLENDER_SCULPT_SUBDIVIDE_PROFILE": {
+    "launcher": "1",
+    "native": "0"
+  },
+  "BLENDER_LAYER_RESP_TRACE": {
+    "launcher": "1",
+    "native": "0"
+  },
+  "BLENDER_SCULPT_COMMIT_KEEP_CCG": {
+    "launcher": "1",
+    "native": "0"
+  }
+}
