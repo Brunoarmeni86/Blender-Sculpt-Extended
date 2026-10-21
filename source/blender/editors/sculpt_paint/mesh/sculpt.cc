@@ -64,6 +64,7 @@
 #include "DNA_scene_types.h"
 #include "DNA_userdef_types.h"
 
+#include "BKE_attribute.h"
 #include "BKE_attribute.hh"
 #include "BKE_brush.hh"
 #include "BKE_bvhutils.hh"
@@ -8099,8 +8100,90 @@ static bool sculpt_polypaint_prepare_stroke_master(bContext *C, wmOperator *op)
     }
     return true;
   }
-  const Mesh *mesh = id_cast<Mesh *>(ob->data);
+  Mesh *mesh = id_cast<Mesh *>(ob->data);
   const SculptSession *ss = ob->runtime->sculpt_session;
+
+  /* Paint/Blur/Smear must be immediately usable. Reuse the active compatible
+   * color attribute, select the first compatible one, or create Color once.
+   * The dense Multires master remains lazy and is allocated below, outside
+   * the parallel dab path. */
+  if (mmd) {
+    const bke::AttributeAccessor attributes = mesh->attributes();
+    std::string color_name;
+    if (mesh->active_color_attribute && mesh->active_color_attribute[0]) {
+      const std::optional<bke::AttributeMetaData> meta = attributes.lookup_meta_data(
+          mesh->active_color_attribute);
+      if (meta && bke::mesh::is_color_attribute(meta) &&
+          ELEM(meta->domain, bke::AttrDomain::Point, bke::AttrDomain::Corner))
+      {
+        color_name = mesh->active_color_attribute;
+      }
+    }
+    if (color_name.empty()) {
+      attributes.foreach_attribute([&](const bke::AttributeIter &attribute) {
+        if (color_name.empty() &&
+            bke::mesh::is_color_attribute(attributes.lookup_meta_data(attribute.name)) &&
+            ELEM(attribute.domain, bke::AttrDomain::Point, bke::AttrDomain::Corner))
+        {
+          color_name = attribute.name;
+        }
+      });
+    }
+    if (color_name.empty()) {
+      if (!(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0 ||
+          (ss && (ss->cache || ss->filter_cache)))
+      {
+        BKE_report(op->reports, RPT_ERROR,
+                   "Automatic Color Attribute creation requires Global Undo and no active stroke");
+        return false;
+      }
+      UndoStack *stack = ED_undo_stack_get();
+      if (!stack || stack->step_init || !ED_undo_is_memfile_compatible(C)) {
+        BKE_report(op->reports, RPT_ERROR, "Cannot checkpoint automatic Color Attribute creation");
+        return false;
+      }
+      UndoStep *previous = stack->step_active;
+      ED_undo_push(C, "Before Automatic Color Attribute");
+      if (!stack->step_active || stack->step_active == previous ||
+          stack->step_active->type != BKE_UNDOSYS_TYPE_MEMFILE)
+      {
+        BKE_report(op->reports, RPT_ERROR, "Automatic Color Attribute checkpoint failed");
+        return false;
+      }
+      color_name = "Color";
+      int suffix = 1;
+      while (attributes.contains(color_name)) {
+        color_name = "Color.Auto." + std::to_string(suffix++);
+      }
+      bke::MutableAttributeAccessor writable = mesh->attributes_for_write();
+      if (!writable.add(color_name,
+                        bke::AttrDomain::Corner,
+                        bke::AttrType::ColorFloat,
+                        bke::AttributeInitDefaultValue()))
+      {
+        BKE_report(op->reports, RPT_ERROR, "Cannot create the automatic Color Attribute");
+        return false;
+      }
+      auto colors = writable.lookup_for_write_span<ColorGeometry4f>(color_name);
+      if (colors) {
+        colors.span.fill(ColorGeometry4f(1.0f, 1.0f, 1.0f, 1.0f));
+        colors.finish();
+      }
+      DEG_id_tag_update(&mesh->id, ID_RECALC_GEOMETRY);
+      DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+      WM_main_add_notifier(NC_GEOM | ND_DATA, mesh);
+    }
+    if (!color_name.empty() &&
+        (!mesh->active_color_attribute || !STREQ(mesh->active_color_attribute, color_name.c_str())))
+    {
+      BKE_id_attributes_active_color_set(&mesh->id, color_name.c_str());
+    }
+    if (!color_name.empty() &&
+        (!mesh->default_color_attribute || !mesh->default_color_attribute[0]))
+    {
+      BKE_id_attributes_default_color_set(&mesh->id, color_name.c_str());
+    }
+  }
   const char *multi = std::getenv("BLENDER_SCULPT_POLYPAINT_MULTI_ATTRIBUTE");
   if (mmd && ((multi && multi[0] == '1') || mmd->sculpt_color_attribute[0] ||
               !mmd->sculpt_color_attributes.is_empty())) {

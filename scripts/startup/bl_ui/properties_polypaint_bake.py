@@ -397,6 +397,7 @@ def draw_modifier_bake(layout, context):
 
 class MPBI_PT_sidebar(bpy.types.Panel):
     bl_label = 'Polypaint → Texture UV'
+    bl_order = -10
     bl_idname = 'MPBI_PT_polypaint_bake_sidebar'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'

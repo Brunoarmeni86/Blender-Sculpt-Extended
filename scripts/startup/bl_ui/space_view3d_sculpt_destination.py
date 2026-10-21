@@ -189,9 +189,10 @@ def draw_header(self, context):
 
 class VIEW3D_PT_sculpt_destination_v01(bpy.types.Panel):
     bl_label = 'Destinazione Sculpt'
+    bl_order = 10
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Sculpt Extended'
+    bl_category = 'Multires'
 
     @classmethod
     def poll(cls, context):

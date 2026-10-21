@@ -6,7 +6,7 @@ class VIEW3D_PT_facesets_rc1(bpy.types.Panel):
     bl_idname='VIEW3D_PT_facesets_rc1'
     bl_space_type='VIEW_3D'
     bl_region_type='UI'
-    bl_category='Sculpt Extended'
+    bl_category='Multires'
     @classmethod
     def poll(cls,context):
         return context.object is not None and context.object.type=='MESH'
@@ -104,7 +104,7 @@ class VIEW3D_PT_polypaint_blur_v01(bpy.types.Panel):
     bl_idname='VIEW3D_PT_polypaint_blur_v01'
     bl_space_type='VIEW_3D'
     bl_region_type='UI'
-    bl_category='Sculpt Extended'
+    bl_category='Multires'
     @classmethod
     def poll(cls,context):return context.object is not None and context.object.mode=='SCULPT'
     def draw(self,context):
@@ -156,47 +156,37 @@ def draw_polypaint_attribute_controls(layout, context):
     col.operator('sculpt.color_v03_clear_confirm', text='Rimuovi tutti i colori HR', icon='TRASH')
 
 
+class SCULPT_OT_color_attribute_add_auto_v07(bpy.types.Operator):
+    bl_idname = 'sculpt.color_attribute_add_auto_v07'
+    bl_label = 'Nuovo Color Attribute'
+    bl_description = 'Crea e attiva un nuovo Color Attribute compatibile con Polypaint HR'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.type == 'MESH'
+
+    def execute(self, context):
+        names = {attribute.name for attribute in context.object.data.color_attributes}
+        name = 'Color'
+        suffix = 1
+        while name in names:
+            name = f'Color.{suffix:03d}'
+            suffix += 1
+        return bpy.ops.sculpt.multires_polypaint_attribute(
+            'EXEC_DEFAULT', action='ADD', name=name)
+
+
 class VIEW3D_PT_color_v03_attributes(bpy.types.Panel):
     bl_label='Color Attribute HR'
+    bl_order = 0
     bl_idname='VIEW3D_PT_color_v03_attributes'
-    bl_space_type='VIEW_3D';bl_region_type='UI';bl_category='Sculpt Extended'
+    bl_space_type='VIEW_3D';bl_region_type='UI';bl_category='Multires'
     @classmethod
     def poll(cls,context):
         return context.object is not None and context.object.type=='MESH' and context.object.mode in {'OBJECT','SCULPT'}
     def draw(self,context):
         draw_polypaint_attribute_controls(self.layout, context)
-
-
-class VIEW3D_PT_multires_polypaint(bpy.types.Panel):
-    bl_label = 'Polypaint HR'
-    bl_idname = 'VIEW3D_PT_multires_polypaint'
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'Multires'
-
-    @classmethod
-    def poll(cls, context):
-        return polypaint_multires(context) is not None and context.object.mode == 'SCULPT'
-
-    def draw(self, context):
-        draw_polypaint_brush_controls(self.layout, context)
-
-
-class VIEW3D_PT_multires_polypaint_attributes(bpy.types.Panel):
-    bl_label = 'Color Attribute HR'
-    bl_idname = 'VIEW3D_PT_multires_polypaint_attributes'
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'Multires'
-
-    @classmethod
-    def poll(cls, context):
-        return (polypaint_multires(context) is not None and
-                context.object.mode in {'OBJECT', 'SCULPT'})
-
-    def draw(self, context):
-        draw_polypaint_attribute_controls(self.layout, context)
-
 
 
 class SCULPT_OT_extended_prepare_transport(bpy.types.Operator):
@@ -290,14 +280,11 @@ class VIEW3D_PT_sculpt_extended_multires(bpy.types.Panel):
 
 
 classes = (
+    SCULPT_OT_color_attribute_add_auto_v07,
     SCULPT_OT_extended_prepare_transport,
     VIEW3D_PT_sculpt_extended_multires,
     SCULPT_OT_color_v03_clear_confirm,
-    VIEW3D_PT_facesets_rc1,
-    VIEW3D_PT_polypaint_blur_v01,
     VIEW3D_PT_color_v03_attributes,
-    VIEW3D_PT_multires_polypaint,
-    VIEW3D_PT_multires_polypaint_attributes,
 )
 
 
