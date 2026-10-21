@@ -12,6 +12,7 @@ parser.add_argument('--installed', type=Path, required=True)
 parser.add_argument('--output', type=Path, required=True)
 parser.add_argument('--archive', type=Path, required=True)
 parser.add_argument('--source-commit', required=True)
+parser.add_argument('--manifest', type=Path)
 args = parser.parse_args()
 source = args.installed.resolve(strict=True)
 target = args.output.resolve()
@@ -39,7 +40,7 @@ for base, dirs, files in os.walk(source, followlinks=False):
         destination = target / rel / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, destination)
-manifest = json.loads((target / 'BUILD-MANIFEST.json').read_text())
+manifest = json.loads((args.manifest or target / 'BUILD-MANIFEST.json').read_text())
 manifest['source_commit'] = args.source_commit
 manifest['source_state'] = 'committed native-startup fix; installed build checked against source hashes'
 manifest['distribution'] = 'runtime-only portable; no SculptExtended launcher scripts or development symbols'

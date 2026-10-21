@@ -1,5 +1,7 @@
 # Unified Sculpt Extended startup — 2026-10-21
 
+> Superseded by `APPROVED_V05_COMPLETE_20261021.md`. This historical launcher-parity profile omitted required V05 optimization defaults and reintroduced the legacy REC UI. Its original 74-default validation is not the acceptance test for the corrected build; use `tools/sculpt_extended/approved_v05_20261021/validate.py`.
+
 Opening `blender.exe` now enables the same functional profile and Multires sidebar that previously required `AVVIA-SCULPT-EXTENDED.cmd`. The native profile contained only 29 defaults; three nested PowerShell launchers supplied 52 additional or overlapping settings, and a Python session script registered four extra UI classes and a diagnostics operator.
 
 The creator profile now supplies 74 defaults before Python and feature caches initialize. Explicit environment overrides and `BLENDER_SCULPT_EXTENDED_NATIVE=0` remain supported. The four existing sidebar classes are registered through `bl_ui`; the diagnostic operator is registered normally and writes its reports to the temporary directory instead of the installation directory. Geometric kernels and Face Sets algorithms are unchanged.

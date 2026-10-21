@@ -212,74 +212,32 @@ class SCULPT_OT_extended_prepare_transport(bpy.types.Operator):
         return {'FINISHED'}
 
 class VIEW3D_PT_sculpt_extended_multires(bpy.types.Panel):
-    bl_label = 'Sculpt Extended · Multires'
+    bl_label = 'Draw Transport'
     bl_idname = 'VIEW3D_PT_sculpt_extended_multires'
+    bl_parent_id = 'VIEW3D_PT_sculpt_multires_sidebar'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Multires'
-    bl_order = -20
 
     @classmethod
     def poll(cls, context):
-        return context.object is not None and context.object.type == 'MESH'
+        return (context.object is not None and context.object.type == 'MESH'
+                and context.object.mode == 'SCULPT')
 
     def draw(self, context):
         layout = self.layout
-        mods = [m for m in context.object.modifiers if m.type == 'MULTIRES']
-        if len(mods) != 1:
-            layout.label(text='Select a mesh with one Multires modifier', icon='INFO')
-            return
-        m = mods[0]
-        col = layout.column(align=True)
-        col.prop(m, 'levels', text='Viewport')
-        col.prop(m, 'sculpt_levels', text='Sculpt')
-        col.prop(m, 'render_levels', text='Render')
-        row = layout.row(align=True)
-        row.operator('object.multires_subdivide', text='Subdivide').modifier = m.name
-        layout.prop(m, 'use_sculpt_base_mesh')
-        if context.object.mode == 'SCULPT':
-            from .space_view3d_sculpt_destination import draw_controls
-            _, target = draw_controls(layout, context, m)
-            layout.label(text=target, icon='INFO')
-        layout.separator()
-        layout.label(text='Sculpt Layers', icon='MOD_MULTIRES')
-        sculpt = context.object.mode == 'SCULPT'
-        tools = layout.column(align=True)
-        tools.enabled = sculpt
-        row = tools.row(align=True)
-        row.operator('sculpt.multires_layer_add', text='Add', icon='ADD')
-        row.operator('sculpt.multires_layer_duplicate', text='Duplicate')
-        row.operator('sculpt.multires_layer_delete', text='Delete', icon='X')
-        for i, layer in enumerate(m.sculpt_layers):
-            box = layout.box()
-            row = box.row(align=True)
-            select = row.row(align=True)
-            select.enabled = sculpt
-            select.operator('sculpt.multires_layer_set_active', text='',
-                icon='RADIOBUT_ON' if i == m.active_sculpt_layer_index else 'RADIOBUT_OFF').index = i
-            row.prop(layer, 'name', text='')
-            row.prop(layer, 'visible', text='', icon='HIDE_OFF' if layer.visible else 'HIDE_ON')
-            box.prop(layer, 'strength')
-        row = tools.row(align=True)
-        row.operator('sculpt.multires_layer_move', text='Up').direction = 'UP'
-        row.operator('sculpt.multires_layer_move', text='Down').direction = 'DOWN'
-        tools.operator('sculpt.multires_layer_commit', text='Commit Pending Changes')
-        tools.operator('sculpt.multires_layer_snapshot', text='Create Hidden Copy')
-        tools.operator_context = 'INVOKE_REGION_WIN'
-        tools.operator('sculpt.multires_base_capture', text='Bake Visible into Base...')
-        layout.separator()
-        transport = layout.column(align=True)
-        transport.enabled = sculpt
-        transport.operator('sculpt.extended_prepare_transport', text='Activate Draw Transport')
+        layout.operator('sculpt.extended_prepare_transport', text='Activate Draw Transport')
         settings = context.tool_settings.sculpt
         brush = settings.brush if settings else None
-        if sculpt and brush:
-            transport.prop(brush, 'sculpt_draw_transport_v01', text='Draw Transport')
-            transport.label(text='R rotate · S scale · SS strength')
-            transport.label(text='Use at the highest Multires level')
+        if brush:
+            layout.prop(brush, 'sculpt_draw_transport_v01', text='Draw Transport')
+            layout.label(text='R rotate · S scale · SS strength')
+            layout.label(text='Use at the highest Multires level')
 
 
 classes = (
+    VIEW3D_PT_facesets_rc1,
+    VIEW3D_PT_polypaint_blur_v01,
     SCULPT_OT_color_attribute_add_auto_v07,
     SCULPT_OT_extended_prepare_transport,
     VIEW3D_PT_sculpt_extended_multires,

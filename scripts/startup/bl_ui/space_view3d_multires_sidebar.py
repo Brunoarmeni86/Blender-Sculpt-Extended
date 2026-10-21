@@ -110,9 +110,6 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
             layout.label(text="Attivo: " + modifier.sculpt_layers[active_index].name)
         controls = layout.column(align=True)
         controls.enabled = context.object.mode == 'SCULPT'
-        rec = controls.row()
-        rec.enabled = bool(len(modifier.sculpt_layers)) and not modifier.use_sculpt_base_mesh
-        rec.prop(modifier, "sculpt_layer_recording", text="REC")
         row = controls.row(align=True)
         native_operator(row, "sculpt.multires_layer_add", "Add", 'ADD')
         native_operator(row, "sculpt.multires_layer_duplicate", "Duplicate", 'DUPLICATE')
@@ -122,6 +119,9 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
         native_operator(row, "sculpt.multires_layer_move", "Down", 'TRIA_DOWN', direction='DOWN')
         native_operator(controls, "sculpt.multires_layer_commit", "Commit Pending Changes")
         native_operator(controls, "sculpt.multires_layer_snapshot", "Create Hidden Copy", 'DUPLICATE')
+        bake = controls.column(align=True)
+        bake.operator_context = 'INVOKE_REGION_WIN'
+        native_operator(bake, 'sculpt.multires_base_capture', 'Bake Visible into Base...')
         # The new native merge appears only after its independent source patch
         # is installed. Do not alias the older bake operator: different semantics.
         # Merge is an Object Mode transaction, independent of Sculpt controls.
@@ -197,8 +197,7 @@ class VIEW3D_PT_multires_polypaint_attributes(bpy.types.Panel):
             row.label(text=('L' + str(level)) if level else 'Base')
         row = controls.row(align=True)
         row.operator_context = 'INVOKE_DEFAULT'
-        button = row.operator('multires.polypaint_manage', text='Add', icon='ADD')
-        button.action = 'ADD'
+        row.operator('sculpt.color_attribute_add_auto_v07', text='Add', icon='ADD')
         if active:
             button = row.operator('multires.polypaint_manage', text='Rename')
             button.action = 'RENAME'
