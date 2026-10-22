@@ -575,13 +575,19 @@ Span<gpu::VertBufPtr> DrawCacheImpl::ensure_grid_geometry_v01(
             float3 normal;
             if (sharp) {
               normal_quad_v3(normal, positions[p3], positions[p2], positions[p1], positions[p0]);
+              const short4 packed = normal_float_to_short(normal);
+              write(positions[p0], packed);
+              write(positions[p1], packed);
+              write(positions[p2], packed);
+              write(positions[p3], packed);
             }
-            else { normal = normals[p0]; }
-            const short4 packed = normal_float_to_short(normal);
-            write(positions[p0], packed);
-            write(positions[p1], packed);
-            write(positions[p2], packed);
-            write(positions[p3], packed);
+            else {
+              /* Duplicated quad vertices still need their individual smooth normals. */
+              write(positions[p0], normal_float_to_short(normals[p0]));
+              write(positions[p1], normal_float_to_short(normals[p1]));
+              write(positions[p2], normal_float_to_short(normals[p2]));
+              write(positions[p3], normal_float_to_short(normals[p3]));
+            }
           }
         }
       }
@@ -1093,7 +1099,6 @@ BLI_NOINLINE static void fill_normals_grids(const Object &object,
                                             const IndexMask &node_mask,
                                             const MutableSpan<gpu::VertBufPtr> vbos)
 {
-  const bool quad_face_sets=facesets_quad_display_v06c(object) || facesets_quad_layout_rc1(object);
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
   const SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
@@ -1130,17 +1135,15 @@ BLI_NOINLINE static void fill_normals_grids(const Object &object,
             else {
               for (int y = 0; y < grid_size_1; y++) {
                 for (int x = 0; x < grid_size_1; x++) {
-                  if (quad_face_sets) {
-                    *data++=normal_float_to_short(grid_normals[CCG_grid_xy_to_index(key.grid_size,x,y)]);
-                    *data++=normal_float_to_short(grid_normals[CCG_grid_xy_to_index(key.grid_size,x+1,y)]);
-                    *data++=normal_float_to_short(grid_normals[CCG_grid_xy_to_index(key.grid_size,x+1,y+1)]);
-                    *data++=normal_float_to_short(grid_normals[CCG_grid_xy_to_index(key.grid_size,x,y+1)]);
-                  }
-                  else {
-                    std::fill_n(data,4,normal_float_to_short(
-                        grid_normals[CCG_grid_xy_to_index(key.grid_size,x,y)]));
-                    data+=4;
-                  }
+                  /* Quad duplication is a storage layout, not a flat-shading request. */
+                  *data++ = normal_float_to_short(
+                      grid_normals[CCG_grid_xy_to_index(key.grid_size, x, y)]);
+                  *data++ = normal_float_to_short(
+                      grid_normals[CCG_grid_xy_to_index(key.grid_size, x + 1, y)]);
+                  *data++ = normal_float_to_short(
+                      grid_normals[CCG_grid_xy_to_index(key.grid_size, x + 1, y + 1)]);
+                  *data++ = normal_float_to_short(
+                      grid_normals[CCG_grid_xy_to_index(key.grid_size, x, y + 1)]);
                 }
               }
             }
