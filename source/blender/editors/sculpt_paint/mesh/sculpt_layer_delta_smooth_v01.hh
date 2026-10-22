@@ -41,6 +41,11 @@ struct State {
 };
 inline State &state() { static State value; return value; }
 inline void reset() { state() = State{}; }
+inline bool targets_layer(const MultiresModifierData &mmd)
+{
+  return !(mmd.flags & eMultiresModifierFlag_UseSculptBaseMesh) &&
+         bke::multires_layers::base_has_visible_layers(mmd);
+}
 inline bool finite(const float3 &v)
 {
   return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
@@ -65,7 +70,7 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
    * Sculpt Base Mesh is the selected target there is no layer to isolate:
    * leave this state empty and let Blender's regular Smooth brush operate on
    * the base mesh, regardless of hidden or zero-strength layers. */
-  if (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) { return true; }
+  if (!targets_layer(*mmd)) { return true; }
   if (mmd->sculpt_layers.is_empty()) { return true; }
   const MultiresSculptLayer *layer = bke::multires_layers::active(*mmd);
   const char *error = nullptr;

@@ -263,7 +263,7 @@ static bool do_layer_delta_smooth(const Depsgraph &depsgraph,
   if (!delta::owns(object)) {
     const SculptSession &session = *object.runtime->sculpt_session;
     const MultiresModifierData *mmd = session.multires_modifier;
-    if (delta::enabled() && mmd && !mmd->sculpt_layers.is_empty()) {
+    if (delta::enabled() && mmd && delta::targets_layer(*mmd)) {
       delta::fail("stroke_not_prepared");
       return true;
     }

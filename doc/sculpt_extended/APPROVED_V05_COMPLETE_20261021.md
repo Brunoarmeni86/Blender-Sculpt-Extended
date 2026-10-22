@@ -41,4 +41,6 @@ La portable pubblicata fa5 resta una prerelease con difetti noti fino alla sosti
 
 Il percorso Delta Smooth dei layer ora viene ignorato quando `Sculpt Base Mesh` è il target. In questo caso Blender usa lo Smooth standard anche se tutti gli Sculpt Layers sono nascosti o hanno strength zero. Il controllo di layer visibile, attivo e con strength non zero resta invariato quando si scolpisce su un layer.
 
+La prima correzione copriva soltanto la gabbia esplicita ed era incompleta. Con tutti i layer nascosti il target è già Base Multires, senza attivare Sculpt Base Mesh. Entrambi i controlli (inizio pennellata e fallback nei grid) ora usano la stessa selezione nativa: Delta Smooth si applica soltanto al target layer. La regressione aggiornata riproduce l'errore sul vecchio binario e passa sul nuovo con Sculpt Base Mesh disattivo: la superficie CCG cambia, la gabbia resta identica. Non è necessaria una nuova suite generale.
+
 Verifica mirata: vera pennellata Smooth su Base Mesh con un layer nascosto a strength zero, operatore completato, nessun errore Delta Smooth e variazione geometrica della base confermata. Sono passati anche avvio, Bake HR/L0 e il confronto Subdivide affine; la suite più estesa è stata interrotta perché non necessaria per questa modifica circoscritta.

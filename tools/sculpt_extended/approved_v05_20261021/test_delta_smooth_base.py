@@ -3,9 +3,11 @@ import bpy
 import json
 import sys
 import traceback
+import numpy as np
 from pathlib import Path
 
 output = Path(sys.argv[sys.argv.index('--') + 1])
+cage = '--cage' in sys.argv
 bpy.context.preferences.use_preferences_save = False
 bpy.context.preferences.view.show_splash = False
 
@@ -21,6 +23,15 @@ def base_positions(obj):
     values = [0.0] * (len(obj.data.vertices) * 3)
     obj.data.vertices.foreach_get('co', values)
     return values
+
+
+def surface_positions():
+    path = output.with_suffix('.probe.json')
+    with view_context():
+        assert bpy.ops.sculpt.polypaint_blur_probe_v01(action='EXPORT', filepath=str(path)) == {'FINISHED'}
+    data = json.loads(path.read_text())
+    path.unlink()
+    return np.asarray(data['positions'], dtype=np.float32)
 
 
 def run():
@@ -44,7 +55,9 @@ def run():
         layer = modifier.sculpt_layers[0]
         layer.visible = False
         layer.strength = 0.0
-        modifier.use_sculpt_base_mesh = True
+        modifier.use_sculpt_base_mesh = cage
+        from bl_ui.space_view3d_sculpt_destination import geometric_target
+        assert geometric_target(modifier)[0] == ('CAGE' if cage else 'BASE')
         assert not any(item.visible and abs(item.strength) > 1e-6 for item in modifier.sculpt_layers)
         assert bpy.ops.brush.asset_activate(
             asset_library_type='ESSENTIALS',
@@ -58,7 +71,8 @@ def run():
         bpy.context.space_data.region_3d.view_distance = 4.0
     yield 0.8
 
-    before = base_positions(obj)
+    before_cage = base_positions(obj)
+    before = before_cage if cage else surface_positions()
     with view_context():
         region = bpy.context.region
         view = bpy.context.space_data.region_3d
@@ -75,13 +89,17 @@ def run():
                 y_tilt=0.0, time=index * 0.1, is_start=index == 0))
         assert bpy.ops.sculpt.brush_stroke(
             'EXEC_DEFAULT', True, stroke=samples, override_location=True) == {'FINISHED'}
+    after = base_positions(obj) if cage else surface_positions()
+    maximum = float(np.max(np.abs(np.asarray(after) - np.asarray(before))))
+    if not cage:
+        assert base_positions(obj) == before_cage, 'Multires smoothing unexpectedly edited the cage'
+    with view_context():
         bpy.ops.object.mode_set(mode='OBJECT')
-    after = base_positions(obj)
-    maximum = max(abs(a - b) for a, b in zip(after, before))
     assert maximum > 1e-7, 'Smooth did not modify the Base Mesh'
     output.write_text(json.dumps({
         'status': 'PASS',
         'target': 'BASE',
+        'sculpt_base_mesh': cage,
         'visible_nonzero_layers': 0,
         'maximum_base_delta': maximum,
     }, indent=2))
