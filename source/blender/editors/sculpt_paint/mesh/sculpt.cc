@@ -7855,25 +7855,6 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   MEM_delete(ss.cache);
   ss.cache = nullptr;
 
-  /* Publish every completed geometric Multires stroke while the layer that
-   * received it is still active. Previously most brushes left their CCG
-   * changes pending until a later layer-stack operation, while Delta Smooth
-   * had its own immediate layer isolation. Besides making the two paths look
-   * inconsistent, delayed publication allowed unrelated UI activity to become
-   * the boundary that decided where a stroke was stored. The local commit
-   * solver subtracts every other visible layer and writes only the active one.
-   * Keep failed commits pending so no sculpt data is discarded. */
-  if (!is_cancel && stroke_started && ss.subdiv_ccg && ss.subdiv_ccg->dirty.coords) {
-    if (MultiresModifierData *mmd = bke::multires_layers::base_modifier(ob);
-        mmd && bke::multires_layers::base_has_visible_layers(*mmd))
-    {
-      if (!bke::multires_layers::commit(ob)) {
-        BKE_modifier_set_error(
-            &ob, &mmd->modifier, "Could not publish the completed stroke to the active Sculpt Layer");
-      }
-    }
-  }
-
   if (!is_cancel && stroke_started) {
     stroke_undo_end(*paint_mode_settings_, *this->object, brush);
   }
