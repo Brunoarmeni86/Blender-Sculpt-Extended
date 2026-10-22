@@ -184,18 +184,36 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
   if(uint64_t(result.source.size())*640+uint64_t(staged.size()+1)*high_area*sizeof(float[4])>budget){color_v04_abort("stage_budget");return;}
   auto stage=std::make_unique<ColorV04GridStage>();stage->index=g;stage->side=high_side;
   stage->colors=MEM_new_array_uninitialized<float[4]>(high_area,"Polypaint V04 staged master");
-  for(int y=0;y<high_side;y++)for(int x=0;x<high_side;x++){
+  const auto &original=mmd->sculpt_color_grids[g];
+  /* Preserve atomic publication and full source validation. Dense grids need
+   * only one contiguous copy; project deltas only inside their support. */
+  if(original.colors)std::memcpy(stage->colors,original.colors,size_t(high_area)*sizeof(float[4]));
+  else for(int y=0;y<high_side;y++)for(int x=0;x<high_side;x++){
+   if(!bke::multires_layers::polypaint_sample_with_base(*mmd,mesh,name,g,
+        float(x)/(high_side-1),float(y)/(high_side-1),stage->colors[y*high_side+x]))return;
+  }
+  for(int i=0;i<high_area;i++)for(float value:stage->colors[i])if(!std::isfinite(value))return;
+  color_project_v04::Bounds bounds;
+  if(!color_project_v04::affected_bounds(high_side,low_side,entry.second,bounds))return;
+  auto project_pixel=[&](int x,int y,const V04RGBA *direct)->bool{
    const int i=y*high_side+x;const float u=float(x)/(high_side-1),v=float(y)/(high_side-1);
    float before[4];
-   const auto &original=mmd->sculpt_color_grids[g];
-   if(original.colors)std::memcpy(before,original.colors[i],sizeof(before));
-   else if(!bke::multires_layers::polypaint_sample_with_base(*mmd,mesh,name,g,u,v,before))return;
-   for(int c=0;c<4;c++)stage->colors[i][c]=before[c];
+   std::memcpy(before,stage->colors[i],sizeof(before));
    double protection=0;
    if(hidden_grids&&hidden_grids[g].hidden&&hidden_grids[g].level>=1&&hidden_grids[g].level<=13){const int side=bke::subdiv::grid_size_from_level(hidden_grids[g].level);const int hx=int(std::round(u*(side-1))),hy=int(std::round(v*(side-1)));if(BLI_BITMAP_TEST(hidden_grids[g].hidden,hy*side+hx))protection=1;}
    if(high_side>low_side&&mask_grids&&mask_grids[g].data&&mask_grids[g].level>=1&&mask_grids[g].level<=13){const int side=bke::subdiv::grid_size_from_level(mask_grids[g].level);const int mx=int(std::round(u*(side-1))),my=int(std::round(v*(side-1)));protection=std::max(protection,double(std::clamp(mask_grids[g].data[my*side+mx],0.f,1.f)));}
-   if(!color_project_v04::sample(before,high_side,low_side,x,y,entry.second,
-        protection,paint?4:3,stage->colors[i]))return;
+   if(direct){
+    const double change[4]={double((*direct)[0]),double((*direct)[1]),double((*direct)[2]),double((*direct)[3])};
+    return color_project_v04::apply_delta(before,change,protection,paint?4:3,stage->colors[i]);
+   }
+   return color_project_v04::sample(before,high_side,low_side,x,y,entry.second,
+        protection,paint?4:3,stage->colors[i]);
+  };
+  if(high_side==low_side){
+   /* At the master level, interpolation is exactly an indexed delta write. */
+   for(const auto &point:entry.second)if(!project_pixel(point.first%low_side,point.first/low_side,&point.second))return;
+  }else{
+   for(int y=bounds.y0;y<=bounds.y1;y++)for(int x=bounds.x0;x<=bounds.x1;x++)if(!project_pixel(x,y,nullptr))return;
   }
   staged.emplace(g,std::move(stage));
  }
