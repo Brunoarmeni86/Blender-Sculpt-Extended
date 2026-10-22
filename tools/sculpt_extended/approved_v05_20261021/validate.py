@@ -37,7 +37,7 @@ for label,worker,settings in cases:
     for kind,binary in targets:
         folder=(args.output/label/kind).resolve();folder.mkdir(parents=True,exist_ok=True)
         for phase in ('seed','exercise','reopen'):
-            extra=dict(settings,SUBDIV_TEST_ROOT=str(folder),SUBDIV_TEST_PHASE=phase,SUBDIV_SEED=str(folder/'seed.blend'),SUBDIV_REFERENCE=str(folder.parent/'reference') if args.reference and kind=='candidate' else '',BLENDER_SCULPT_SUBDIVIDE_PROFILE='1')
+            extra=dict(settings,SUBDIV_TEST_ROOT=str(folder),SUBDIV_TEST_PHASE=phase,SUBDIV_SEED=str(folder/'seed.blend'),SUBDIV_REFERENCE=str(folder.parent/'reference') if args.reference and kind=='candidate' else '',BLENDER_SCULPT_SUBDIVIDE_PROFILE='1',SCULPT_EXPECT_CONSOLIDATED_UI='1' if kind=='candidate' else '0')
             run(binary,worker,folder/(phase+'.log'),extra)
             data=json.loads((folder/(phase+'.json')).read_text())
             assert data['status'].startswith('PASS'),data.get('error',data)

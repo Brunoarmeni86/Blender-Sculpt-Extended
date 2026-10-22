@@ -36,3 +36,9 @@ La regressione finale della UI consolidata passa Bake HR e L0, Subdivide affine 
 I confronti preliminari delle pennellate non dimostrano un rallentamento ripetibile imputabile alle 28 impostazioni storiche. Nessuna modifica prestazionale viene introdotta sulla base di quei tempi. La compilazione resta Release /O2 con TBB. Non viene promessa equivalenza prestazionale su scene, pennelli o hardware non misurati.
 
 La portable pubblicata fa5 resta una prerelease con difetti noti fino alla sostituzione esplicita dei suoi allegati. Il nuovo manifest della distribuzione corretta deve identificare il commit e l'hash dell'eseguibile.
+
+## Delta Smooth su Base Mesh — 22 ottobre 2026
+
+Il percorso Delta Smooth dei layer ora viene ignorato quando `Sculpt Base Mesh` è il target. In questo caso Blender usa lo Smooth standard anche se tutti gli Sculpt Layers sono nascosti o hanno strength zero. Il controllo di layer visibile, attivo e con strength non zero resta invariato quando si scolpisce su un layer.
+
+Verifica mirata: vera pennellata Smooth su Base Mesh con un layer nascosto a strength zero, operatore completato, nessun errore Delta Smooth e variazione geometrica della base confermata. Sono passati anche avvio, Bake HR/L0 e il confronto Subdivide affine; la suite più estesa è stata interrotta perché non necessaria per questa modifica circoscritta.

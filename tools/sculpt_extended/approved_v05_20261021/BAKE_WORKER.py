@@ -223,8 +223,9 @@ def audit_ui():
         activate_draw()
         brush.sculpt_draw_transport_v01 = False
     assert ['operator', 'sculpt.extended_prepare_transport'] in calls
-    assert ui.VIEW3D_PT_sculpt_extended_multires.bl_parent_id == 'VIEW3D_PT_sculpt_multires_sidebar'
-    assert ui.VIEW3D_PT_sculpt_extended_multires.bl_label == 'Draw Transport'
+    if os.environ.get('SCULPT_EXPECT_CONSOLIDATED_UI') == '1':
+        assert ui.VIEW3D_PT_sculpt_extended_multires.bl_parent_id == 'VIEW3D_PT_sculpt_multires_sidebar'
+        assert ui.VIEW3D_PT_sculpt_extended_multires.bl_label == 'Draw Transport'
     S['ui_audit'] = dict(status='PASS_NATIVE_RNA_AND_PANEL_CALLBACK', calls=calls,
         limitation='Validates panel draw callback and actual RNA/operator availability; visual layout requires manual check.')
 

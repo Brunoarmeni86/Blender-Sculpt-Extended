@@ -60,7 +60,13 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
                      brush.autosmooth_factor <= 0.0f)) { return true; }
   SculptSession *ss = object.runtime->sculpt_session;
   MultiresModifierData *mmd = ss ? const_cast<MultiresModifierData *>(ss->multires_modifier) : nullptr;
-  if (!ss || !ss->subdiv_ccg || !mmd || mmd->sculpt_layers.is_empty()) { return true; }
+  if (!ss || !ss->subdiv_ccg || !mmd) { return true; }
+  /* Delta Smooth isolates the active layer from the evaluated surface. When
+   * Sculpt Base Mesh is the selected target there is no layer to isolate:
+   * leave this state empty and let Blender's regular Smooth brush operate on
+   * the base mesh, regardless of hidden or zero-strength layers. */
+  if (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) { return true; }
+  if (mmd->sculpt_layers.is_empty()) { return true; }
   const MultiresSculptLayer *layer = bke::multires_layers::active(*mmd);
   const char *error = nullptr;
   if (ss->cache || ss->filter_cache) { error = "Another sculpt operation is active"; }
@@ -75,9 +81,8 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
            ss->subdiv_ccg->grid_size != bke::subdiv::grid_size_from_level(mmd->sculptlvl) ||
            ss->subdiv_ccg->grid_area != ss->subdiv_ccg->grid_size * ss->subdiv_ccg->grid_size)
   { error = "Delta Smooth requires a valid Multires level and maximum-resolution layer grids"; }
-  else if ((mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) ||
-           mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled)
-  { error = "Delta Smooth V01 does not support Sculpt Base Mesh or live displacement/shrinkwrap"; }
+  else if (mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled)
+  { error = "Delta Smooth V01 does not support live displacement/shrinkwrap"; }
   if (!error && !force_smooth && brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_SMOOTH &&
       brush.smooth_deform_type != BRUSH_SMOOTH_DEFORM_LAPLACIAN) {
     error = "Delta Smooth V01 supports Laplacian Smooth only";
