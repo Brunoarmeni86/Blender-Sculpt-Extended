@@ -160,7 +160,7 @@ jobs:
           flags=['WITH_CYCLES_DEVICE_CUDA','WITH_CYCLES_DEVICE_OPTIX','WITH_CYCLES_DEVICE_HIP','WITH_CYCLES_DEVICE_ONEAPI','WITH_CYCLES_CUDA_BINARIES','WITH_CYCLES_HIP_BINARIES']
           for flag in flags:assert re.search(r'^'+flag+r':BOOL=ON$',cache,re.M),flag
           files=[str(p) for p in Path('portable').rglob('*') if p.is_file()]
-          for kind,pattern in [('CUDA',r'kernel.*\.cubin$'),('OptiX',r'kernel.*\.ptx$'),('HIP',r'kernel.*\.fatbin$'),('oneAPI',r'cycles_kernel_oneapi')]:
+          for kind,pattern in [('CUDA',r'kernel.*\.cubin(?:\.zst)?$'),('OptiX',r'kernel.*\.ptx(?:\.zst)?$'),('HIP',r'kernel.*\.fatbin(?:\.zst)?$'),('oneAPI',r'cycles_kernel_oneapi')]:
               assert any(re.search(pattern,p) for p in files),kind+' kernel missing'
           maximum=(0,0);checked=0
           for p in Path('portable').rglob('*'):
