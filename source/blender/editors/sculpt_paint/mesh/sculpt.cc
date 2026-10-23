@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include "sculpt_layer_delta_smooth_v01.hh"
+#include "sculpt_sample_runs.hh"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -10244,7 +10245,9 @@ void apply_translations(const Span<float3> translations,
   /* SCULPT_EXACT_DIRTY_SAMPLES_WRITER_V1_1
    * Collect sample IDs locally; merge under the same mutex used by
    * the exact-grid journal so parallel brush tasks remain safe. */
-  Vector<int64_t, 256> exact_dirty_samples;
+  Vector<SculptSampleRun, 32> exact_dirty_runs;
+  SculptSampleRunBuilder run_builder;
+  const auto emit_run = [&](const SculptSampleRun run) { exact_dirty_runs.append(run); };
   for (const int i : grids.index_range()) {
     const Span<float3> grid_translations = translations.slice(bke::ccg::grid_range(key, i));
     MutableSpan<float3> grid_positions = positions.slice(bke::ccg::grid_range(key, grids[i]));
@@ -10255,7 +10258,7 @@ void apply_translations(const Span<float3> translations,
       if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
         grid_positions[offset] += delta;
         grid_changed = true;
-        exact_dirty_samples.append(int64_t(grids[i]) * int64_t(key.grid_area) + offset);
+        run_builder.add(int64_t(grids[i]) * int64_t(key.grid_area) + offset, emit_run);
       }
     }
 
@@ -10264,6 +10267,7 @@ void apply_translations(const Span<float3> translations,
     }
   }
 
+  run_builder.finish(emit_run);
   if (!exact_dirty_grids.is_empty()) {
     std::lock_guard<std::mutex> lock(subdiv_ccg.sculpt_dirty_position_grids_mutex);
 
@@ -10283,14 +10287,13 @@ void apply_translations(const Span<float3> translations,
 
     }
 
-    for (const int64_t sample : exact_dirty_samples) {
-
-      if (sample >= 0 && sample < position_samples) {
-
-        subdiv_ccg.sculpt_dirty_position_sample_flags[sample].set();
-
+    MutableBitSpan sample_flags = subdiv_ccg.sculpt_dirty_position_sample_flags;
+    for (const SculptSampleRun run : exact_dirty_runs) {
+      BLI_assert(run.start >= 0 && run.size > 0 &&
+                 run.start <= position_samples - run.size);
+      if (run.start >= 0 && run.size > 0 && run.start <= position_samples - run.size) {
+        sample_flags.slice(IndexRange(run.start, run.size)).set_all();
       }
-
     }
 
 
