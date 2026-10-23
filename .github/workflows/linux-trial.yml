@@ -1,4 +1,4 @@
-name: Linux 5.2.3 sculpt trial
+name: Linux 5.2.3 corrected sculpt trial
 on:
   push:
     branches: [build/linux-5.2.3-20261023]
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
-      SOURCE_SHA: 74517c578a8a08cf60ada31e5b31e86cb244a1e8
+      SOURCE_SHA: d62af38df29b687ecf6a10985b032b6694a062c5
       GIT_LFS_SKIP_SMUDGE: '1'
       CC: gcc-14
       CXX: g++-14
@@ -21,7 +21,7 @@ jobs:
           # Only preinstalled SDKs on this disposable GitHub runner are removed.
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet
           sudo apt-get update -qq
-          sudo apt-get install -y gcc-14 g++-14 ninja-build cmake git-lfs pkg-config libx11-dev libxxf86vm-dev libxcursor-dev libxi-dev libxrandr-dev libxinerama-dev libegl-dev libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev libdecor-0-dev libvulkan-dev libgl1-mesa-dri libsm-dev libice-dev
+          sudo apt-get install -y gcc-14 g++-14 ninja-build cmake git-lfs pkg-config libx11-dev libxxf86vm-dev libxcursor-dev libxi-dev libxrandr-dev libxinerama-dev libegl-dev libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev libdecor-0-dev libvulkan-dev libgl1-mesa-dri libsm-dev libice-dev xvfb xauth
           df -h .
           gcc-14 --version
       - name: Fetch approved source and matching Linux libraries
@@ -57,15 +57,88 @@ jobs:
             -DWITH_CYCLES_CUDA_BINARIES=OFF -DWITH_CYCLES_HIP_BINARIES=OFF \
             -DWITH_CYCLES_DEVICE_ONEAPI=OFF -DWITH_CYCLES_DEVICE_OPTIX=OFF
       - name: Compile modified sculpt code first
-        run: cmake --build build --target bf_editor_sculpt_paint --parallel 2
+        run: cmake --build build --target bf_editor_sculpt_paint --parallel 3
       - name: Build and install portable trial
         run: |
-          cmake --build build --parallel 2
+          cmake --build build --parallel 3
           cmake --install build --prefix "$GITHUB_WORKSPACE/portable"
       - name: Check startup and approved defaults
         run: |
           set -euxo pipefail
           portable/blender --background --factory-startup --python-exit-code 1 --python-expr "import bpy; assert bpy.app.version[:3]==(5,2,3); b=bpy.data.brushes.new('Linux audit',mode='SCULPT'); assert b.sculpt_preserve_other_layers; assert not hasattr(b,'sculpt_pose_gentle_multires'); assert hasattr(bpy.types,'VIEW3D_PT_multires_brush_experiments'); print('LINUX_STARTUP_DEFAULTS_PASS')"
+      - name: Reproduce corrected brush guards on Linux
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          SCULPT_SOURCE_ROOT: ${{ github.workspace }}/source
+          SUBDIV_TEST_ROOT: ${{ github.workspace }}/linux-guard-audit
+          SUBDIV_TEST_PHASE: trial
+        run: |
+          mkdir -p "$SUBDIV_TEST_ROOT"
+          cat > linux_guard_smoke.py <<'PY'
+          from pathlib import Path
+          import os,json,traceback
+          kit=Path(os.environ['SCULPT_SOURCE_ROOT'])/'tools/sculpt_extended/approved_v05_20261021'
+          exec((kit/'BAKE_WORKER.py').read_text().split('\nsteps = pipeline()')[0])
+          result=[]
+          def run():
+              with ctx():
+                  bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
+                  bpy.ops.mesh.primitive_cube_add(size=2)
+                  ob=bpy.context.object
+                  bpy.ops.object.mode_set(mode='EDIT');bpy.ops.mesh.subdivide(number_cuts=4)
+                  bpy.ops.object.mode_set(mode='OBJECT')
+                  ob.data.color_attributes.new(name='AuditColor',type='FLOAT_COLOR',domain='POINT')
+                  m=ob.modifiers.new('Multires','MULTIRES')
+                  for _ in range(3):assert bpy.ops.object.multires_subdivide(modifier=m.name)=={'FINISHED'}
+                  m.levels=m.sculpt_levels=m.total_levels
+                  bpy.ops.object.mode_set(mode='SCULPT')
+                  bpy.ops.view3d.view_axis(type='TOP',align_active=False)
+                  bpy.context.space_data.region_3d.view_distance=4.
+                  activate_draw()
+                  b=bpy.context.tool_settings.sculpt.brush;b.unprojected_size=1.5
+                  assert b.sculpt_preserve_other_layers
+                  assert bpy.ops.sculpt.multires_layer_add()=={'FINISHED'}
+                  assert bpy.ops.sculpt.multires_layer_add()=={'FINISHED'}
+                  m.sculpt_layers[0].visible=False
+                  m.active_sculpt_layer_index=1
+              yield .5
+              for case in ('lower-level','dots'):
+                  with ctx():
+                      m=mod();m.sculpt_levels=m.total_levels-1 if case=='lower-level' else m.total_levels
+                      bpy.context.tool_settings.sculpt.brush.stroke_method='DOTS' if case=='dots' else 'SPACE'
+                  yield .3
+                  before=points();stroke(0);after=points()
+                  assert np.isfinite(after).all()
+                  assert float(np.max(np.abs(after-before)))>1e-5,case+' had no meaningful effect'
+                  result.append({'case':case,'status':'PASS'})
+              with ctx():
+                  mod().sculpt_layers[0].visible=True
+                  bpy.context.tool_settings.sculpt.brush.stroke_method='DOTS'
+              yield .3
+              blocked=False
+              try:stroke(0)
+              except RuntimeError as error:
+                  blocked='Preserve Other Layers' in str(error)
+              assert blocked,'Unsupported isolation no longer rejected'
+              result.append({'case':'two-effective-layers-dots-protection','status':'PASS'})
+              (ROOT/'RESULT.json').write_text(json.dumps(result,indent=2))
+              print('LINUX_CORRECTED_GUARDS_PASS',flush=True)
+              bpy.ops.wm.quit_blender()
+          steps=run()
+          def tick():
+              try:return next(steps)
+              except StopIteration:return None
+              except Exception:
+                  failure=traceback.format_exc();print(failure,flush=True)
+                  (ROOT/'ERROR.txt').write_text(failure)
+                  os._exit(1)
+          bpy.app.timers.register(tick,first_interval=1,persistent=True)
+          PY
+          xvfb-run -a -s '-screen 0 1280x800x24' portable/blender --factory-startup --no-window-focus --window-geometry 0 0 1280 800 --python-exit-code 1 --python linux_guard_smoke.py
+          test -f linux-guard-audit/RESULT.json
+          cat linux-guard-audit/RESULT.json
+      - name: Package tested Linux trial
+        run: |
           printf 'Approved source: %s\nTarget: Ubuntu 24.04 x86_64; GCC 14\nGPU Cycles kernels not certified; sculpt viewport build trial.\n' "$SOURCE_SHA" > portable/BUILD-PROVENANCE.txt
           tar -cJf Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24-trial.tar.xz -C portable .
           sha256sum Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24-trial.tar.xz > SHA256SUMS.txt
@@ -76,5 +149,6 @@ jobs:
           path: |
             Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24-trial.tar.xz
             SHA256SUMS.txt
+            linux-guard-audit/RESULT.json
           compression-level: 0
           retention-days: 7
