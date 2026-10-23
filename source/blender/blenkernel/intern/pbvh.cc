@@ -36,6 +36,7 @@
 #include "BKE_paint_bvh.hh"
 #include "BKE_paint_bvh_pixels.hh"
 #include "BKE_subdiv_ccg.hh"
+#include "pbvh_face_indices.hh"
 
 #include "DEG_depsgraph_query.hh"
 
@@ -1780,6 +1781,28 @@ IndexMask nodes_to_face_selection_grids(const SubdivCCG &subdiv_ccg,
                                         IndexMaskMemory &memory)
 {
   const Span<int> grid_to_face_map = subdiv_ccg.grid_to_face_map;
+  if (nodes_mask.is_empty()) {
+    return {};
+  }
+  int64_t selected_grids = 0;
+  nodes_mask.foreach_index(
+      [&](const int i) { selected_grids += nodes[i].grids().size(); }, exec_mode::serial);
+  /* Small strokes must not initialize and scan a flag for every base face.
+   * Use the existing parallel dense path for broad updates. Count grids (an
+   * upper bound on unique faces), so sparse scratch is conservatively bounded. */
+  if (selected_grids < subdiv_ccg.faces.size() / 8) {
+    Vector<int> face_indices;
+    face_indices.reserve(selected_grids);
+    nodes_mask.foreach_index(
+        [&](const int i) {
+          for (const int grid : nodes[i].grids()) {
+            face_indices.append(grid_to_face_map[grid]);
+          }
+        },
+        exec_mode::serial);
+    sort_unique_face_indices(face_indices);
+    return IndexMask::from_indices(face_indices.as_span(), memory);
+  }
   /* Using a #VectorSet for index deduplication would also work, but the performance gets much
    * worse with large selections since the loop would be single-threaded. A boolean array has an
    * overhead regardless of selection size, but that is small. */
