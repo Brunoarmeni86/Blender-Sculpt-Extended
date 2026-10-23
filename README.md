@@ -1,43 +1,37 @@
-<!--
-Keep this document short & concise,
-linking to external resources instead of including content in-line.
-See 'release/text/readme.html' for the end user read-me.
--->
+# Blender Sculpt Extended
 
-Blender
-=======
+Custom build di Blender dedicata allo sculpt su mesh Multires dense, con Sculpt Layers, Preserve Other Layers, Polypaint e ottimizzazioni mirate.
 
-Blender is the free and open source 3D creation suite.
-It supports the entirety of the 3D pipeline—modeling, rigging, animation, simulation, rendering, compositing,
-motion tracking and video editing.
+## Release corrente
 
-![Blender screenshot](https://code.blender.org/wp-content/uploads/2018/12/springrg.jpg "Blender screenshot")
+**[Blender Sculpt Extended 5.2.3 — download e note](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/tag/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview)**
 
-Sculpt Extended
----------------
+| Sistema | Download | Indicazione |
+|---|---|---|
+| Windows x64 | [Scarica ZIP](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Windows-x64.zip) | Build completa e verificata |
+| Linux x64 | [Scarica TAR.XZ](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Linux-x64.tar.xz) | Build verificata su Ubuntu 24.04 |
+| Linux general purpose | In preparazione | Rocky Linux 8, glibc 2.28, CUDA/OptiX, HIP e oneAPI |
 
-- [Note condivise: audit del codice, difetti e ottimizzazioni](doc/sculpt_extended/CODE_REVIEW.md)
+Le release contrassegnate **Superseded** sono conservate come archivio e non sono consigliate per nuovi download. Consulta sempre la [pagina Releases](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases) per lo stato aggiornato.
 
-Project Pages
--------------
+## Funzioni principali
 
-- [Main Website](https://www.blender.org)
-- [Reference Manual](https://docs.blender.org/manual/en/latest/index.html)
-- [User Community](https://www.blender.org/community/)
+- Sculpt Layers per Multires.
+- Preserve Other Layers sui pennelli supportati.
+- Polypaint e strumenti di trasferimento dei dettagli.
+- Base Smooth e visualizzazione Multires corretta tra Sculpt Mode e Object Mode.
+- Miglioramenti prestazionali per lo sculpt su mesh dense.
 
-Development
------------
+## Documentazione tecnica
 
-- [Build Instructions](https://developer.blender.org/docs/handbook/building_blender/)
-- [Code Review & Bug Tracker](https://projects.blender.org)
-- [Developer Forum](https://devtalk.blender.org)
-- [Developer Documentation](https://developer.blender.org/docs/)
+- [Release nativa e verifiche](doc/sculpt_extended/NATIVE_RELEASE_20261020.md)
+- [Audit del codice, difetti e ottimizzazioni](doc/sculpt_extended/CODE_REVIEW.md)
+- [Sorgente esatto della release 5.2.3](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/tree/d62af38df29b687ecf6a10985b032b6694a062c5)
 
+## Blender
 
-License
--------
+Blender è una suite 3D libera e open source. Consulta il [sito ufficiale](https://www.blender.org), il [manuale](https://docs.blender.org/manual/en/latest/index.html) e la [documentazione per sviluppatori](https://developer.blender.org/docs/handbook/building_blender/).
 
-Blender as a whole is licensed under the GNU General Public License, Version 3.
-Individual files may have a different but compatible license.
+## Licenza
 
-See [blender.org/about/license](https://www.blender.org/about/license) for details.
+Blender è distribuito principalmente secondo GNU General Public License Version 3. I singoli file possono usare licenze differenti ma compatibili. Consulta [blender.org/about/license](https://www.blender.org/about/license/).
