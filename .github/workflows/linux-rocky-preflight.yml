@@ -1,0 +1,49 @@
+name: Rocky 8 official compatibility GPU preflight
+on:
+  push:
+    branches: [build/linux-rocky8-gpu-20261023]
+    paths: [.github/workflows/linux-rocky-preflight.yml]
+permissions:
+  contents: read
+jobs:
+  toolchains:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - name: Inspect pinned official library SDK inventory
+        run: |
+          set -euxo pipefail
+          mkdir evidence
+          git clone --depth 1 --branch blender-v5.2-release https://projects.blender.org/blender/lib-linux_x64.git libs
+          git -C libs fetch --depth 1 origin ecbd06cf6d2a4aa6b00a61ffb479fc81b17aba08
+          git -C libs checkout --detach FETCH_HEAD
+          git -C libs rev-parse HEAD > evidence/library-commit.txt
+          git -C libs ls-tree -r --name-only HEAD > evidence/library-files.txt
+          grep -Ei 'optix|dpcpp|sycl|hip|cuda' evidence/library-files.txt > evidence/gpu-sdk-files.txt || true
+          df -h > evidence/runner-disk.txt
+      - name: Verify Rocky baseline compiler and discover official GPU SDK packages
+        run: |
+          set -euxo pipefail
+          docker run --rm -v "$PWD/evidence:/evidence" rockylinux:8 bash -euxo pipefail -c '
+            dnf install -y dnf-plugins-core
+            dnf config-manager --set-enabled powertools
+            dnf install -y epel-release gcc-toolset-14-gcc gcc-toolset-14-gcc-c++ cmake ninja-build
+            /opt/rh/gcc-toolset-14/root/usr/bin/gcc --version > /evidence/gcc.txt
+            ldd --version > /evidence/glibc.txt
+            cmake --version > /evidence/cmake.txt
+            dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+            dnf repoquery --latest-limit 1 --qf "%{name} %{version} %{installsize}" cuda-nvcc-12-8 cuda-cudart-devel-12-8 cuda-cccl-12-8 > /evidence/cuda-packages.txt
+            printf "[rocm]\nname=ROCm 7.2.1\nbaseurl=https://repo.radeon.com/rocm/el8/7.2.1/main\nenabled=1\ngpgcheck=1\ngpgkey=https://repo.radeon.com/rocm/rocm.gpg.key\n" > /etc/yum.repos.d/rocm.repo
+            dnf repoquery --latest-limit 1 --qf "%{name} %{version} %{installsize}" hipcc7.2.1 hip-devel7.2.1 rocm-llvm7.2.1 rocm-device-libs7.2.1 > /evidence/hip-packages.txt
+            test -s /evidence/cuda-packages.txt
+            test -s /evidence/hip-packages.txt
+          '
+      - name: Save preflight evidence (not a Blender build)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rocky8-gpu-toolchain-preflight
+          path: evidence/
+          retention-days: 7
