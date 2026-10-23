@@ -20,6 +20,7 @@
 #include <cstdio>
 #include "sculpt_layer_delta_smooth_v01.hh"
 #include "sculpt_sample_runs.hh"
+#include "sculpt_layer_detail_v01.hh"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -140,6 +141,11 @@ namespace blender {
 static CLG_LogRef LOG = {"sculpt"};
 
 namespace ed::sculpt_paint {
+void layer_detail_adjust_positions(const SubdivCCG &ccg, Span<int> grids,
+                                   MutableSpan<float3> positions)
+{
+  layer_detail_v01::adjust(ccg, grids, positions);
+}
 
 /* ANCHORED_GEODESIC_V3: use memory proportional to the stamp, never the complete mesh.
  * Allocated and updated before parallel brush execution, then only read by workers. */
@@ -1816,12 +1822,19 @@ static void calc_area_normal_and_center_node_grids(const Object &object,
                                                                                           node))
     {
       const Span<float3> orig_positions = orig_data->positions;
+      if (layer_detail_v01::state().active) {
+        tls.positions.resize(orig_positions.size());
+        tls.positions.as_mutable_span().copy_from(orig_positions);
+        layer_detail_adjust_positions(subdiv_ccg, grids, tls.positions);
+      }
+      const Span<float3> sample_positions = layer_detail_v01::state().active ?
+                                             tls.positions.as_span() : orig_positions;
       const Span<float3> orig_normals = orig_data->normals;
 
       tls.distances.reinitialize(orig_positions.size());
       const MutableSpan<float> distances_sq = tls.distances;
       calc_brush_distances_squared(
-          ss, orig_positions, eBrushFalloffShape(brush.falloff_shape), distances_sq);
+          ss, sample_positions, eBrushFalloffShape(brush.falloff_shape), distances_sq);
 
       for (const int i : grids.index_range()) {
         const IndexRange grid_range_node = bke::ccg::grid_range(key, i);
@@ -1844,7 +1857,7 @@ static void calc_area_normal_and_center_node_grids(const Object &object,
           const int flip_index = math::dot(view_normal, normal) <= 0.0f;
           if (needs_center) {
             accumulate_area_center(location,
-                                   orig_positions[node_vert],
+                                   sample_positions[node_vert],
                                    distance,
                                    position_radius_inv,
                                    flip_index,
@@ -3564,6 +3577,11 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
     return {all_leaf_nodes(pbvh, memory), std::nullopt, std::nullopt};
   }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_PLANE) {
+    /* Plane samples its center before returning the final affected-node mask. */
+    const IndexMask initial_mask = pbvh_gather_generic(ob, brush, use_original, 1.0f, memory);
+    if (!layer_detail_v01::prepare(ob, initial_mask)) {
+      return {IndexMask(), std::nullopt, std::nullopt};
+    }
     return brushes::plane::calc_node_mask(depsgraph, ob, brush, memory);
   }
   if (brush.sculpt_brush_type == SCULPT_BRUSH_TYPE_CLAY_STRIPS) {
@@ -5066,7 +5084,10 @@ static void do_brush_action(const Depsgraph &depsgraph,
   }
 
   const double sculpt_mesh_v3_probe_gather_start = BLI_time_now_seconds();
-  const brushes::CursorSampleResult cursor_sample_result = calc_brush_node_mask(
+  struct DetailScope {
+    ~DetailScope() { layer_detail_v01::suspend(); }
+  } detail_scope;
+  brushes::CursorSampleResult cursor_sample_result = calc_brush_node_mask(
       depsgraph, ob, brush, memory);
   const IndexMask node_mask = cursor_sample_result.node_mask;
   sculpt_mesh_v3_probe_gather_ms =
@@ -5095,6 +5116,25 @@ static void do_brush_action(const Depsgraph &depsgraph,
 
   /* Capture Auto Smooth's reference before the main brush changes the CCG. */
   if (!layer_delta_smooth_v01::prepare_region(ob, node_mask)) { return; }
+  if (!layer_detail_v01::prepare(ob, node_mask)) { return; }
+  struct AnchorReferenceScope {
+    StrokeCache &cache;
+    float3 location, location_symm;
+    void restore() { cache.location = location; cache.location_symm = location_symm; }
+    ~AnchorReferenceScope() { restore(); }
+  } anchor_reference{*ss.cache, ss.cache->location, ss.cache->location_symm};
+  if (brush.stroke_method == BRUSH_STROKE_ANCHORED && layer_detail_v01::state().active) {
+    const float3 offset = layer_detail_v01::anchor_offset(ss.cache->location_symm);
+    ss.cache->location_symm -= offset;
+    /* The unsymmetrized location is used to construct the local texture matrix. */
+    if (ss.cache->mirror_symmetry_pass == 0 && ss.cache->radial_symmetry_pass == 0) {
+      ss.cache->location -= offset;
+    }
+    if (cursor_sample_result.plane_center) {
+      calc_brush_plane(depsgraph, brush, ob, node_mask,
+                       *cursor_sample_result.plane_normal, *cursor_sample_result.plane_center);
+    }
+  }
 
   /* There are issues with the underlying normals cache / mesh data that can cause the data to
    * become out of date.
@@ -5307,6 +5347,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
       break;
   }
 
+  layer_detail_v01::suspend();
+  anchor_reference.restore();
   /* Face Set painting changes IDs only. Do not apply Auto Smooth to geometry
    * while recording Face Sets independently of the selected sculpt layer. */
   if (!ELEM(brush.sculpt_brush_type,
@@ -7816,6 +7858,7 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     draw_transport.reset();
   }
   layer_delta_smooth_v01::reset();
+  layer_detail_v01::reset();
   Object &ob = *this->object;
   SculptSession &ss = *ob.runtime->sculpt_session;
   Sculpt &sd = *this->sculpt_;
@@ -8328,6 +8371,11 @@ static wmOperatorStatus sculpt_brush_stroke_invoke(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
+  if (delta_brush && !layer_detail_v01::begin(
+          *CTX_data_active_object(C), *delta_brush, op->reports,
+          BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")) == BrushSwitchMode::Smooth)) {
+    return OPERATOR_CANCELLED;
+  }
   cold_trace.mark("layer_checks_and_delta_smooth_begin");
   int ignore_background_click;
   Object &ob = *CTX_data_active_object(C);
@@ -8479,6 +8527,11 @@ static wmOperatorStatus sculpt_brush_stroke_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
+  if (delta_brush && !layer_detail_v01::begin(
+          *CTX_data_active_object(C), *delta_brush, op->reports,
+          BrushSwitchMode(RNA_enum_get(op->ptr, "brush_toggle")) == BrushSwitchMode::Smooth)) {
+    return OPERATOR_CANCELLED;
+  }
   brush_stroke_init(C, op);
 
   SculptPaintStroke *stroke = MEM_new<SculptPaintStroke>(__func__, C, op, nullptr);

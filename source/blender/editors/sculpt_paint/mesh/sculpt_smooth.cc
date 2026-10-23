@@ -747,6 +747,9 @@ void blur_geometry_data_array(const Object &object,
                               const MutableSpan<float> data)
 {
   PRF_scope(ProfileCategory::Editor);
+  if (iterations <= 0 || data.is_empty()) {
+    return;
+  }
   struct LocalData {
     Vector<int> vert_indices;
     Vector<int> neighbor_offsets;
@@ -821,7 +824,7 @@ void blur_geometry_data_array(const Object &object,
                   const int node_start = i * key.grid_area;
                   BKE_subdiv_ccg_foreach_visible_grid_vert(
                       key, grid_hidden, grids[i], [&](const int offset) {
-                        data[i] = new_factors[node_start + offset];
+                        data[grids[i] * key.grid_area + offset] = new_factors[node_start + offset];
                       });
                 }
               }

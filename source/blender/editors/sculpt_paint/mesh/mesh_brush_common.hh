@@ -143,6 +143,8 @@ template<typename T>
 void scatter_data_bmesh(Span<T> node_data, const Set<BMVert *, 0> &verts, MutableSpan<T> dst);
 
 /** Fill the output array with all positions in the geometry referenced by the indices. */
+void layer_detail_adjust_positions(const SubdivCCG &ccg, Span<int> grids,
+                                   MutableSpan<float3> positions);
 inline MutableSpan<float3> gather_grids_positions(const SubdivCCG &subdiv_ccg,
                                                   const Span<int> grids,
                                                   Vector<float3> &positions)
@@ -151,6 +153,7 @@ inline MutableSpan<float3> gather_grids_positions(const SubdivCCG &subdiv_ccg,
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
   positions.resize(key.grid_area * grids.size());
   gather_data_grids(subdiv_ccg, subdiv_ccg.positions.as_span(), grids, positions);
+  layer_detail_adjust_positions(subdiv_ccg, grids, positions);
   return positions;
 }
 void gather_bmesh_positions(const Set<BMVert *, 0> &verts, MutableSpan<float3> positions);

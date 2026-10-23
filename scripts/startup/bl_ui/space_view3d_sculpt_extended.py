@@ -235,7 +235,31 @@ class VIEW3D_PT_sculpt_extended_multires(bpy.types.Panel):
             layout.label(text='Use at the highest Multires level')
 
 
+class VIEW3D_PT_multires_brush_experiments(bpy.types.Panel):
+    bl_label = 'Brush Layers'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Multires'
+    bl_parent_id = 'VIEW3D_PT_sculpt_multires_sidebar'
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.mode == 'SCULPT'
+
+    def draw(self, context):
+        brush = context.tool_settings.sculpt.brush
+        if not brush:
+            return
+        layout = self.layout
+        if brush.sculpt_brush_type in {'DRAW', 'CLAY', 'CLAY_STRIPS', 'CLAY_THUMB', 'INFLATE', 'PLANE'}:
+            layout.prop(brush, 'sculpt_preserve_other_layers', text='Preserve Other Layers')
+            layout.label(text='Top Multires level, Space or Anchored stroke')
+        else:
+            layout.label(text='Standard brush behavior')
+
+
 classes = (
+    VIEW3D_PT_multires_brush_experiments,
     VIEW3D_PT_facesets_rc1,
     VIEW3D_PT_polypaint_blur_v01,
     SCULPT_OT_color_attribute_add_auto_v07,
@@ -250,6 +274,9 @@ _owns_transport_property = False
 
 def register_props():
     global _owns_transport_property
+    bpy.types.Brush.sculpt_preserve_other_layers = bpy.props.BoolProperty(
+        name='Preserve Other Layers', default=True,
+        description='Experimental: exclude other layer offsets from brush position sampling; geometry stays composed')
     if not hasattr(bpy.types.Brush, 'sculpt_draw_transport_v01'):
         bpy.types.Brush.sculpt_draw_transport_v01 = bpy.props.BoolProperty(
             name='Draw Transport', default=False,
@@ -262,6 +289,9 @@ def register_props():
 
 def unregister_props():
     global _owns_transport_property
+    for name in ('sculpt_preserve_other_layers', 'sculpt_pose_gentle_multires'):
+        if hasattr(bpy.types.Brush, name):
+            delattr(bpy.types.Brush, name)
     if _owns_transport_property and hasattr(bpy.types.Brush, 'sculpt_draw_transport_v01'):
         del bpy.types.Brush.sculpt_draw_transport_v01
     _owns_transport_property = False

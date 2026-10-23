@@ -142,18 +142,22 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
   return true;
 }
 /* Evaluator calls and all map insertions stay serial. Workers only read captured references. */
-inline bool raw_offset(const int index, float3 &out)
+inline bool raw_offset(State &s, const int index, float3 &out)
 {
-  State &s = state();
+  const auto invalid = [&](const char *reason) {
+    s.ready = false;
+    std::fprintf(stderr, "[LAYER_OFFSET] stopped=%s\n", reason);
+    return false;
+  };
   if (const float3 *p = s.raw_offsets.lookup_ptr(index)) { out = *p; return true; }
   const SubdivCCG &ccg = *s.ccg;
   const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
   const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, index);
-  if (coord.grid_index < 0 || coord.grid_index >= s.layer->grids_num) { return fail("grid_index"); }
+  if (coord.grid_index < 0 || coord.grid_index >= s.layer->grids_num) { return invalid("grid_index"); }
   const MDisps &grid = s.layer->disps[coord.grid_index];
   if (grid.level != s.layer->level ||
       grid.totdisp != s.stored_grid_size * s.stored_grid_size)
-  { return fail("grid_descriptor"); }
+  { return invalid("grid_descriptor"); }
   if (!grid.disps) { out = float3(0.0f); s.raw_offsets.add(index, out); return true; }
   const int face_index = BKE_subdiv_ccg_grid_to_face_index(ccg, coord.grid_index);
   const IndexRange face = ccg.faces[face_index];
@@ -167,7 +171,7 @@ inline bool raw_offset(const int index, float3 &out)
   const int stored_y = int(coord.y) * s.sample_stride;
   const float *sample = grid.disps[stored_y * s.stored_grid_size + stored_x];
   const float3 delta = float3(sample[0], sample[1], sample[2]) * s.layer->strength;
-  if (!finite(delta)) { return fail("nonfinite_layer_sample"); }
+  if (!finite(delta)) { return invalid("nonfinite_layer_sample"); }
   if (delta.x == 0.0f && delta.y == 0.0f && delta.z == 0.0f) {
     out = float3(0.0f); s.raw_offsets.add(index, out); return true;
   }
@@ -181,9 +185,13 @@ inline bool raw_offset(const int index, float3 &out)
   float3x3 tangent;
   BKE_multires_construct_tangent_matrix(tangent, du, dv, quad ? corner : 0);
   out = math::transform_direction(tangent, delta);
-  if (!finite(out)) { return fail("nonfinite_offset"); }
+  if (!finite(out)) { return invalid("nonfinite_offset"); }
   s.raw_offsets.add(index, out);
   return true;
+}
+inline bool raw_offset(const int index, float3 &out)
+{
+  return raw_offset(state(), index, out);
 }
 inline bool capture(const int index)
 {
