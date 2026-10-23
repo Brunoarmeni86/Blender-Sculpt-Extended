@@ -2,6 +2,24 @@
 
 ## Approved version
 
+### Preflight bug fixes
+
+If no other effective layer is visible, Preserve Other Layers now uses native
+sculpting without imposing isolation-only level, stroke-method, deformer or L0
+restrictions. Native active-layer editability validation still runs. Hidden or
+zero-strength other layers are skipped before inspecting their L0 offsets.
+Restrictions remain when another effective layer actually needs isolation.
+
+Windows Release rebuilt. Paired reproductions passed: lower level and Dots with
+one effective layer were blocked before and finish after the fix; a hidden layer
+with real nonzero L0 offsets plus another visible detail layer was blocked before
+and finishes after. The L0 fixture verifies the actual x64 DNA offset payload
+read-only, rather than inferring L0 edits from a changed aggregate layer hash.
+Anchored Draw on 653,400 samples still produces meaningful geometry and restores
+the protected surface within 1.2e-7. Startup/default checks passed. Evidence:
+`C:/BlenderDev/LINUX-BUILD-20261023/guard-after/`, `hidden-l0-before-v3/`,
+`hidden-l0-after/`, and `BRUSH-LAYER-POSE-20261023/guard-regression/`.
+
 User approved the result on 2026-10-23 and requested Preserve Other Layers on by
 default and publication on GitHub. It now defaults to true; an explicitly saved
 per-brush false value remains a user override. Supported brushes: Draw, Clay,

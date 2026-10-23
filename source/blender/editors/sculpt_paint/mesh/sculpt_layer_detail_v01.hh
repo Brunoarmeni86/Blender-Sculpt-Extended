@@ -39,8 +39,21 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports,
     return true;
   }
   const auto *active = bke::multires_layers::active(*mmd);
-  if (!active || !bke::multires_layers::can_record(*mmd, *id_cast<Mesh *>(object.data)) ||
-      ss->subdiv_ccg->level != mmd->totlvl || mmd->sculpt_displacement_enabled ||
+  if (!active || !bke::multires_layers::can_record(*mmd, *id_cast<Mesh *>(object.data))) {
+    BKE_report(reports, RPT_ERROR, "Preserve Other Layers requires a valid visible active layer with nonzero strength");
+    return false;
+  }
+  bool has_other_layers = false;
+  for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    if (&layer != active && bke::multires_layers::is_effective(layer)) {
+      has_other_layers = true;
+      break;
+    }
+  }
+  /* With no other contribution, ordinary sculpting already preserves everything.
+   * Do not impose isolation-only stroke/level/cage restrictions on that case. */
+  if (!has_other_layers) { return true; }
+  if (ss->subdiv_ccg->level != mmd->totlvl || mmd->sculpt_displacement_enabled ||
       mmd->sculpt_shrinkwrap_enabled || brush.deform_target != BRUSH_DEFORM_TARGET_GEOMETRY ||
       !ELEM(brush.stroke_method, BRUSH_STROKE_SPACE, BRUSH_STROKE_ANCHORED))
   {
@@ -49,6 +62,8 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports,
   }
   State &s = state(); s.object = &object; s.ccg = ss->subdiv_ccg;
   for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    /* Hidden and zero-strength other layers do not affect the sampled surface. */
+    if (&layer != active && !bke::multires_layers::is_effective(layer)) { continue; }
     if (layer.base_deltas) {
       for (int i=0; i<layer.base_verts_num; i++) {
         if (!is_zero_v3(layer.base_deltas[i])) {
@@ -57,7 +72,7 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports,
         }
       }
     }
-    if (&layer == active || !bke::multires_layers::is_effective(layer)) { continue; }
+    if (&layer == active) { continue; }
     if (layer.level != s.ccg->level || !layer.disps) {
       reset();
       BKE_report(reports, RPT_ERROR, "Preserve Other Layers requires layers stored at the current Multires level");
