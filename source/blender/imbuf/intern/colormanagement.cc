@@ -426,6 +426,13 @@ static bool colormanage_use_look(const char *look_name, const char *view_name)
   return (look && look->is_noop == false && colormanage_compatible_look(look, view_name));
 }
 
+static float colormanage_exponent(float gamma)
+{
+  const float exponent = 1.0f / std::max(FLT_EPSILON, gamma);
+  /* OpenColorIO reports an error for exponents bigger than this. */
+  return std::min(exponent, 100.0f);
+}
+
 void IMB_colormanagement_display_settings_from_ctx(
     const bContext *C,
     ColorManagedViewSettings **r_view_settings,
@@ -475,7 +482,7 @@ static std::shared_ptr<const ocio::CPUProcessor> get_display_buffer_processor(
   display_parameters.display = display_settings.display_device;
   display_parameters.look = colormanage_use_look(look, view_transform) ? look : "";
   display_parameters.scale = (exposure == 0.0f) ? 1.0f : powf(2.0f, exposure);
-  display_parameters.exponent = (gamma == 1.0f) ? 1.0f : 1.0f / max_ff(FLT_EPSILON, gamma);
+  display_parameters.exponent = colormanage_exponent(gamma);
   display_parameters.temperature = temperature;
   display_parameters.tint = tint;
   display_parameters.use_white_balance = use_white_balance;
@@ -1085,7 +1092,7 @@ Vector<char> IMB_colormanagement_space_to_icc_profile(const ColorSpace *colorspa
   }
 
   char icc_filename[FILE_MAX];
-  STRNCPY(icc_filename, (interop_id + ".icc").c_str());
+  STRNCPY(icc_filename, (ocio::interop_id_drop_namespace(interop_id) + ".icc").c_str());
   BLI_path_make_safe_filename(icc_filename);
 
   char icc_filepath[FILE_MAX];
@@ -1108,13 +1115,15 @@ Vector<char> IMB_colormanagement_space_to_icc_profile(const ColorSpace *colorspa
 /* Primaries */
 static const int CICP_PRI_REC709 = 1;
 static const int CICP_PRI_REC2020 = 9;
+static const int CICP_PRI_XYZD65 = 10;
 static const int CICP_PRI_P3D65 = 12;
 /* Transfer functions */
 static const int CICP_TRC_BT709 = 1;
 static const int CICP_TRC_G22 = 4;
+static const int CICP_TRC_LINEAR = 8;
 static const int CICP_TRC_SRGB = 13;
 static const int CICP_TRC_PQ = 16;
-static const int CICP_TRC_G26 = 17;
+static const int CICP_TRC_SMPTE428 = 17;
 static const int CICP_TRC_HLG = 18;
 /* Matrix */
 static const int CICP_MATRIX_RGB = 0;
@@ -1160,22 +1169,34 @@ bool IMB_colormanagement_space_to_cicp(const ColorSpace *colorspace,
     cicp[3] = CICP_RANGE_FULL;
     return true;
   }
-  if (interop_id == "g26_p3d65_display") {
-    /* BT.709 matrix may seem odd, but follows Color Interop Forum recommendation. */
-    cicp[0] = CICP_PRI_P3D65;
-    cicp[1] = CICP_TRC_G26;
-    cicp[2] = (rgb_matrix) ? CICP_MATRIX_RGB : CICP_MATRIX_BT709;
+  if (interop_id == "pq_xyzd65_display") {
+    cicp[0] = CICP_PRI_XYZD65;
+    cicp[1] = CICP_TRC_PQ;
+    cicp[2] = CICP_MATRIX_RGB;
     cicp[3] = CICP_RANGE_FULL;
     return true;
   }
-  if (interop_id == "g22_rec709_display") {
+  if (interop_id == "g26_xyzd65_display") {
+    cicp[0] = CICP_PRI_XYZD65;
+    cicp[1] = CICP_TRC_SMPTE428;
+    cicp[2] = CICP_MATRIX_RGB;
+    cicp[3] = CICP_RANGE_FULL;
+    return true;
+  }
+  if (interop_id == "g26_p3d65_display") {
+    /* One might think the same transfer function as g26_xyzd65_display can be
+     * used here. But actually it's that one has headroom scaling, and this one
+     * does not. And there is no CICP for regular gamma 2.6. */
+    return false;
+  }
+  if (ELEM(interop_id, "g22_rec709_display", "g22_rec709_scene")) {
     cicp[0] = CICP_PRI_REC709;
     cicp[1] = CICP_TRC_G22;
     cicp[2] = (rgb_matrix) ? CICP_MATRIX_RGB : CICP_MATRIX_BT709;
     cicp[3] = CICP_RANGE_FULL;
     return true;
   }
-  if (interop_id == "blender:g24_rec2020_display") {
+  if (ELEM(interop_id, "blender:g24_rec2020_display", "g24_rec2020_scene")) {
     /* There is no gamma 2.4 TRC, but BT.709 is close. */
     cicp[0] = CICP_PRI_REC2020;
     cicp[1] = CICP_TRC_BT709;
@@ -1183,7 +1204,7 @@ bool IMB_colormanagement_space_to_cicp(const ColorSpace *colorspace,
     cicp[3] = CICP_RANGE_FULL;
     return true;
   }
-  if (interop_id == "g24_rec709_display") {
+  if (ELEM(interop_id, "g24_rec709_display", "g24_rec709_scene")) {
     /* There is no gamma 2.4 TRC, but BT.709 is close. */
     cicp[0] = CICP_PRI_REC709;
     cicp[1] = CICP_TRC_BT709;
@@ -1191,7 +1212,7 @@ bool IMB_colormanagement_space_to_cicp(const ColorSpace *colorspace,
     cicp[3] = CICP_RANGE_FULL;
     return true;
   }
-  if (ELEM(interop_id, "srgb_p3d65_display", "srgbe_p3d65_display")) {
+  if (ELEM(interop_id, "srgb_p3d65_display", "srgbe_p3d65_display", "srgb_p3d65_scene")) {
     /* For video we use BT.709 to match default sRGB writing, even though it is wrong.
      * But we have been writing sRGB like this forever, and there is the so called
      * "Quicktime gamma shift bug" that complicates things. */
@@ -1201,10 +1222,38 @@ bool IMB_colormanagement_space_to_cicp(const ColorSpace *colorspace,
     cicp[3] = CICP_RANGE_FULL;
     return true;
   }
-  if (interop_id == "srgb_rec709_display") {
+  if (ELEM(interop_id, "srgb_rec709_display", "srgb_rec709_scene")) {
     /* Don't write anything for backwards compatibility. Is fine for PNG
      * and video but may reconsider when JXL or AVIF get added. */
     return false;
+  }
+  if (ELEM(interop_id, "lin_rec709_display", "lin_rec709_scene")) {
+    cicp[0] = CICP_PRI_REC709;
+    cicp[1] = CICP_TRC_LINEAR;
+    cicp[2] = (rgb_matrix) ? CICP_MATRIX_RGB : CICP_MATRIX_BT709;
+    cicp[3] = CICP_RANGE_FULL;
+    return true;
+  }
+  if (ELEM(interop_id, "lin_p3d65_display", "lin_p3d65_scene")) {
+    cicp[0] = CICP_PRI_P3D65;
+    cicp[1] = CICP_TRC_LINEAR;
+    cicp[2] = (rgb_matrix) ? CICP_MATRIX_RGB : CICP_MATRIX_BT709;
+    cicp[3] = CICP_RANGE_FULL;
+    return true;
+  }
+  if (ELEM(interop_id, "lin_rec2020_display", "lin_rec2020_scene")) {
+    cicp[0] = CICP_PRI_REC2020;
+    cicp[1] = CICP_TRC_LINEAR;
+    cicp[2] = (rgb_matrix) ? CICP_MATRIX_RGB : CICP_MATRIX_REC2020_NCL;
+    cicp[3] = CICP_RANGE_FULL;
+    return true;
+  }
+  if (interop_id == "lin_ciexyzd65_scene") {
+    cicp[0] = CICP_PRI_XYZD65;
+    cicp[1] = CICP_TRC_LINEAR;
+    cicp[2] = CICP_MATRIX_RGB;
+    cicp[3] = CICP_RANGE_FULL;
+    return true;
   }
 
   return false;
@@ -1226,8 +1275,11 @@ const ColorSpace *IMB_colormanagement_space_from_cicp(const int cicp[4],
   else if (cicp[0] == CICP_PRI_P3D65 && cicp[1] == CICP_TRC_PQ) {
     interop_id = "pq_p3d65_display";
   }
-  else if (cicp[0] == CICP_PRI_P3D65 && cicp[1] == CICP_TRC_G26) {
-    interop_id = "g26_p3d65_display";
+  else if (cicp[0] == CICP_PRI_XYZD65 && cicp[1] == CICP_TRC_PQ) {
+    interop_id = "pq_xyzd65_display";
+  }
+  else if (cicp[0] == CICP_PRI_XYZD65 && cicp[1] == CICP_TRC_SMPTE428) {
+    interop_id = "g26_xyzd65_display";
   }
   else if (cicp[0] == CICP_PRI_REC709 && cicp[1] == CICP_TRC_G22) {
     interop_id = "g22_rec709_display";
@@ -1250,6 +1302,18 @@ const ColorSpace *IMB_colormanagement_space_from_cicp(const int cicp[4],
   }
   else if (cicp[0] == CICP_PRI_REC709 && cicp[1] == CICP_TRC_SRGB) {
     interop_id = "srgb_rec709_display";
+  }
+  else if (cicp[0] == CICP_PRI_REC709 && cicp[1] == CICP_TRC_LINEAR) {
+    interop_id = "lin_rec709_display";
+  }
+  else if (cicp[0] == CICP_PRI_P3D65 && cicp[1] == CICP_TRC_LINEAR) {
+    interop_id = "lin_p3d65_display";
+  }
+  else if (cicp[0] == CICP_PRI_REC2020 && cicp[1] == CICP_TRC_LINEAR) {
+    interop_id = "lin_rec2020_display";
+  }
+  else if (cicp[0] == CICP_PRI_XYZD65 && cicp[1] == CICP_TRC_LINEAR) {
+    interop_id = "lin_ciexyzd65_scene";
   }
 
   return interop_id.is_empty() ? nullptr : g_config()->get_color_space_by_interop_id(interop_id);
@@ -3680,7 +3744,7 @@ bool IMB_colormanagement_setup_glsl_draw_from_space(
   display_parameters.look = (use_look) ? applied_view_settings->look : "";
   display_parameters.curve_mapping = applied_curve_mapping;
   display_parameters.scale = (exposure == 0.0f) ? 1.0f : powf(2.0f, exposure);
-  display_parameters.exponent = (gamma == 1.0f) ? 1.0f : 1.0f / max_ff(FLT_EPSILON, gamma);
+  display_parameters.exponent = colormanage_exponent(gamma);
   display_parameters.dither = dither;
   display_parameters.temperature = applied_view_settings->temperature;
   display_parameters.tint = applied_view_settings->tint;

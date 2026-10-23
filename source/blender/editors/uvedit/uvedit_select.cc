@@ -2521,10 +2521,17 @@ static int uv_select_edgering(Scene *scene, Object *obedit, UvNearestHit *hit, c
       if (l_step && BM_elem_flag_test(l_step->e, BM_ELEM_TAG)) {
         /* Previously this check was not done and this resulted in the final edge in the edge ring
          * cycle to be skipped during selection (caused by old sticky selection behavior). */
-        if (select && uvedit_edge_select_test(scene, bm, l_step, offsets)) {
-          break;
+        bool is_select;
+        if (use_vertex_select && !use_face_select) {
+          /* When selecting vertices in sync-select mode we must read from vertices too
+           * since flushing to edges happens afterwards. */
+          is_select = uvedit_uv_select_test(scene, bm, l_step, offsets) &&
+                      uvedit_uv_select_test(scene, bm, l_step->next, offsets);
         }
-        if (!select && !uvedit_edge_select_test(scene, bm, l_step, offsets)) {
+        else {
+          is_select = uvedit_edge_select_test(scene, bm, l_step, offsets);
+        }
+        if (is_select == select) {
           break;
         }
       }
@@ -5281,10 +5288,10 @@ static wmOperatorStatus uv_circle_select_exec(bContext *C, wmOperator *op)
     /* do selection */
     if (uv_select_mode == UV_SELECT_FACE) {
       /* Handle face selection (face center). */
-      if (use_select_linked) {
-        BM_mesh_elem_hflag_disable_all(bm, BM_FACE, BM_ELEM_TAG, false);
-      }
       BM_ITER_MESH (efa, &iter, bm, BM_FACES_OF_MESH) {
+        /* Clear the tag on hidden faces too, needed for: #uv_select_flush_from_tag_face. */
+        BM_elem_flag_disable(efa, BM_ELEM_TAG);
+
         if (!uvedit_face_visible_test(scene, efa)) {
           continue;
         }
@@ -5294,7 +5301,6 @@ static wmOperatorStatus uv_circle_select_exec(bContext *C, wmOperator *op)
           }
         }
         else {
-          BM_elem_flag_disable(efa, BM_ELEM_TAG);
           if (select == uvedit_face_select_test(scene, bm, efa)) {
             continue;
           }
@@ -5519,10 +5525,9 @@ static bool do_lasso_select_mesh_uv(bContext *C, const Span<int2> mcoords, const
 
     if (uv_select_mode == UV_SELECT_FACE) {
       /* Handle face selection (face center). */
-      if (use_select_linked) {
-        BM_mesh_elem_hflag_disable_all(bm, BM_FACE, BM_ELEM_TAG, false);
-      }
       BM_ITER_MESH (efa, &iter, bm, BM_FACES_OF_MESH) {
+        /* Clear the tag on hidden faces too, needed for: #uv_select_flush_from_tag_face. */
+        BM_elem_flag_disable(efa, BM_ELEM_TAG);
         if (!uvedit_face_visible_test(scene, efa)) {
           continue;
         }
@@ -5532,7 +5537,6 @@ static bool do_lasso_select_mesh_uv(bContext *C, const Span<int2> mcoords, const
           }
         }
         else {
-          BM_elem_flag_disable(efa, BM_ELEM_TAG);
           if (select == uvedit_face_select_test(scene, bm, efa)) {
             continue;
           }

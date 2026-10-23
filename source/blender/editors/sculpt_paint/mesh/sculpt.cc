@@ -5719,7 +5719,6 @@ static void smooth_brush_toggle_on(Main *bmain,
 
   toggle_settings.original_brush_size = BKE_brush_size_get(paint, smooth_brush);
   BKE_brush_size_set(paint, smooth_brush, cur_brush_size);
-  bke::brush::common_pressure_curves_init(*smooth_brush);
 }
 
 static void smooth_brush_toggle_off(Paint *paint, StrokeCache *cache)
@@ -5776,14 +5775,6 @@ static void mask_brush_toggle_on(Main *bmain, Paint *paint, StrokeToggleSettings
   const int cur_brush_size = BKE_brush_size_get(paint, cur_brush);
   toggle_settings.original_brush_size = BKE_brush_size_get(paint, mask_brush);
   BKE_brush_size_set(paint, mask_brush, cur_brush_size);
-
-  if (mask_brush->curve_distance_falloff) {
-    BKE_curvemapping_init(mask_brush->curve_distance_falloff);
-  }
-
-  if (mask_brush->curve_strength) {
-    BKE_curvemapping_init(mask_brush->curve_strength);
-  }
 }
 
 static void mask_brush_toggle_off(Paint *paint, StrokeCache *cache)
@@ -6834,7 +6825,6 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   ToolSettings *tool_settings = CTX_data_tool_settings(C);
   Sculpt &sd = *tool_settings->sculpt;
   SculptSession &ss = *CTX_data_active_object(C)->runtime->sculpt_session;
-  const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
 
   if (!G.background) {
     view3d_operator_needs_gpu(C);
@@ -6846,6 +6836,8 @@ static void brush_stroke_init(bContext *C, const wmOperator *op)
   }
 
   cold_trace.mark("gpu_context_and_stroke_cache");
+  Brush *brush = BKE_paint_brush(&sd.paint);
+  bke::brush::common_pressure_curves_init(*brush);
   brush_init_tex(sd, ss);
   cold_trace.mark("brush_textures");
 

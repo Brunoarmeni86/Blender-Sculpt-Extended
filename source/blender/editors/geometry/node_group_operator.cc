@@ -546,7 +546,11 @@ static bke::GeometrySet get_original_geometry_eval_copy(Depsgraph &depsgraph,
         operator_data.active_face_index = BM_mesh_active_face_index_get(em->bm, false, true);
         EDBM_mesh_load_ex(DEG_get_bmain(&depsgraph), &object, true);
         EDBM_mesh_free_data(mesh->runtime->edit_mesh.get());
-        em->bm = nullptr;
+        /* Clear the edit-mesh entirely rather than just freeing its #BMesh. Leaving a #BMEditMesh
+         * with a null `bm` behind is a non-standard state that other code (e.g. the active
+         * attribute lookup when the tool result is stored back) doesn't expect. The edit-mesh is
+         * rebuilt from the tool result in #EDBM_mesh_make_from_mesh. */
+        mesh->runtime->edit_mesh.reset();
       }
 
       if (bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object)) {
@@ -597,6 +601,7 @@ static void store_result_geometry(const bContext &C,
       Curves *new_curves = geometry.get_curves_for_write();
       if (!new_curves) {
         curves.geometry.wrap() = {};
+        DEG_id_tag_update(&curves.id, ID_RECALC_GEOMETRY);
         break;
       }
 
@@ -613,8 +618,9 @@ static void store_result_geometry(const bContext &C,
       PointCloud *new_points =
           geometry.get_component_for_write<bke::PointCloudComponent>().release();
       if (!new_points) {
-        new_points->attribute_storage.wrap() = {};
+        points.attribute_storage.wrap() = {};
         points.totpoint = 0;
+        DEG_id_tag_update(&points.id, ID_RECALC_GEOMETRY);
         break;
       }
 
@@ -1107,6 +1113,9 @@ static bool run_node_group_poll(bContext *C, wmOperatorType *ot)
     return false;
   }
   const GeometryNodeAssetTraitFlag flag = asset_flag_for_context(*active_object);
+  if (flag == GeometryNodeAssetTraitFlag(0)) {
+    return false;
+  }
   if ((type_data.flag & flag) != flag) {
     return false;
   }
