@@ -1,0 +1,41 @@
+name: Publish verified Linux trial
+on:
+  push:
+    branches: [release-upload/linux-20261023]
+    paths: [.github/workflows/publish-linux.yml]
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview
+    steps:
+      - name: Download and verify tested artifact
+        run: |
+          set -euo pipefail
+          gh run download 39950290074 --repo "$GITHUB_REPOSITORY" --name Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24-trial --dir package
+          cd package
+          sha256sum --check SHA256SUMS.txt
+          cat linux-guard-audit/RESULT.json
+          python3 - <<'PY'
+          import json,tarfile,hashlib
+          from pathlib import Path
+          results=json.loads(Path('linux-guard-audit/RESULT.json').read_text())
+          assert len(results)==3 and all(x['status']=='PASS' for x in results)
+          name='Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24-trial.tar.xz'
+          with tarfile.open(name) as archive:
+              provenance=archive.extractfile('./BUILD-PROVENANCE.txt').read().decode()
+          assert 'd62af38df29b687ecf6a10985b032b6694a062c5' in provenance
+          with open(name,'rb') as f:digest=hashlib.file_digest(f,'sha256').hexdigest()
+          manifest={'source_commit':'d62af38df29b687ecf6a10985b032b6694a062c5','target':'Ubuntu 24.04 x86_64','compiler':'GCC 14','run_id':39950290074,'package':name,'sha256':digest,'validation':{'build':'PASS','startup_defaults':'PASS','brush_guards':results},'limitations':['Linux trial; not certified on older distributions','GPU Cycles kernels not certified','Real GPU and dense-model performance require manual evaluation']}
+          Path('BUILD-MANIFEST-Linux.json').write_text(json.dumps(manifest,indent=2)+'\n')
+          PY
+          mv SHA256SUMS.txt SHA256SUMS-Linux.txt
+      - name: Publish Linux assets beside matching Windows build
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" package/Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24-trial.tar.xz package/SHA256SUMS-Linux.txt package/BUILD-MANIFEST-Linux.json --repo "$GITHUB_REPOSITORY"
