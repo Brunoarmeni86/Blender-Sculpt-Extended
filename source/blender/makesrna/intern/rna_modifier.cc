@@ -2087,11 +2087,23 @@ static void rna_MultiresModifier_sculpt_levels_set(PointerRNA *ptr, int value)
 {
   auto *mmd = static_cast<MultiresModifierData *>(ptr->data);
   Object *ob = id_cast<Object *>(ptr->owner_id);
-  if (ob && (!bke::multires_layers::commit(*ob) || !multires_force_sculpt_rebuild(ob))) {
-    BKE_modifier_set_error(ob, &mmd->modifier, "Commit sculpt edits before changing Sculpt Levels");
-    return;
+  const int new_level = std::clamp(value, 0, int(mmd->totlvl));
+  if (ob) {
+    if (!bke::multires_layers::commit(*ob)) {
+      BKE_modifier_set_error(ob, &mmd->modifier, "Commit sculpt edits before changing Sculpt Levels");
+      return;
+    }
+    Mesh &mesh = *id_cast<Mesh *>(ob->data);
+    const bool mask_ok = mmd->sculptlvl > 0 && new_level == 0 ?
+                             multires_mask_sync_to_base(mesh) :
+                         mmd->sculptlvl == 0 && new_level > 0 ?
+                             multires_mask_sync_from_base(mesh, mmd->totlvl) : true;
+    if (!mask_ok || !multires_force_sculpt_rebuild(ob)) {
+      BKE_modifier_set_error(ob, &mmd->modifier, "Cannot synchronize mask while changing Sculpt Levels");
+      return;
+    }
   }
-  mmd->sculptlvl = std::clamp(value, 0, int(mmd->totlvl));
+  mmd->sculptlvl = new_level;
 }
 
 static void rna_MultiresModifier_level_range(
@@ -3813,6 +3825,28 @@ static void rna_def_modifier_multires_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_boolean_funcs(prop, nullptr, "rna_MultiresSculptLayer_visible_set");
   RNA_def_property_ui_text(prop, "Visible", "Include this layer in the evaluated surface");
   RNA_def_property_update(prop, 0, "rna_MultiresSculptLayer_visible_update");
+
+  prop = RNA_def_property(srna, "group_id", PROP_INT, PROP_NONE);
+  RNA_def_property_int_sdna(prop, nullptr, "group_id");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Group", "Organizational Sculpt Layer group identifier");
+
+  prop = RNA_def_property(srna, "group_name", PROP_STRING, PROP_NONE);
+  RNA_def_property_string_sdna(prop, nullptr, "group_name");
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Group Name", "Name of the containing Sculpt Layer group");
+
+  prop = RNA_def_property(srna, "group_hidden", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "group_flag", MULTIRES_SCULPT_LAYER_GROUP_HIDDEN);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Group Hidden", "The containing group is hidden");
+
+  prop = RNA_def_property(srna, "group_collapsed", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(
+      prop, nullptr, "group_flag", MULTIRES_SCULPT_LAYER_GROUP_COLLAPSED);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE);
+  RNA_def_property_ui_text(prop, "Group Collapsed", "The containing group is collapsed");
 }
 
 static void rna_def_modifier_multires_color_attribute(BlenderRNA *brna)

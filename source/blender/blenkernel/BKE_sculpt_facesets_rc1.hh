@@ -36,7 +36,9 @@ inline bool eligible(const Object &object,const Mesh &mesh,const MultiresModifie
 }
 inline bool master_valid(const Object &object,const Mesh &mesh,const MultiresModifierData &mmd)
 {
-  return eligible(object,mesh,mmd) && mmd.sculpt_face_set_level==mmd.totlvl &&
+  /* A retained higher-resolution categorical master remains valid after
+   * Delete Higher. Lower sculpt grids sample it exactly and preserve IDs. */
+  return eligible(object,mesh,mmd) && mmd.sculpt_face_set_level>=mmd.totlvl &&
          multires_layers::faceset_master_valid(mmd,mesh.corners_num);
 }
 }  // namespace blender::bke::facesets_rc1

@@ -28,6 +28,7 @@
 
 #include "DNA_mesh_types.h"
 #include "DNA_object_types.h"
+#include "DNA_scene_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_texture_types.h"
 
@@ -912,55 +913,22 @@ static void panel_draw(const bContext *C, Panel *panel)
     layout.separator();
     layout.label(IFACE_("Sculpt Layers"), ICON_MOD_MULTIRES);
 
-    ui::Layout &base_box = layout.box();
-    base_box.label(IFACE_("Base - native Multires surface"), ICON_MOD_MULTIRES);
-    base_box.label(IFACE_("Stored separately from sculpt layers"), ICON_NONE);
-    base_box.op("SCULPT_OT_multires_base_capture", IFACE_("Bake Visible into Base..."), ICON_NONE);
-
-    if (const MultiresSculptLayer *active = bke::multires_layers::active(*mmd)) {
-      /* Geometry routing follows effective layer visibility/selection, not REC.
-       * The destination selector uses the existing all-hidden native base path. */
-      const bool sculpt_base_mesh =
-          (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) != 0;
-      const bool editing_base =
-          sculpt_base_mesh || !bke::multires_layers::base_has_visible_layers(*mmd);
-      ui::Layout &active_box = layout.box();
-      active_box.label(editing_base ? IFACE_("Target: Multires Base") :
-                                     IFACE_("Target: Active Layer"), ICON_INFO);
-      if (sculpt_base_mesh) {
-        active_box.label(IFACE_("Editing base cage coordinates"), ICON_INFO);
-      }
-      else if (editing_base) {
-        active_box.label(IFACE_("Native Multires surface - layers hidden"), ICON_NONE);
-      }
-      else {
-        active_box.label(active->name, ICON_RADIOBUT_ON);
-      }
-      active_box.op("SCULPT_OT_multires_layer_commit", IFACE_("Commit Pending Changes"), ICON_NONE);
-      active_box.op("SCULPT_OT_multires_layer_snapshot", IFACE_("Create Hidden Copy"), ICON_DUPLICATE);
-      active_box.label(IFACE_("Save the .blend to keep changes on disk"), ICON_NONE);
-      if (!editing_base && (!(active->flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
-          !std::isfinite(active->strength) || std::abs(active->strength) < 1e-6f ||
-          mmd->sculptlvl > mmd->totlvl)) {
-        active_box.label(IFACE_("Sculpting into a layer requires a valid level and a visible layer with non-zero strength"), ICON_ERROR);
-      }
-    }
-
-    ui::Layout &layer_tools = layout.row(false);
-    layer_tools.op("SCULPT_OT_multires_layer_add", IFACE_("Add"), ICON_ADD);
-    layer_tools.op("SCULPT_OT_multires_layer_duplicate", IFACE_("Duplicate"), ICON_DUPLICATE);
-    layer_tools.op("SCULPT_OT_multires_layer_delete", IFACE_("Delete"), ICON_X);
-    PointerRNA move_up = layer_tools.op(
-        "SCULPT_OT_multires_layer_move", IFACE_("Up"), ICON_TRIA_UP);
+    /* Shape Key style: one framed stack with a compact vertical tool strip. */
+    ui::Layout &list_row = layout.row(false);
+    ui::Layout &list_box = list_row.box().column(true);
+    ui::Layout &layer_tools = list_row.column(true);
+    layer_tools.op("SCULPT_OT_multires_layer_add", "", ICON_ADD);
+    layer_tools.op("SCULPT_OT_multires_layer_delete", "", ICON_REMOVE);
+    layer_tools.separator();
+    layer_tools.op("SCULPT_OT_multires_layer_duplicate", "", ICON_DUPLICATE);
+    layer_tools.separator();
+    PointerRNA move_up = layer_tools.op("SCULPT_OT_multires_layer_move", "", ICON_TRIA_UP);
     RNA_enum_set(&move_up, "direction", -1);
-    PointerRNA move_down = layer_tools.op(
-        "SCULPT_OT_multires_layer_move", IFACE_("Down"), ICON_TRIA_DOWN);
+    PointerRNA move_down = layer_tools.op("SCULPT_OT_multires_layer_move", "", ICON_TRIA_DOWN);
     RNA_enum_set(&move_down, "direction", 1);
-    ui::Layout &group_tools = layout.row(false);
-    group_tools.op("SCULPT_OT_multires_layer_group_create", IFACE_("New Group"), ICON_FILE_FOLDER);
-group_tools.op("SCULPT_OT_multires_layer_group_remove", IFACE_("Ungroup"), ICON_X);
-    layer_tools.op("SCULPT_OT_multires_layer_merge", IFACE_("Merge Down"), ICON_TRIA_DOWN);
-    layer_tools.op("SCULPT_OT_multires_layer_flatten", IFACE_("Flatten"), ICON_TRIA_DOWN);
+    layer_tools.separator();
+    layer_tools.op("SCULPT_OT_multires_layer_group_create", "", ICON_FILE_FOLDER);
+    layer_tools.op("SCULPT_OT_multires_layer_group_remove", "", ICON_REMOVE);
 
     int last_sculpt_group_id = 0;
     for (int i = 0; i < mmd->sculpt_layers.count(); i++) {
@@ -975,7 +943,7 @@ group_tools.op("SCULPT_OT_multires_layer_group_remove", IFACE_("Ungroup"), ICON_
         const bool group_collapsed =
             (layer->group_flag & MULTIRES_SCULPT_LAYER_GROUP_COLLAPSED) != 0;
 
-        ui::Layout &group_row = layout.row(false);
+        ui::Layout &group_row = list_box.row(true);
         PointerRNA collapse_ptr = group_row.op(
             "SCULPT_OT_multires_layer_group_collapse",
             "",
@@ -987,20 +955,20 @@ group_tools.op("SCULPT_OT_multires_layer_group_remove", IFACE_("Ungroup"), ICON_
 
         PointerRNA visibility_ptr = group_row.op(
             "SCULPT_OT_multires_layer_group_visibility",
-            group_hidden ? IFACE_("Show") : IFACE_("Hide"),
+            "",
             group_hidden ? ICON_RESTRICT_VIEW_ON : ICON_RESTRICT_VIEW_OFF);
         RNA_int_set(&visibility_ptr, "group_id", layer->group_id);
 
         PointerRNA add_active_ptr = group_row.op(
             "SCULPT_OT_multires_layer_group_add_active",
-            IFACE_("+ Active"),
+            "",
             ICON_ADD);
         RNA_int_set(&add_active_ptr, "group_id", layer->group_id);
 
         PointerRNA merge_group_ptr = group_row.op(
             "SCULPT_OT_multires_layer_group_merge",
-            IFACE_("Merge"),
-            ICON_NONE);
+            "",
+            ICON_AUTOMERGE_ON);
         RNA_int_set(&merge_group_ptr, "group_id", layer->group_id);
       }
 
@@ -1012,9 +980,12 @@ group_tools.op("SCULPT_OT_multires_layer_group_remove", IFACE_("Ungroup"), ICON_
       }
       PointerRNA layer_ptr = RNA_pointer_create_discrete(
           &CTX_data_active_object(C)->id, RNA_MultiresSculptLayer, layer);
-      ui::Layout &row = layout.row(false);
+      ui::Layout &row = list_box.row(true);
+      if (layer->group_id != 0) {
+        row.separator_spacer();
+      }
       PointerRNA op_ptr = row.op("SCULPT_OT_multires_layer_set_active",
-                                 i == mmd->sculpt_layer_active ? IFACE_("Editing") : IFACE_("Select"),
+                                 "",
                                  i == mmd->sculpt_layer_active ? ICON_RADIOBUT_ON :
                                                                   ICON_RADIOBUT_OFF);
       RNA_int_set(&op_ptr, "index", i);
@@ -1022,9 +993,31 @@ group_tools.op("SCULPT_OT_multires_layer_group_remove", IFACE_("Ungroup"), ICON_
       row.prop(&layer_ptr, "name", UI_ITEM_NONE, std::nullopt, ICON_NONE);
       row.prop(&layer_ptr, "strength", UI_ITEM_NONE, std::nullopt, ICON_NONE);
       PointerRNA solo_ptr = row.op("SCULPT_OT_multires_layer_solo",
-                                   IFACE_("Solo"),
+                                   "",
                                    ICON_RESTRICT_VIEW_OFF);
       RNA_int_set(&solo_ptr, "index", i);
+    }
+
+    ui::Layout &actions = layout.column(true);
+    actions.op("SCULPT_OT_multires_layer_commit", IFACE_("Commit Pending Changes"), ICON_NONE);
+    actions.op("SCULPT_OT_multires_layer_snapshot", IFACE_("Create Hidden Copy"), ICON_DUPLICATE);
+    ui::Layout &merge_row = actions.row(true);
+    merge_row.op("SCULPT_OT_multires_layer_merge", IFACE_("Merge Down"), ICON_TRIA_DOWN);
+    merge_row.op("SCULPT_OT_multires_layer_flatten", IFACE_("Flatten"), ICON_NONE);
+    actions.op("SCULPT_OT_multires_base_capture", IFACE_("Bake Visible into Base..."), ICON_NONE);
+
+    if (const MultiresSculptLayer *active = bke::multires_layers::active(*mmd)) {
+      const bool editing_base =
+          (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) != 0 ||
+          !bke::multires_layers::base_has_visible_layers(*mmd);
+      if (!editing_base && (!(active->flag & MULTIRES_SCULPT_LAYER_VISIBLE) ||
+                            !std::isfinite(active->strength) ||
+                            std::abs(active->strength) < 1e-6f ||
+                            mmd->sculptlvl > mmd->totlvl))
+      {
+        layout.label(IFACE_("Active layer needs visibility, non-zero strength and a valid level"),
+                     ICON_ERROR);
+      }
     }
   }
 
@@ -1200,6 +1193,50 @@ static void advanced_panel_draw(const bContext * /*C*/, Panel *panel)
   layout.prop(ptr, "use_custom_normals", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 }
 
+static void polypaint_bake_panel_draw(const bContext *C, Panel *panel)
+{
+  ui::Layout &layout = *panel->layout;
+  Scene *scene = CTX_data_scene(C);
+  Object *object = CTX_data_active_object(C);
+  if (scene == nullptr || object == nullptr || object->data == nullptr) {
+    return;
+  }
+
+  PointerRNA scene_ptr = RNA_id_pointer_create(&scene->id);
+  PointerRNA settings = RNA_pointer_get(&scene_ptr, "multires_polypaint_bake_internal");
+  if (settings.data == nullptr) {
+    layout.label(IFACE_("Polypaint bake controls unavailable"), ICON_INFO);
+    return;
+  }
+  PointerRNA mesh_ptr = RNA_id_pointer_create(static_cast<ID *>(object->data));
+  layout.use_property_split_set(true);
+  layout.prop_search(&settings, "attribute", &mesh_ptr, "color_attributes", std::nullopt, ICON_NONE);
+  layout.prop_search(&settings, "uv_map", &mesh_ptr, "uv_layers", std::nullopt, ICON_NONE);
+  layout.prop(&settings, "resolution", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.prop(&settings, "samples", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.prop(&settings, "bake_mode", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  const bool all_tiles = RNA_enum_get(&settings, "bake_mode") == 1;
+  if (all_tiles) {
+    layout.prop(&settings, "save_series", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    if (RNA_boolean_get(&settings, "save_series")) {
+      layout.prop(&settings, "output_dir", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+      layout.prop(&settings, "output_name", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+      layout.prop(&settings, "release_saved", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    }
+    layout.op("MULTIRES_POLYPAINT_INTERNAL_OT_series", IFACE_("Bake UV Tiles"), ICON_RENDER_STILL);
+  }
+  else {
+    layout.prop(&settings, "tile", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    layout.op("MULTIRES_POLYPAINT_INTERNAL_OT_bake", IFACE_("Bake Color to UV"), ICON_RENDER_STILL);
+  }
+  layout.prop(&settings, "margin", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  layout.separator();
+  layout.prop(&settings, "image", UI_ITEM_NONE, IFACE_("Result"), ICON_IMAGE_DATA);
+  ui::Layout &result = layout.row(true);
+  result.op("MULTIRES_POLYPAINT_INTERNAL_OT_show", IFACE_("Show"), ICON_IMAGE_DATA);
+  result.op("MULTIRES_POLYPAINT_INTERNAL_OT_save", IFACE_("Save PNG"), ICON_FILE_TICK);
+}
+
 static void shrinkwrap_panel_draw(const bContext * /*C*/, Panel *panel)
 {
   ui::Layout &layout = *panel->layout;
@@ -1270,6 +1307,12 @@ static void panel_register(ARegionType *region_type)
                              panel_type);
   modifier_subpanel_register(
       region_type, "advanced", "Advanced", nullptr, advanced_panel_draw, panel_type);
+  modifier_subpanel_register(region_type,
+                             "polypaint_bake",
+                             "Polypaint Bake",
+                             nullptr,
+                             polypaint_bake_panel_draw,
+                             panel_type);
   modifier_subpanel_register(
       region_type, "shrinkwrap", "Shrinkwrap", nullptr, shrinkwrap_panel_draw, panel_type);
 }

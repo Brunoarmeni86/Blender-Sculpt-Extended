@@ -191,7 +191,7 @@ static void calc_faces(const Depsgraph &depsgraph,
   apply_face_set(face_set_id, face_indices, factors, face_sets);
   if (bke::facesets_rc1::enabled()) {
     MultiresModifierData *mmd=bke::facesets_rc1::modifier(object);
-    if (mmd && mmd->sculptlvl==0) {
+    if (mmd && mmd->totlvl>0 && mmd->sculptlvl==0 && mmd->sculpt_face_set_grids) {
       for (const int i:face_indices.index_range()) {
         if (!(factors[i]>face_set::FACE_SET_MIN_FADE)) { continue; }
         for (const int corner:faces[face_indices[i]]) {
@@ -215,7 +215,7 @@ static void do_draw_face_sets_brush_mesh(const Depsgraph &depsgraph,
 
   if (bke::facesets_rc1::enabled()) {
     MultiresModifierData *mmd=bke::facesets_rc1::modifier(object);
-    if (mmd && mmd->sculptlvl==0) {
+    if (mmd && mmd->totlvl>0 && mmd->sculptlvl==0 && mmd->sculpt_face_set_grids) {
       const Mesh &mesh=*id_cast<Mesh *>(object.data);
       Vector<int> corners;
       const Span<bke::pbvh::MeshNode> mesh_nodes=pbvh.nodes<bke::pbvh::MeshNode>();
@@ -461,7 +461,10 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
   MultiresModifierData *rc_mmd=bke::facesets_rc1::enabled()?bke::facesets_rc1::modifier(object):nullptr;
   if (bke::facesets_rc1::enabled()) {
     const Mesh &mesh=*id_cast<Mesh *>(object.data);
-    if (rc_mmd) {
+    /* A Multires modifier with no subdivisions is still an ordinary mesh for
+     * Face Sets. Keep Blender's native base-mesh path until the first level is
+     * created; that level will initialize the HR master from the base IDs. */
+    if (rc_mmd && rc_mmd->totlvl > 0) {
       if (!bke::facesets_rc1::eligible(object,mesh,*rc_mmd) || mesh.id.us!=1 ||
           bke::object::pbvh_get(object)->type()==bke::pbvh::Type::BMesh ||
           !ELEM(brush.stroke_method,BRUSH_STROKE_DOTS,BRUSH_STROKE_SPACE)) {
@@ -479,7 +482,7 @@ void do_draw_face_sets_brush(const Depsgraph &depsgraph,
     }
   }
   const bool high_resolution = use_high_resolution_face_sets(object);
-  const bool rc_l0=rc_mmd && rc_mmd->sculptlvl==0 &&
+  const bool rc_l0=rc_mmd && rc_mmd->totlvl>0 && rc_mmd->sculptlvl==0 &&
       bke::object::pbvh_get(object)->type()==bke::pbvh::Type::Mesh;
   if (rebuild_brush_v05_enabled() && !bke::facesets_rc1::enabled()) {
     const SculptSession &ss=*object.runtime->sculpt_session;

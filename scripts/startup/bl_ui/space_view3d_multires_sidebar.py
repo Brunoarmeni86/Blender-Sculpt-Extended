@@ -38,27 +38,28 @@ class VIEW3D_PT_sculpt_multires_sidebar(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
         layout.operator_context = 'INVOKE_DEFAULT'
         modifiers = multires_modifiers(context)
         if not modifiers:
             layout.label(text="Aggiungi un modificatore Multires", icon='INFO')
             return
         for modifier in modifiers:
-            box = layout.box()
-            box.context_pointer_set("modifier", modifier)
-            row = box.row(align=True)
+            column = layout.column(align=True)
+            column.context_pointer_set("modifier", modifier)
+            row = column.row(align=True)
             row.label(text=modifier.name, icon='MOD_MULTIRES')
-            row.prop(modifier, "show_viewport", text="")
-            column = box.column(align=True)
+            row.prop(modifier, "show_viewport", text="", icon='RESTRICT_VIEW_OFF')
             column.enabled = context.object.mode != 'EDIT'
             column.prop(modifier, "levels", text="Viewport")
             column.prop(modifier, "sculpt_levels", text="Sculpt")
             column.prop(modifier, "render_levels", text="Render")
-            column.label(text="Livelli totali: " + str(modifier.total_levels))
+            column.label(text="Total Levels: " + str(modifier.total_levels), icon='INFO')
             row = column.row(align=True)
             native_operator(row, "object.multires_subdivide", "Subdivide",
                             modifier=modifier.name, mode='CATMULL_CLARK')
-            native_operator(row, "object.multires_higher_levels_delete", "Delete Higher",
+            native_operator(row, "object.multires_higher_levels_delete", "Delete Higher", 'TRASH',
                             modifier=modifier.name)
             if hasattr(modifier, "use_sculpt_base_mesh"):
                 row = column.row()
@@ -73,6 +74,7 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Multires"
+    bl_order = 0
 
     @classmethod
     def poll(cls, context):
@@ -80,6 +82,7 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.use_property_decorate = False
         layout.operator_context = 'INVOKE_DEFAULT'
         modifiers = multires_modifiers(context)
         # Native Sculpt operators target the SculptSession's modifier. RNA has
@@ -94,29 +97,58 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
         layout.context_pointer_set("modifier", modifier)
         layout.enabled = context.object.mode != 'EDIT'
         active_index = modifier.active_sculpt_layer_index
+        row = layout.row()
+        layer_list = row.box().column(align=True)
+        last_group = 0
         for index, layer in enumerate(modifier.sculpt_layers):
-            row = layout.row(align=True)
-            selection = row.row(align=True)
-            selection.enabled = context.object.mode == 'SCULPT'
-            native_operator(selection, "sculpt.multires_layer_set_active", "",
-                            'RADIOBUT_ON' if index == active_index else 'RADIOBUT_OFF',
-                            index=index)
-            row.prop(layer, "visible", text="")
-            row.prop(layer, "name", text="")
-            row.prop(layer, "strength", text="")
-        if not len(modifier.sculpt_layers):
-            layout.label(text="Nessun layer")
-        elif 0 <= active_index < len(modifier.sculpt_layers):
-            layout.label(text="Attivo: " + modifier.sculpt_layers[active_index].name)
+            group_id = getattr(layer, 'group_id', 0)
+            if group_id and group_id != last_group:
+                group = layer_list.row(align=True)
+                op = group.operator(
+                    'sculpt.multires_layer_group_collapse', text='', emboss=False,
+                    icon='TRIA_RIGHT' if layer.group_collapsed else 'TRIA_DOWN')
+                op.group_id = group_id
+                group.label(text=layer.group_name or 'Group', icon='FILE_FOLDER')
+                op = group.operator(
+                    'sculpt.multires_layer_group_visibility', text='', emboss=False,
+                    icon='HIDE_ON' if layer.group_hidden else 'HIDE_OFF')
+                op.group_id = group_id
+                op = group.operator('sculpt.multires_layer_group_add_active', text='',
+                                    icon='ADD', emboss=False)
+                op.group_id = group_id
+                op = group.operator('sculpt.multires_layer_group_merge', text='',
+                                    icon='AUTOMERGE_ON', emboss=False)
+                op.group_id = group_id
+            last_group = group_id
+            if group_id and layer.group_collapsed:
+                continue
+            item = layer_list.row(align=True)
+            if group_id:
+                item.separator(factor=1.0)
+            op = item.operator(
+                'sculpt.multires_layer_set_active', text='', emboss=False,
+                icon='RADIOBUT_ON' if index == active_index else 'RADIOBUT_OFF')
+            op.index = index
+            item.prop(layer, 'name', text='', emboss=False)
+            item.prop(layer, 'strength', text='')
+            item.prop(layer, 'visible', text='', emboss=False,
+                      icon='HIDE_OFF' if layer.visible else 'HIDE_ON')
+        if not modifier.sculpt_layers:
+            layer_list.label(text='No Sculpt Layers', icon='INFO')
+        side = row.column(align=True)
+        side.enabled = context.object.mode == 'SCULPT'
+        native_operator(side, "sculpt.multires_layer_add", "", 'ADD')
+        native_operator(side, "sculpt.multires_layer_delete", "", 'REMOVE')
+        side.separator()
+        native_operator(side, "sculpt.multires_layer_duplicate", "", 'DUPLICATE')
+        side.separator()
+        native_operator(side, "sculpt.multires_layer_move", "", 'TRIA_UP', direction='UP')
+        native_operator(side, "sculpt.multires_layer_move", "", 'TRIA_DOWN', direction='DOWN')
+        side.separator()
+        native_operator(side, 'sculpt.multires_layer_group_create', '', 'FILE_FOLDER')
+        native_operator(side, 'sculpt.multires_layer_group_remove', '', 'REMOVE')
         controls = layout.column(align=True)
         controls.enabled = context.object.mode == 'SCULPT'
-        row = controls.row(align=True)
-        native_operator(row, "sculpt.multires_layer_add", "Add", 'ADD')
-        native_operator(row, "sculpt.multires_layer_duplicate", "Duplicate", 'DUPLICATE')
-        native_operator(row, "sculpt.multires_layer_delete", "Delete", 'X')
-        row = controls.row(align=True)
-        native_operator(row, "sculpt.multires_layer_move", "Up", 'TRIA_UP', direction='UP')
-        native_operator(row, "sculpt.multires_layer_move", "Down", 'TRIA_DOWN', direction='DOWN')
         native_operator(controls, "sculpt.multires_layer_commit", "Commit Pending Changes")
         native_operator(controls, "sculpt.multires_layer_snapshot", "Create Hidden Copy", 'DUPLICATE')
         bake = controls.column(align=True)
@@ -169,6 +201,7 @@ class VIEW3D_PT_multires_polypaint_attributes(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Multires"
+    bl_order = 20
 
     @classmethod
     def poll(cls, context):
@@ -177,6 +210,7 @@ class VIEW3D_PT_multires_polypaint_attributes(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.use_property_decorate = False
         layout.operator_context = 'EXEC_DEFAULT'
         modifier = multires_modifiers(context)[0]
         mesh = context.object.data
@@ -186,8 +220,9 @@ class VIEW3D_PT_multires_polypaint_attributes(bpy.types.Panel):
             levels[modifier.polypaint_attribute] = modifier.polypaint_level
         controls = layout.column()
         controls.enabled = context.object.mode in {'OBJECT', 'SCULPT'}
+        attribute_box = controls.box()
         for attribute in mesh.color_attributes:
-            row = controls.row(align=True)
+            row = attribute_box.row(align=True)
             selected = active is not None and attribute.name == active.name
             button = row.operator('sculpt.multires_polypaint_attribute', text=attribute.name,
                                   icon='RADIOBUT_ON' if selected else 'RADIOBUT_OFF', depress=selected)
@@ -195,6 +230,8 @@ class VIEW3D_PT_multires_polypaint_attributes(bpy.types.Panel):
             button.name = attribute.name
             level = levels.get(attribute.name, 0)
             row.label(text=('L' + str(level)) if level else 'Base')
+        if not mesh.color_attributes:
+            attribute_box.label(text='No Color Attributes', icon='INFO')
         row = controls.row(align=True)
         row.operator_context = 'INVOKE_DEFAULT'
         row.operator('sculpt.color_attribute_add_auto_v07', text='Add', icon='ADD')

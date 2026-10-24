@@ -2526,7 +2526,7 @@ static bool hr_gesture_poll(bContext *C)
   const Mesh &mesh=*id_cast<const Mesh *>(object.data);
   /* RC10_FIX_A: L0 gestures already have their own master update and Undo path.
    * Poll before PBVH rebuild: the requested Sculpt level identifies that path. */
-  const bool l0=rc5_gestures_enabled() && mmd && mmd->sculptlvl==0 &&
+  const bool l0=rc5_gestures_enabled() && mmd && mmd->totlvl>0 && mmd->sculptlvl==0 &&
       mesh.id.us==1 && bke::facesets_rc1::eligible(object,mesh,*mmd);
   return l0 || hr_gesture_requested(object) || base_face_sets_poll(C);
 }
@@ -2868,11 +2868,14 @@ static bool init_operation(gesture::GestureData &gesture_data, wmOperator &op)
 {
   Object &object = *gesture_data.vc.obact;
   const bool high_resolution = hr_gesture_requested(object);
+  auto *mmd=const_cast<MultiresModifierData *>(rc2_source_master(object));
   bool l0=false;
-  if (rc5_gestures_enabled()) {
-    auto *mmd=const_cast<MultiresModifierData *>(rc2_source_master(object));
+  /* RC5 augments a real subdivided Multires surface. Without Multires, or
+   * before its first subdivision, gestures must retain Blender's native
+   * base-mesh behavior and native Undo payload. */
+  if (rc5_gestures_enabled() && mmd && mmd->totlvl > 0) {
     Mesh &mesh=*id_cast<Mesh *>(object.data);
-    if (!mmd || !bke::facesets_rc1::eligible(object,mesh,*mmd) || mesh.id.us!=1 ||
+    if (!bke::facesets_rc1::eligible(object,mesh,*mmd) || mesh.id.us!=1 ||
         bke::object::pbvh_get(object)->type()==bke::pbvh::Type::BMesh) {
       BKE_report(op.reports,RPT_ERROR,"Face Set gesture requires a supported single Multires mesh");return false;
     }

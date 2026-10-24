@@ -64,8 +64,6 @@ class DATA_PT_modifiers(ModifierButtonsPanel, Panel):
         layout = self.layout
         layout.operator("wm.call_menu", text="Add Modifier", icon='ADD').name = "OBJECT_MT_modifier_add"
         layout.template_modifiers()
-        from .properties_polypaint_bake import draw_modifier_bake
-        draw_modifier_bake(self.layout, _context)
 
 
 class OBJECT_MT_modifier_add(ModifierAddMenu, Menu):

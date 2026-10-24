@@ -396,6 +396,14 @@ static bool multires_flush_mask_updates_impl(const SubdivCCG &ccg,
   }
   GridPaintMask *dst = static_cast<GridPaintMask *>(CustomData_get_layer_for_write(
       &mesh.corner_data, CD_GRID_PAINT_MASK, mesh.corners_num));
+  /* Some mask tools can materialize CCG masks before the persistent corner
+   * layer exists (notably after level changes and scripted operations). The
+   * evaluated CCG is authoritative here, so create the backing layer instead
+   * of silently losing the edit during the flush. */
+  if (!dst) {
+    dst = static_cast<GridPaintMask *>(CustomData_add_layer(
+        &mesh.corner_data, CD_GRID_PAINT_MASK, CD_SET_DEFAULT, mesh.corners_num));
+  }
   if (!dst) {
     return false;
   }
@@ -442,6 +450,93 @@ static bool multires_flush_mask_updates_impl(const SubdivCCG &ccg,
 bool multires_flush_mask_updates(const SubdivCCG &ccg, Mesh &mesh, const int level)
 {
   return multires_flush_mask_updates_impl(ccg, mesh, level, nullptr);
+}
+
+bool multires_mask_sync_from_base(Mesh &mesh, const int level)
+{
+  if (level < 1 || level > 13 || mesh.corners_num == 0) {
+    return false;
+  }
+  const VArray<float> mask = mesh.attributes().lookup_or_default<float>(
+      ".sculpt_mask", bke::AttrDomain::Point, 0.0f).varray;
+  const VArraySpan<float> values(mask);
+  GridPaintMask *grids = static_cast<GridPaintMask *>(CustomData_get_layer_for_write(
+      &mesh.corner_data, CD_GRID_PAINT_MASK, mesh.corners_num));
+  if (!grids) {
+    grids = static_cast<GridPaintMask *>(CustomData_add_layer(
+        &mesh.corner_data, CD_GRID_PAINT_MASK, CD_SET_DEFAULT, mesh.corners_num));
+  }
+  if (!grids) {
+    return false;
+  }
+  const int side = bke::subdiv::grid_size_from_level(level);
+  const int area = side * side;
+  const OffsetIndices<int> faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  for (const int face_i : faces.index_range()) {
+    const IndexRange face = faces[face_i];
+    float center = 0.0f;
+    for (const int corner : face) {
+      center += values[corner_verts[corner]];
+    }
+    center /= float(face.size());
+    for (const int corner : face) {
+      GridPaintMask &grid = grids[corner];
+      MEM_SAFE_DELETE(grid.data);
+      grid.data = MEM_new_array_uninitialized<float>(area, "multires mask from base");
+      grid.level = level;
+      const float vertex = values[corner_verts[corner]];
+      const float edge_next = 0.5f *
+          (vertex + values[corner_verts[blender::bke::mesh::face_corner_next(face, corner)]]);
+      const float edge_prev = 0.5f *
+          (vertex + values[corner_verts[blender::bke::mesh::face_corner_prev(face, corner)]]);
+      for (int y = 0; y < side; y++) {
+        const float v = float(y) / float(side - 1);
+        for (int x = 0; x < side; x++) {
+          const float u = float(x) / float(side - 1);
+          const float a = center * (1.0f - u) + edge_next * u;
+          const float b = edge_prev * (1.0f - u) + vertex * u;
+          grid.data[y * side + x] = a * (1.0f - v) + b * v;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+bool multires_mask_sync_to_base(Mesh &mesh)
+{
+  const GridPaintMask *grids = static_cast<const GridPaintMask *>(
+      CustomData_get_layer(&mesh.corner_data, CD_GRID_PAINT_MASK));
+  if (!grids) {
+    return true;
+  }
+  Array<float> sums(mesh.verts_num, 0.0f);
+  Array<int> counts(mesh.verts_num, 0);
+  const Span<int> corner_verts = mesh.corner_verts();
+  for (const int corner : IndexRange(mesh.corners_num)) {
+    const GridPaintMask &grid = grids[corner];
+    if (!grid.data || grid.level < 1 || grid.level > 13) {
+      continue;
+    }
+    const int side = bke::subdiv::grid_size_from_level(grid.level);
+    const int vert = corner_verts[corner];
+    sums[vert] += grid.data[side * side - 1];
+    counts[vert]++;
+  }
+  bke::MutableAttributeAccessor attributes = mesh.attributes_for_write();
+  bke::SpanAttributeWriter<float> mask = attributes.lookup_or_add_for_write_span<float>(
+      ".sculpt_mask", bke::AttrDomain::Point);
+  if (!mask) {
+    return false;
+  }
+  for (const int vert : mask.span.index_range()) {
+    if (counts[vert] > 0) {
+      mask.span[vert] = sums[vert] / float(counts[vert]);
+    }
+  }
+  mask.finish();
+  return true;
 }
 
 static void sculpt_change_bits_reset(BitVector<> &bits, const int size)

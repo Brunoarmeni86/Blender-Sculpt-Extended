@@ -153,11 +153,11 @@ static wmOperatorStatus multires_subdivide_exec(bContext *C, wmOperator *op)
   }
 
   Mesh *mesh = id_cast<Mesh *>(object->data);
-  if (mesh->attributes().contains(".sculpt_mask") &&
-      !CustomData_has_layer(&mesh->corner_data, CD_GRID_PAINT_MASK))
-  {
-    BKE_sculpt_mask_layers_ensure(
-        CTX_data_ensure_evaluated_depsgraph(C), CTX_data_main(C), object, mmd);
+  if (old_level == 0 && mesh->attributes().contains(".sculpt_mask")) {
+    if (!multires_mask_sync_from_base(*mesh, mmd->totlvl)) {
+      BKE_report(op->reports, RPT_ERROR, "Subdivision succeeded but mask propagation failed");
+      return OPERATOR_CANCELLED;
+    }
   }
 
   iter_other(CTX_data_main(C), object, true, multires_update_totlevels, &mmd->totlvl);

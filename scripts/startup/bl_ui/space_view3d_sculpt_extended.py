@@ -78,33 +78,36 @@ class VIEW3D_PT_facesets_rc1(bpy.types.Panel):
 
 def draw_polypaint_brush_controls(layout, context):
     """Shared by Sculpt Extended and Multires; keep brush behavior in one place."""
-    col = layout.column()
-    col.label(text='Paint / Blur / Smear: L0 e livelli superiori.')
-    col.label(text='L0: anteprima sulla mesh base.')
-    col.label(text='Nessun limite globale di campioni.')
-    col.operator_context = 'EXEC_REGION_WIN'
+    col = layout.column(align=True)
+    row = col.row(align=True)
+    row.operator_context = 'EXEC_REGION_WIN'
     for action, label in (('PAINT', 'Paint'), ('BLUR', 'Blur'), ('SMEAR', 'Smear')):
-        op = col.operator('sculpt.polypaint_blur_probe_v01', text='Attiva ' + label + ' HR')
+        op = row.operator('sculpt.polypaint_blur_probe_v01', text=label)
         op.action = action
-    col.label(text='Shift da Paint/Smear richiama Blur.')
     brush = context.tool_settings.sculpt.brush
     if brush:
-        col.prop(brush, 'strength', text='Intensita')
-        col.prop(brush, 'size', text='Raggio')
+        settings = col.column()
+        settings.use_property_split = True
+        settings.use_property_decorate = False
+        settings.prop(brush, 'strength', text='Strength')
+        settings.prop(brush, 'size', text='Radius')
         if brush.sculpt_brush_type == 'PAINT':
             for prop, label in (('blend', 'Fusione'), ('flow', 'Flusso'), ('wet_mix', 'Wet Mix'),
                                 ('wet_persistence', 'Wet Persistence'), ('density', 'Densita')):
-                col.prop(brush, prop, text=label)
+                settings.prop(brush, prop, text=label)
         if brush.sculpt_brush_type == 'SMEAR':
-            col.prop(brush, 'smear_deform_type', text='Modo')
+            settings.prop(brush, 'smear_deform_type', text='Mode')
+    col.label(text='Shift uses Blur', icon='INFO')
 
 
 class VIEW3D_PT_polypaint_blur_v01(bpy.types.Panel):
-    bl_label='Polypaint HR'
+    bl_label='Polypaint Brushes'
     bl_idname='VIEW3D_PT_polypaint_blur_v01'
+    bl_parent_id='VIEW3D_PT_sculpt_multires_sidebar'
     bl_space_type='VIEW_3D'
     bl_region_type='UI'
     bl_category='Multires'
+    bl_options={'DEFAULT_CLOSED'}
     @classmethod
     def poll(cls,context):return context.object is not None and context.object.mode=='SCULPT'
     def draw(self,context):
@@ -211,36 +214,13 @@ class SCULPT_OT_extended_prepare_transport(bpy.types.Operator):
         brush.sculpt_draw_transport_v01 = True
         return {'FINISHED'}
 
-class VIEW3D_PT_sculpt_extended_multires(bpy.types.Panel):
-    bl_label = 'Draw Transport'
-    bl_idname = 'VIEW3D_PT_sculpt_extended_multires'
-    bl_parent_id = 'VIEW3D_PT_sculpt_multires_sidebar'
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'Multires'
-
-    @classmethod
-    def poll(cls, context):
-        return (context.object is not None and context.object.type == 'MESH'
-                and context.object.mode == 'SCULPT')
-
-    def draw(self, context):
-        layout = self.layout
-        layout.operator('sculpt.extended_prepare_transport', text='Activate Draw Transport')
-        settings = context.tool_settings.sculpt
-        brush = settings.brush if settings else None
-        if brush:
-            layout.prop(brush, 'sculpt_draw_transport_v01', text='Draw Transport')
-            layout.label(text='R rotate · S scale · SS strength')
-            layout.label(text='Use at the highest Multires level')
-
-
 class VIEW3D_PT_multires_brush_experiments(bpy.types.Panel):
-    bl_label = 'Brush Layers'
+    bl_label = 'Brush Options'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Multires'
     bl_parent_id = 'VIEW3D_PT_sculpt_multires_sidebar'
+    bl_order = 10
 
     @classmethod
     def poll(cls, context):
@@ -251,22 +231,20 @@ class VIEW3D_PT_multires_brush_experiments(bpy.types.Panel):
         if not brush:
             return
         layout = self.layout
+        layout.use_property_decorate = False
         if brush.sculpt_brush_type in {'DRAW', 'CLAY', 'CLAY_STRIPS', 'CLAY_THUMB', 'INFLATE', 'PLANE'}:
             layout.prop(brush, 'sculpt_preserve_other_layers', text='Preserve Other Layers')
-            layout.label(text='Top Multires level, Space or Anchored stroke')
+        if brush.sculpt_brush_type == 'DRAW':
+            layout.prop(brush, 'sculpt_draw_transport_v01', text='Draw Transport')
         else:
-            layout.label(text='Standard brush behavior')
+            layout.operator('sculpt.extended_prepare_transport', text='Activate Draw Transport',
+                            icon='BRUSH_DATA')
 
 
 classes = (
     VIEW3D_PT_multires_brush_experiments,
-    VIEW3D_PT_facesets_rc1,
-    VIEW3D_PT_polypaint_blur_v01,
     SCULPT_OT_color_attribute_add_auto_v07,
     SCULPT_OT_extended_prepare_transport,
-    VIEW3D_PT_sculpt_extended_multires,
-    SCULPT_OT_color_v03_clear_confirm,
-    VIEW3D_PT_color_v03_attributes,
 )
 
 

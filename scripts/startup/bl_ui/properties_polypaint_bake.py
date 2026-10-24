@@ -396,27 +396,13 @@ def draw_modifier_bake(layout, context):
 
 
 class MPBI_PT_sidebar(bpy.types.Panel):
-    bl_label = 'Polypaint → Texture UV'
-    bl_order = -10
+    bl_label = 'Polypaint Bake'
+    bl_order = 30
     bl_idname = 'MPBI_PT_polypaint_bake_sidebar'
+    bl_parent_id = 'VIEW3D_PT_sculpt_multires_sidebar'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = 'Multires'
-
-    @classmethod
-    def poll(cls, context):
-        return has_multires(context) and native_available()
-
-    def draw(self, context):
-        draw_bake_controls(self.layout, context)
-
-
-class MPBI_PT_render(bpy.types.Panel):
-    bl_label = 'Bake · Multires Polypaint'
-    bl_idname = 'MPBI_PT_polypaint_bake_render'
-    bl_space_type = 'PROPERTIES'
-    bl_region_type = 'WINDOW'
-    bl_context = 'render'
     bl_options = {'DEFAULT_CLOSED'}
 
     @classmethod
@@ -427,7 +413,7 @@ class MPBI_PT_render(bpy.types.Panel):
         draw_bake_controls(self.layout, context)
 
 
-classes = (MPBI_Settings, MPBI_OT_bake, MPBI_OT_cancel_series, MPBI_OT_series, MPBI_OT_show, MPBI_OT_save, MPBI_PT_sidebar, MPBI_PT_render)
+classes = (MPBI_Settings, MPBI_OT_bake, MPBI_OT_cancel_series, MPBI_OT_series, MPBI_OT_show, MPBI_OT_save, MPBI_PT_sidebar)
 
 
 def register_props():
