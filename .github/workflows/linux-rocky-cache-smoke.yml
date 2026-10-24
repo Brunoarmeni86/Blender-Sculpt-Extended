@@ -1,0 +1,118 @@
+name: Validate Linux cache and recovery pipeline
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+env:
+  GIT_LFS_SKIP_SMUDGE: '1'
+  CXX: /opt/rh/gcc-toolset-14/root/usr/bin/g++
+  CCACHE_DIR: ${{ github.workspace }}/.ccache-smoke
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_COMPILERCHECK: content
+  CCACHE_MAXSIZE: 64M
+  CCACHE_COMPRESS: 'true'
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: false
+          persist-credentials: false
+      - name: Check production and smoke workflow syntax
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color -pyflakes= .github/workflows/linux-rocky-cached.yml .github/workflows/linux-rocky-cache-smoke.yml
+  seed:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container: rockylinux:8
+    steps:
+      - name: Install actual baseline compiler and cache
+        run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled powertools
+          dnf install -y epel-release
+          dnf install -y gcc-toolset-14 ccache tar gzip zstd python3.11
+      - name: Compile and require an immediate cache hit
+        run: |
+          set -euo pipefail
+          mkdir -p smoke snapshot "$CCACHE_DIR"
+          printf 'int cached_value() { return 42; }\n' > smoke/unit.cc
+          ccache --max-size "$CCACHE_MAXSIZE"
+          ccache --zero-stats
+          ccache "$CXX" -c smoke/unit.cc -o smoke/unit.o
+          rm smoke/unit.o
+          ccache "$CXX" -c smoke/unit.cc -o smoke/unit.o
+          ccache --show-stats | tee snapshot/cache-stats.txt
+          python3.11 - <<'PY'
+          from pathlib import Path
+          import re
+          stats=Path('snapshot/cache-stats.txt').read_text()
+          hits=re.search(r'cache hit\s*\(direct\)\s+(\d+)',stats) or re.search(r'\bHits:\s*(\d+)',stats)
+          assert hits and int(hits[1])>=1,stats
+          PY
+          cp smoke/unit.o snapshot/unit.o
+          (cd snapshot && sha256sum unit.o > SHA256SUMS.txt)
+          printf '{"status":"UNVERIFIED","fixture":"cache-smoke"}\n' > snapshot/SNAPSHOT.json
+      - name: Save compiler cache before verification
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: smoke-rocky8-gcc14-${{ github.run_id }}
+      - name: Save recoverable test snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cache-smoke-UNVERIFIED-${{ github.run_id }}
+          path: snapshot/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+  verify:
+    needs: seed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    container: rockylinux:8
+    steps:
+      - name: Install baseline tools in a fresh runner
+        run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled powertools
+          dnf install -y epel-release
+          dnf install -y gcc-toolset-14 ccache tar gzip zstd python3.11
+      - name: Restore cache written by the previous job
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: smoke-rocky8-gcc14-${{ github.run_id }}
+          fail-on-cache-miss: true
+      - name: Download the already compiled snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: Cache-smoke-UNVERIFIED-${{ github.run_id }}
+          path: input
+      - name: Verify existing artifact and require a cross-job compiler cache hit
+        run: |
+          set -euo pipefail
+          (cd input && sha256sum -c SHA256SUMS.txt)
+          mkdir -p smoke
+          printf 'int cached_value() { return 42; }\n' > smoke/unit.cc
+          ccache --zero-stats
+          ccache "$CXX" -c smoke/unit.cc -o smoke/unit.o
+          ccache --show-stats | tee restored-cache-stats.txt
+          python3.11 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,re
+          assert json.load(open('input/SNAPSHOT.json'))['status']=='UNVERIFIED'
+          stats=Path('restored-cache-stats.txt').read_text()
+          hits=re.search(r'cache hit\s*\(direct\)\s+(\d+)',stats) or re.search(r'\bHits:\s*(\d+)',stats)
+          assert hits and int(hits[1])>=1,stats
+          assert hashlib.sha256(Path('input/unit.o').read_bytes()).digest()==hashlib.sha256(Path('smoke/unit.o').read_bytes()).digest()
+          print('CACHE_RESTORE_AND_RECOVERABLE_ARTIFACT_PASS')
+          PY
