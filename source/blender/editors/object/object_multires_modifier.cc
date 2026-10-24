@@ -146,6 +146,8 @@ static wmOperatorStatus multires_subdivide_exec(bContext *C, wmOperator *op)
   const MultiresSubdivideModeType subdivide_mode = MultiresSubdivideModeType(
       RNA_enum_get(op->ptr, "mode"));
   const int old_level = mmd->totlvl;
+  const bool mask_from_base = old_level == 0 || mmd->sculptlvl == 0 ||
+                              (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh);
   multiresModifier_subdivide(object, mmd, subdivide_mode);
   if (mmd->totlvl == old_level) {
     BKE_report(op->reports, RPT_ERROR, "Subdivision failed; check Multires grids and pending sculpt edits");
@@ -153,7 +155,10 @@ static wmOperatorStatus multires_subdivide_exec(bContext *C, wmOperator *op)
   }
 
   Mesh *mesh = id_cast<Mesh *>(object->data);
-  if (old_level == 0 && mesh->attributes().contains(".sculpt_mask")) {
+  /* Subdivide raises Sculpt Levels directly, bypassing the RNA level setter. When sculpting
+   * the base, its mask must therefore be propagated here even if higher grids already exist.
+   * Clear Mask can remove the point attribute entirely, which represents an all-zero mask. */
+  if (mask_from_base) {
     if (!multires_mask_sync_from_base(*mesh, mmd->totlvl)) {
       BKE_report(op->reports, RPT_ERROR, "Subdivision succeeded but mask propagation failed");
       return OPERATOR_CANCELLED;
