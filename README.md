@@ -1,35 +1,35 @@
 # Blender Sculpt Extended
 
-Custom build di Blender dedicata allo sculpt su mesh Multires dense, con Sculpt Layers, Preserve Other Layers, Polypaint e ottimizzazioni mirate.
+Custom build di Blender per lo sculpt su mesh Multires dense, con Sculpt Layers, Preserve Other Layers e Polypaint.
 
-## Release corrente
+## Release corrente: Blender Sculpt Extended 5.2.3
 
-**[Blender Sculpt Extended 5.2.3 - download e note](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/tag/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview)**
-
-| Sistema | Download | Indicazione |
+| Sistema | Download | Revisione e verifiche |
 |---|---|---|
-| Windows x64 | [Scarica ZIP](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Windows-x64.zip) | Build completa e verificata |
-| Linux x64 general purpose | [Scarica TAR.XZ](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Linux-x64.tar.xz) | **Consigliata**; Rocky Linux 8 / glibc 2.28, verificata anche su Ubuntu 24.04 |
-| Linux x64 Ubuntu 24.04 | [Scarica TAR.XZ alternativo](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24.tar.xz) | Compilazione precedente specifica Ubuntu |
+| Windows x64 | [Scarica ZIP](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Windows-x64.zip) | `7eb49ddcb0d`; compilazione, avvio e prove locali |
+| Linux x64 general purpose | [Scarica TAR.XZ](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Linux-x64.tar.xz) | `7eb49ddcb0d`; Rocky Linux 8 / glibc 2.28, verificata anche su Ubuntu 24.04 |
+| Ubuntu 24.04 x64, alternativa | [Scarica TAR.XZ Ubuntu24](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24.tar.xz) | Precedente revisione `d62af38`, conservata come alternativa |
 
-La build Linux general purpose include CUDA/OptiX per NVIDIA, HIP per AMD e oneAPI per Intel. I kernel sono presenti e l'avvio è verificato; il runner non disponeva di GPU fisiche per misurare rendering e prestazioni reali.
+Windows e Linux general purpose includono la stessa interfaccia Multires compatta e i fix approvati di maschere e Face Sets. Consulta le [note della release](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/tag/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview) per i dettagli e lo stato dei problemi ancora in indagine. Checksum SHA-256 e manifest sono allegati alla release.
 
-Le release contrassegnate **Superseded** sono conservate come archivio e non sono consigliate. Consulta la [pagina Releases](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases) per lo stato aggiornato.
+Linux general purpose include i backend e kernel Cycles CUDA/OptiX, HIP e oneAPI. Il pacchetto è stato verificato su Rocky Linux 8 e Ubuntu 24.04; l'esecuzione su GPU fisiche non è stata provata dal runner CI. La compatibilità richiede anche CPU, sistema grafico e driver supportati; glibc 2.28 è la baseline ABI.
 
 ## Funzioni principali
 
-- Sculpt Layers per Multires.
-- Preserve Other Layers sui pennelli supportati.
-- Polypaint e strumenti di trasferimento dei dettagli.
-- Base Smooth e visualizzazione Multires coerente tra Sculpt Mode e Object Mode.
-- Miglioramenti prestazionali per lo sculpt su mesh dense.
+- Sculpt Layers per Multires con gruppi e interfaccia compatta.
+- Preserve Other Layers sui pennelli supportati, compresi Space e Anchored.
+- Polypaint e bake UV integrato nei pannelli Multires.
+- Base Smooth, visualizzazione Multires e ottimizzazioni per mesh dense.
+- Face Sets e propagazione delle maschere tra base e livelli Multires.
 
-## Documentazione tecnica
+Le release indicate come **Superseded** sono archiviate. Questi pacchetti restano pre-release personalizzate.
 
+## Sorgenti e documentazione
+
+- [Sorgente esatto dei pacchetti principali](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/tree/7eb49ddcb0df065d12129df06134437d795b5c70)
 - [Release nativa e verifiche](doc/sculpt_extended/NATIVE_RELEASE_20261020.md)
-- [Audit del codice, difetti e ottimizzazioni](doc/sculpt_extended/CODE_REVIEW.md)
-- [Sorgente esatto della release 5.2.3](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/tree/d62af38df29b687ecf6a10985b032b6694a062c5)
+- [Audit del codice](doc/sculpt_extended/CODE_REVIEW.md)
 
 ## Blender e licenza
 
-Blender è una suite 3D libera e open source. Consulta il [sito ufficiale](https://www.blender.org), il [manuale](https://docs.blender.org/manual/en/latest/index.html) e la [licenza](https://www.blender.org/about/license/).
+Blender è una suite 3D libera e open source: [sito ufficiale](https://www.blender.org), [manuale](https://docs.blender.org/manual/en/latest/index.html) e [licenza](https://www.blender.org/about/license/). Blender è distribuito principalmente secondo GNU GPL versione 3; singoli file possono usare licenze compatibili differenti.
