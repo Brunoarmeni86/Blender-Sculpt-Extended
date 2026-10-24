@@ -55,3 +55,5 @@ and larger paid runners are outside this change.
 
 The PC must only enter standby on a new explicit user request. Build completion
 must not trigger standby automatically.
+
+The lightweight workflow completed successfully in [run 40130187355](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/actions/runs/40130187355): workflow lint, native cache hit, cache persistence across separate runners and recovery of the compiled artifact with matching checksum all passed. A full Blender build with this new workflow has not yet been benchmarked.
