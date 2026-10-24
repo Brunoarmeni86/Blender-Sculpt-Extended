@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 360
     container: rockylinux:8
     env:
-      SOURCE_SHA: 7eb49ddcb0df065d12129df06134437d795b5c70
+      SOURCE_SHA: ab6dd77b95c47672a27b1be92c766c776559a435
       GIT_LFS_SKIP_SMUDGE: '1'
       CC: /opt/rh/gcc-toolset-14/root/usr/bin/gcc
       CXX: /opt/rh/gcc-toolset-14/root/usr/bin/g++
@@ -151,6 +151,151 @@ jobs:
           xvfb-run -a -s '-screen 0 1280x800x24' portable/blender --factory-startup --no-window-focus --window-geometry 0 0 1280 800 --python-exit-code 1 --python linux_guard_smoke.py
           test -f linux-guard-audit/RESULT.json
           cat linux-guard-audit/RESULT.json
+      - name: Verify Clear Mask survives subdivision from the base
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euxo pipefail
+          cat > mask_clear_gui_regression.py <<'MASK_TEST'
+          import bpy
+          import json
+          import os
+          import traceback
+          from pathlib import Path
+          
+          root = Path(__file__).parent
+          label = 'linux_clear_mask'
+          results = []
+          
+          def run():
+              window = bpy.context.window
+              area = next(a for a in window.screen.areas if a.type == 'VIEW_3D')
+              region = next(r for r in area.regions if r.type == 'WINDOW')
+              with bpy.context.temp_override(window=window, area=area, region=region):
+                  for scenario in ('existing_levels_subdivide', 'existing_levels_object_switch', 'base_mesh_subdivide', 'higher_level_mask_retained', 'brush_fresh'):
+                      if bpy.context.object and bpy.context.object.mode != 'OBJECT':
+                          bpy.ops.object.mode_set(mode='OBJECT')
+                      for obj in list(bpy.data.objects):
+                          bpy.data.objects.remove(obj, do_unlink=True)
+                      bpy.ops.mesh.primitive_cube_add()
+                      obj = bpy.context.object
+                      mesh = obj.data
+                      if scenario.startswith('brush'):
+                          bpy.ops.object.mode_set(mode='EDIT')
+                          bpy.ops.mesh.subdivide(number_cuts=4)
+                          bpy.ops.object.mode_set(mode='OBJECT')
+                      m = None if scenario == 'brush_before_modifier' else obj.modifiers.new('Multires', 'MULTIRES')
+                      attr = mesh.attributes.new('.sculpt_mask', 'FLOAT', 'POINT')
+                      for item in attr.data:
+                          item.value = 1.0
+                      if scenario.startswith('existing_levels') or scenario in ('resubdivide_clear', 'base_mesh_subdivide', 'higher_level_mask_retained'):
+                          assert bpy.ops.object.multires_subdivide(modifier=m.name) == {'FINISHED'}
+                          m.sculpt_levels = 0
+                          m.levels = 0
+                          if scenario == 'resubdivide_clear':
+                              assert bpy.ops.object.multires_higher_levels_delete(modifier=m.name) == {'FINISHED'}
+                              assert m.total_levels == 0
+                          if scenario in ('base_mesh_subdivide', 'higher_level_mask_retained'):
+                              m.sculpt_levels = 1
+                              if scenario == 'base_mesh_subdivide':
+                                  m.use_sculpt_base_mesh = True
+                      bpy.ops.object.mode_set(mode='SCULPT')
+                      if scenario.startswith('brush'):
+                          mesh.attributes.remove(mesh.attributes['.sculpt_mask'])
+                          assert bpy.ops.brush.asset_activate(asset_library_type='ESSENTIALS', relative_asset_identifier='brushes/essentials_brushes-mesh_sculpt.blend/Brush/Mask') == {'FINISHED'}
+                          brush = bpy.context.tool_settings.sculpt.brush
+                          brush.size = 96
+                          brush.use_locked_size = 'SCENE'
+                          brush.unprojected_size = 2.0
+                          brush.strength = 1.0
+                          brush.use_pressure_strength = False
+                          unified = getattr(bpy.context.tool_settings.sculpt, 'unified_paint_settings', None)
+                          if unified:
+                              unified.use_unified_size = unified.use_unified_strength = False
+                          for owner in (brush, bpy.context.tool_settings.sculpt):
+                              for prop in owner.bl_rna.properties:
+                                  if prop.identifier.startswith('use_automasking_') and prop.type == 'BOOLEAN' and not prop.is_readonly:
+                                      setattr(owner, prop.identifier, False)
+                          bpy.ops.view3d.view_axis(type='TOP', align_active=False)
+                          area.spaces.active.region_3d.view_distance = 5.0
+                          yield 0.3
+                          from bpy_extras import view3d_utils
+                          from mathutils import Vector
+                          xy = view3d_utils.location_3d_to_region_2d(region, area.spaces.active.region_3d, Vector((0,0,1)))
+                          stroke = [dict(name='MaskTest', mouse=tuple(xy), mouse_event=tuple(xy), location=(0,0,1), pressure=1.0, size=96, x_tilt=0.0, y_tilt=0.0, time=i*0.1, is_start=i==0) for i in range(3)]
+                          assert bpy.ops.sculpt.brush_stroke('EXEC_DEFAULT', True, stroke=stroke, override_location=True) == {'FINISHED'}
+                          yield 0.3
+                          attr = mesh.attributes.get('.sculpt_mask')
+                          assert attr and max(i.value for i in attr.data) > 0.05, 'Mask brush must actually paint'
+                      expected = 0.25 if scenario == 'higher_level_mask_retained' else 0.0
+                      assert bpy.ops.paint.mask_flood_fill(mode='VALUE', value=expected) == {'FINISHED'}
+                      if not expected:
+                          assert '.sculpt_mask' not in mesh.attributes or all(i.value == 0 for i in mesh.attributes['.sculpt_mask'].data)
+                      if scenario in ('brush_object_switch', 'existing_levels_object_switch'):
+                          bpy.ops.object.mode_set(mode='OBJECT')
+                          yield 0.3
+                      if scenario == 'brush_save_reload':
+                          saved = root / ('mask_clear_' + label + '.blend')
+                          bpy.ops.wm.save_as_mainfile(filepath=str(saved), check_existing=False)
+                          bpy.ops.wm.open_mainfile(filepath=str(saved))
+                          obj = bpy.context.object
+                          mesh = obj.data
+                          m = obj.modifiers.get('Multires')
+                          yield 0.3
+                      if m is None:
+                          m = obj.modifiers.new('Multires', 'MULTIRES')
+                      if scenario != 'existing_levels_clear':
+                          assert bpy.ops.object.multires_subdivide(modifier=m.name) == {'FINISHED'}
+                      else:
+                          m.sculpt_levels = m.total_levels
+                      bpy.context.view_layer.update()
+                      yield 0.3
+                      if scenario == 'base_mesh_subdivide':
+                          m.use_sculpt_base_mesh = False
+                          bpy.context.view_layer.update()
+                          yield 0.3
+                      if obj.mode != 'SCULPT':
+                          bpy.ops.object.mode_set(mode='SCULPT')
+                          yield 0.3
+                      print('LEVELS_AFTER_SUBDIVIDE', scenario, m.total_levels, m.levels, m.sculpt_levels, flush=True)
+                      assert m.sculpt_levels > 0
+                      dump = root / ('mask_surface_' + label + '_' + scenario + '.json')
+                      assert bpy.ops.sculpt.polypaint_blur_probe_v01(action='EXPORT', filepath=str(dump)) == {'FINISHED'}
+                      surface = json.loads(dump.read_text())['mask']
+                      assert (surface or not expected) and (not surface or max(abs(v-expected) for v in surface) <= 1e-7), (scenario, 'CCG MASK MISMATCH', max(surface) if surface else None)
+                      m.sculpt_levels = 0
+                      bpy.context.view_layer.update()
+                      attr = mesh.attributes.get('.sculpt_mask')
+                      values = [i.value for i in attr.data] if attr else [0.0] * len(mesh.vertices)
+                      assert max(abs(i-expected) for i in values) <= 1e-7, (scenario, values)
+                      results.append({'scenario': scenario, 'status': 'PASS', 'mask_min': min(surface, default=0.0), 'mask_max': max(surface, default=0.0), 'sample_count': len(surface)})
+              (root / ('mask_gui_' + label + '.json')).write_text(json.dumps(results, indent=2))
+              print('MASK_GUI_REGRESSION_PASS', json.dumps(results), flush=True)
+              bpy.ops.wm.quit_blender()
+          
+          steps = run()
+          def tick():
+              try:
+                  window = bpy.context.window
+                  area = next(a for a in window.screen.areas if a.type == 'VIEW_3D')
+                  region = next(r for r in area.regions if r.type == 'WINDOW')
+                  with bpy.context.temp_override(window=window, area=area, region=region):
+                      return next(steps)
+              except StopIteration:
+                  return None
+              except Exception:
+                  error = traceback.format_exc()
+                  (root / ('mask_gui_' + label + '.json')).write_text(json.dumps({'error': error, 'completed': results}, indent=2))
+                  print(error, flush=True)
+                  os._exit(1)
+          bpy.app.timers.register(tick, first_interval=1.0)
+          MASK_TEST
+          xvfb-run -a -s '-screen 0 1280x800x24' portable/blender --factory-startup --no-window-focus --python-exit-code 1 --python mask_clear_gui_regression.py
+          python3.11 - <<'CHECK'
+          import json
+          result=json.load(open('mask_gui_linux_clear_mask.json'))
+          assert len(result)==5 and all(row['status']=='PASS' for row in result),result
+          CHECK
       - name: Require all requested GPU backends and packaged kernels
         run: |
           python3.11 - <<'PY'
@@ -190,6 +335,7 @@ jobs:
             SHA256SUMS.txt
             GPU-ABI-AUDIT.json
             linux-guard-audit/RESULT.json
+            mask_gui_linux_clear_mask.json
           compression-level: 0
           retention-days: 7
 
