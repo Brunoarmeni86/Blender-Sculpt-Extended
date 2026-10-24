@@ -46,10 +46,11 @@ jobs:
           assert audit['elf_files'] > 0,audit
           assert audit['physical_gpu_tested'] is False,audit
           PY
-          tar -tf "$ORIGINAL" | grep -Eq 'kernel_sm_[0-9]+\.cubin\.zst$'
-          tar -tf "$ORIGINAL" | grep -Eq 'kernel_optix.*\.ptx\.zst$'
-          tar -tf "$ORIGINAL" | grep -Eq 'kernel_gfx[0-9]+\.fatbin\.zst$'
-          tar -tf "$ORIGINAL" | grep -Eq 'libcycles_kernel_oneapi_(aot|jit)\.so$'
+          tar -tf "$ORIGINAL" > package-contents.txt
+          grep -Eq 'kernel_sm_[0-9]+\.cubin\.zst$' package-contents.txt
+          grep -Eq 'kernel_optix.*\.ptx\.zst$' package-contents.txt
+          grep -Eq 'kernel_gfx[0-9]+\.fatbin\.zst$' package-contents.txt
+          grep -Eq 'libcycles_kernel_oneapi_(aot|jit)\.so$' package-contents.txt
       - name: Verify startup on Ubuntu 24.04
         run: |
           set -euxo pipefail
