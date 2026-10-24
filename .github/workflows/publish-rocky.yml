@@ -1,0 +1,104 @@
+name: Publish verified Rocky Linux general-purpose package
+on:
+  push:
+    branches: [release-upload/multires-linux-20261024]
+    paths: [.github/workflows/publish-rocky.yml]
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: Brunoarmeni86/Blender-Sculpt-Extended
+      TAG: sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview
+      SOURCE_SHA: 7eb49ddcb0df065d12129df06134437d795b5c70
+      BUILD_RUN: '40101911721'
+      ARTIFACT: Blender-Sculpt-Extended-5.2.3-Linux-x64-Rocky8-GPU-preview
+      ORIGINAL: Blender-Sculpt-Extended-5.2.3-Linux-x64-Rocky8-GPU-preview.tar.xz
+      GENERAL: Blender-Sculpt-Extended-5.2.3-Linux-x64.tar.xz
+      UBUNTU: Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24.tar.xz
+      UBUNTU_SHA: 05869965c423dcb8f2563437f180c1644697cba66e7daa4e2c7a2e4eb98ac468
+    steps:
+      - name: Download exact successful build artifact
+        run: |
+          set -euxo pipefail
+          test "$(gh api repos/$REPO/actions/runs/$BUILD_RUN --jq .conclusion)" = success
+          test "$(gh api repos/$REPO/actions/runs/$BUILD_RUN --jq .head_sha)" = d40f3f39ed67e6989d9d55bf89dd976753ca5363
+          gh run download "$BUILD_RUN" --repo "$REPO" --name "$ARTIFACT" --dir artifact
+          ls -lh artifact
+      - name: Verify package, source, brush tests, GPU kernels and ABI audit
+        run: |
+          set -euxo pipefail
+          cd artifact
+          sha256sum -c SHA256SUMS.txt
+          test "$(tar -xOf "$ORIGINAL" ./BUILD-PROVENANCE.txt | sed -n 's/^Approved source: //p')" = "$SOURCE_SHA"
+          python3 - <<'PY'
+          import json
+          result=json.load(open('linux-guard-audit/RESULT.json'))
+          assert len(result)==3 and all(row['status']=='PASS' for row in result),result
+          audit=json.load(open('GPU-ABI-AUDIT.json'))
+          expected={'WITH_CYCLES_DEVICE_CUDA','WITH_CYCLES_DEVICE_OPTIX','WITH_CYCLES_DEVICE_HIP','WITH_CYCLES_DEVICE_ONEAPI','WITH_CYCLES_CUDA_BINARIES','WITH_CYCLES_HIP_BINARIES'}
+          assert set(audit['flags'])==expected,audit
+          assert tuple(audit['max_glibc']) <= (2,28),audit
+          assert audit['elf_files'] > 0,audit
+          assert audit['physical_gpu_tested'] is False,audit
+          PY
+          tar -tf "$ORIGINAL" > package-contents.txt
+          grep -Eq 'kernel_sm_[0-9]+\.cubin\.zst$' package-contents.txt
+          grep -Eq 'kernel_optix.*\.ptx\.zst$' package-contents.txt
+          grep -Eq 'kernel_gfx[0-9]+\.fatbin\.zst$' package-contents.txt
+          grep -Eq 'libcycles_kernel_oneapi_(aot|jit)\.so$' package-contents.txt
+      - name: Verify startup on Ubuntu 24.04
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y libx11-6 libxi6 libxfixes3 libxrender1 libxxf86vm1 libxkbcommon0 libsm6 libice6 libegl1 libgl1 libdbus-1-3 libwayland-client0 libwayland-egl1 libpulse0 libasound2t64
+          mkdir portable
+          tar -xJf "artifact/$ORIGINAL" -C portable
+          portable/blender --background --factory-startup --python-exit-code 1 --python-expr "import bpy; assert bpy.app.version[:3]==(5,2,3); b=bpy.data.brushes.new('Release audit',mode='SCULPT'); assert b.sculpt_preserve_other_layers; print('ROCKY_PACKAGE_STARTS_ON_UBUNTU24_PASS')"
+      - name: Prepare general-purpose package metadata
+        run: |
+          set -euxo pipefail
+          mv "artifact/$ORIGINAL" "artifact/$GENERAL"
+          ROCKY_SHA="$(sha256sum "artifact/$GENERAL" | cut -d' ' -f1)"
+          printf '%s  %s\n' "$ROCKY_SHA" "$GENERAL" > artifact/SHA256SUMS-Linux-x64.txt
+          printf '%s  %s\n' "$UBUNTU_SHA" "$UBUNTU" > artifact/SHA256SUMS-Linux-x64-Ubuntu24.txt
+          python3 - <<'PY'
+          import hashlib,json,os
+          p='artifact/'+os.environ['GENERAL']
+          sha=hashlib.sha256(open(p,'rb').read()).hexdigest()
+          manifest={
+            'source_commit':os.environ['SOURCE_SHA'],
+            'target':'Linux x86_64 general purpose; glibc 2.28 baseline',
+            'build_environment':'Rocky Linux 8; GCC 14',
+            'build_run':int(os.environ['BUILD_RUN']),
+            'package':os.environ['GENERAL'],
+            'sha256':sha,
+            'validation':{
+              'build':'PASS','startup_rocky8':'PASS','startup_ubuntu24':'PASS',
+              'brush_guards':'PASS','abi_glibc_max':'2.28',
+              'cuda_optix_kernels':'PRESENT','hip_kernels':'PRESENT','oneapi_kernel':'PRESENT',
+              'physical_gpu_tested':False,
+            },
+          }
+          open('artifact/BUILD-MANIFEST-Linux-x64.json','w').write(json.dumps(manifest,indent=2)+'\n')
+          PY
+      - name: Preserve Ubuntu alternative and publish Rocky as main Linux package
+        run: |
+          set -euxo pipefail
+          test "$(gh api repos/$REPO/releases/tags/$TAG --jq '.assets[] | select(.name==env.UBUNTU) | .digest')" = "sha256:$UBUNTU_SHA"
+          gh release upload "$TAG" \
+            "artifact/$GENERAL" \
+            artifact/SHA256SUMS-Linux-x64.txt \
+            artifact/BUILD-MANIFEST-Linux-x64.json \
+            --repo "$REPO" --clobber
+      - name: Verify public assets and digests
+        run: |
+          set -euxo pipefail
+          ROCKY_SHA="$(cut -d' ' -f1 artifact/SHA256SUMS-Linux-x64.txt)"
+          test "$(gh api repos/$REPO/releases/tags/$TAG --jq '.assets[] | select(.name==env.GENERAL) | .digest')" = "sha256:$ROCKY_SHA"
+          test "$(gh api repos/$REPO/releases/tags/$TAG --jq '.assets[] | select(.name==env.UBUNTU) | .digest')" = "sha256:$UBUNTU_SHA"
+          gh api repos/$REPO/releases/tags/$TAG --jq '[.assets[].name]'
