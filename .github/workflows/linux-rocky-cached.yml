@@ -456,6 +456,29 @@ jobs:
               checked+=1
           Path('GPU-ABI-AUDIT.json').write_text(json.dumps({'flags':flags,'elf_files':checked,'max_glibc':maximum,'physical_gpu_tested':False},indent=2))
           PY
+      - name: Verify Smooth L0 isolation and RNA defaults without diagnostic errors
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          SMOOTH_TEST_LEVELS: '3'
+          RNA_TEST_RESULT: ${{ github.workspace }}/rna-defaults.json
+        run: |
+          set -euo pipefail
+          portable/blender --background --factory-startup --python-exit-code 1 --python source/doc/sculpt_extended/tests/check_rna_defaults.py > rna-startup.log 2>&1
+          cat rna-startup.log
+          xvfb-run -a -s '-screen 0 1280x800x24' portable/blender --factory-startup --no-window-focus --python-exit-code 1 --python source/doc/sculpt_extended/tests/smooth_l0_isolation_regression.py > smooth-l0.log 2>&1
+          cat smooth-l0.log
+          cp source/doc/sculpt_extended/tests/SMOOTH-ROUTING-20261025/l0_isolation.json smooth-l0.json
+          python3.11 - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.load(open('smooth-l0.json'))
+          assert len(rows)==7 and all(row['status']=='PASS' for row in rows),rows
+          rna=json.load(open('rna-defaults.json'))
+          assert len(rna)==5 and all(p['default']=='' and p['explicit_and_empty_values']=='PASS' for p in rna.values()),rna
+          for name in ['rna-startup.log','smooth-l0.log']:
+              log=Path(name).read_text(errors='replace')
+              assert not any(error in log for error in ['rna.define','Failure in TopologyRefiner','Incompatible existing refinement','Traceback','AssertionError']),name
+          PY
       - name: Prepare verified artifact without recompiling or repackaging
         run: |
           cp "input/$ORIGINAL" .
@@ -469,6 +492,7 @@ jobs:
               'verification_run':os.environ['GITHUB_RUN_ID'],
               'startup_rocky8':'PASS','brush_regressions':'PASS',
               'mask_regressions':'PASS','gpu_abi_audit':'PASS',
+              'smooth_l0_regressions':'PASS','rna_defaults':'PASS','diagnostic_errors':'NONE',
               'ubuntu24_verification':'PENDING_PUBLICATION_WORKFLOW',
               'physical_gpu_tested':False,
           },indent=2)+'\n')
@@ -484,6 +508,11 @@ jobs:
             linux-guard-audit/RESULT.json
             mask_gui_linux_clear_mask.json
             VERIFICATION.json
+            smooth-l0.json
+            rna-defaults.json
+            rna-startup.log
+            smooth-l0.log
+            input/CCACHE-STATS.txt
           if-no-files-found: error
           compression-level: 0
           overwrite: true
