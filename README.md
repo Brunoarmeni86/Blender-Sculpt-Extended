@@ -9,7 +9,7 @@ Build personalizzata di Blender per sculpt Multires su mesh dense, con Sculpt La
 | Sistema | Download | Revisione e stato |
 |---|---|---|
 | **Windows x64** | [**Scarica ZIP portable**](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-smooth-l0-20261025-preview/Blender-Sculpt-Extended-5.2.3-Windows-x64.zip) | `08db801d6a5`; include Smooth L0, OpenSubdiv e RNA |
-| **Linux x64 general purpose** | [Compilazione in corso](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/actions/runs/40201092229) | Stesso sorgente `08db801d6a5`; pubblicata dopo verifica |
+| **Linux x64 general purpose** | [Compilazione sospesa](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/actions/runs/40201092229) | Stesso sorgente `08db801d6a5`; pubblicata dopo verifica |
 | Linux general purpose precedente | [Scarica Clear Mask](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-clear-mask-20261024-preview/Blender-Sculpt-Extended-5.2.3-Linux-x64.tar.xz) | `ab6dd77b95c`; non include le ultime correzioni Smooth L0/RNA |
 | Ubuntu 24.04, alternativa storica | [Scarica Ubuntu24](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24.tar.xz) | `d62af38`; precedente anche al fix Clear Mask |
 
