@@ -260,6 +260,12 @@ static bool do_layer_delta_smooth(const Depsgraph &depsgraph,
                                  const float brush_strength)
 {
   namespace delta = layer_delta_smooth_v01;
+  bke::sculpt_cold_v01::Scope profile("smooth.delta_brush", &object);
+  /* Intentional native routing is not a failed Delta Smooth preparation.
+   * This also covers Shift and Auto Smooth using the stroke's original choice. */
+  if (delta::uses_native_smooth(object)) {
+    return false;
+  }
   if (!delta::owns(object)) {
     const SculptSession &session = *object.runtime->sculpt_session;
     const MultiresModifierData *mmd = session.multires_modifier;
@@ -282,7 +288,7 @@ static bool do_layer_delta_smooth(const Depsgraph &depsgraph,
   const OffsetIndices<int> offsets = create_node_vert_offsets(key, nodes, node_mask, offset_data);
   Array<float3> changes(offsets.total_size());
   threading::EnumerableThreadSpecific<LocalData> all_tls;
-  const Map<int, float3> &reference = delta::state().reference;
+  const auto &reference = delta::state().reference;
   const auto read_delta = [&](const SubdivCCGCoord coord) -> float3 {
     const int index = coord.to_index(key);
     return ccg.positions[index] - reference.lookup(index);

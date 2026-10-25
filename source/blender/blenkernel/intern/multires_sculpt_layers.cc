@@ -12,6 +12,10 @@
 #include <cstdio>
 
 #include "BKE_multires_sculpt_layers.hh"
+#include "BKE_multires_layer_smooth_reference.hh"
+#include "BKE_sculpt_cold_start_profile.hh"
+#include <unordered_map>
+#include <memory>
 #include "polypaint_cpu_math.hh"
 #include "BLI_color.hh"
 #include "multires_layer_base_math.hh"
@@ -36,6 +40,7 @@
 #include "BKE_subdiv_eval.hh"
 #ifdef WITH_OPENSUBDIV
 #  include "opensubdiv_evaluator.hh"
+#  include "opensubdiv_evaluator_capi.hh"
 #endif
 #include "multires_reshape.hh"
 #include "DNA_mesh_types.h"
@@ -71,6 +76,109 @@
 #include "multires_detail_transfer_v01.hh"
 
 namespace blender::bke::multires_layers {
+
+/* The registry has an explicit CCG destruction hook. Its entries borrow only
+ * that CCG's topology, never original/evaluated Mesh, Object or layer pointers. */
+struct SmoothL0Reference {
+  bke::subdiv::Subdiv values{};
+  Array<float3> coarse_snapshot;
+  float strength = 0.0f;
+  bool has_values = false;
+  ~SmoothL0Reference()
+  {
+#ifdef WITH_OPENSUBDIV
+    delete values.evaluator;
+#endif
+    values.evaluator = nullptr;
+    values.topology_refiner = nullptr; /* Borrowed, owned by the live CCG. */
+  }
+};
+static std::unordered_map<const SubdivCCG *, std::unique_ptr<SmoothL0Reference>> &smooth_l0_references()
+{
+  static std::unordered_map<const SubdivCCG *, std::unique_ptr<SmoothL0Reference>> entries;
+  return entries;
+}
+static std::mutex &smooth_l0_reference_mutex()
+{
+  static std::mutex mutex;
+  return mutex;
+}
+void smooth_l0_reference_clear(const SubdivCCG &ccg)
+{
+  std::lock_guard<std::mutex> lock(smooth_l0_reference_mutex());
+  smooth_l0_references().erase(&ccg);
+}
+bool smooth_l0_reference_prepare(const MultiresSculptLayer &layer,
+                                 const Mesh &mesh,
+                                 SubdivCCG &ccg,
+                                 const SmoothL0Reference *&r_reference)
+{
+  r_reference = nullptr;
+  if (!layer.base_deltas) {
+    return true;
+  }
+  if (!ccg.subdiv || !ccg.subdiv->topology_refiner ||
+      layer.base_verts_num != mesh.verts_num || mesh.corners_num != ccg.grids_num ||
+      mesh.faces_num != ccg.faces.size() || !std::isfinite(layer.strength)) {
+    return false;
+  }
+#ifndef WITH_OPENSUBDIV
+  return false;
+#else
+  bke::sculpt_cold_v01::Scope profile("smooth.l0_reference", &ccg);
+  std::lock_guard<std::mutex> lock(smooth_l0_reference_mutex());
+  auto &slot = smooth_l0_references()[&ccg];
+  if (!slot) {
+    slot = std::make_unique<SmoothL0Reference>();
+    slot->values.settings = ccg.subdiv->settings;
+    slot->values.topology_refiner = ccg.subdiv->topology_refiner;
+  }
+  SmoothL0Reference &entry = *slot;
+  static_assert(sizeof(float3) == sizeof(float[3]));
+  const size_t bytes = size_t(mesh.verts_num) * sizeof(float3);
+  if (entry.coarse_snapshot.size() == mesh.verts_num &&
+      entry.strength == layer.strength &&
+      std::memcmp(entry.coarse_snapshot.data(), layer.base_deltas, bytes) == 0) {
+    r_reference = entry.has_values ? &entry : nullptr;
+    profile.mark("EXACT_COARSE_HIT");
+    return true;
+  }
+  Array<float3> weighted(mesh.verts_num);
+  bool nonzero = false;
+  for (const int i : weighted.index_range()) {
+    weighted[i] = float3(layer.base_deltas[i]) * layer.strength;
+    if (!std::isfinite(weighted[i].x) || !std::isfinite(weighted[i].y) ||
+        !std::isfinite(weighted[i].z)) {
+      return false;
+    }
+    nonzero |= weighted[i] != float3(0.0f);
+  }
+  profile.mark("COARSE_VALUES");
+  if (nonzero) {
+    /* Reuse the existing live topology. This evaluator has independent numeric
+     * buffers, so no positions, native displacement, masks or UVs are overwritten. */
+    if (!bke::subdiv::eval_begin_from_mesh(&entry.values, &mesh,
+                                          bke::subdiv::SUBDIV_EVALUATOR_TYPE_CPU,
+                                          weighted)) {
+      return false;
+    }
+    profile.mark("REFINE_CHANGED_VALUES");
+  }
+  entry.coarse_snapshot.reinitialize(mesh.verts_num);
+  std::memcpy(entry.coarse_snapshot.data(), layer.base_deltas, bytes);
+  entry.strength = layer.strength;
+  entry.has_values = nonzero;
+  r_reference = nonzero ? &entry : nullptr;
+  return true;
+#endif
+}
+float3 smooth_l0_reference_sample(const SmoothL0Reference &reference,
+                                  const int ptex, const float u, const float v)
+{
+  return bke::subdiv::eval_limit_point(
+      const_cast<bke::subdiv::Subdiv *>(&reference.values), ptex, u, v);
+}
+
 
 struct LayerPayloadIndex {
   const MultiresSculptLayer *layer = nullptr;

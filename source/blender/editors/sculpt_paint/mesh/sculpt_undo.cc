@@ -317,6 +317,10 @@ struct StepData {
   /* Per-step decision made before the stroke: never pair pending CCG coordinates with
    * stale persistent deltas, or a lower-level surface with a partial top-level snapshot. */
   bool layer_persistent_snapshot_valid = false;
+  /* L0 cage edits at the top level need the persistent layer exchange as well
+   * as the CCG display swap. Coordinate-only Undo can otherwise reapply an
+   * unrelated layer contribution when the restored surface is later flushed. */
+  bool layer_l0_persistent = false;
   /* A refresh restores persistent data without exchanging compressed_positions. Once that
    * happens, those coordinates must no longer be used as the paired redo representation. */
   bool layer_position_buffers_match_payload = true;
@@ -1677,8 +1681,8 @@ static bool sculpt_layer_undo_persistent_frame_matches(const MultiresModifierDat
 static SculptLayerPersistentRestoreResult sculpt_layer_undo_persistent_restore(
     Depsgraph *depsgraph, Object &object, StepData &step_data)
 {
-  if (sculpt_layer_undo_ccg_enabled() || !sculpt_layer_undo_persistent_enabled() ||
-      step_data.type != Type::Position ||
+  if ((sculpt_layer_undo_ccg_enabled() && !step_data.layer_l0_persistent) ||
+      !sculpt_layer_undo_persistent_enabled() || step_data.type != Type::Position ||
       !step_data.position_step_storage || !step_data.position_step_storage->sculpt_layer_undo ||
       step_data.layer_frame.is_empty() || step_data.layer_frame_active < 0 ||
       step_data.layer_frame_active >= step_data.layer_frame.size())
@@ -2890,8 +2894,9 @@ static void store_sculpt_layer_disps(const Object &object,
                                      Node &unode,
                                      const bool persistent_snapshot_valid)
 {
-  if (sculpt_layer_undo_ccg_enabled() || !sculpt_layer_undo_persistent_enabled() ||
-      !persistent_snapshot_valid)
+  /* The snapshot-valid flag already selects the configured CCG/persistent path,
+   * including the targeted L0 exception captured before the stroke. */
+  if (!sculpt_layer_undo_persistent_enabled() || !persistent_snapshot_valid)
   {
     return;
   }
@@ -3343,8 +3348,20 @@ static void save_common_data(Object &ob, SculptUndoStep *us)
       us->data.layer_frame_level = mmd.sculptlvl;
       us->data.layer_frame_top_level = mmd.totlvl;
       const SubdivCCG &ccg = *ob.runtime->sculpt_session->subdiv_ccg;
+      const MultiresSculptLayer *active_layer = bke::multires_layers::active(mmd);
+      if (active_layer && active_layer->base_deltas && mmd.sculptlvl == mmd.totlvl &&
+          ccg.level == mmd.totlvl) {
+        for (int i = 0; i < active_layer->base_verts_num; i++) {
+          const float *delta = active_layer->base_deltas[i];
+          if (delta[0] != 0.0f || delta[1] != 0.0f || delta[2] != 0.0f) {
+            us->data.layer_l0_persistent = true;
+            break;
+          }
+        }
+      }
       us->data.layer_persistent_snapshot_valid =
-          !sculpt_layer_undo_ccg_enabled() && !us->data.native_multires_base_undo &&
+          (!sculpt_layer_undo_ccg_enabled() || us->data.layer_l0_persistent) &&
+          !us->data.native_multires_base_undo &&
           mmd.sculptlvl == mmd.totlvl &&
           ccg.level == mmd.totlvl && !ccg.dirty.coords && !ccg.dirty.hidden &&
           !ccg.dirty.masks;

@@ -232,7 +232,7 @@ class VIEW3D_PT_multires_brush_experiments(bpy.types.Panel):
             return
         layout = self.layout
         layout.use_property_decorate = False
-        if brush.sculpt_brush_type in {'DRAW', 'CLAY', 'CLAY_STRIPS', 'CLAY_THUMB', 'INFLATE', 'PLANE'}:
+        if brush.sculpt_brush_type in {'DRAW', 'CLAY', 'CLAY_STRIPS', 'CLAY_THUMB', 'INFLATE', 'PLANE', 'SMOOTH'}:
             layout.prop(brush, 'sculpt_preserve_other_layers', text='Preserve Other Layers')
         if brush.sculpt_brush_type == 'DRAW':
             layout.prop(brush, 'sculpt_draw_transport_v01', text='Draw Transport')
@@ -254,7 +254,7 @@ def register_props():
     global _owns_transport_property
     bpy.types.Brush.sculpt_preserve_other_layers = bpy.props.BoolProperty(
         name='Preserve Other Layers', default=True,
-        description='Experimental: exclude other layer offsets from brush position sampling; geometry stays composed')
+        description='Preserve other layer details when sculpting; Smooth uses active-layer isolation. Disable to use normal smoothing')
     if not hasattr(bpy.types.Brush, 'sculpt_draw_transport_v01'):
         bpy.types.Brush.sculpt_draw_transport_v01 = bpy.props.BoolProperty(
             name='Draw Transport', default=False,

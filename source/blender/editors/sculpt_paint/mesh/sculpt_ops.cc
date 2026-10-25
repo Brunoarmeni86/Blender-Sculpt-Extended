@@ -751,8 +751,8 @@ static void SCULPT_OT_multires_polypaint_attribute(wmOperatorType *ot)
   ot->poll = sculpt_multires_polypaint_attribute_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
   RNA_def_enum(ot->srna, "action", actions, 0, "Action", "Color Attribute operation");
-  RNA_def_string(ot->srna, "name", "", 68, "Attribute", "Color Attribute name");
-  RNA_def_string(ot->srna, "new_name", "", 68, "New Name", "New unique name");
+  RNA_def_string(ot->srna, "name", nullptr, 68, "Attribute", "Color Attribute name");
+  RNA_def_string(ot->srna, "new_name", nullptr, 68, "New Name", "New unique name");
 }
 
 static bool sculpt_multires_merge_visible_to_base_poll(bContext *C)

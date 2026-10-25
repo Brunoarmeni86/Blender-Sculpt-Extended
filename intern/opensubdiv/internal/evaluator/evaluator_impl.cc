@@ -489,20 +489,49 @@ OpenSubdiv_Evaluator *openSubdiv_createEvaluatorFromTopologyRefiner(
   const bool stencil_generate_intermediate_levels = is_adaptive;
   const bool stencil_generate_offsets = true;
   const bool use_inf_sharp_patch = true;
-  // Refine the topology with given settings.
-  // TODO(sergey): What if topology is already refined?
+  /* More than one numeric evaluator can share the same fixed topology.
+   * OpenSubdiv rejects a second refinement; reuse the existing levels only
+   * when their stored options match this descriptor. Never Unrefine a live
+   * shared topology to satisfy a different evaluator. */
+  const bool already_refined = refiner->GetNumLevels() > 1;
+  bool compatible_refinement = true;
   if (is_adaptive) {
     TopologyRefiner::AdaptiveOptions options(level);
     options.considerFVarChannels = has_face_varying_data;
     options.useInfSharpPatch = use_inf_sharp_patch;
-    refiner->RefineAdaptive(options);
+    if (!already_refined) {
+      refiner->RefineAdaptive(options);
+    }
+    else {
+      const TopologyRefiner::AdaptiveOptions existing = refiner->GetAdaptiveOptions();
+      compatible_refinement = !refiner->IsUniform() &&
+          existing.isolationLevel == options.isolationLevel &&
+          existing.secondaryLevel == options.secondaryLevel &&
+          existing.useSingleCreasePatch == options.useSingleCreasePatch &&
+          existing.useInfSharpPatch == options.useInfSharpPatch &&
+          existing.considerFVarChannels == options.considerFVarChannels &&
+          existing.orderVerticesFromFacesFirst == options.orderVerticesFromFacesFirst;
+    }
   }
   else {
     TopologyRefiner::UniformOptions options(level);
-    refiner->RefineUniform(options);
+    if (!already_refined) {
+      refiner->RefineUniform(options);
+    }
+    else {
+      const TopologyRefiner::UniformOptions existing = refiner->GetUniformOptions();
+      compatible_refinement = refiner->IsUniform() &&
+          existing.refinementLevel == options.refinementLevel &&
+          existing.orderVerticesFromFacesFirst == options.orderVerticesFromFacesFirst &&
+          existing.fullTopologyInLastLevel == options.fullTopologyInLastLevel;
+    }
   }
-
-  eval_trace.mark("topology_refine");
+  if (!compatible_refinement) {
+    std::fprintf(stderr, "[OPENSUBDIV_EVALUATOR] Incompatible existing refinement; "
+                         "shared topology retained unchanged\n");
+    return nullptr;
+  }
+  eval_trace.mark(already_refined ? "topology_reuse" : "topology_refine");
 
   // Work around ASAN warnings, due to OpenSubdiv pretending to have an actual StencilTable
   // instance while it's really its base class.

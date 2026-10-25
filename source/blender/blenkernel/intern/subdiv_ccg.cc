@@ -12,6 +12,7 @@
 #include "BLI_time.h"
 #include "BLI_threads.h"
 #include "BKE_subdiv_ccg.hh"
+#include "BKE_multires_layer_smooth_reference.hh"
 #include "BKE_sculpt_cold_start_profile.hh"
 
 #include "MEM_guardedalloc.h"
@@ -1129,6 +1130,7 @@ Mesh *BKE_subdiv_to_ccg_mesh(Subdiv &subdiv,
 
 SubdivCCG::~SubdivCCG()
 {
+  bke::multires_layers::smooth_l0_reference_clear(*this);
   if (this->subdiv != nullptr) {
     free(this->subdiv);
   }

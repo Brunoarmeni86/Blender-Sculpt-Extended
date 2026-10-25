@@ -142,7 +142,7 @@ static void SCULPT_OT_multires_detail_transfer_import_v01(wmOperatorType *ot)
   ot->poll = detail_transfer_import_poll_v01;
   ot->exec = detail_transfer_import_exec_v01;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
-  RNA_def_string(ot->srna, "preview_object", "", MAX_ID_NAME, "Preview", "Frozen preview object");
+  RNA_def_string(ot->srna, "preview_object", nullptr, MAX_ID_NAME, "Preview", "Frozen preview object");
   RNA_def_string(ot->srna, "layer_name", "Transferred Detail", 64, "Layer", "New layer name");
 }
 

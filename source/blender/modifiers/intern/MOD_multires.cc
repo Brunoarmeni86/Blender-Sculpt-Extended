@@ -42,6 +42,7 @@
 #include "BKE_multires.hh"
 #include "BKE_sculpt_cold_start_profile.hh"
 #include "BKE_multires_sculpt_layers.hh"
+#include "BKE_multires_layer_smooth_reference.hh"
 #include "BKE_paint.hh"
 #include "BKE_subdiv.hh"
 #include "BKE_subdiv_ccg.hh"
@@ -808,6 +809,15 @@ static Mesh *modify_mesh(ModifierData *md, const ModifierEvalContext *ctx, Mesh 
     /* NOTE: CCG takes ownership over Subdiv. */
     result = multires_as_ccg(mmd, ctx, mesh, subdiv);
     result->runtime->subdiv_ccg_tot_level = mmd->totlvl;
+    /* Prepare L0 propagation for the active layer as part of CCG creation
+     * (Subdivide, level change, file load), not at every Smooth stroke. */
+    if (const MultiresSculptLayer *layer = bke::multires_layers::active(*mmd)) {
+      if (bke::multires_layers::is_effective(*layer) && layer->base_deltas) {
+        const bke::multires_layers::SmoothL0Reference *reference = nullptr;
+        bke::multires_layers::smooth_l0_reference_prepare(
+            *layer, *mesh, *result->runtime->subdiv_ccg, reference);
+      }
+    }
     /* TODO(sergey): Usually it is sculpt stroke's update variants which
      * takes care of this, but is possible that we need this before the
      * stroke: i.e. when exiting blender right after stroke is done.

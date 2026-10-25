@@ -217,8 +217,8 @@ static void SCULPT_OT_multires_polypaint_uv_bake_v01(wmOperatorType *ot)
   ot->exec=polypaint_uv_v01::exec;
   ot->invoke=polypaint_uv_bake_v01_invoke;
   ot->flag=OPTYPE_REGISTER|OPTYPE_UNDO;
-  RNA_def_string(ot->srna,"attribute","",256,"Color Attribute","Empty uses the active Multires Polypaint attribute");
-  RNA_def_string(ot->srna,"uv_map","",256,"UV Map","Empty uses active UV map; V01 uses bilinear cage UV patches");
+  RNA_def_string(ot->srna,"attribute",nullptr,256,"Color Attribute","Empty uses the active Multires Polypaint attribute");
+  RNA_def_string(ot->srna,"uv_map",nullptr,256,"UV Map","Empty uses active UV map; V01 uses bilinear cage UV patches");
   RNA_def_int(ot->srna,"resolution",2048,64,4096,"Resolution","Square image size",64,4096);
   RNA_def_int(ot->srna,"tile",1001,1001,2000,"UDIM Tile","One separate image per invocation",1001,1100);
   RNA_def_int(ot->srna,"samples",2,1,2,"Samples per Axis","1: center pixel; 2: four subpixel samples",1,2);
