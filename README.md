@@ -7,10 +7,10 @@ Custom build di Blender per lo sculpt su mesh Multires dense, con Sculpt Layers,
 | Sistema | Download | Revisione e verifiche |
 |---|---|---|
 | Windows x64 | [Scarica ZIP](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-clear-mask-20261024-preview/Blender-Sculpt-Extended-5.2.3-Windows-x64.zip) | `ab6dd77b95c`; include il fix Clear Mask / Subdivide |
-| Linux x64 general purpose | [Scarica TAR.XZ](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Linux-x64.tar.xz) | `7eb49ddcb0d`, revisione precedente verificata; aggiornamento Clear Mask in compilazione |
+| Linux x64 general purpose | [Scarica TAR.XZ](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-clear-mask-20261024-preview/Blender-Sculpt-Extended-5.2.3-Linux-x64.tar.xz) | `ab6dd77b95c`; include il fix Clear Mask / Subdivide; verificata su Rocky 8 e Ubuntu 24.04 |
 | Ubuntu 24.04 x64, alternativa | [Scarica TAR.XZ Ubuntu24](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/download/sculpt-extended-5.2.3-preserve-layers-fix-20261023-preview/Blender-Sculpt-Extended-5.2.3-Linux-x64-Ubuntu24.tar.xz) | Precedente revisione `d62af38`, conservata come alternativa |
 
-Windows include il nuovo fix Clear Mask / Subdivide e tutte le funzioni precedenti. La Linux corrispondente è [in compilazione e verifica](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/actions/runs/40123115194); il download Linux indicato sopra è la precedente revisione verificata. Consulta le [note della release](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/tag/sculpt-extended-5.2.3-clear-mask-20261024-preview) per i dettagli e lo stato dei problemi ancora in indagine. Checksum SHA-256 e manifest sono allegati alla release.
+Windows e Linux general purpose includono il fix Clear Mask / Subdivide e tutte le funzioni precedentemente approvate, sullo stesso sorgente `ab6dd77b95c`. La [verifica e pubblicazione Linux](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/actions/runs/40167961272) è completata. L'alternativa Ubuntu24 conserva la revisione precedente e non include l'ultimo fix Clear Mask. Consulta le [note della release](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/tag/sculpt-extended-5.2.3-clear-mask-20261024-preview) per i dettagli e lo stato dei problemi ancora in indagine. Checksum SHA-256 e manifest sono allegati alla release.
 
 Linux general purpose include i backend e kernel Cycles CUDA/OptiX, HIP e oneAPI. Il pacchetto è stato verificato su Rocky Linux 8 e Ubuntu 24.04; l'esecuzione su GPU fisiche non è stata provata dal runner CI. La compatibilità richiede anche CPU, sistema grafico e driver supportati; glibc 2.28 è la baseline ABI.
 
@@ -26,7 +26,7 @@ Le release indicate come **Superseded** sono archiviate. Questi pacchetti restan
 
 ## Sorgenti e documentazione
 
-- [Sorgente della Windows corrente (Linux in aggiornamento)](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/tree/ab6dd77b95c47672a27b1be92c766c776559a435)
+- [Sorgente comune delle build Windows e Linux correnti](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/tree/ab6dd77b95c47672a27b1be92c766c776559a435)
 - [Release nativa e verifiche](doc/sculpt_extended/NATIVE_RELEASE_20261020.md)
 - [Audit del codice](doc/sculpt_extended/CODE_REVIEW.md)
 
