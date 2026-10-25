@@ -1,0 +1,84 @@
+name: Assemble and publish verified Smooth L0 Windows portable
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  assemble:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: Brunoarmeni86/Blender-Sculpt-Extended
+      SOURCE_SHA: 08db801d6a539d0737aa29f6811644d2bb06a6d9
+      RELEASE_ID: '423446284'
+      BUNDLE_ID: '675277788'
+      BUNDLE_SHA: f12efd9d837d786add3c86b1371dfcaaba509589225ebd821b9544d1f26a4cc2
+      BASE_ID: '673059254'
+      BASE_SHA: eee1163230e93eecc0e1f98c0898bebaa28168e661b5aea34ca45e462e1977a5
+    steps:
+      - name: Download approved update and previous portable
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/$REPO/releases/$RELEASE_ID --jq .draft)" = true
+          test "$(gh api repos/$REPO/releases/$RELEASE_ID --jq .target_commitish)" = "$SOURCE_SHA"
+          gh api repos/$REPO/releases/assets/$BUNDLE_ID -H 'Accept: application/octet-stream' > update.zip
+          printf '%s  update.zip\n' "$BUNDLE_SHA" | sha256sum -c -
+          gh api repos/$REPO/releases/assets/$BASE_ID -H 'Accept: application/octet-stream' > base.zip
+          printf '%s  base.zip\n' "$BASE_SHA" | sha256sum -c -
+          python3 - <<'PY'
+          import zipfile
+          from pathlib import PurePosixPath
+          with zipfile.ZipFile('update.zip') as z:
+              assert all(not PurePosixPath(i.filename).is_absolute() and '..' not in PurePosixPath(i.filename).parts for i in z.infolist())
+              z.extractall('input')
+          PY
+      - name: Assemble portable and verify every file against approved inventory
+        run: python3 input/assemble_windows_smooth.py
+      - name: Upload canonical files after complete verification
+        run: |
+          set -euo pipefail
+          for name in Blender-Sculpt-Extended-5.2.3-Windows-x64.zip SHA256SUMS-Windows-x64.txt BUILD-MANIFEST-Windows-x64.json; do
+            expected="sha256:$(sha256sum "publish/$name" | cut -d' ' -f1)"
+            existing="$(gh api repos/$REPO/releases/$RELEASE_ID --jq ".assets[] | select(.name==\"$name\") | .digest")"
+            if [ -z "$existing" ]; then
+              curl --fail-with-body --silent --show-error \
+                -H "Authorization: Bearer $GH_TOKEN" -H 'Content-Type: application/octet-stream' \
+                --data-binary "@publish/$name" \
+                "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=$name" > upload-result.json
+              test "$(python3 -c 'import json; print(json.load(open("upload-result.json"))["digest"])')" = "$expected"
+            else
+              test "$existing" = "$expected"
+            fi
+          done
+      - name: Verify assets and make the new release primary
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess,json,hashlib,os
+          repo=os.environ['REPO'];rid=os.environ['RELEASE_ID']
+          release=json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/releases/{rid}']))
+          assets={a['name']:a for a in release['assets']}
+          for p in Path('publish').iterdir():
+              a=assets[p.name]
+              assert a['state']=='uploaded' and a['size']==p.stat().st_size
+              assert a['digest']=='sha256:'+hashlib.file_digest(p.open('rb'),'sha256').hexdigest()
+          # Remove only this run's temporary update bundle from the new private draft.
+          assert release['draft']
+          bundle=next(a for a in release['assets'] if str(a['id'])==os.environ['BUNDLE_ID'])
+          assert bundle['name']=='Windows-update-bundle.zip' and bundle['digest']=='sha256:'+os.environ['BUNDLE_SHA']
+          subprocess.run(['gh','api','--method','DELETE',f'repos/{repo}/releases/assets/'+str(bundle['id'])],check=True)
+          PY
+          gh api --method PATCH repos/$REPO/releases/$RELEASE_ID -F draft=false -F prerelease=false -f make_latest=true > release.json
+          test "$(gh api repos/$REPO/git/ref/tags/sculpt-extended-5.2.3-smooth-l0-20261025-preview --jq .object.sha)" = "$SOURCE_SHA"
+          test "$(gh api repos/$REPO/releases/latest --jq .id)" = "$RELEASE_ID"
+      - name: Preserve publication evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: Windows-Smooth-L0-publication-evidence
+          path: |
+            publish/BUILD-MANIFEST-Windows-x64.json
+            publish/SHA256SUMS-Windows-x64.txt
+            release.json
+          retention-days: 14
