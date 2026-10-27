@@ -9,9 +9,14 @@ struct ReferenceSample {
   float3 position = float3(0), normal = float3(0);
   float mask_factor = 1.0f;
   bool hidden = false;
+  int8_t visibility = 0; /* 0: unknown, 1: visible, -1: occluded in this target frame. */
 };
 struct SavedPosition { int index; float3 position; };
-struct QueryStats { int64_t queries=0, misses=0, fallbacks=0, culled=0, hinted=0; };
+struct QueryStats {
+  int64_t queries=0, misses=0, fallbacks=0, culled=0, hinted=0, ray_hits=0;
+  double ray_distance_total=0;
+  float ray_distance_max=0;
+};
 struct State {
   std::vector<Triangle> triangles;
   float3 source_min=float3(0),source_max=float3(0);
@@ -19,9 +24,14 @@ struct State {
   QueryStats query_stats;
   int64_t retained_seeds=0;
   BVHTree *tree = nullptr;
+  BVHTree *surface_tree = nullptr;
   SubdivCCG *ccg = nullptr;
+  bool mesh_backend = false;
+  const Mesh *mesh_data = nullptr;
+  std::vector<std::array<float3,3>> mesh_surface;
   float3 center = float3(0), normal = float3(0, 0, 1);
   float radius = 0, support = 0;
+  float source_depth_min = FLT_MAX, source_depth_max = -FLT_MAX;
   float2 mouse_offset = float2(0);
   float2 target_mouse = float2(0);
   float angle = 0.0f, rotation_base = 0.0f, rotation_mouse_start = 0.0f;
@@ -30,6 +40,7 @@ struct State {
   float scale_base = 1.0f, scale_mouse_start = 1.0f;
   float strength_base = 1.0f, strength_mouse_start = 0.0f;
   struct Pending { int index; float3 delta; };
+  std::vector<Pending> source_deltas;
   std::vector<Pending> pending;
   std::vector<int> write_grids;
   std::vector<float3> write_translations;
@@ -59,6 +70,7 @@ struct State {
       std::fflush(stdout);
     }
     if (tree) { BLI_bvhtree_free(tree); }
+    if (surface_tree) { BLI_bvhtree_free(surface_tree); }
   }
 };
 inline bool finite(const float3 &p)
@@ -111,14 +123,77 @@ inline void nearest_cb(void *userdata, int index, const float co[3], BVHTreeNear
     copy_v3_v3(nearest->co, point);
   }
 }
+inline void raycast_cb(void *userdata, int index, const BVHTreeRay *ray, BVHTreeRayHit *hit)
+{
+  const State &state = *static_cast<const State *>(userdata);
+  const Triangle &tri = state.triangles[index];
+  float distance;
+#ifdef USE_KDOPBVH_WATERTIGHT
+  const bool intersects = isect_ray_tri_watertight_v3(ray->origin, ray->isect_precalc,
+                                                    tri.co[0], tri.co[1], tri.co[2],
+                                                    &distance, nullptr);
+#else
+  const bool intersects = isect_ray_tri_epsilon_v3(ray->origin,
+                                ray->direction,
+                                tri.co[0],
+                                tri.co[1],
+                                tri.co[2],
+                                &distance,
+                                nullptr,
+                                FLT_EPSILON);
+#endif
+  if (intersects && distance >= 0.0f && distance < hit->dist)
+  {
+    hit->index = index;
+    hit->dist = distance;
+    copy_v3_v3(hit->co, float3(ray->origin) + float3(ray->direction) * distance);
+  }
+}
+/* IDs encode a grid-local triangle; the pristine CCG supplies its coordinates.
+ * This BVH is read-only during parallel mapping, unlike PBVH ray traversal. */
+inline std::array<float3,3> surface_triangle(const State &state, const int index)
+{
+  if (state.mesh_backend) { return state.mesh_surface[index]; }
+  const int side = state.ccg->grid_size, cells = side-1;
+  const int cell = index/2, grid_slot = cell/(cells*cells), local = cell%(cells*cells);
+  const int a = state.region_grids[grid_slot]*state.ccg->grid_area+(local/cells)*side+local%cells;
+  const int b = index%2 ? a+side : a+1;
+  return {state.ccg->positions[a], state.ccg->positions[b], state.ccg->positions[a+side+1]};
+}
+inline void surface_raycast_cb(void *userdata, int index, const BVHTreeRay *ray, BVHTreeRayHit *hit)
+{
+  const auto co = surface_triangle(*static_cast<const State *>(userdata), index);
+  float distance;
+#ifdef USE_KDOPBVH_WATERTIGHT
+  const bool intersects = isect_ray_tri_watertight_v3(ray->origin, ray->isect_precalc,
+                                                    co[0], co[1], co[2], &distance, nullptr);
+#else
+  const bool intersects = isect_ray_tri_epsilon_v3(ray->origin, ray->direction,
+                                                co[0], co[1], co[2], &distance, nullptr,
+                                                FLT_EPSILON);
+#endif
+  if (intersects && distance >= 0.0f && distance < hit->dist) {
+    hit->index = index;
+    hit->dist = distance;
+  }
+}
 inline bool weights(const Triangle &tri, const float3 &p, float3 &w)
 {
-  const float3 a = tri.co[1]-tri.co[0], b = tri.co[2]-tri.co[0], q = p-tri.co[0];
+  const double3 a = double3(tri.co[1])-double3(tri.co[0]);
+  const double3 b = double3(tri.co[2])-double3(tri.co[0]);
+  const double3 q = double3(p)-double3(tri.co[0]);
   const double aa = math::dot(a,a), ab = math::dot(a,b), bb = math::dot(b,b);
   const double aq = math::dot(a,q), bq = math::dot(b,q), det = aa*bb-ab*ab;
   if (det <= 1e-14*std::max(aa,bb)*std::max(aa,bb) || !std::isfinite(det)) { return false; }
   w.y = float((bb*aq-ab*bq)/det); w.z = float((aa*bq-ab*aq)/det); w.x = 1-w.y-w.z;
-  return finite(w);
+  if (!finite(w)) { return false; }
+  /* Ray/closest points belong to this triangle. Clamp float hit-coordinate
+   * rounding at its edges instead of extrapolating a displacement. */
+  w = math::clamp(w, float3(0), float3(1));
+  const float total = w.x+w.y+w.z;
+  if (total<=0.0f) { return false; }
+  w /= total;
+  return true;
 }
 inline bool enabled(const Brush &brush)
 {
@@ -139,17 +214,35 @@ inline const char *preflight(bContext *C, const Brush &brush, const wmOperator &
       brush.falloff_shape != PAINT_FALLOFF_SHAPE_SPHERE || (brush.flag & BRUSH_EDGE_TO_EDGE) ||
       RNA_enum_get(op.ptr, "brush_toggle") != int(BrushSwitchMode::None))
   { return "Draw Transport V07 requires Draw, Anchored, sphere falloff, no Edge to Edge or alternate brush"; }
-  if (!ss || ss->bm || !ss->subdiv_ccg || !mmd || ss->cache || ss->filter_cache ||
-      ss->subdiv_ccg->level != mmd->totlvl || mmd->sculptlvl != mmd->totlvl ||
-      mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled ||
-      (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) || ob.modifiers.count() != 1 ||
-      mesh.id.us != 1 || mesh.key || ob.id.lib || ob.id.override_library || mesh.id.lib)
-  { return "Draw Transport V07 requires local single-user Multires at maximum Sculpt Level, no other modifiers or live deformation"; }
+  const bool mesh_surface = ss && !ss->bm && !ss->subdiv_ccg &&
+                            bke::object::pbvh_get(ob) &&
+                            bke::object::pbvh_get(ob)->type()==bke::pbvh::Type::Mesh;
+  if (mesh_surface) {
+    auto *base = bke::multires_layers::base_modifier(*const_cast<Object *>(&ob));
+    if (ss->cache || ss->filter_cache || mesh.id.us!=1 || mesh.key || ob.id.lib ||
+        ob.id.override_library || mesh.id.lib ||
+        (ob.modifiers.count()!=0 && !(ob.modifiers.count()==1 && base && base->sculptlvl==0 &&
+            !base->sculpt_displacement_enabled && !base->sculpt_shrinkwrap_enabled))) {
+      return "Draw Transport mesh requires local single-user mesh with no modifiers, or only Multires at level zero";
+    }
+    if (base && layer_delta_smooth_v01::targets_layer(*base) &&
+        !bke::multires_layers::can_record(*base,mesh)) {
+      return "Draw Transport L0 requires a valid visible active layer with nonzero strength";
+    }
+  }
+  else {
+    if (!ss || ss->bm || !ss->subdiv_ccg || !mmd || ss->cache || ss->filter_cache ||
+        ss->subdiv_ccg->level != mmd->totlvl || mmd->sculptlvl != mmd->totlvl ||
+        mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled ||
+        (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) || ob.modifiers.count() != 1 ||
+        mesh.id.us != 1 || mesh.key || ob.id.lib || ob.id.override_library || mesh.id.lib)
+    { return "Draw Transport V07 requires local single-user Multires at maximum Sculpt Level, no other modifiers or live deformation"; }
+  }
   if (mesh_symmetry_xyz_get(ob) || mesh.radial_symmetry[0] != 1 || mesh.radial_symmetry[1] != 1 ||
       mesh.radial_symmetry[2] != 1 || (sd.paint.symmetry_flags & (PAINT_TILE_X|PAINT_TILE_Y|PAINT_TILE_Z)) ||
       (sd.flags & (SCULPT_LOCK_X|SCULPT_LOCK_Y|SCULPT_LOCK_Z)))
   { return "Draw Transport V07 requires mirror/radial/tile symmetry and axis locks disabled"; }
-  if (!BKE_sculptsession_use_pbvh_draw(&ob, CTX_wm_region_view3d(C)))
+  if (!mesh_surface && !BKE_sculptsession_use_pbvh_draw(&ob, CTX_wm_region_view3d(C)))
   { return "Draw Transport V07 requires native PBVH viewport drawing"; }
   if (!(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0)
   { return "Draw Transport V07 requires Global Undo"; }
@@ -162,7 +255,8 @@ inline bool fail(State &state, const char *reason)
                reason,static_cast<long long>(state.capture_samples),state.triangles.size());
   return false;
 }
-inline bool capture(State &state, Object &ob)
+inline bool capture_mesh(State &state, Object &ob, const Depsgraph &depsgraph);
+inline bool capture(State &state, Object &ob, const Depsgraph &depsgraph)
 {
   const double capture_start = BLI_time_now_seconds();
   const char *reference = std::getenv("BLENDER_SCULPT_DRAW_TRANSPORT_REFERENCE");
@@ -178,6 +272,7 @@ inline bool capture(State &state, Object &ob)
   state.parallel = !(serial && serial[0] == '1');
   state.profile = profiling && profiling[0] == '1';
   SculptSession &ss = *ob.runtime->sculpt_session;
+  if (!ss.subdiv_ccg) { return capture_mesh(state,ob,depsgraph); }
   if (!ss.cache || !ss.subdiv_ccg || ss.cache->radius <= 1e-8f) { return fail(state,"No active Multires imprint or zero radius"); }
   state.ccg = ss.subdiv_ccg;
   state.positions_num = state.ccg->positions.size();
@@ -201,6 +296,10 @@ inline bool capture(State &state, Object &ob)
     if (!state.reference_path) { state.preview_nodes.push_back(int(&node-nodes.data())); }
     int base = 0;
     for (const int grid : node.grids()) {
+      for (int j=0; j<area; j++) {
+        const float3 delta = state.ccg->positions[grid*area+j]-original->positions[base+j];
+        if (math::length_squared(delta)>0.0f) { state.source_deltas.push_back({grid*area+j,delta}); }
+      }
       if (!state.reference_path) {
         for (int j=0;j<area;j++) {
           const int index=grid*area+j;
@@ -225,15 +324,21 @@ inline bool capture(State &state, Object &ob)
               if (!finite(tri.co[j]) || !finite(tri.delta[j]) || !finite(tri.normal[j])) { return fail(state,"Non-finite imprint coordinates or normals"); }
               changed |= math::length_squared(tri.delta[j]) > 1e-20f;
             }
-            if (!changed) { continue; }
             if (math::length_squared(math::cross(tri.co[1]-tri.co[0],tri.co[2]-tri.co[0])) < 1e-24f) { continue; }
-            any_delta = true;
-            for (int j=0;j<3;j++) { state.support = std::max(state.support, math::distance(tri.co[j],state.center)); }
+            any_delta |= changed;
+            if (changed) {
+              for (int j=0;j<3;j++) { state.support = std::max(state.support, math::distance(tri.co[j],state.center)); }
+            }
+            /* Zero-displacement triangles still occlude deeper source sheets;
+             * a black alpha/mask area must remain zero after transport. */
             /* BVH primitive IDs are signed int; this is an API representability check, not a prototype sample cap. */
             if (state.triangles.size() >= size_t(std::numeric_limits<int>::max())) {
               return fail(state,"BVH primitive IDs cannot represent this footprint");
             }
             for (const float3 &co:tri.co) {
+              const float depth = math::dot(co-state.center, state.normal);
+              state.source_depth_min = std::min(state.source_depth_min, depth);
+              state.source_depth_max = std::max(state.source_depth_max, depth);
               if (!state.source_bounds_valid) { state.source_min=state.source_max=co;state.source_bounds_valid=true; }
               for (int axis=0;axis<3;axis++) {
                 state.source_min[axis]=std::min(state.source_min[axis],co[axis]);
@@ -248,6 +353,8 @@ inline bool capture(State &state, Object &ob)
     }
   }
   if (!any_delta) { return fail(state,"No nonzero displacement in the Anchored imprint"); }
+  std::sort(state.source_deltas.begin(), state.source_deltas.end(),
+            [](const State::Pending &a, const State::Pending &b) { return a.index<b.index; });
   state.tree = BLI_bvhtree_new(int(state.triangles.size()), 0.0f, 4, 6);
   if (!state.tree) { return fail(state,"Cannot allocate the source BVH"); }
   for (int i = 0; i < int(state.triangles.size()); i++) {
@@ -453,12 +560,40 @@ inline float3 map_reference_sample(const State &state, const ReferenceSample &sa
                                    const PreparedAxisRotation &output_angle,
                                    int *seed = nullptr, const int neighbor_seed = -1, QueryStats *stats = nullptr)
 {
-  if (sample.hidden || sample.mask_factor==0.0f || math::distance_squared(sample.position,location)>support*support ||
-      math::dot(sample.normal,normal)<.25f) { return float3(0); }
+  if (sample.hidden || sample.mask_factor==0.0f ||
+      math::distance_squared(sample.position,location)>support*support) { return float3(0); }
   const float3 unrotated=inverse_normal.apply(inverse_angle.apply(sample.position-location));
   const float3 query=state.center+footprint_inverse(unrotated,state.normal,state.footprint_scale);
-  /* Only reject outside the source AABB expanded by the full query radius.
-   * Padding covers transform/float rounding; no projected surface assumption. */
+  if (stats) { stats->queries++; }
+  /* Scaling changes tangent coordinates, not the source surface's height.
+   * Cast through the captured source column, independently of destination depth:
+   * curvature and existing relief must not clip a scaled footprint in 3D. */
+  {
+    const float padding = std::max(state.radius*1e-4f,1e-6f);
+    const float depth = math::dot(query-state.center, state.normal);
+    const float3 origin = query+state.normal*(state.source_depth_max+padding-depth);
+    BVHTreeRayHit ray_hit{};
+    ray_hit.index = -1;
+    ray_hit.dist = state.source_depth_max-state.source_depth_min+2.0f*padding;
+    BLI_bvhtree_ray_cast(state.tree, origin, -state.normal, 0.0f, &ray_hit,
+                        raycast_cb, const_cast<State *>(&state));
+    if (ray_hit.index >= 0) {
+      const Triangle &tri = state.triangles[ray_hit.index];
+      float3 w;
+      if (weights(tri, float3(ray_hit.co), w)) {
+        const float3 delta = w.x * tri.delta[0] + w.y * tri.delta[1] + w.z * tri.delta[2];
+        if (stats) {
+          stats->ray_hits++;
+          stats->ray_distance_total += ray_hit.dist;
+          stats->ray_distance_max = std::max(stats->ray_distance_max, ray_hit.dist);
+        }
+        /* Native Draw captures a vector in the brush frame. Transport that
+         * frame once; local relief normals must not tilt an unchanged stamp. */
+        return output_angle.apply(rotate(delta, state.normal, normal));
+      }
+    }
+  }
+  /* Keep the previous bounded nearest fallback for source-boundary rounding. */
   if (state.source_cull && state.source_bounds_valid) {
     const float padding=max_distance+std::max(state.radius*1e-4f,1e-6f);
     for (int axis=0;axis<3;axis++) {
@@ -467,7 +602,6 @@ inline float3 map_reference_sample(const State &state, const ReferenceSample &sa
       }
     }
   }
-  if (stats) { stats->queries++; }
   BVHTreeNearest nearest{};
   nearest.index=-1; nearest.dist_sq=max_distance*max_distance;
   /* Coherent triangles give a valid upper distance bound, never a replacement
@@ -497,15 +631,13 @@ inline float3 map_reference_sample(const State &state, const ReferenceSample &sa
   const Triangle &tri=state.triangles[nearest.index];
   float3 w;
   if (!weights(tri,float3(nearest.co),w)) { return float3(0); }
-  const float3 source_normal=math::normalize(w.x*tri.normal[0]+w.y*tri.normal[1]+w.z*tri.normal[2]);
-  if (math::dot(source_normal,state.normal)<.25f) { return float3(0); }
   const float3 separation=query-float3(nearest.co);
   const float3 face_normal=math::normalize(math::cross(tri.co[1]-tri.co[0],tri.co[2]-tri.co[0]));
   const float3 tangent=separation-face_normal*math::dot(separation,face_normal);
   const float tolerance=std::max(state.radius*1e-4f,1e-6f);
   if (math::length_squared(tangent)>tolerance*tolerance) { return float3(0); }
   const float3 delta=w.x*tri.delta[0]+w.y*tri.delta[1]+w.z*tri.delta[2];
-  return output_angle.apply(rotate(delta,source_normal,normal));
+  return output_angle.apply(rotate(delta,state.normal,normal));
 }
 inline float3 weighted_delta(const float3 &mapped, const float strength, const float mask_factor)
 {
@@ -547,9 +679,12 @@ inline void profile_frame(State &state, const std::array<double,5> &times,
         static_cast<long long>(state.profile_frames),state.strength_adjust?"SS":state.scaling?"S":state.rotating?"R":"MOVE",
         static_cast<long long>(restored),state.region_samples.size(),int(reused_region),int(reused_mapping),int(state.parallel),
         times[0],times[1],times[2],times[3],times[4],times[0]+times[1]+times[2]+times[3]+times[4]);
-    std::printf("[DRAW_TRANSPORT_V07_QUERY] retained_samples=%lld queries=%lld misses=%lld fallbacks=%lld culled=%lld hinted=%lld reuse=%d cull=%d\n",
+    std::printf("[DRAW_TRANSPORT_V07_QUERY] retained_samples=%lld queries=%lld misses=%lld ray_hits=%lld ray_avg=%.7g ray_max=%.7g fallbacks=%lld culled=%lld hinted=%lld reuse=%d cull=%d\n",
         static_cast<long long>(state.retained_seeds),static_cast<long long>(state.query_stats.queries),
-        static_cast<long long>(state.query_stats.misses),static_cast<long long>(state.query_stats.fallbacks),
+        static_cast<long long>(state.query_stats.misses),static_cast<long long>(state.query_stats.ray_hits),
+        state.query_stats.ray_hits ? state.query_stats.ray_distance_total/state.query_stats.ray_hits : 0.0,
+        double(state.query_stats.ray_distance_max),
+        static_cast<long long>(state.query_stats.fallbacks),
         static_cast<long long>(state.query_stats.culled),static_cast<long long>(state.query_stats.hinted),
         int(state.region_reuse),int(state.source_cull));
     std::fflush(stdout);
@@ -572,6 +707,7 @@ inline void update_status(State &state,bContext *C)
   }
   ED_workspace_status_text(C,status);
 }
+#include "sculpt_draw_transport_mesh_v01.hh"
 inline bool move_optimized(State &state,bContext *C,ViewContext &vc,const wmEvent &event)
 {
   Object &ob=*CTX_data_active_object(C);
@@ -618,6 +754,45 @@ inline bool move_optimized(State &state,bContext *C,ViewContext &vc,const wmEven
     }
     state.cached_location=hit->location;
     state.cached_normal=math::normalize(hit->normal);
+    /* Match the area normal used by the sculpt stroke. A single hit triangle's
+     * normal follows small ridges and can rotate the stamp even at its origin. */
+    if (const Brush *brush = BKE_paint_brush_for_read(&sd.paint);
+        brush && std::isfinite(brush->normal_radius_factor) &&
+        brush->normal_radius_factor > 0.0f)
+    {
+      const float normal_radius = state.radius * brush->normal_radius_factor;
+      IndexMaskMemory normal_memory;
+      const IndexMask normal_nodes = bke::pbvh::search_nodes(pbvh, normal_memory,
+          [&](const bke::pbvh::Node &node) {
+            return sphere_bounds(node.bounds(), hit->location, normal_radius);
+          });
+      const float3 previous_location = ss.cache->location;
+      const float3 previous_symm = ss.cache->location_symm;
+      ss.cache->location = ss.cache->location_symm = hit->location;
+      std::optional<float3> averaged;
+      try {
+        averaged = calc_area_normal(depsgraph, *brush, ob, normal_nodes);
+      }
+      catch (...) {
+        ss.cache->location = previous_location;
+        ss.cache->location_symm = previous_symm;
+        throw;
+      }
+      ss.cache->location = previous_location;
+      ss.cache->location_symm = previous_symm;
+      if (averaged && finite(*averaged) && math::length_squared(*averaged) > .5f &&
+          math::dot(*averaged, state.cached_normal) > .25f)
+      {
+        state.cached_normal = math::normalize(*averaged);
+      }
+    }
+    /* At the captured center keep the native Anchored frame. With preserved
+     * layers its private reference can differ from the evaluated surface used
+     * by the cursor normal, even though the imprint has not moved. */
+    const float origin_epsilon=std::max(state.radius*1e-5f,1e-7f);
+    if (math::distance_squared(hit->location,state.center)<=origin_epsilon*origin_epsilon) {
+      state.cached_normal=state.normal;
+    }
     if (!finite(state.cached_normal) || math::length_squared(state.cached_normal)<.5f) {
       return fail(state,"Invalid destination normal");
     }
@@ -625,8 +800,24 @@ inline bool move_optimized(State &state,bContext *C,ViewContext &vc,const wmEven
     state.target_cached=true;
   }
   const float3 location=state.cached_location,normal=state.cached_normal;
+  if (state.profile) {
+    std::printf("[DRAW_TRANSPORT_V07_FRAME_BASIS] center_delta=%.9g normal_dot=%.9g source_center=(%.9g,%.9g,%.9g) target=(%.9g,%.9g,%.9g)\n",
+                math::distance(state.center, location),
+                math::dot(state.normal, normal),
+                state.center.x,
+                state.center.y,
+                state.center.z,
+                location.x,
+                location.y,
+                location.z);
+    std::fflush(stdout);
+  }
   const float max_distance=std::max(state.radius*.25f,1e-5f);
   const float support=state.support*std::max(1.0f,state.footprint_scale)+max_distance;
+  const float pose_epsilon=std::max(state.radius*1e-5f,1e-7f);
+  const bool original_pose = state.footprint_scale==1.0f && state.angle==0.0f &&
+      math::distance_squared(location,state.center)<=pose_epsilon*pose_epsilon &&
+      math::dot(normal,state.normal)>.999999f;
   const bool reused_region=state.region_cached && same_target && support<=state.region_support;
   const int area=state.ccg->grid_area;
   state.retained_seeds=0;state.query_stats={};
@@ -669,6 +860,21 @@ inline bool move_optimized(State &state,bContext *C,ViewContext &vc,const wmEven
     };
     if (state.parallel) { threading::parallel_for(IndexRange(state.region_samples.size()),4096,capture_region); }
     else { capture_region(IndexRange(state.region_samples.size())); }
+    if (state.surface_tree) { BLI_bvhtree_free(state.surface_tree); state.surface_tree=nullptr; }
+    const int64_t triangle_count = int64_t(state.region_grids.size())*
+                                   (state.ccg->grid_size-1)*(state.ccg->grid_size-1)*2;
+    if (triangle_count>std::numeric_limits<int>::max()) {
+      return fail(state,"Destination BVH primitive IDs cannot represent this region");
+    }
+    if (triangle_count>0) {
+      state.surface_tree=BLI_bvhtree_new(int(triangle_count),0.0f,4,6);
+      if (!state.surface_tree) { return fail(state,"Cannot allocate the destination BVH"); }
+      for (int i=0; i<int(triangle_count); i++) {
+        const auto co=surface_triangle(state,i);
+        BLI_bvhtree_insert(state.surface_tree,i,co[0],3);
+      }
+      BLI_bvhtree_balance(state.surface_tree);
+    }
     state.region_support=support;
     state.region_cached=true;state.mapping_cached=false;
     state.nearest_seeds.assign(state.region_samples.size(),-1);
@@ -698,10 +904,32 @@ inline bool move_optimized(State &state,bContext *C,ViewContext &vc,const wmEven
         int neighbor_seed=-1;
         const int64_t end=std::min<int64_t>((block+1)*block_size,state.region_samples.size());
         for (int64_t i=block*block_size;i<end;i++) {
+          if (original_pose) {
+            const int index=state.region_samples[i].index;
+            const auto it=std::lower_bound(state.source_deltas.begin(),state.source_deltas.end(),index,
+                [](const State::Pending &value, int key) { return value.index<key; });
+            state.mapped_deltas[i]=it!=state.source_deltas.end() && it->index==index ? it->delta : float3(0);
+            continue;
+          }
           state.mapped_deltas[i]=map_reference_sample(state,state.region_samples[i],location,normal,
               support,max_distance,inverse_angle,inverse_normal,output_angle,
               state.coherent ? &state.nearest_seeds[i] : nullptr,neighbor_seed,
               state.profile?&local_stats:nullptr);
+          /* Preserve steep visible relief without accepting the opposite side
+           * of a closed surface. Fine-detail normals are not a visibility test. */
+          if (state.surface_tree && effective_delta(state.mapped_deltas[i])) {
+            ReferenceSample &sample=state.region_samples[i];
+            if (sample.visibility==0) {
+              const float epsilon=std::max(state.radius*1e-4f,1e-6f);
+              const float3 origin=sample.position+normal*epsilon;
+              BVHTreeRayHit occluder{};
+              occluder.index=-1; occluder.dist=2.0f*state.region_support;
+              BLI_bvhtree_ray_cast(state.surface_tree,origin,normal,0.0f,&occluder,
+                                  surface_raycast_cb,&state);
+              sample.visibility=occluder.index>=0 ? -1 : 1;
+            }
+            if (sample.visibility<0) { state.mapped_deltas[i]=float3(0); }
+          }
           neighbor_seed=state.nearest_seeds[i];
         }
         if (state.profile) { block_stats[block]=local_stats; }
@@ -711,6 +939,9 @@ inline bool move_optimized(State &state,bContext *C,ViewContext &vc,const wmEven
     else { map_range(IndexRange(blocks)); }
     for (const QueryStats &q:block_stats) {
       state.query_stats.queries+=q.queries;state.query_stats.misses+=q.misses;
+      state.query_stats.ray_hits+=q.ray_hits;
+      state.query_stats.ray_distance_total+=q.ray_distance_total;
+      state.query_stats.ray_distance_max=std::max(state.query_stats.ray_distance_max,q.ray_distance_max);
       state.query_stats.fallbacks+=q.fallbacks;state.query_stats.culled+=q.culled;
       state.query_stats.hinted+=q.hinted;
     }
@@ -728,7 +959,8 @@ inline bool move_optimized(State &state,bContext *C,ViewContext &vc,const wmEven
     for (int j=0;j<area;j++) {
       const size_t i=start+j;
       const ReferenceSample &sample=state.region_samples[i];
-      const float3 delta=weighted_delta(state.mapped_deltas[i],state.imprint_strength,sample.mask_factor);
+      const float3 delta=original_pose ? state.mapped_deltas[i]*state.imprint_strength :
+          weighted_delta(state.mapped_deltas[i],state.imprint_strength,sample.mask_factor);
       if (!effective_delta(delta)) { continue; }
       if (!grid_written) {
         grids.push_back(state.region_grids[g]);
@@ -769,6 +1001,7 @@ inline bool move_optimized(State &state,bContext *C,ViewContext &vc,const wmEven
 }
 inline bool move(State &state,bContext *C,ViewContext &vc,const wmEvent &event)
 {
+  if (state.mesh_backend) { return move_mesh(state,C,vc,event); }
   if (state.reference_path) {
     const double start=BLI_time_now_seconds();
     const bool result=move_reference(state,C,vc,event);

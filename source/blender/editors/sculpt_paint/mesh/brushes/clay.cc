@@ -191,7 +191,7 @@ void do_clay_brush(const Depsgraph &depsgraph,
     case bke::pbvh::Type::Mesh: {
       const Mesh &mesh = *id_cast<Mesh *>(object.data);
       const MeshAttributeData attribute_data(mesh);
-      const PositionDeformData position_data(depsgraph, object);
+      const PositionDeformData position_data(depsgraph, object, true);
       const Span<float3> vert_normals = bke::pbvh::vert_normals_eval(depsgraph, object);
       MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
       node_mask.foreach_index(

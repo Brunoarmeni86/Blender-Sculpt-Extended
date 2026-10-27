@@ -382,7 +382,8 @@ void multires_mark_as_modified(Depsgraph *depsgraph,
 static bool multires_flush_mask_updates_impl(const SubdivCCG &ccg,
                                                Mesh &mesh,
                                                const int level,
-                                               const BitVector<> *dirty_grids)
+                                               const BitVector<> *dirty_grids,
+                                               const bool preserve_detail = false)
 {
   if (ccg.masks.is_empty()) {
     return true;
@@ -423,6 +424,36 @@ static bool multires_flush_mask_updates_impl(const SubdivCCG &ccg,
     }
 
     GridPaintMask &mask = dst[grid];
+    if (preserve_detail && mask.data && ccg.level < level && mask.level != level &&
+        mask.level >= 1 && mask.level <= 13) {
+      /* Older files can retain mask descriptors below the Multires maximum.
+       * Promote only this edited grid, matching native mask sampling exactly. */
+      const int old_side = bke::subdiv::grid_size_from_level(mask.level);
+      float *promoted = MEM_new_array_uninitialized<float>(area, "multires mask detail promotion");
+      for (int y = 0; y < side; y++) {
+        const int my = int(std::round(float(y) * float(old_side - 1) / float(side - 1)));
+        for (int x = 0; x < side; x++) {
+          const int mx = int(std::round(float(x) * float(old_side - 1) / float(side - 1)));
+          promoted[y * side + x] = mask.data[my * old_side + mx];
+        }
+      }
+      MEM_delete(mask.data);mask.data = promoted;mask.level = level;
+    }
+    Array<float> delta;
+    const bool apply_delta = preserve_detail && mask.data && mask.level == level &&
+                             ccg.level < level && (side - 1) % (ccg.grid_size - 1) == 0;
+    if (apply_delta) {
+      /* Freeze the sampled old mask before writing any high-resolution value. */
+      const int stride = (side - 1) / (ccg.grid_size - 1);
+      delta.reinitialize(ccg.grid_area);
+      for (int y = 0; y < ccg.grid_size; y++) {
+        for (int x = 0; x < ccg.grid_size; x++) {
+          delta[y * ccg.grid_size + x] =
+              src[y * ccg.grid_size + x] - mask.data[y * stride * side + x * stride];
+        }
+      }
+      src = delta.data();
+    }
     if (!mask.data || mask.level != level) {
       MEM_SAFE_DELETE(mask.data);
       mask.data = MEM_new_array_uninitialized<float>(area, "multires mask-only flush");
@@ -440,7 +471,9 @@ static bool multires_flush_mask_updates_impl(const SubdivCCG &ccg,
                         src[y0 * ccg.grid_size + x1] * fx;
         const float b = src[y1 * ccg.grid_size + x0] * (1.0f - fx) +
                         src[y1 * ccg.grid_size + x1] * fx;
-        mask.data[y * side + x] = a * (1.0f - fy) + b * fy;
+        const float value = a * (1.0f - fy) + b * fy;
+        mask.data[y * side + x] = apply_delta ?
+            std::clamp(mask.data[y * side + x] + value, 0.0f, 1.0f) : value;
       }
     }
   }
@@ -454,49 +487,99 @@ bool multires_flush_mask_updates(const SubdivCCG &ccg, Mesh &mesh, const int lev
 
 bool multires_mask_sync_from_base(Mesh &mesh, const int level)
 {
-  if (level < 1 || level > 13 || mesh.corners_num == 0) {
-    return false;
+  if (level < 1 || level > 13 || mesh.corners_num == 0) { return false; }
+  const VArraySpan<float> values(mesh.attributes().lookup_or_default<float>(
+      ".sculpt_mask", bke::AttrDomain::Point, 0.0f).varray);
+  const auto *old = static_cast<const GridPaintMask *>(
+      CustomData_get_layer(&mesh.corner_data, CD_GRID_PAINT_MASK));
+  Array<float> original(mesh.verts_num, 0.0f);
+  Array<int> counts(mesh.verts_num, 0);
+  const Span<int> corner_verts = mesh.corner_verts();
+  if (old) {
+    for (const int corner : IndexRange(mesh.corners_num)) {
+      const auto &grid = old[corner];
+      if (!grid.data || grid.level < 1 || grid.level > 13) { continue; }
+      const int side = bke::subdiv::grid_size_from_level(grid.level);
+      const int vertex = corner_verts[corner];
+      original[vertex] += grid.data[side * side - 1];
+      counts[vertex]++;
+    }
   }
-  const VArray<float> mask = mesh.attributes().lookup_or_default<float>(
-      ".sculpt_mask", bke::AttrDomain::Point, 0.0f).varray;
-  const VArraySpan<float> values(mask);
-  GridPaintMask *grids = static_cast<GridPaintMask *>(CustomData_get_layer_for_write(
+  Array<float> delta(mesh.verts_num);
+  bool changed = false;
+  for (const int vertex : delta.index_range()) {
+    if (counts[vertex] > 0) { original[vertex] /= float(counts[vertex]); }
+    delta[vertex] = values[vertex] - original[vertex];
+    changed |= delta[vertex] != 0.0f;
+  }
+  /* A roundtrip through L0 must not replace unsampled high-resolution detail. */
+  if (!changed) { return true; }
+  auto *grids = static_cast<GridPaintMask *>(CustomData_get_layer_for_write(
       &mesh.corner_data, CD_GRID_PAINT_MASK, mesh.corners_num));
   if (!grids) {
     grids = static_cast<GridPaintMask *>(CustomData_add_layer(
         &mesh.corner_data, CD_GRID_PAINT_MASK, CD_SET_DEFAULT, mesh.corners_num));
   }
-  if (!grids) {
-    return false;
-  }
-  const int side = bke::subdiv::grid_size_from_level(level);
-  const int area = side * side;
+  if (!grids) { return false; }
+  const int side = bke::subdiv::grid_size_from_level(level), area = side * side;
   const OffsetIndices<int> faces = mesh.faces();
-  const Span<int> corner_verts = mesh.corner_verts();
   for (const int face_i : faces.index_range()) {
     const IndexRange face = faces[face_i];
-    float center = 0.0f;
+    float center_delta = 0.0f, center_value = 0.0f;
     for (const int corner : face) {
-      center += values[corner_verts[corner]];
+      center_delta += delta[corner_verts[corner]];
+      center_value += values[corner_verts[corner]];
     }
-    center /= float(face.size());
+    center_delta /= float(face.size());center_value /= float(face.size());
     for (const int corner : face) {
-      GridPaintMask &grid = grids[corner];
-      MEM_SAFE_DELETE(grid.data);
-      grid.data = MEM_new_array_uninitialized<float>(area, "multires mask from base");
-      grid.level = level;
-      const float vertex = values[corner_verts[corner]];
-      const float edge_next = 0.5f *
-          (vertex + values[corner_verts[blender::bke::mesh::face_corner_next(face, corner)]]);
-      const float edge_prev = 0.5f *
-          (vertex + values[corner_verts[blender::bke::mesh::face_corner_prev(face, corner)]]);
+      auto &grid = grids[corner];
+      const bool preserve = grid.data && grid.level == level;
+      if (!preserve) {
+        MEM_SAFE_DELETE(grid.data);
+        grid.data = MEM_new_array_uninitialized<float>(area, "multires mask from base");
+        grid.level = level;
+      }
+      const auto sample = [&](const int vertex) { return preserve ? delta[vertex] : values[vertex]; };
+      const int vertex_i = corner_verts[corner];
+      const float vertex = sample(vertex_i);
+      const float edge_next = 0.5f * (vertex + sample(corner_verts[bke::mesh::face_corner_next(face, corner)]));
+      const float edge_prev = 0.5f * (vertex + sample(corner_verts[bke::mesh::face_corner_prev(face, corner)]));
+      const float center = preserve ? center_delta : center_value;
       for (int y = 0; y < side; y++) {
         const float v = float(y) / float(side - 1);
         for (int x = 0; x < side; x++) {
           const float u = float(x) / float(side - 1);
           const float a = center * (1.0f - u) + edge_next * u;
           const float b = edge_prev * (1.0f - u) + vertex * u;
-          grid.data[y * side + x] = a * (1.0f - v) + b * v;
+          const float change = a * (1.0f - v) + b * v;
+          grid.data[y * side + x] = preserve ? std::clamp(grid.data[y * side + x] + change, 0.0f, 1.0f) : change;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+bool multires_mask_fill_base(Object &object, const float value, const bool invert)
+{
+  auto *mmd = bke::multires_layers::base_modifier(object);
+  if (!mmd) { return true; }
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  auto *grids = static_cast<GridPaintMask *>(CustomData_get_layer_for_write(
+      &mesh.corner_data, CD_GRID_PAINT_MASK, mesh.corners_num));
+  if (!grids) { return mmd->totlvl == 0 || multires_mask_sync_from_base(mesh, mmd->totlvl); }
+  const auto hidden_faces = *mesh.attributes().lookup<bool>(".hide_poly", bke::AttrDomain::Face);
+  const auto hidden_verts = *mesh.attributes().lookup<bool>(".hide_vert", bke::AttrDomain::Point);
+  const auto corner_verts = mesh.corner_verts();
+  for (const int face_i : mesh.faces().index_range()) {
+    if (hidden_faces && hidden_faces[face_i]) { continue; }
+    for (const int corner : mesh.faces()[face_i]) {
+      if (hidden_verts && hidden_verts[corner_verts[corner]]) { continue; }
+      auto &grid = grids[corner];
+      if (grid.data && grid.level >= 1 && grid.level <= 13) {
+        const int side = bke::subdiv::grid_size_from_level(grid.level);
+        for (float &mask : MutableSpan<float>(grid.data, side * side)) {
+          mask = invert ? 1.0f - mask : value;
         }
       }
     }
@@ -1300,8 +1383,9 @@ bool bke::multires_layers::weight_direct_delta(Object &object,
                                                MultiresModifierData &mmd,
                                                const MultiresSculptLayer &layer,
                                                const float weight_delta,
-                                               BitVector<> &r_affected_faces,
-                                               bool *r_hot_cache_hit)
+                                               BitVector<> *r_affected_faces,
+                                               bool *r_hot_cache_hit,
+                                               const Span<int> *validated_payload_grids)
 {
   if (r_hot_cache_hit != nullptr) {
     *r_hot_cache_hit = false;
@@ -1324,15 +1408,24 @@ bool bke::multires_layers::weight_direct_delta(Object &object,
   const int side=ccg->grid_size, area=ccg->grid_area;
   if (side<2 || area!=side*side) return false;
 
-  r_affected_faces.resize(mesh->faces_num);
-  r_affected_faces.fill(false);
-  Vector<int> payload_grids;
-  if (!bke::multires_layers::payload_grids(layer, ccg->grids_num, payload_grids)) {
+  /* RNA already validated support while constructing the surface update region.
+   * Borrow it only for this transaction; never retain pointers across edits/Undo. */
+  Vector<int> owned_payload_grids;
+  if (validated_payload_grids == nullptr &&
+      !bke::multires_layers::payload_grids(layer, ccg->grids_num, owned_payload_grids))
+  {
     return false;
   }
-  const OffsetIndices faces = mesh->faces();
-  for (const int grid : payload_grids) {
-    r_affected_faces[int(std::upper_bound(faces.data().begin(), faces.data().end(), grid) - faces.data().begin() - 1)].set();
+  const Span<int> payload_grids = validated_payload_grids ? *validated_payload_grids :
+                                                          owned_payload_grids.as_span();
+  if (r_affected_faces != nullptr) {
+    r_affected_faces->resize(mesh->faces_num);
+    r_affected_faces->fill(false);
+    const OffsetIndices faces = mesh->faces();
+    for (const int grid : payload_grids) {
+      (*r_affected_faces)[int(std::upper_bound(faces.data().begin(), faces.data().end(), grid) -
+                             faces.data().begin() - 1)].set();
+    }
   }
   if (payload_grids.is_empty() || std::abs(weight_delta)<1.0e-12f) return true;
 
@@ -1427,7 +1520,7 @@ bool bke::multires_layers::weight_direct_delta(Object &object,
     hot.clear();
     hot.mesh=mesh; hot.mmd=&mmd; hot.layer=&layer; hot.layer_disps=layer.disps;
     hot.fingerprint=fingerprint; hot.level=mmd.totlvl; hot.side=side;
-    hot.area=area; hot.grids_num=ccg->grids_num; hot.grids=Array<int>(payload_grids.as_span());
+    hot.area=area; hot.grids_num=ccg->grids_num; hot.grids=Array<int>(payload_grids);
     hot.grid_offsets=Array<int>(ccg->grids_num); hot.grid_offsets.fill(-1);
     hot.deltas=Array<float3>(int64_t(payload_grids.size())*int64_t(area));
     for (const int j: payload_grids.index_range()) hot.grid_offsets[payload_grids[j]]=j*area;
@@ -1512,7 +1605,7 @@ bool bke::multires_layers::visible_direct_delta(Object &object,
                              mmd,
                              layer,
                              (make_visible ? 1.0f : -1.0f)*layer.strength,
-                             r_affected_faces);
+                             &r_affected_faces);
 }
 
 static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
@@ -2555,8 +2648,9 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
         copy_v3_v3(result[corner].disps[i], delta);
       }
     }
-    GridPaintMask *masks = static_cast<GridPaintMask *>(CustomData_get_layer_for_write(
-        &scratch->corner_data, CD_GRID_PAINT_MASK, scratch->corners_num));
+    GridPaintMask *masks = ccg->dirty.masks ? static_cast<GridPaintMask *>(
+        CustomData_get_layer_for_write(&scratch->corner_data, CD_GRID_PAINT_MASK,
+                                      scratch->corners_num)) : nullptr;
     if (masks) {
       for (int corner = 0; corner < mesh->corners_num; corner++) {
         if (!masks[corner].data || masks[corner].level != mmd->totlvl) {
@@ -2590,6 +2684,32 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
   ccg->dirty.hidden = false;
   ccg->dirty.masks = false;
   multires_sculpt_changes_clear(ss, *pbvh);
+  return true;
+}
+
+/* Mask brushes publish their own domain before a later level/geometry change.
+ * Native fill/invert tools keep the absolute replacement path. */
+bool multires_flush_mask_brush_updates(Object &object)
+{
+  SculptSession *ss = object.runtime->sculpt_session;
+  if (!ss) { return true; }
+  if (!ss->subdiv_ccg) {
+    const auto *mmd = bke::multires_layers::base_modifier(object);
+    return !mmd || mmd->totlvl == 0 || multires_mask_sync_from_base(*id_cast<Mesh *>(object.data), mmd->totlvl);
+  }
+  if (!ss->subdiv_ccg->dirty.masks) { return true; }
+  SubdivCCG &ccg = *ss->subdiv_ccg;
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+  if (ccg.dirty.coords || ccg.dirty.hidden || !ss->multires_modifier || !pbvh ||
+      pbvh->type() != bke::pbvh::Type::Grids) { return false; }
+  multires_sculpt_changes_sync(*ss, *pbvh, ccg);
+  const BitVector<> *subset = ss->change_set.masks_full ? nullptr : &ss->change_set.mask_grids;
+  if (!multires_flush_mask_updates_impl(ccg, *id_cast<Mesh *>(object.data),
+                                       ss->multires_modifier->totlvl, subset, true)) {
+    return false;
+  }
+  ccg.dirty.masks = false;
+  multires_sculpt_changes_clear(*ss, *pbvh);
   return true;
 }
 

@@ -24,7 +24,7 @@ class ScopedDiscardCacheWrites {
   ScopedDiscardCacheWrites()
   {
     const char *value = std::getenv("BLENDER_SCULPT_LAYER_UNDO_CACHE_GUARD");
-    enabled_ = value && value[0] == '1' && value[1] == '\0';
+    enabled_ = !value || value[0] != '0';
     if (enabled_) {
       discard_depth.fetch_add(1, std::memory_order_acq_rel);
     }

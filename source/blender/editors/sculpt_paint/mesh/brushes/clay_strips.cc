@@ -45,6 +45,8 @@
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 
 #include "bmesh.hh"
+#include "editors/sculpt_paint/mesh/sculpt_layer_detail_v01.hh"
+
 
 namespace blender::ed::sculpt_paint::brushes {
 
@@ -355,7 +357,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
       sculpt_mesh_v3_clay_mesh_path = true;
       const double sculpt_mesh_v3_clay_setup_start = BLI_time_now_seconds();      const double v3deep_deform_start = v3deep ? BLI_time_now_seconds() : 0.0;
-      const PositionDeformData position_data(depsgraph, object);
+      const PositionDeformData position_data(depsgraph, object, true);
       const double v3deep_attributes_start = v3deep ? BLI_time_now_seconds() : 0.0;
       const MeshAttributeData attribute_data(mesh);
       const double v3deep_normals_start = v3deep ? BLI_time_now_seconds() : 0.0;
@@ -556,7 +558,7 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
   const float initial_radius_squared = math::square(ss.cache->radius * std::numbers::sqrt2);
 
   const bool use_original = !ss.cache->accum;
-  const IndexMask initial_node_mask = gather_nodes(pbvh,
+  IndexMask initial_node_mask = gather_nodes(pbvh,
                                                    eBrushFalloffShape(brush.falloff_shape),
                                                    use_original,
                                                    ss.cache->location_symm,
@@ -564,6 +566,26 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
                                                    ss.cache->view_normal_symm,
                                                    memory);
 
+  initial_node_mask=layer_detail_v01::extend_shared_region(
+      object,brush,initial_node_mask,memory);
+  if (!layer_detail_v01::prepare(object, initial_node_mask)) {
+    return {IndexMask(), std::nullopt, std::nullopt};
+  }
+  const auto &detail = layer_detail_v01::state();
+  const bool isolated = detail.active;
+  struct SamplingLocationScope {
+    StrokeCache &cache;
+    float3 location, location_symm;
+    void restore() { cache.location=location;cache.location_symm=location_symm; }
+    ~SamplingLocationScope() { restore(); }
+  } sampling_location{*ss.cache,ss.cache->location,ss.cache->location_symm};
+  if (layer_detail_v01::sampling_offset_needed(brush)) {
+    const float3 offset=layer_detail_v01::anchor_offset(ss.cache->location_symm);
+    ss.cache->location_symm-=offset;
+    if (ss.cache->mirror_symmetry_pass==0 && ss.cache->radial_symmetry_pass==0) {
+      ss.cache->location-=offset;
+    }
+  }
   float3 plane_center;
   float3 plane_normal;
   calc_brush_plane(depsgraph, brush, object, initial_node_mask, plane_normal, plane_center);
@@ -577,6 +599,12 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
 
   const float4x4 mat = calc_local_matrix(brush, *ss.cache, plane_normal, plane_center, flip);
 
+  sampling_location.restore();
+  if (isolated) {
+    /* Candidate bounds belong to the composed surface, while the plane is private.
+     * Keep the conservative cursor region; per-vertex brush factors clip the footprint. */
+    return {initial_node_mask, plane_center, plane_normal};
+  }
   const IndexMask plane_mask = bke::pbvh::search_nodes(
       pbvh, memory, [&](const bke::pbvh::Node &node) {
         if (node_fully_masked_or_hidden(node)) {

@@ -129,7 +129,7 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
                 'sculpt.multires_layer_set_active', text='', emboss=False,
                 icon='RADIOBUT_ON' if index == active_index else 'RADIOBUT_OFF')
             op.index = index
-            item.prop(layer, 'name', text='', emboss=False)
+            item.prop(layer, 'name', text='')
             item.prop(layer, 'strength', text='')
             item.prop(layer, 'visible', text='', emboss=False,
                       icon='HIDE_OFF' if layer.visible else 'HIDE_ON')

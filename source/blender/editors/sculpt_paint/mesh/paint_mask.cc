@@ -12,6 +12,7 @@
 #include "MEM_guardedalloc.h"
 
 #include "DNA_object_types.h"
+#include "DNA_modifier_types.h"
 
 #include "BLI_array_utils.hh"
 #include "BLI_bit_span_ops.hh"
@@ -25,6 +26,7 @@
 #include "BKE_context.hh"
 #include "BKE_mesh.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
@@ -496,7 +498,8 @@ static void fill_mask_grids(Main &bmain,
   node_mask.foreach_index(
       [&](const int i) {
         const Span<int> grid_indices = nodes[i].grids();
-        if (std::all_of(grid_indices.begin(), grid_indices.end(), [&](const int grid) {
+        if (subdiv_ccg.level == mmd.totlvl &&
+            std::all_of(grid_indices.begin(), grid_indices.end(), [&](const int grid) {
               const Span<float> grid_masks = masks.slice(bke::ccg::grid_range(key, grid));
               return std::all_of(grid_masks.begin(), grid_masks.end(), [&](const float mask) {
                 return mask == value;
@@ -595,7 +598,13 @@ static void fill_mask(
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(pbvh, memory);
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
+      /* Also capture fine Multires masks when the visible L0 mask is already
+       * empty: Clear Mask remains an intentional edit of the stored master. */
+      if (const auto *mmd = bke::multires_layers::base_modifier(object); mmd && mmd->totlvl > 0) {
+        undo::push_nodes(depsgraph, object, node_mask, undo::Type::Mask);
+      }
       fill_mask_mesh(depsgraph, object, value, node_mask);
+      multires_mask_fill_base(object, value);
       break;
     case bke::pbvh::Type::Grids:
       fill_mask_grids(bmain, scene, depsgraph, object, value, node_mask);
@@ -684,12 +693,16 @@ static void invert_mask(Main &bmain, const Scene &scene, Depsgraph &depsgraph, O
   const IndexMask node_mask = bke::pbvh::all_leaf_nodes(*bke::object::pbvh_get(object), memory);
   switch (bke::object::pbvh_get(object)->type()) {
     case bke::pbvh::Type::Mesh:
+      if (const auto *mmd = bke::multires_layers::base_modifier(object); mmd && mmd->totlvl > 0) {
+        undo::push_nodes(depsgraph, object, node_mask, undo::Type::Mask);
+      }
       write_mask_mesh(
           depsgraph, object, node_mask, [&](MutableSpan<float> mask, const Span<int> verts) {
             for (const int vert : verts) {
               mask[vert] = 1.0f - mask[vert];
             }
           });
+      multires_mask_fill_base(object, 0.0f, true);
       break;
     case bke::pbvh::Type::Grids:
       invert_mask_grids(bmain, scene, depsgraph, object, node_mask);

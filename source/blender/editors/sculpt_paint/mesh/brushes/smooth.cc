@@ -118,10 +118,21 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;
 
+  const auto &delta_state = layer_delta_smooth_v01::state();
+  const bool isolate_l0 = delta_state.object == &object && delta_state.mesh_l0 &&
+                          delta_state.mesh_reference.size() == position_data.eval.size();
+  Array<float3> layer_values;
+  if (isolate_l0) { layer_values.reinitialize(position_data.eval.size()); }
+
   /* Calculate the new positions into a separate array in a separate loop because multiple loops
    * are updated in parallel. Without this there would be non-threadsafe access to changing
    * positions in other bke::pbvh::Tree nodes. */
   for (const float strength : iteration_strengths(brush_strength)) {
+    if (isolate_l0) {
+      for (const int i : layer_values.index_range()) {
+        layer_values[i] = position_data.eval[i] - delta_state.mesh_reference[i];
+      }
+    }
     node_mask.foreach_index(
         [&](const int i, const int pos) {
           LocalData &tls = all_tls.local();
@@ -151,10 +162,16 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
               tls.neighbor_offsets,
               tls.neighbor_data);
           smooth::neighbor_data_average_mesh_check_loose(
-              position_data.eval,
+              isolate_l0 ? layer_values.as_span() : position_data.eval,
               verts,
               neighbors,
               new_positions.as_mutable_span().slice(node_vert_offsets[pos]));
+          if (isolate_l0) {
+            MutableSpan<float3> targets = new_positions.as_mutable_span().slice(node_vert_offsets[pos]);
+            for (const int j : verts.index_range()) {
+              targets[j] += delta_state.mesh_reference[verts[j]];
+            }
+          }
         },
         exec_mode::grain_size(1));
 

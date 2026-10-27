@@ -1724,12 +1724,22 @@ static void calc_area_normal_and_center_node_mesh(const Object &object,
   const float normal_radius_inv = math::rcp(normal_radius);
 
   const Span<int> verts = node.verts();
+  const auto &detail = layer_detail_v01::state();
+  const bool isolate_l0 = detail.mesh_reference_sampling && detail.object == &object &&
+                          detail.mesh_protected.size() == vert_positions.size();
 
   if (ss.cache && !ss.cache->accum) {
     if (const std::optional<OrigPositionData> orig_data = orig_position_data_lookup_mesh(object,
                                                                                          node))
     {
-      const Span<float3> orig_positions = orig_data->positions;
+      Span<float3> orig_positions = orig_data->positions;
+      if (isolate_l0) {
+        tls.positions.resize(verts.size());
+        for (const int i : verts.index_range()) {
+          tls.positions[i] = orig_positions[i] - detail.mesh_protected[verts[i]];
+        }
+        orig_positions = tls.positions;
+      }
       const Span<float3> orig_normals = orig_data->normals;
 
       tls.distances.reinitialize(verts.size());
@@ -1764,10 +1774,21 @@ static void calc_area_normal_and_center_node_mesh(const Object &object,
     }
   }
 
+  if (isolate_l0) {
+    tls.positions.resize(verts.size());
+    for (const int i : verts.index_range()) {
+      tls.positions[i] = vert_positions[verts[i]] - detail.mesh_protected[verts[i]];
+    }
+  }
+  const Span<float3> sample_positions = tls.positions;
   tls.distances.reinitialize(verts.size());
   const MutableSpan<float> distances_sq = tls.distances;
-  calc_brush_distances_squared(
-      ss, vert_positions, verts, eBrushFalloffShape(brush.falloff_shape), distances_sq);
+  if (isolate_l0) {
+    calc_brush_distances_squared(ss, sample_positions, eBrushFalloffShape(brush.falloff_shape), distances_sq);
+  }
+  else {
+    calc_brush_distances_squared(ss, vert_positions, verts, eBrushFalloffShape(brush.falloff_shape), distances_sq);
+  }
 
   for (const int i : verts.index_range()) {
     const int vert = verts[i];
@@ -1786,7 +1807,7 @@ static void calc_area_normal_and_center_node_mesh(const Object &object,
     const int flip_index = math::dot(view_normal, normal) <= 0.0f;
     if (needs_center) {
       accumulate_area_center(
-          location, vert_positions[vert], distance, position_radius_inv, flip_index, anctd);
+          location, isolate_l0 ? sample_positions[i] : vert_positions[vert], distance, position_radius_inv, flip_index, anctd);
     }
     if (needs_normal) {
       accumulate_area_normal(normal, distance, normal_radius_inv, flip_index, anctd);
@@ -5089,6 +5110,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
   } detail_scope;
   brushes::CursorSampleResult cursor_sample_result = calc_brush_node_mask(
       depsgraph, ob, brush, memory);
+  cursor_sample_result.node_mask = layer_detail_v01::extend_shared_region(
+      ob, brush, cursor_sample_result.node_mask, memory);
   const IndexMask node_mask = cursor_sample_result.node_mask;
   sculpt_mesh_v3_probe_gather_ms =
       (BLI_time_now_seconds() - sculpt_mesh_v3_probe_gather_start) * 1000.0;
@@ -5123,7 +5146,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
     void restore() { cache.location = location; cache.location_symm = location_symm; }
     ~AnchorReferenceScope() { restore(); }
   } anchor_reference{*ss.cache, ss.cache->location, ss.cache->location_symm};
-  if (brush.stroke_method == BRUSH_STROKE_ANCHORED && layer_detail_v01::state().active) {
+  if (layer_detail_v01::sampling_offset_needed(brush)) {
     const float3 offset = layer_detail_v01::anchor_offset(ss.cache->location_symm);
     ss.cache->location_symm -= offset;
     /* The unsymmetrized location is used to construct the local texture matrix. */
@@ -7891,6 +7914,11 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
   MEM_delete(ss.cache);
   ss.cache = nullptr;
 
+  if (!is_cancel && stroke_started && this->brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
+    if (!multires_flush_mask_brush_updates(ob)) {
+      std::fprintf(stderr, "[MULTIRES_MASK] brush flush deferred; pending edits retained\n");
+    }
+  }
   if (!is_cancel && stroke_started) {
     stroke_undo_end(*paint_mode_settings_, *this->object, brush);
   }
@@ -8556,8 +8584,14 @@ static void sculpt_brush_stroke_cancel(bContext *C, wmOperator *op)
   BLI_assert(!dyntopo::stroke_is_dyntopo(ob, brush));
   UNUSED_VARS_NDEBUG(brush);
 
+  const bool l0_layer_stroke = bke::multires_layers::base_recording_layer(ob) != nullptr;
   undo::restore_from_undo_step(depsgraph, sd, ob);
   stroke->cancel(C);
+  if (l0_layer_stroke) {
+    /* The coarse deltas are restored, but cancelling does not run the normal
+     * stroke completion update. Recompose the evaluated mesh from those deltas. */
+    DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  }
 }
 
 static wmOperatorStatus brush_stroke_modal(bContext *C, wmOperator *op, const wmEvent *event)
@@ -8657,7 +8691,7 @@ static wmOperatorStatus brush_stroke_modal(bContext *C, wmOperator *op, const wm
     }
     if (event->type == stroke->draw_transport_event && event->val == KM_RELEASE) {
       bool captured = false;
-      try { captured = draw_transport_v01::capture(transport, *stroke->object); }
+      try { captured = draw_transport_v01::capture(transport, *stroke->object, *CTX_data_depsgraph_pointer(C)); }
       catch (const std::bad_alloc &) { transport.failure_reason = "Insufficient memory while capturing the imprint"; captured = false; }
       catch (const std::length_error &) { transport.failure_reason = "Imprint exceeds the representable buffer size"; captured = false; }
       if (!captured) {
@@ -10514,7 +10548,7 @@ static bool sculpt_mesh_v3deep_enabled()
   return enabled;
 }
 
-PositionDeformData::PositionDeformData(const Depsgraph &depsgraph, Object &object_orig)
+PositionDeformData::PositionDeformData(const Depsgraph &depsgraph, Object &object_orig, const bool isolate_l0)
 {
   Mesh &mesh = *id_cast<Mesh *>(object_orig.data);
   const bool v3deep = sculpt_mesh_v3deep_enabled() && mesh.verts_num >= 1'000'000;
@@ -10552,6 +10586,13 @@ PositionDeformData::PositionDeformData(const Depsgraph &depsgraph, Object &objec
     eval_mut_ = eval_mut;
   }
 
+  const auto &detail = layer_detail_v01::state();
+  if (isolate_l0 && base_layer_ && detail.object == &object_orig &&
+      detail.mesh_protected.size() == this->eval.size()) {
+    isolated_eval_ = Array<float3>(this->eval);
+    for (const int i : isolated_eval_.index_range()) { isolated_eval_[i] -= detail.mesh_protected[i]; }
+    this->eval = isolated_eval_;
+  }
   shape_key_data_ = ShapeKeyData::from_object(object_orig);
   if (v3deep) {
     const double total_ms = (BLI_time_now_seconds() - v3deep_begin) * 1000.0;
@@ -10606,6 +10647,7 @@ void PositionDeformData::deform(MutableSpan<float3> translations, const Span<int
     if (eval_mut_) {
       apply_translations(translations, verts, *eval_mut_);
     }
+    if (!isolated_eval_.is_empty()) { apply_translations(translations, verts, isolated_eval_); }
     return;
   }
   if (eval_mut_) {

@@ -55,6 +55,8 @@ void multires_mark_as_modified(Depsgraph *depsgraph, Object *object, MultiresMod
 bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserved = nullptr);
 /** Copy only mask grids from an evaluated CCG to the original mesh. */
 bool multires_flush_mask_updates(const SubdivCCG &ccg, Mesh &mesh, int level);
+bool multires_flush_mask_brush_updates(Object &object);
+bool multires_mask_fill_base(Object &object, float value, bool invert = false);
 bool multires_mask_sync_from_base(Mesh &mesh, int level);
 bool multires_mask_sync_to_base(Mesh &mesh);
 bool multires_force_sculpt_rebuild(Object *object);

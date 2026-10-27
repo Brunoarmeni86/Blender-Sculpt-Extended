@@ -1792,11 +1792,11 @@ static bool rna_multires_visible_fast_refresh(Object &ob,
   }
 
   const double eval_start = BLI_time_now_seconds();
-  BitVector<> direct_faces;
   const double direct_start = BLI_time_now_seconds();
   bool hot_delta_hit = false;
+  const Span<int> validated_payload_grids = payload_grids.as_span();
   const bool direct_ok = bke::multires_layers::weight_direct_delta(
-      ob, *mmd, layer, direct_weight_delta, direct_faces, &hot_delta_hit);
+      ob, *mmd, layer, direct_weight_delta, nullptr, &hot_delta_hit, &validated_payload_grids);
   const double direct_ms = (BLI_time_now_seconds() - direct_start) * 1000.0;
 
   if (rna_multires_visible_trace_enabled()) {
@@ -1893,8 +1893,7 @@ static void rna_MultiresSculptLayer_strength_update(
   WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
 }
 
-static void rna_MultiresSculptLayer_visible_update(
-    Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+static void rna_MultiresSculptLayer_visible_refresh(PointerRNA *ptr, const float weight_delta)
 {
   Object *ob = id_cast<Object *>(ptr->owner_id);
   const auto *layer = static_cast<const MultiresSculptLayer *>(ptr->data);
@@ -1905,8 +1904,7 @@ static void rna_MultiresSculptLayer_visible_update(
   const bool local_ok = ob != nullptr && layer != nullptr &&
       rna_multires_visible_fast_refresh(*ob,
                                         *layer,
-                                        ((layer->flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0 ?
-                                             layer->strength : -layer->strength),
+                                        weight_delta,
                                         support_faces,
                                         updated_faces,
                                         changed_nodes,
@@ -1924,7 +1922,6 @@ static void rna_MultiresSculptLayer_visible_update(
     }
     DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
   }
-  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
   if (rna_multires_visible_trace_enabled()) {
     std::printf(
         "[LAYER_VISIBLE_LOCAL] mode=%s reason=%s support_faces=%d updated_faces=%d "
@@ -1940,6 +1937,14 @@ static void rna_MultiresSculptLayer_visible_update(
   }
 }
 
+/* Property updates also run for assigning the current value. Geometry is
+ * refreshed by the setter, exactly once per actual visibility transition. */
+static void rna_MultiresSculptLayer_visible_update(
+    Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
+}
+
 /* LAYER_VISIBLE_INCREMENTAL_V2
  * Conservative V2 checkpoint on top of the validated V1 local CCG/PBVH path.
  * This marker is used to keep the next direct-delta optimization isolated.
@@ -1948,27 +1953,25 @@ static void rna_MultiresSculptLayer_visible_set(PointerRNA *ptr, bool value)
 {
   Object *ob = id_cast<Object *>(ptr->owner_id);
   auto *layer = static_cast<MultiresSculptLayer *>(ptr->data);
-  bool prepared = ob != nullptr && layer != nullptr;
-  if (prepared) {
-    /* Commit using OLD visibility. Do not release PBVH here: the RNA update
-     * callback will try the in-place CCG refresh first. */
-    prepared = bke::multires_layers::commit(*ob);
-  }
-  if (prepared) {
-    for (ModifierData &md : ob->modifiers) {
-      if (md.type == eModifierType_Multires) {
-        reinterpret_cast<MultiresModifierData *>(&md)->sculpt_layer_recording = 0;
-      }
-    }
-    bke::multires_layers::set_visible(*layer, value);
-  }
-  if (!prepared && ob != nullptr) {
-    /* A failed old-state Commit must never be silently treated as local success. */
+  if (!ob || !layer) { return; }
+  const bool old_value = (layer->flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0;
+  if (old_value == value) { return; }
+  /* Flush using the old composition, then publish exactly the changed weight.
+   * A repeated Show/Hide assignment must neither alter the surface nor REC. */
+  if (!bke::multires_layers::commit(*ob)) {
     multires_force_sculpt_rebuild(ob);
+    DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
+    return;
   }
+  for (ModifierData &md : ob->modifiers) {
+    if (md.type == eModifierType_Multires) {
+      reinterpret_cast<MultiresModifierData *>(&md)->sculpt_layer_recording = 0;
+    }
+  }
+  bke::multires_layers::set_visible(*layer, value);
+  rna_MultiresSculptLayer_visible_refresh(ptr, value ? layer->strength : -layer->strength);
   if (rna_multires_visible_trace_enabled()) {
-    std::printf("[LAYER_VISIBLE] requested=%d applied=%d update=CALLBACK_PENDING\n",
-                int(value), int(prepared));
+    std::printf("[LAYER_VISIBLE] requested=%d applied=1 update=TRANSACTION\n", int(value));
   }
 }
 

@@ -123,11 +123,12 @@ class PositionDeformData {
   MutableSpan<float3> orig_;
   MultiresSculptLayer *base_layer_ = nullptr;
   bool base_recording_blocked_ = false;
+  mutable Array<float3> isolated_eval_;
 
   std::optional<ShapeKeyData> shape_key_data_;
 
  public:
-  PositionDeformData(const Depsgraph &depsgraph, Object &object_orig);
+  PositionDeformData(const Depsgraph &depsgraph, Object &object_orig, bool isolate_l0 = false);
   void deform(MutableSpan<float3> translations, Span<int> verts) const;
 };
 

@@ -308,8 +308,9 @@ bool weight_direct_delta(Object &object,
                          MultiresModifierData &mmd,
                          const MultiresSculptLayer &layer,
                          float weight_delta,
-                         blender::BitVector<> &r_affected_faces,
-                         bool *r_hot_cache_hit = nullptr);
+                         blender::BitVector<> *r_affected_faces,
+                         bool *r_hot_cache_hit = nullptr,
+                         const blender::Span<int> *validated_payload_grids = nullptr);
 
 bool visible_direct_delta(Object &object,
                           MultiresModifierData &mmd,

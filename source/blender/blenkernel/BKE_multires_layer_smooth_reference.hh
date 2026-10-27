@@ -4,6 +4,7 @@
 namespace blender {
 struct Mesh;
 struct MultiresSculptLayer;
+struct MultiresModifierData;
 struct SubdivCCG;
 namespace bke::multires_layers {
 struct SmoothL0Reference;
@@ -11,6 +12,13 @@ struct SmoothL0Reference;
  * Exact input comparison prevents stale data after weights, Undo or L0 edits.
  * The live CCG owns the topology; clear MUST run before its Subdiv is freed. */
 bool smooth_l0_reference_prepare(const MultiresSculptLayer &layer,
+                                 const Mesh &mesh,
+                                 SubdivCCG &ccg,
+                                 const SmoothL0Reference *&r_reference);
+/** Separate evaluator for the weighted coarse contribution of protected layers.
+ * Never replaces the active Smooth reference retained during Auto Smooth. */
+bool detail_l0_reference_prepare(const MultiresModifierData &mmd,
+                                 const MultiresSculptLayer &active,
                                  const Mesh &mesh,
                                  SubdivCCG &ccg,
                                  const SmoothL0Reference *&r_reference);

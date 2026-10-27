@@ -98,6 +98,11 @@ static std::unordered_map<const SubdivCCG *, std::unique_ptr<SmoothL0Reference>>
   static std::unordered_map<const SubdivCCG *, std::unique_ptr<SmoothL0Reference>> entries;
   return entries;
 }
+static std::unordered_map<const SubdivCCG *, std::unique_ptr<SmoothL0Reference>> &detail_l0_references()
+{
+  static std::unordered_map<const SubdivCCG *, std::unique_ptr<SmoothL0Reference>> entries;
+  return entries;
+}
 static std::mutex &smooth_l0_reference_mutex()
 {
   static std::mutex mutex;
@@ -107,11 +112,13 @@ void smooth_l0_reference_clear(const SubdivCCG &ccg)
 {
   std::lock_guard<std::mutex> lock(smooth_l0_reference_mutex());
   smooth_l0_references().erase(&ccg);
+  detail_l0_references().erase(&ccg);
 }
-bool smooth_l0_reference_prepare(const MultiresSculptLayer &layer,
+static bool l0_reference_prepare(const MultiresSculptLayer &layer,
                                  const Mesh &mesh,
                                  SubdivCCG &ccg,
-                                 const SmoothL0Reference *&r_reference)
+                                 const SmoothL0Reference *&r_reference,
+                                 const bool protected_layers)
 {
   r_reference = nullptr;
   if (!layer.base_deltas) {
@@ -127,7 +134,7 @@ bool smooth_l0_reference_prepare(const MultiresSculptLayer &layer,
 #else
   bke::sculpt_cold_v01::Scope profile("smooth.l0_reference", &ccg);
   std::lock_guard<std::mutex> lock(smooth_l0_reference_mutex());
-  auto &slot = smooth_l0_references()[&ccg];
+  auto &slot = (protected_layers ? detail_l0_references() : smooth_l0_references())[&ccg];
   if (!slot) {
     slot = std::make_unique<SmoothL0Reference>();
     slot->values.settings = ccg.subdiv->settings;
@@ -171,6 +178,36 @@ bool smooth_l0_reference_prepare(const MultiresSculptLayer &layer,
   r_reference = nonzero ? &entry : nullptr;
   return true;
 #endif
+}
+bool smooth_l0_reference_prepare(const MultiresSculptLayer &layer,
+                                 const Mesh &mesh, SubdivCCG &ccg,
+                                 const SmoothL0Reference *&r_reference)
+{
+  return l0_reference_prepare(layer, mesh, ccg, r_reference, false);
+}
+bool detail_l0_reference_prepare(const MultiresModifierData &mmd,
+                                 const MultiresSculptLayer &active,
+                                 const Mesh &mesh, SubdivCCG &ccg,
+                                 const SmoothL0Reference *&r_reference)
+{
+  r_reference = nullptr;
+  Array<float3> sum;
+  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (&layer == &active || !is_effective(layer) || !layer.base_deltas) { continue; }
+    if (layer.base_verts_num != mesh.verts_num || !std::isfinite(layer.strength)) {
+      return false;
+    }
+    if (sum.is_empty()) { sum.reinitialize(mesh.verts_num); sum.fill(float3(0)); }
+    for (const int i : sum.index_range()) {
+      sum[i] += float3(layer.base_deltas[i]) * layer.strength;
+    }
+  }
+  if (sum.is_empty()) { return true; }
+  MultiresSculptLayer aggregate{};
+  aggregate.base_deltas = reinterpret_cast<float (*)[3]>(sum.data());
+  aggregate.base_verts_num = mesh.verts_num;
+  aggregate.strength = 1.0f;
+  return l0_reference_prepare(aggregate, mesh, ccg, r_reference, true);
 }
 float3 smooth_l0_reference_sample(const SmoothL0Reference &reference,
                                   const int ptex, const float u, const float v)

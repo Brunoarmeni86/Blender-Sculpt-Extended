@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #pragma once
+#include "BLI_listbase.h"
 
 #include <algorithm>
 #include <cmath>
@@ -70,6 +71,14 @@ class SampleStore {
     }
     return sparse_.lookup_ptr(index);
   }
+  /* Read only after the caller has completed every sample of this grid. */
+  const float3 *prepared_grid_data(const int grid) const
+  {
+    if (compact_) {
+      if (const int64_t *offset = grids_.lookup_ptr(grid)) { return values_.data() + *offset; }
+    }
+    return nullptr;
+  }
   bool contains(const int index) const { return lookup_ptr(index) != nullptr; }
   const float3 &lookup(const int index) const
   {
@@ -95,6 +104,8 @@ struct State {
   Object *object = nullptr;
   /* Freeze the routing decision before Shift switches to the Smooth asset. */
   Object *native_object = nullptr;
+  Array<float3> mesh_reference;
+  bool mesh_l0 = false;
   SubdivCCG *ccg = nullptr;
   const MultiresSculptLayer *layer = nullptr;
   Span<int> ptex;
@@ -150,6 +161,29 @@ inline bool prepare_base_delta(State &s, Object &object)
 }
 /* Must run before stroke_cache_init and stroke Undo begin. Previous pending coordinates
  * are committed in their existing frame, never by temporarily hiding/reweighting layers. */
+/* Coarse layer isolation uses vertex deltas directly, never a temporary subdivision. */
+inline bool mesh_protected_offsets(Object &object, const MultiresModifierData &mmd,
+                                   Array<float3> &offsets, ReportList *reports)
+{
+  const Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const auto *active = bke::multires_layers::active(mmd);
+  if (!active || !bke::multires_layers::can_record(mmd, mesh) ||
+      mmd.modifier.prev || mmd.modifier.next || mmd.sculpt_displacement_enabled ||
+      mmd.sculpt_shrinkwrap_enabled) {
+    BKE_report(reports, RPT_ERROR, "L0 layer isolation requires a valid active layer and Multires as the only modifier");
+    return false;
+  }
+  offsets.reinitialize(mesh.verts_num); offsets.fill(float3(0));
+  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (&layer == active || !bke::multires_layers::is_effective(layer) || !layer.base_deltas) { continue; }
+    if (layer.base_verts_num != mesh.verts_num) { return false; }
+    for (const int i : offsets.index_range()) {
+      offsets[i] += float3(layer.base_deltas[i]) * layer.strength;
+      if (!finite(offsets[i])) { return false; }
+    }
+  }
+  return true;
+}
 inline bool begin(Object &object, const Brush &brush, ReportList *reports, const bool force_smooth = false)
 {
   reset();
@@ -163,6 +197,18 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
   }
   SculptSession *ss = object.runtime->sculpt_session;
   MultiresModifierData *mmd = ss ? const_cast<MultiresModifierData *>(ss->multires_modifier) : nullptr;
+  if (ss && !ss->subdiv_ccg) {
+    if (auto *base = bke::multires_layers::base_modifier(object)) {
+      if (base->sculptlvl == 0 && targets_layer(*base)) {
+        State &s = state();
+        if (!mesh_protected_offsets(object, *base, s.mesh_reference, reports)) { reset(); return false; }
+        const Span<float3> positions = id_cast<Mesh *>(object.data)->vert_positions();
+        for (const int i : s.mesh_reference.index_range()) { s.mesh_reference[i] += positions[i]; }
+        s.object = &object; s.mesh_l0 = true; s.ready = true;
+        return true;
+      }
+    }
+  }
   if (!ss || !ss->subdiv_ccg || !mmd) { return true; }
   /* Delta Smooth isolates the active layer from the evaluated surface. When
    * Sculpt Base Mesh is the selected target there is no layer to isolate:
@@ -207,10 +253,10 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
      * its newly stored layer data and refresh the current CCG before capturing
      * a new stroke reference. This runs before stroke cache/Undo initialization.
      * Keep the established maximum-level preservation requirement unchanged. */
-    if (ccg->level >= mmd->totlvl || !multires_refresh_sculpt_ccg(&object, mmd) ||
+    if (!multires_refresh_sculpt_ccg(&object, mmd) ||
         object.runtime->sculpt_session != ss || ss->subdiv_ccg != ccg)
     {
-      BKE_report(reports, RPT_ERROR, "Cannot refresh Multires after lower-level sculpt Commit");
+      BKE_report(reports, RPT_ERROR, "Cannot refresh Multires after sculpt Commit");
       return false;
     }
   }
@@ -243,7 +289,10 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
   return true;
 }
 /* Evaluator calls and all map insertions stay serial. Workers only read captured references. */
-inline bool raw_offset(State &s, const int index, float3 &out)
+/* Optional scratch is shared only by callers sampling the same CCG coordinate.
+ * It is local to that sample, never retained across layer edits or strokes. */
+inline bool raw_offset(State &s, const int index, float3 &out,
+                       float3x3 *shared_tangent = nullptr, bool *shared_tangent_ready = nullptr)
 {
   const auto invalid = [&](const char *reason) {
     s.ready = false;
@@ -288,10 +337,14 @@ inline bool raw_offset(State &s, const int index, float3 &out)
   if (delta == float3(0.0f)) {
     out = base_offset; s.raw_offsets.add(index, out); return true;
   }
-  float3 P, du, dv;
-  bke::subdiv::eval_limit_point_and_derivatives(ccg.subdiv, ptex, u, v, P, du, dv);
-  float3x3 tangent;
-  BKE_multires_construct_tangent_matrix(tangent, du, dv, quad ? corner : 0);
+  float3x3 local_tangent;
+  float3x3 &tangent = shared_tangent ? *shared_tangent : local_tangent;
+  if (!shared_tangent_ready || !*shared_tangent_ready) {
+    float3 P, du, dv;
+    bke::subdiv::eval_limit_point_and_derivatives(ccg.subdiv, ptex, u, v, P, du, dv);
+    BKE_multires_construct_tangent_matrix(tangent, du, dv, quad ? corner : 0);
+    if (shared_tangent_ready) { *shared_tangent_ready = true; }
+  }
   out = base_offset + math::transform_direction(tangent, delta);
   if (!finite(out)) { return invalid("nonfinite_offset"); }
   s.raw_offsets.add(index, out);
@@ -339,6 +392,7 @@ inline bool prepare_region(Object &object, const IndexMask &node_mask)
   State &s = state();
   if (s.object != &object) { return true; }
   if (!s.ready) { return false; }
+  if (s.mesh_l0) { return true; }
   if (object.runtime->sculpt_session->subdiv_ccg != s.ccg) { return fail("surface_changed"); }
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
