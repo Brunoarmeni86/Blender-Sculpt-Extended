@@ -18,6 +18,7 @@
 #include "BKE_subdiv_ccg.hh"
 #include "BLI_map.hh"
 #include "BLI_bit_vector.hh"
+#include "BLI_bit_span_ops.hh"
 #include "BLI_set.hh"
 #include "BKE_sculpt_cold_start_profile.hh"
 #include "BLI_math_matrix.hh"
@@ -76,6 +77,20 @@ class SampleStore {
   {
     if (compact_) {
       if (const int64_t *offset = grids_.lookup_ptr(grid)) { return values_.data() + *offset; }
+    }
+    return nullptr;
+  }
+  /* A formerly halo-only grid can retain sparse entries after promotion.
+   * Only expose a direct span when every dense sample is actually initialized. */
+  const float3 *complete_grid_data(const int grid) const
+  {
+    if (compact_) {
+      if (const int64_t *offset = grids_.lookup_ptr(grid)) {
+        const BoundedBitSpan valid = valid_;
+        if (!bits::any_bit_unset(valid.slice(IndexRange(*offset, area_)))) {
+          return values_.data() + *offset;
+        }
+      }
     }
     return nullptr;
   }

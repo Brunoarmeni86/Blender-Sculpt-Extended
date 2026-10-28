@@ -306,6 +306,8 @@ static bool do_layer_delta_smooth(const Depsgraph &depsgraph,
   Array<float3> changes(offsets.total_size());
   threading::EnumerableThreadSpecific<LocalData> all_tls;
   const auto &reference = delta::state().reference;
+  const char *grid_read_env = std::getenv("BLENDER_SCULPT_DELTA_GRID_READ_V01");
+  const bool use_grid_read = grid_read_env && grid_read_env[0] == '1' && grid_read_env[1] == '\0';
   const auto read_delta = [&](const SubdivCCGCoord coord) -> float3 {
     const int index = coord.to_index(key);
     return ccg.positions[index] - reference.lookup(index);
@@ -322,6 +324,15 @@ static bool do_layer_delta_smooth(const Depsgraph &depsgraph,
       MutableSpan<float3> node_changes = changes.as_mutable_span().slice(offsets[pos]);
       int local_index = 0;
       for (const int grid : grids) {
+        const float3 *grid_reference = use_grid_read ? reference.complete_grid_data(grid) : nullptr;
+        const int grid_offset = grid * key.grid_area;
+        const auto read_grid_delta = [&](const SubdivCCGCoord coord) -> float3 {
+          if (grid_reference && coord.grid_index == grid) {
+            const int index = coord.to_index(key);
+            return ccg.positions[index] - grid_reference[index - grid_offset];
+          }
+          return read_delta(coord);
+        };
         for (int y = 0; y < key.grid_size; y++) {
           for (int x = 0; x < key.grid_size; x++, local_index++) {
             node_changes[local_index] = float3(0.0f);
@@ -341,10 +352,10 @@ static bool do_layer_delta_smooth(const Depsgraph &depsgraph,
               }
             }
             if (neighbors.coords.is_empty()) { continue; }
-            const float3 center = read_delta(coord);
+            const float3 center = read_grid_delta(coord);
             float3 translation(0.0f);
             for (const SubdivCCGCoord neighbor : neighbors.coords) {
-              translation += read_delta(neighbor) - center;
+              translation += read_grid_delta(neighbor) - center;
             }
             translation /= float(neighbors.coords.size());
             if (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE) {
