@@ -1,0 +1,563 @@
+name: Linux optimized checkpoint 20261028 cached build and verification
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact approved Blender source commit
+        required: true
+        default: 233b1a2da926d9200da5321674e54038875813b1
+        type: string
+      snapshot_run:
+        description: Optional original run ID to verify its UNVERIFIED snapshot without compiling
+        required: false
+        default: ''
+        type: string
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  GIT_LFS_SKIP_SMUDGE: '1'
+  BLENDER_MULTIRES_SHARED_INDEX_V01: '1'
+  BLENDER_SCULPT_DELTA_GRID_READ_V01: '1'
+  BLENDER_SCULPT_DRAW_TRANSPORT_V01: '1'
+  ORIGINAL: Blender-Sculpt-Extended-5.2.3-Linux-x64-Rocky8-GPU-preview.tar.xz
+jobs:
+  build:
+    if: ${{ !inputs.snapshot_run }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    container: rockylinux:8
+    env:
+      CC: /opt/rh/gcc-toolset-14/root/usr/bin/gcc
+      CXX: /opt/rh/gcc-toolset-14/root/usr/bin/g++
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 4G
+      CCACHE_COMPRESS: 'true'
+    steps:
+      - name: Validate exact source revision
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Install official baseline and GPU compilation toolchains
+        run: |
+          set -exo pipefail
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled powertools
+          dnf install -y epel-release
+          dnf install -y ccache zstd gzip gcc-toolset-14 gcc-toolset-14-libstdc++-devel cmake ninja-build make git git-lfs python3.11 pkgconf-pkg-config tar xz patch binutils mesa-libEGL-devel mesa-libGL-devel mesa-libGLU-devel libxkbcommon-devel libX11-devel libXcursor-devel libXi-devel libXinerama-devel libXrandr-devel libXt-devel libXxf86vm-devel libSM-devel libICE-devel dbus-devel wayland-devel wayland-protocols-devel alsa-lib-devel pulseaudio-libs-devel jack-audio-connection-kit-devel mesa-dri-drivers xorg-x11-server-Xvfb xorg-x11-xauth
+          dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+          dnf install -y cuda-nvcc-12-8 cuda-cudart-devel-12-8 cuda-cccl-12-8
+          printf '[rocm]\nname=ROCm 7.2.1\nbaseurl=https://repo.radeon.com/rocm/el8/7.2.1/main\nenabled=1\ngpgcheck=1\ngpgkey=https://repo.radeon.com/rocm/rocm.gpg.key\n' > /etc/yum.repos.d/rocm.repo
+          dnf install -y hipcc7.2.1 hip-devel7.2.1 rocm-llvm7.2.1 rocm-core7.2.1 rocm-device-libs7.2.1
+          dnf clean all
+          git clone --depth 1 --branch v9.0.0 https://github.com/NVIDIA/optix-dev.git optix
+          git -C optix rev-parse HEAD
+          ldd --version
+          df -h .
+      - name: Fetch approved source and matching Linux libraries
+        run: |
+          export PATH=/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/cuda-12.8/bin:/opt/rocm-7.2.1/bin:$PATH
+          set -euxo pipefail
+          git init source
+          git -C source remote add origin https://github.com/Brunoarmeni86/Blender-Sculpt-Extended.git
+          git -C source fetch --depth 1 origin "$SOURCE_SHA"
+          git -C source checkout --detach FETCH_HEAD
+          git -C source lfs install --local
+          git -C source -c lfs.url=https://projects.blender.org/blender/blender.git/info/lfs lfs pull --include='assets/**,release/datafiles/**' --exclude=''
+          git -C source submodule update --init --checkout --depth 1 lib/linux_x64
+          git -C source/lib/linux_x64 lfs pull
+          # Libraries are materialized; remove only the duplicate download cache.
+          python3.11 - <<'PY'
+          from pathlib import Path
+          import subprocess, shutil
+          workspace=Path.cwd().resolve()
+          for repo in (workspace/'source',workspace/'source/lib/linux_x64'):
+              raw=subprocess.check_output(['git','rev-parse','--git-path','lfs/objects'],cwd=repo,text=True).strip()
+              p=(repo/raw).resolve()
+              assert p.is_relative_to(workspace) and p.parts[-2:]==('lfs','objects'),p
+              if p.exists():shutil.rmtree(p)
+          PY
+          git -C source rev-parse HEAD
+          git -C source/lib/linux_x64 rev-parse HEAD
+          df -h .
+      - name: Fingerprint compiler, libraries and build configuration
+        id: cache_id
+        run: |
+          set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          ccache --max-size "$CCACHE_MAXSIZE"
+          {
+            printf '%s\n' 'rocky8-gcc14-release-gpu-native-ccache-v1'
+            uname -m
+            "$CC" -dumpfullversion
+            sha256sum "$CC" "$CXX"
+            ccache --version
+            git -C source/lib/linux_x64 rev-parse HEAD
+            sha256sum source/build_files/cmake/config/blender_release.cmake
+          } > cache-fingerprint.txt
+          fingerprint="$(sha256sum cache-fingerprint.txt | cut -d' ' -f1)"
+          printf 'fingerprint=%s\n' "$fingerprint" >> "$GITHUB_OUTPUT"
+      - name: Restore native C and C++ compiler cache
+        id: compiler_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: linux-rocky8-gcc14-${{ steps.cache_id.outputs.fingerprint }}-${{ env.SOURCE_SHA }}
+          restore-keys: |
+            linux-rocky8-gcc14-${{ steps.cache_id.outputs.fingerprint }}-
+      - name: Reset cache counters
+        run: ccache --zero-stats
+      - name: Configure Release for sculpt and viewport
+        run: |
+          export PATH=/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/cuda-12.8/bin:/opt/rocm-7.2.1/bin:$PATH
+          set -euxo pipefail
+          cmake -S source -B build -G Ninja -C source/build_files/cmake/config/blender_release.cmake \
+            -DCMAKE_BUILD_TYPE=Release -DWITH_COMPILER_CCACHE=ON -DWITH_GTESTS=OFF -DWITH_LTO=OFF -DWITH_DOC_MANPAGE=OFF \
+            -DWITH_CYCLES_CUDA_BINARIES=ON -DWITH_CYCLES_CUDA_BUILD_SERIAL=ON -DWITH_CYCLES_HIP_BINARIES=ON -DWITH_CYCLES_DEVICE_HIP=ON \
+            -DWITH_CYCLES_DEVICE_ONEAPI=ON -DWITH_CYCLES_DEVICE_OPTIX=ON -DOPTIX_ROOT_DIR="$GITHUB_WORKSPACE/optix" -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-12.8 -DHIP_ROOT_DIR=/opt/rocm-7.2.1
+      - name: Require active compiler cache launchers
+        run: |
+          grep -Eq '^WITH_COMPILER_CCACHE:BOOL=ON$' build/CMakeCache.txt
+          grep -Eq '^CCACHE_PROGRAM:FILEPATH=.+ccache$' build/CMakeCache.txt
+      - name: Build and install portable trial
+        id: compile
+        run: |
+          export PATH=/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/cuda-12.8/bin:/opt/rocm-7.2.1/bin:$PATH
+          cmake --build build --parallel 3
+          cmake --install build --prefix "$GITHUB_WORKSPACE/portable"
+      - name: Save native compiler cache before package verification
+        if: ${{ always() && steps.compile.outcome == 'success' && steps.compiler_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: linux-rocky8-gcc14-${{ steps.cache_id.outputs.fingerprint }}-${{ env.SOURCE_SHA }}
+      - name: Show compiler cache effectiveness
+        if: ${{ always() && steps.compile.outcome != 'skipped' }}
+        run: ccache --show-stats
+      - name: Save compiled package as UNVERIFIED before running checks
+        run: |
+          set -euo pipefail
+          mkdir -p snapshot
+          printf 'Approved source: %s\nTarget: Rocky Linux 8 x86_64; glibc 2.28; GCC 14\nCUDA/OptiX, HIP, oneAPI compiled; physical GPU testing pending.\n' "$SOURCE_SHA" > portable/BUILD-PROVENANCE.txt
+          cat > portable/Avvia-Sculpt.sh <<'LAUNCHER'
+          #!/bin/sh
+          export BLENDER_MULTIRES_SHARED_INDEX_V01=1
+          export BLENDER_SCULPT_DELTA_GRID_READ_V01=1
+          export BLENDER_SCULPT_DRAW_TRANSPORT_V01=1
+          here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          exec "$here/blender" --gpu-backend opengl "$@"
+          LAUNCHER
+          chmod +x portable/Avvia-Sculpt.sh
+          printf '\nUse Avvia-Sculpt.sh for approved shared indices, Smooth reads and Draw Transport on OpenGL. Direct blender keeps switches opt-in.\n' >> portable/BUILD-PROVENANCE.txt
+          tar -cJf "snapshot/$ORIGINAL" -C portable .
+          (cd snapshot && sha256sum "$ORIGINAL" > SHA256SUMS.txt)
+          cp build/CMakeCache.txt snapshot/CMakeCache.txt
+          cp cache-fingerprint.txt snapshot/cache-fingerprint.txt
+          ccache --show-stats > snapshot/CCACHE-STATS.txt
+          python3.11 - <<'PY'
+          import json,os
+          from pathlib import Path
+          Path('snapshot/SNAPSHOT.json').write_text(json.dumps({
+              'status':'UNVERIFIED','source_commit':os.environ['SOURCE_SHA'],
+              'build_run':os.environ['GITHUB_RUN_ID'],
+              'build_attempt':os.environ['GITHUB_RUN_ATTEMPT'],
+              'native_compiler_cache_max':'4G','physical_gpu_tested':False,
+              'shared_indices_and_smooth_reads':'ENABLED_FOR_CHECKS_AND_LAUNCHER',
+          },indent=2)+'\n')
+          PY
+      - name: Upload recoverable UNVERIFIED snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: Linux-UNVERIFIED-${{ github.run_id }}
+          path: snapshot/
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+  verify:
+    needs: build
+    env:
+      ORIGINAL_BUILD_RUN: ${{ inputs.snapshot_run || github.run_id }}
+    if: ${{ always() && (needs.build.result == 'success' || inputs.snapshot_run != '') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container: rockylinux:8
+    steps:
+      - name: Install baseline runtime and verification tools
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled powertools
+          dnf install -y epel-release
+          dnf install -y gcc-toolset-14 git python3.11 tar xz binutils mesa-libEGL-devel mesa-libGL-devel mesa-libGLU-devel libxkbcommon-devel libX11-devel libXcursor-devel libXi-devel libXinerama-devel libXrandr-devel libXt-devel libXxf86vm-devel libSM-devel libICE-devel dbus-devel wayland-devel wayland-protocols-devel alsa-lib-devel pulseaudio-libs-devel jack-audio-connection-kit-devel mesa-dri-drivers xorg-x11-server-Xvfb xorg-x11-xauth
+      - name: Download compiled snapshot from the original build run
+        uses: actions/download-artifact@v4
+        with:
+          name: Linux-UNVERIFIED-${{ inputs.snapshot_run || github.run_id }}
+          path: input
+          run-id: ${{ inputs.snapshot_run || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify snapshot identity and checksum then extract
+        run: |
+          set -euo pipefail
+          (cd input && sha256sum -c SHA256SUMS.txt)
+          python3.11 - <<'PY'
+          import json,os
+          snapshot=json.load(open('input/SNAPSHOT.json'))
+          assert snapshot['status']=='UNVERIFIED',snapshot
+          assert snapshot['source_commit']==os.environ['SOURCE_SHA'],snapshot
+          assert snapshot['build_run']==os.environ.get('ORIGINAL_BUILD_RUN',os.environ['GITHUB_RUN_ID']),snapshot
+          PY
+          test "$(tar -xOf "input/$ORIGINAL" ./BUILD-PROVENANCE.txt | sed -n 's/^Approved source: //p')" = "$SOURCE_SHA"
+          mkdir portable
+          tar -xJf "input/$ORIGINAL" -C portable
+      - name: Fetch matching source scripts for GUI regressions
+        run: |
+          git init source
+          git -C source remote add origin https://github.com/Brunoarmeni86/Blender-Sculpt-Extended.git
+          git -C source fetch --depth 1 origin "$SOURCE_SHA"
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+      - name: Check startup and approved defaults
+        run: |
+          export PATH=/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/cuda-12.8/bin:/opt/rocm-7.2.1/bin:$PATH
+          set -euxo pipefail
+          portable/blender --background --factory-startup --python-exit-code 1 --python-expr "import bpy; assert bpy.app.version[:3]==(5,2,3); b=bpy.data.brushes.new('Linux audit',mode='SCULPT'); assert b.sculpt_preserve_other_layers; assert not hasattr(b,'sculpt_pose_gentle_multires'); assert hasattr(bpy.types,'VIEW3D_PT_multires_brush_experiments'); print('LINUX_STARTUP_DEFAULTS_PASS')"
+      - name: Reproduce corrected brush guards on Linux
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          SCULPT_SOURCE_ROOT: ${{ github.workspace }}/source
+          SUBDIV_TEST_ROOT: ${{ github.workspace }}/linux-guard-audit
+          SUBDIV_TEST_PHASE: trial
+        run: |
+          mkdir -p "$SUBDIV_TEST_ROOT"
+          cat > linux_guard_smoke.py <<'PY'
+          from pathlib import Path
+          import os,json,traceback
+          kit=Path(os.environ['SCULPT_SOURCE_ROOT'])/'tools/sculpt_extended/approved_v05_20261021'
+          exec((kit/'BAKE_WORKER.py').read_text().split('\nsteps = pipeline()')[0])
+          result=[]
+          def run():
+              with ctx():
+                  bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
+                  bpy.ops.mesh.primitive_cube_add(size=2)
+                  ob=bpy.context.object
+                  bpy.ops.object.mode_set(mode='EDIT');bpy.ops.mesh.subdivide(number_cuts=4)
+                  bpy.ops.object.mode_set(mode='OBJECT')
+                  ob.data.color_attributes.new(name='AuditColor',type='FLOAT_COLOR',domain='POINT')
+                  m=ob.modifiers.new('Multires','MULTIRES')
+                  for _ in range(3):assert bpy.ops.object.multires_subdivide(modifier=m.name)=={'FINISHED'}
+                  m.levels=m.sculpt_levels=m.total_levels
+                  bpy.ops.object.mode_set(mode='SCULPT')
+                  bpy.ops.view3d.view_axis(type='TOP',align_active=False)
+                  bpy.context.space_data.region_3d.view_distance=4.
+                  activate_draw()
+                  b=bpy.context.tool_settings.sculpt.brush;b.unprojected_size=1.5
+                  assert b.sculpt_preserve_other_layers
+                  assert bpy.ops.sculpt.multires_layer_add()=={'FINISHED'}
+                  assert bpy.ops.sculpt.multires_layer_add()=={'FINISHED'}
+                  m.sculpt_layers[0].visible=False
+                  m.active_sculpt_layer_index=1
+              yield .5
+              for case in ('lower-level','dots'):
+                  with ctx():
+                      m=mod();m.sculpt_levels=m.total_levels-1 if case=='lower-level' else m.total_levels
+                      bpy.context.tool_settings.sculpt.brush.stroke_method='DOTS' if case=='dots' else 'SPACE'
+                  yield .3
+                  before=points();stroke(0);after=points()
+                  assert np.isfinite(after).all()
+                  assert float(np.max(np.abs(after-before)))>1e-5,case+' had no meaningful effect'
+                  result.append({'case':case,'status':'PASS'})
+              with ctx():
+                  mod().sculpt_layers[0].visible=True
+                  bpy.context.tool_settings.sculpt.brush.stroke_method='DOTS'
+              yield .3
+              blocked=False
+              try:stroke(0)
+              except RuntimeError as error:
+                  blocked='Preserve Other Layers' in str(error)
+              assert blocked,'Unsupported isolation no longer rejected'
+              result.append({'case':'two-effective-layers-dots-protection','status':'PASS'})
+              (ROOT/'RESULT.json').write_text(json.dumps(result,indent=2))
+              print('LINUX_CORRECTED_GUARDS_PASS',flush=True)
+              undo_rows=[]
+              for kind in ['DRAW','SMOOTH']:
+                  for preserve in [False,True]:
+                      with ctx():
+                          m=mod();m.sculpt_levels=m.total_levels;m.active_sculpt_layer_index=1
+                          m.sculpt_layers[0].visible=True;m.sculpt_layers[0].strength=-0.4
+                          m.sculpt_layers[1].visible=True;m.sculpt_layers[1].strength=2.4
+                          b=bpy.context.tool_settings.sculpt.brush;b.sculpt_brush_type=kind;b.stroke_method='SPACE'
+                          b.sculpt_preserve_other_layers=preserve
+                          bpy.ops.wm.save_as_mainfile(filepath=str(ROOT/'undo-configured.blend'),check_existing=False)
+                          bpy.ops.wm.open_mainfile(filepath=str(ROOT/'undo-configured.blend'))
+                      yield .3
+                      before=points();weights=[(l.strength,l.visible) for l in mod().sculpt_layers]
+                      stroke(0);yield .15
+                      after=points();assert float(np.max(np.abs(after-before)))>1e-6,('No effect',kind,preserve)
+                      errors=[]
+                      for cycle in range(3):
+                          with ctx():assert bpy.ops.ed.undo()=={'FINISHED'}
+                          yield .15
+                          errors.append(float(np.max(np.abs(points()-before))))
+                          assert weights==[(l.strength,l.visible) for l in mod().sculpt_layers]
+                          with ctx():assert bpy.ops.ed.redo()=={'FINISHED'}
+                          yield .15
+                          errors.append(float(np.max(np.abs(points()-after))))
+                      assert max(errors)<2e-6,(kind,preserve,errors)
+                      undo_rows.append(dict(brush=kind,preserve=preserve,cycles=3,max_error=max(errors),status='PASS'))
+              (ROOT/'LAYER-UNDO.json').write_text(json.dumps(undo_rows,indent=2))
+              print('LINUX_LAYER_UNDO_REPEATED_PASS',flush=True)
+              bpy.ops.wm.quit_blender()
+          steps=run()
+          def tick():
+              try:return next(steps)
+              except StopIteration:return None
+              except Exception:
+                  failure=traceback.format_exc();print(failure,flush=True)
+                  (ROOT/'ERROR.txt').write_text(failure)
+                  os._exit(1)
+          bpy.app.timers.register(tick,first_interval=1,persistent=True)
+          PY
+          xvfb-run -a -s '-screen 0 1280x800x24' portable/blender --factory-startup --no-window-focus --window-geometry 0 0 1280 800 --python-exit-code 1 --python linux_guard_smoke.py
+          test -f linux-guard-audit/RESULT.json
+          cat linux-guard-audit/RESULT.json
+      - name: Verify Clear Mask survives subdivision from the base
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euxo pipefail
+          cat > mask_clear_gui_regression.py <<'MASK_TEST'
+          import bpy
+          import json
+          import os
+          import traceback
+          from pathlib import Path
+          
+          root = Path(__file__).parent
+          label = 'linux_clear_mask'
+          results = []
+          
+          def run():
+              window = bpy.context.window
+              area = next(a for a in window.screen.areas if a.type == 'VIEW_3D')
+              region = next(r for r in area.regions if r.type == 'WINDOW')
+              with bpy.context.temp_override(window=window, area=area, region=region):
+                  for scenario in ('existing_levels_subdivide', 'existing_levels_object_switch', 'base_mesh_subdivide', 'higher_level_mask_retained', 'brush_fresh'):
+                      if bpy.context.object and bpy.context.object.mode != 'OBJECT':
+                          bpy.ops.object.mode_set(mode='OBJECT')
+                      for obj in list(bpy.data.objects):
+                          bpy.data.objects.remove(obj, do_unlink=True)
+                      bpy.ops.mesh.primitive_cube_add()
+                      obj = bpy.context.object
+                      mesh = obj.data
+                      if scenario.startswith('brush'):
+                          bpy.ops.object.mode_set(mode='EDIT')
+                          bpy.ops.mesh.subdivide(number_cuts=4)
+                          bpy.ops.object.mode_set(mode='OBJECT')
+                      m = None if scenario == 'brush_before_modifier' else obj.modifiers.new('Multires', 'MULTIRES')
+                      attr = mesh.attributes.new('.sculpt_mask', 'FLOAT', 'POINT')
+                      for item in attr.data:
+                          item.value = 1.0
+                      if scenario.startswith('existing_levels') or scenario in ('resubdivide_clear', 'base_mesh_subdivide', 'higher_level_mask_retained'):
+                          assert bpy.ops.object.multires_subdivide(modifier=m.name) == {'FINISHED'}
+                          m.sculpt_levels = 0
+                          m.levels = 0
+                          if scenario == 'resubdivide_clear':
+                              assert bpy.ops.object.multires_higher_levels_delete(modifier=m.name) == {'FINISHED'}
+                              assert m.total_levels == 0
+                          if scenario in ('base_mesh_subdivide', 'higher_level_mask_retained'):
+                              m.sculpt_levels = 1
+                              if scenario == 'base_mesh_subdivide':
+                                  m.use_sculpt_base_mesh = True
+                      bpy.ops.object.mode_set(mode='SCULPT')
+                      if scenario.startswith('brush'):
+                          mesh.attributes.remove(mesh.attributes['.sculpt_mask'])
+                          assert bpy.ops.brush.asset_activate(asset_library_type='ESSENTIALS', relative_asset_identifier='brushes/essentials_brushes-mesh_sculpt.blend/Brush/Mask') == {'FINISHED'}
+                          brush = bpy.context.tool_settings.sculpt.brush
+                          brush.size = 96
+                          brush.use_locked_size = 'SCENE'
+                          brush.unprojected_size = 2.0
+                          brush.strength = 1.0
+                          brush.use_pressure_strength = False
+                          unified = getattr(bpy.context.tool_settings.sculpt, 'unified_paint_settings', None)
+                          if unified:
+                              unified.use_unified_size = unified.use_unified_strength = False
+                          for owner in (brush, bpy.context.tool_settings.sculpt):
+                              for prop in owner.bl_rna.properties:
+                                  if prop.identifier.startswith('use_automasking_') and prop.type == 'BOOLEAN' and not prop.is_readonly:
+                                      setattr(owner, prop.identifier, False)
+                          bpy.ops.view3d.view_axis(type='TOP', align_active=False)
+                          area.spaces.active.region_3d.view_distance = 5.0
+                          yield 0.3
+                          from bpy_extras import view3d_utils
+                          from mathutils import Vector
+                          xy = view3d_utils.location_3d_to_region_2d(region, area.spaces.active.region_3d, Vector((0,0,1)))
+                          stroke = [dict(name='MaskTest', mouse=tuple(xy), mouse_event=tuple(xy), location=(0,0,1), pressure=1.0, size=96, x_tilt=0.0, y_tilt=0.0, time=i*0.1, is_start=i==0) for i in range(3)]
+                          assert bpy.ops.sculpt.brush_stroke('EXEC_DEFAULT', True, stroke=stroke, override_location=True) == {'FINISHED'}
+                          yield 0.3
+                          attr = mesh.attributes.get('.sculpt_mask')
+                          assert attr and max(i.value for i in attr.data) > 0.05, 'Mask brush must actually paint'
+                      expected = 0.25 if scenario == 'higher_level_mask_retained' else 0.0
+                      assert bpy.ops.paint.mask_flood_fill(mode='VALUE', value=expected) == {'FINISHED'}
+                      if not expected:
+                          assert '.sculpt_mask' not in mesh.attributes or all(i.value == 0 for i in mesh.attributes['.sculpt_mask'].data)
+                      if scenario in ('brush_object_switch', 'existing_levels_object_switch'):
+                          bpy.ops.object.mode_set(mode='OBJECT')
+                          yield 0.3
+                      if scenario == 'brush_save_reload':
+                          saved = root / ('mask_clear_' + label + '.blend')
+                          bpy.ops.wm.save_as_mainfile(filepath=str(saved), check_existing=False)
+                          bpy.ops.wm.open_mainfile(filepath=str(saved))
+                          obj = bpy.context.object
+                          mesh = obj.data
+                          m = obj.modifiers.get('Multires')
+                          yield 0.3
+                      if m is None:
+                          m = obj.modifiers.new('Multires', 'MULTIRES')
+                      if scenario != 'existing_levels_clear':
+                          assert bpy.ops.object.multires_subdivide(modifier=m.name) == {'FINISHED'}
+                      else:
+                          m.sculpt_levels = m.total_levels
+                      bpy.context.view_layer.update()
+                      yield 0.3
+                      if scenario == 'base_mesh_subdivide':
+                          m.use_sculpt_base_mesh = False
+                          bpy.context.view_layer.update()
+                          yield 0.3
+                      if obj.mode != 'SCULPT':
+                          bpy.ops.object.mode_set(mode='SCULPT')
+                          yield 0.3
+                      print('LEVELS_AFTER_SUBDIVIDE', scenario, m.total_levels, m.levels, m.sculpt_levels, flush=True)
+                      assert m.sculpt_levels > 0
+                      dump = root / ('mask_surface_' + label + '_' + scenario + '.json')
+                      assert bpy.ops.sculpt.polypaint_blur_probe_v01(action='EXPORT', filepath=str(dump)) == {'FINISHED'}
+                      surface = json.loads(dump.read_text())['mask']
+                      assert (surface or not expected) and (not surface or max(abs(v-expected) for v in surface) <= 1e-7), (scenario, 'CCG MASK MISMATCH', max(surface) if surface else None)
+                      m.sculpt_levels = 0
+                      bpy.context.view_layer.update()
+                      attr = mesh.attributes.get('.sculpt_mask')
+                      values = [i.value for i in attr.data] if attr else [0.0] * len(mesh.vertices)
+                      assert max(abs(i-expected) for i in values) <= 1e-7, (scenario, values)
+                      results.append({'scenario': scenario, 'status': 'PASS', 'mask_min': min(surface, default=0.0), 'mask_max': max(surface, default=0.0), 'sample_count': len(surface)})
+              (root / ('mask_gui_' + label + '.json')).write_text(json.dumps(results, indent=2))
+              print('MASK_GUI_REGRESSION_PASS', json.dumps(results), flush=True)
+              bpy.ops.wm.quit_blender()
+          
+          steps = run()
+          def tick():
+              try:
+                  window = bpy.context.window
+                  area = next(a for a in window.screen.areas if a.type == 'VIEW_3D')
+                  region = next(r for r in area.regions if r.type == 'WINDOW')
+                  with bpy.context.temp_override(window=window, area=area, region=region):
+                      return next(steps)
+              except StopIteration:
+                  return None
+              except Exception:
+                  error = traceback.format_exc()
+                  (root / ('mask_gui_' + label + '.json')).write_text(json.dumps({'error': error, 'completed': results}, indent=2))
+                  print(error, flush=True)
+                  os._exit(1)
+          bpy.app.timers.register(tick, first_interval=1.0)
+          MASK_TEST
+          xvfb-run -a -s '-screen 0 1280x800x24' portable/blender --factory-startup --no-window-focus --python-exit-code 1 --python mask_clear_gui_regression.py
+          python3.11 - <<'CHECK'
+          import json
+          result=json.load(open('mask_gui_linux_clear_mask.json'))
+          assert len(result)==5 and all(row['status']=='PASS' for row in result),result
+          CHECK
+      - name: Require all requested GPU backends and packaged kernels
+        run: |
+          python3.11 - <<'PY'
+          from pathlib import Path
+          import re,json,subprocess
+          cache=Path('input/CMakeCache.txt').read_text()
+          flags=['WITH_CYCLES_DEVICE_CUDA','WITH_CYCLES_DEVICE_OPTIX','WITH_CYCLES_DEVICE_HIP','WITH_CYCLES_DEVICE_ONEAPI','WITH_CYCLES_CUDA_BINARIES','WITH_CYCLES_HIP_BINARIES']
+          for flag in flags:assert re.search(r'^'+flag+r':BOOL=ON$',cache,re.M),flag
+          files=[str(p) for p in Path('portable').rglob('*') if p.is_file()]
+          for kind,pattern in [('CUDA',r'kernel.*\.cubin(?:\.zst)?$'),('OptiX',r'kernel.*\.ptx(?:\.zst)?$'),('HIP',r'kernel.*\.fatbin(?:\.zst)?$'),('oneAPI',r'cycles_kernel_oneapi')]:
+              assert any(re.search(pattern,p) for p in files),kind+' kernel missing'
+          maximum=(0,0);checked=0
+          for p in Path('portable').rglob('*'):
+              if not p.is_file():continue
+              with p.open('rb') as f:elf=f.read(4)==b'\x7fELF'
+              if not elf:continue
+              out=subprocess.check_output(['readelf','--version-info',str(p)],text=True)
+              # Requirements only; definitions are not imported ABI requirements.
+              needs=out.split('Version needs section',1)[-1] if 'Version needs section' in out else ''
+              versions=[tuple(map(int,x.split('.'))) for x in re.findall(r'Name: GLIBC_([0-9.]+)',needs)]
+              assert all(v<=(2,28) for v in versions),(str(p),versions)
+              if versions:maximum=max(maximum,max(versions))
+              checked+=1
+          Path('GPU-ABI-AUDIT.json').write_text(json.dumps({'flags':flags,'elf_files':checked,'max_glibc':maximum,'physical_gpu_tested':False},indent=2))
+          PY
+      - name: Verify Smooth L0 isolation and RNA defaults without diagnostic errors
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          SMOOTH_TEST_LEVELS: '3'
+          RNA_TEST_RESULT: ${{ github.workspace }}/rna-defaults.json
+        run: |
+          set -euo pipefail
+          portable/blender --background --factory-startup --python-exit-code 1 --python source/doc/sculpt_extended/tests/check_rna_defaults.py > rna-startup.log 2>&1
+          cat rna-startup.log
+          xvfb-run -a -s '-screen 0 1280x800x24' portable/blender --factory-startup --no-window-focus --python-exit-code 1 --python source/doc/sculpt_extended/tests/smooth_l0_isolation_regression.py > smooth-l0.log 2>&1
+          cat smooth-l0.log
+          cp source/doc/sculpt_extended/tests/SMOOTH-ROUTING-20261025/l0_isolation.json smooth-l0.json
+          python3.11 - <<'PY'
+          import json
+          from pathlib import Path
+          rows=json.load(open('smooth-l0.json'))
+          assert len(rows)==7 and all(row['status']=='PASS' for row in rows),rows
+          rna=json.load(open('rna-defaults.json'))
+          assert len(rna)==5 and all(p['default']=='' and p['explicit_and_empty_values']=='PASS' for p in rna.values()),rna
+          for name in ['rna-startup.log','smooth-l0.log']:
+              log=Path(name).read_text(errors='replace')
+              assert not any(error in log for error in ['rna.define','Failure in TopologyRefiner','Incompatible existing refinement','Traceback','AssertionError']),name
+          PY
+      - name: Prepare verified artifact without recompiling or repackaging
+        run: |
+          cp "input/$ORIGINAL" .
+          cp input/SHA256SUMS.txt .
+          python3.11 - <<'PY'
+          import json,os
+          from pathlib import Path
+          Path('VERIFICATION.json').write_text(json.dumps({
+              'status':'VERIFIED_ROCKY8','source_commit':os.environ['SOURCE_SHA'],
+              'build_run':os.environ['ORIGINAL_BUILD_RUN'],
+              'verification_run':os.environ['GITHUB_RUN_ID'],
+              'startup_rocky8':'PASS','brush_regressions':'PASS','layer_undo_repeated':'PASS',
+              'mask_regressions':'PASS','gpu_abi_audit':'PASS',
+              'smooth_l0_regressions':'PASS','rna_defaults':'PASS','diagnostic_errors':'NONE',
+              'ubuntu24_verification':'PENDING_PUBLICATION_WORKFLOW',
+              'physical_gpu_tested':False,
+              'shared_indices_and_smooth_reads':'ENABLED_FOR_CHECKS_AND_LAUNCHER',
+          },indent=2)+'\n')
+          PY
+      - name: Save verified Linux package and evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: Blender-Sculpt-Extended-5.2.3-Linux-x64-Rocky8-GPU-preview
+          path: |
+            Blender-Sculpt-Extended-5.2.3-Linux-x64-Rocky8-GPU-preview.tar.xz
+            SHA256SUMS.txt
+            GPU-ABI-AUDIT.json
+            linux-guard-audit/RESULT.json
+            linux-guard-audit/LAYER-UNDO.json
+            mask_gui_linux_clear_mask.json
+            VERIFICATION.json
+            smooth-l0.json
+            rna-defaults.json
+            rna-startup.log
+            smooth-l0.log
+            input/CCACHE-STATS.txt
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
