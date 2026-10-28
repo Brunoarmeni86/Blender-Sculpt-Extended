@@ -44,6 +44,7 @@
 #include "DEG_depsgraph_query.hh"
 
 #include "GPU_batch.hh"
+#include "GPU_context.hh"
 
 #include "DRW_engine.hh"
 #include "DRW_pbvh.hh"
@@ -181,6 +182,10 @@ class DrawCacheImpl : public DrawCache {
   Vector<gpu::IndexBufPtr> lines_ibos_;
   /** Index buffers for coarse "fast navigate" wireframe geometry for each node. */
   Vector<gpu::IndexBufPtr> lines_ibos_coarse_;
+  /* SHARED_UNHIDDEN_GRID_INDICES_V01: immutable owners outlive node subranges.
+   * Declared before node IBOs so reverse member destruction frees subranges first. */
+  Map<uint64_t, gpu::IndexBufPtr> shared_grid_tri_indices_;
+
   /** Index buffers for triangles for each node, only used for grids. */
   Vector<gpu::IndexBufPtr> tris_ibos_;
   /** Index buffers for coarse "fast navigate" triangles for each node, only used for grids. */
@@ -2615,6 +2620,39 @@ Span<gpu::IndexBufPtr> DrawCacheImpl::ensure_tri_indices(const Object &object,
 
       const SubdivCCG &subdiv_ccg = *object.runtime->sculpt_session->subdiv_ccg;
       const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+
+      const char *share_env = std::getenv("BLENDER_MULTIRES_SHARED_INDEX_V01");
+      if (share_env && share_env[0] == '1' && share_env[1] == '\0' &&
+          GPU_backend_get_type() == GPU_BACKEND_OPENGL && subdiv_ccg.grid_hidden.is_empty())
+      {
+        const bool coarse_layout = coarse && !facesets_quad_display_v06c(object) &&
+                                   !facesets_quad_layout_rc1(object);
+        /* With no hidden elements, triangle indices depend only on local grid
+         * count, resolution, coarse mode and flat/smooth layout. Source IBOs
+         * are immutable. Per-node subranges keep existing batch ownership and
+         * visibility invalidation; hidden grids use the original path below. */
+        nodes_to_calculate.foreach_index([&](const int i) {
+          const uint64_t cache_key = (uint64_t(key.level) << 34) |
+                                     (uint64_t(coarse_layout) << 33) |
+                                     (uint64_t(use_flat_layout_[i]) << 32) |
+                                     uint64_t(nodes[i].grids().size());
+          if (!shared_grid_tri_indices_.contains(cache_key)) {
+            shared_grid_tri_indices_.add_new(
+                cache_key, create_tri_index_grids(key, {}, coarse_layout,
+                                                 nodes[i].grids(), use_flat_layout_[i]));
+          }
+          gpu::IndexBuf *source = shared_grid_tri_indices_.lookup(cache_key).get();
+          ibos[i] = gpu::IndexBufPtr(
+              GPU_indexbuf_create_subrange(source, 0, source->index_len_get()));
+        });
+        if (multires_draw_profile_v01::path()) {
+          multires_draw_profile_v01::log(
+              "[MULTIRES_SHARED_INDEX_V01] new_nodes=%lld source_patterns=%lld\n",
+              (long long)nodes_to_calculate.size(),
+              (long long)shared_grid_tri_indices_.size());
+        }
+        return ibos;
+      }
 
       nodes_to_calculate.foreach_index(
           [&](const int i) {

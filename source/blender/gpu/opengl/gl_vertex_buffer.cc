@@ -46,6 +46,7 @@ void GLVertBuf::release_data()
     GLContext::buffer_free(vbo_id_);
     vbo_id_ = 0;
     memory_usage -= vbo_size_;
+    vbo_size_ = 0;
   }
 
   MEM_SAFE_DELETE(data_);
@@ -67,6 +68,8 @@ void GLVertBuf::bind()
   glBindBuffer(GL_ARRAY_BUFFER, vbo_id_);
 
   if (flag & GPU_VERTBUF_DATA_DIRTY) {
+    /* Account for replacement storage rather than accumulating every upload. */
+    memory_usage -= vbo_size_;
     vbo_size_ = this->size_used_get();
 
     /* This is fine on some systems but will crash on others. */
