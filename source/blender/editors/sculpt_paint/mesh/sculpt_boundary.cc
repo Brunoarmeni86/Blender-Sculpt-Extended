@@ -3116,7 +3116,7 @@ static void init_boundary_mesh(const Depsgraph &depsgraph,
     initial_vert = std::get<int>(initial_vert_ref);
   }
   else {
-    float3 location = symmetry_flip(positions_eval[std::get<int>(initial_vert_ref)], symm_area);
+    float3 location = reference_symmetry_point(*ss.cache, positions_eval[std::get<int>(initial_vert_ref)], symm_area);
     initial_vert = nearest_vert_calc_mesh(
         pbvh, positions_eval, hide_vert, location, ss.cache->radius_squared, false);
   }
@@ -3172,7 +3172,7 @@ static void init_boundary_grids(Object &object,
   }
   else {
     const int active_vert = std::get<int>(initial_vert_ref);
-    float3 location = symmetry_flip(positions[active_vert], symm_area);
+    float3 location = reference_symmetry_point(*ss.cache, positions[active_vert], symm_area);
     initial_vert = nearest_vert_calc_grids(
         pbvh, subdiv_ccg, location, ss.cache->radius_squared, false);
   }
@@ -3227,7 +3227,7 @@ static void init_boundary_bmesh(Object &object,
   }
   else {
     BMVert *active_vert = std::get<BMVert *>(initial_vert_ref);
-    float3 location = symmetry_flip(active_vert->co, symm_area);
+    float3 location = reference_symmetry_point(*ss.cache, float3(active_vert->co), symm_area);
     initial_vert = nearest_vert_calc_bmesh(pbvh, location, ss.cache->radius_squared, false);
   }
 

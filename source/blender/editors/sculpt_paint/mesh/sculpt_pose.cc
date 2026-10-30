@@ -130,7 +130,33 @@ struct BrushLocalData {
   Vector<float3> translations;
 };
 
-BLI_NOINLINE static void calc_segment_translations(const Span<float3> positions,
+/* Ordered custom/local copies need spatial regions rather than XYZ sign bits.
+ * Assign original coordinates to the nearest mirrored pivot; stable ties keep
+ * the first region. No per-vertex cache or duplicate IK chain is needed. */
+static int pose_reference_region(const StrokeCache &cache, const float3 &position,
+                                 const float3 &pivot)
+{
+  int closest = 0;
+  float distance = FLT_MAX;
+  for (const int i : cache.reference_passes.index_range()) {
+    const float3 candidate = math::transform_point(cache.reference_passes[i], pivot);
+    const float d = math::distance_squared(position, candidate);
+    if (d < distance) { distance = d; closest = i; }
+  }
+  return closest;
+}
+
+static bool pose_reference_pivot_check(const StrokeCache *cache,
+                                       const float3 &position, const float3 &pivot,
+                                       const char symmetry)
+{
+  if (!cache || !cache->reference_symmetry) { return check_vertex_pivot_symmetry(position, pivot, symmetry); }
+  if (cache->reference_combined) { return pose_reference_region(*cache, position, pivot) == 0; }
+  return check_vertex_pivot_symmetry(math::transform_point(cache->object_to_reference, position),
+                                     math::transform_point(cache->object_to_reference, pivot), symmetry);
+}
+
+BLI_NOINLINE static void calc_segment_translations(const StrokeCache &cache, const Span<float3> positions,
                                                    const IKChainSegment &segment,
                                                    const MutableSpan<float3> translations)
 {
@@ -138,7 +164,9 @@ BLI_NOINLINE static void calc_segment_translations(const Span<float3> positions,
   BLI_assert(positions.size() == translations.size());
   for (const int i : positions.index_range()) {
     float3 position = positions[i];
-    const ePaintSymmetryAreas symm_area = get_vertex_symm_area(position);
+    const ePaintSymmetryAreas symm_area = cache.reference_combined ?
+        ePaintSymmetryAreas(pose_reference_region(cache, position, cache.orig_grab_location)) :
+        get_vertex_symm_area(cache.reference_symmetry ? math::transform_point(cache.object_to_reference, position) : position);
     position = math::transform_point(segment.pivot_mat_inv[int(symm_area)], position);
     position = math::transform_point(segment.trans_mat[int(symm_area)], position);
     position = math::transform_point(segment.pivot_mat[int(symm_area)], position);
@@ -186,7 +214,7 @@ static void calc_mesh(const Depsgraph &depsgraph,
   const MutableSpan<float3> segment_translations = tls.segment_translations;
 
   for (const IKChainSegment &segment : cache.pose_ik_chain->segments) {
-    calc_segment_translations(orig_data.positions, segment, segment_translations);
+    calc_segment_translations(cache, orig_data.positions, segment, segment_translations);
     gather_data_mesh(segment.weights.as_span(), verts, segment_weights);
     scale_translations(segment_translations, segment_weights);
     add_arrays(translations, segment_translations);
@@ -237,7 +265,7 @@ static void calc_grids(const Depsgraph &depsgraph,
   const MutableSpan<float3> segment_translations = tls.segment_translations;
 
   for (const IKChainSegment &segment : cache.pose_ik_chain->segments) {
-    calc_segment_translations(orig_data.positions, segment, segment_translations);
+    calc_segment_translations(cache, orig_data.positions, segment, segment_translations);
     gather_data_grids(subdiv_ccg, segment.weights.as_span(), grids, segment_weights);
     scale_translations(segment_translations, segment_weights);
     add_arrays(translations, segment_translations);
@@ -291,7 +319,7 @@ static void calc_bmesh(const Depsgraph &depsgraph,
   const MutableSpan<float3> segment_translations = tls.segment_translations;
 
   for (const IKChainSegment &segment : cache.pose_ik_chain->segments) {
-    calc_segment_translations(orig_positions, segment, segment_translations);
+    calc_segment_translations(cache, orig_positions, segment, segment_translations);
     gather_data_bmesh(segment.weights.as_span(), verts, segment_weights);
     scale_translations(segment_translations, segment_weights);
     add_arrays(translations, segment_translations);
@@ -353,7 +381,7 @@ BLI_NOINLINE static void add_fake_neighbors(const Span<int> fake_neighbors,
   neighbor_offsets.last() = neighbor_data_with_fake.size();
 }
 
-static void grow_factors_mesh(const ePaintSymmetryFlags symm,
+static void grow_factors_mesh(const StrokeCache *cache, const ePaintSymmetryFlags symm,
                               const float3 &pose_initial_position,
                               const Span<float3> vert_positions,
                               const OffsetIndices<int> faces,
@@ -400,7 +428,7 @@ static void grow_factors_mesh(const ePaintSymmetryFlags symm,
     if (max > prev_mask[vert]) {
       const float3 &position = vert_positions[verts[i]];
       pose_factor[vert] = max;
-      if (check_vertex_pivot_symmetry(position, pose_initial_position, symm)) {
+      if (pose_reference_pivot_check(cache, position, pose_initial_position, symm)) {
         gftd.pos_avg += position;
         gftd.pos_count++;
       }
@@ -408,7 +436,7 @@ static void grow_factors_mesh(const ePaintSymmetryFlags symm,
   }
 }
 
-static void grow_factors_grids(const ePaintSymmetryFlags symm,
+static void grow_factors_grids(const StrokeCache *cache, const ePaintSymmetryFlags symm,
                                const float3 &pose_initial_position,
                                const SubdivCCG &subdiv_ccg,
                                const Span<int> fake_neighbors,
@@ -450,7 +478,7 @@ static void grow_factors_grids(const ePaintSymmetryFlags symm,
         if (max > prev_mask[vert]) {
           const float3 &position = positions[vert];
           pose_factor[vert] = max;
-          if (check_vertex_pivot_symmetry(position, pose_initial_position, symm)) {
+          if (pose_reference_pivot_check(cache, position, pose_initial_position, symm)) {
             gftd.pos_avg += position;
             gftd.pos_count++;
           }
@@ -460,7 +488,7 @@ static void grow_factors_grids(const ePaintSymmetryFlags symm,
   }
 }
 
-static void grow_factors_bmesh(const ePaintSymmetryFlags symm,
+static void grow_factors_bmesh(const StrokeCache *cache, const ePaintSymmetryFlags symm,
                                const float3 &pose_initial_position,
                                const Span<int> fake_neighbors,
                                const Span<float> prev_mask,
@@ -488,7 +516,7 @@ static void grow_factors_bmesh(const ePaintSymmetryFlags symm,
     if (max > prev_mask[vert]) {
       const float3 position = bm_vert->co;
       pose_factor[vert] = max;
-      if (check_vertex_pivot_symmetry(position, pose_initial_position, symm)) {
+      if (pose_reference_pivot_check(cache, position, pose_initial_position, symm)) {
         gftd.pos_avg += position;
         gftd.pos_count++;
       }
@@ -543,7 +571,7 @@ static void grow_pose_factor(const Depsgraph &depsgraph,
             [&](const IndexRange range, PoseGrowFactorData gftd) {
               GrowFactorLocalData &tls = all_tls.local();
               node_mask.slice(range).foreach_index([&](const int i) {
-                grow_factors_mesh(symm,
+                grow_factors_mesh(ss.cache, symm,
                                   pose_target,
                                   vert_positions,
                                   faces,
@@ -572,7 +600,7 @@ static void grow_pose_factor(const Depsgraph &depsgraph,
             PoseGrowFactorData{},
             [&](const IndexRange range, PoseGrowFactorData gftd) {
               node_mask.slice(range).foreach_index([&](const int i) {
-                grow_factors_grids(symm,
+                grow_factors_grids(ss.cache, symm,
                                    pose_target,
                                    subdiv_ccg,
                                    fake_neighbors,
@@ -595,7 +623,7 @@ static void grow_pose_factor(const Depsgraph &depsgraph,
             [&](const IndexRange range, PoseGrowFactorData gftd) {
               node_mask.slice(range).foreach_index([&](const int i) {
                 grow_factors_bmesh(
-                    symm, pose_target, fake_neighbors, prev_mask, nodes[i], pose_factor, gftd);
+                    ss.cache, symm, pose_target, fake_neighbors, prev_mask, nodes[i], pose_factor, gftd);
               });
               return gftd;
             },
@@ -646,14 +674,20 @@ static void grow_pose_factor(const Depsgraph &depsgraph,
   }
 }
 
-static bool vert_inside_brush_radius(const float3 &vertex,
+static bool vert_inside_brush_radius(const StrokeCache *cache, const float3 &vertex,
                                      const float3 &br_co,
                                      float radius,
                                      char symm)
 {
+  if (cache && cache->reference_symmetry && cache->reference_combined) {
+    for (const float4x4 &matrix : cache->reference_passes) {
+      if (math::distance(vertex, math::transform_point(matrix, br_co)) < radius) { return true; }
+    }
+    return false;
+  }
   for (char i = 0; i <= symm; ++i) {
     if (is_symmetry_iteration_valid(i, symm)) {
-      const float3 location = symmetry_flip(br_co, ePaintSymmetryFlags(i));
+      const float3 location = cache ? reference_symmetry_point(*cache, br_co, ePaintSymmetryFlags(i)) : symmetry_flip(br_co, ePaintSymmetryFlags(i));
       if (math::distance(location, vertex) < radius) {
         return true;
       }
@@ -699,11 +733,11 @@ static void calc_pose_origin_and_factor_mesh(const Depsgraph &depsgraph,
       fallback_floodfill_origin = co;
     }
 
-    if (vert_inside_brush_radius(co, initial_location, radius, symm)) {
+    if (vert_inside_brush_radius(ss.cache, co, initial_location, radius, symm)) {
       return true;
     }
 
-    if (check_vertex_pivot_symmetry(co, initial_location, symm)) {
+    if (pose_reference_pivot_check(ss.cache, co, initial_location, symm)) {
       pose_origin += co;
       tot_co++;
     }
@@ -754,11 +788,11 @@ static void calc_pose_origin_and_factor_grids(Object &object,
           fallback_floodfill_origin = co;
         }
 
-        if (vert_inside_brush_radius(co, initial_location, radius, symm)) {
+        if (vert_inside_brush_radius(ss.cache, co, initial_location, radius, symm)) {
           return true;
         }
 
-        if (check_vertex_pivot_symmetry(co, initial_location, symm)) {
+        if (pose_reference_pivot_check(ss.cache, co, initial_location, symm)) {
           if (!is_duplicate) {
             pose_origin += co;
             tot_co++;
@@ -807,11 +841,11 @@ static void calc_pose_origin_and_factor_bmesh(Object &object,
       fallback_floodfill_origin = co;
     }
 
-    if (vert_inside_brush_radius(co, initial_location, radius, symm)) {
+    if (vert_inside_brush_radius(ss.cache, co, initial_location, radius, symm)) {
       return true;
     }
 
-    if (check_vertex_pivot_symmetry(co, initial_location, symm)) {
+    if (pose_reference_pivot_check(ss.cache, co, initial_location, symm)) {
       pose_origin += co;
       tot_co++;
     }
@@ -1088,7 +1122,7 @@ static std::unique_ptr<IKChain> ik_chain_init_face_sets_mesh(const Depsgraph &de
     const float3 &pose_initial_co = vert_positions[current_data.vert];
     flood_fill.execute(object, vert_to_face_map, [&](int /*from_v*/, int to_v) {
       const float3 &to_v_position = vert_positions[to_v];
-      const bool symmetry_check = check_vertex_pivot_symmetry(
+      const bool symmetry_check = pose_reference_pivot_check(ss.cache,
           to_v_position, pose_initial_co, symm);
 
       /* First iteration. Continue expanding using topology until a vertex is outside the brush
@@ -1098,7 +1132,7 @@ static std::unique_ptr<IKChain> ik_chain_init_face_sets_mesh(const Depsgraph &de
         pose_factor[to_v] = 1.0f;
         is_weighted[to_v].set();
 
-        if (vert_inside_brush_radius(to_v_position, pose_initial_co, radius, symm)) {
+        if (vert_inside_brush_radius(ss.cache, to_v_position, pose_initial_co, radius, symm)) {
           const int visited_face_set = face_set::vert_face_set_max_get(
               vert_to_face_map, face_sets, to_v);
           visited_face_sets.add(visited_face_set);
@@ -1264,7 +1298,7 @@ static std::unique_ptr<IKChain> ik_chain_init_face_sets_grids(Object &object,
           const int to_v_i = to_v.to_index(key);
 
           const float3 to_v_position = positions[to_v_i];
-          const bool symmetry_check = check_vertex_pivot_symmetry(
+          const bool symmetry_check = pose_reference_pivot_check(ss.cache,
                                           to_v_position, pose_initial_co, symm) &&
                                       !is_duplicate;
 
@@ -1275,7 +1309,7 @@ static std::unique_ptr<IKChain> ik_chain_init_face_sets_grids(Object &object,
             pose_factor[to_v_i] = 1.0f;
             is_weighted[to_v_i].set();
 
-            if (vert_inside_brush_radius(to_v_position, pose_initial_co, radius, symm)) {
+            if (vert_inside_brush_radius(ss.cache, to_v_position, pose_initial_co, radius, symm)) {
               const int visited_face_set = face_set::vert_face_set_get(
                   subdiv_ccg, face_sets, to_v.grid_index);
               visited_face_sets.add(visited_face_set);
@@ -1431,7 +1465,7 @@ static std::unique_ptr<IKChain> ik_chain_init_face_sets_bmesh(Object &object,
       const int to_v_i = BM_elem_index_get(to_v);
 
       const float3 to_v_position = to_v->co;
-      const bool symmetry_check = check_vertex_pivot_symmetry(
+      const bool symmetry_check = pose_reference_pivot_check(ss.cache,
           to_v_position, pose_initial_co, symm);
 
       /* First iteration. Continue expanding using topology until a vertex is outside the brush
@@ -1441,7 +1475,7 @@ static std::unique_ptr<IKChain> ik_chain_init_face_sets_bmesh(Object &object,
         pose_factor[to_v_i] = 1.0f;
         is_weighted[to_v_i].set();
 
-        if (vert_inside_brush_radius(to_v_position, pose_initial_co, radius, symm)) {
+        if (vert_inside_brush_radius(ss.cache, to_v_position, pose_initial_co, radius, symm)) {
           const int visited_face_set = face_set::vert_face_set_max_get(face_set_offset, *to_v);
           visited_face_sets.add(visited_face_set);
         }
@@ -2132,7 +2166,7 @@ void do_pose_brush(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
-  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
+  const ePaintSymmetryFlags symm = ss.cache->reference_combined ? ePaintSymmetryFlags(0) : mesh_symmetry_xyz_get(ob);
 
   if (!ss.cache->pose_ik_chain) {
     if (!pose_brush_init(depsgraph, ob, ss, brush)) {
@@ -2164,19 +2198,35 @@ void do_pose_brush(const Depsgraph &depsgraph,
    * possible combination. */
   /* This can be optimized by skipping the calculation of matrices where the symmetry is not
    * enabled. */
-  for (int symm_it = 0; symm_it < PAINT_SYMM_AREAS; symm_it++) {
+  const int area_count = ss.cache->reference_combined ? int(ss.cache->reference_passes.size()) : PAINT_SYMM_AREAS;
+  for (int symm_it = 0; symm_it < area_count; symm_it++) {
     for (const int i : ik_chain.segments.index_range()) {
       ePaintSymmetryAreas symm_area = ePaintSymmetryAreas(symm_it);
 
       float symm_rot[4];
       copy_qt_qt(symm_rot, ik_chain.segments[i].rot);
 
+      const bool reference = ss.cache->reference_symmetry && !ss.cache->reference_combined;
+      const float4x4 inverse = reference ? ss.cache->object_to_reference : float4x4::identity();
+      const float3 grab = reference ? math::transform_point(inverse, ss.cache->orig_grab_location) : ss.cache->orig_grab_location;
+      IKChainSegment reference_segment;
+      reference_segment.head = reference ? math::transform_point(inverse, ik_chain.segments[i].head) : ik_chain.segments[i].head;
+      reference_segment.orig = reference ? math::transform_point(inverse, ik_chain.segments[i].orig) : ik_chain.segments[i].orig;
+      const float3 initial_orig = reference ? math::transform_point(inverse, ik_chain.segments[i].initial_orig) : ik_chain.segments[i].initial_orig;
+      if (reference) {
+        float4x4 rotation; quat_to_mat4(rotation.ptr(), symm_rot);
+        float4x4 basis = ss.cache->reference_to_object;
+        basis.location() = float3(0.0f);
+        rotation = math::invert(basis) * rotation * basis;
+        mat4_to_quat(symm_rot, rotation.ptr());
+      }
+
       /* Flip the origins and rotation quats of each segment. */
-      flip_quat_by_symm_area(symm_rot, symm, symm_area, ss.cache->orig_grab_location);
+      flip_quat_by_symm_area(symm_rot, symm, symm_area, grab);
       float3 symm_orig = flip_v3_by_symm_area(
-          ik_chain.segments[i].orig, symm, symm_area, ss.cache->orig_grab_location);
+          reference_segment.orig, symm, symm_area, grab);
       float3 symm_initial_orig = flip_v3_by_symm_area(
-          ik_chain.segments[i].initial_orig, symm, symm_area, ss.cache->orig_grab_location);
+          initial_orig, symm, symm_area, grab);
 
       float pivot_local_space[4][4];
       unit_m4(pivot_local_space);
@@ -2186,8 +2236,8 @@ void do_pose_brush(const Depsgraph &depsgraph,
         align_pivot_local_space(pivot_local_space,
                                 symm,
                                 symm_area,
-                                &ik_chain.segments[i],
-                                ss.cache->orig_grab_location);
+                                &reference_segment,
+                                grab);
         unit_m4(ik_chain.segments[i].trans_mat[symm_it].ptr());
       }
       else {
@@ -2210,6 +2260,12 @@ void do_pose_brush(const Depsgraph &depsgraph,
           ik_chain.segments[i].pivot_mat[symm_it].ptr(), symm_orig[0], symm_orig[1], symm_orig[2]);
       mul_m4_m4_post(ik_chain.segments[i].pivot_mat[symm_it].ptr(), pivot_local_space);
 
+      if (reference) {
+        ik_chain.segments[i].pivot_mat[symm_it] = ss.cache->reference_to_object * ik_chain.segments[i].pivot_mat[symm_it];
+      }
+      else if (ss.cache->reference_combined) {
+        ik_chain.segments[i].pivot_mat[symm_it] = ss.cache->reference_passes[symm_it] * ik_chain.segments[i].pivot_mat[symm_it];
+      }
       invert_m4_m4(ik_chain.segments[i].pivot_mat_inv[symm_it].ptr(),
                    ik_chain.segments[i].pivot_mat[symm_it].ptr());
     }

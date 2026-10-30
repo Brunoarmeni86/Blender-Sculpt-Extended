@@ -1533,12 +1533,257 @@ const float *brush_frontface_normal_from_falloff_shape(const SculptSession &ss, 
 /* ===== Sculpting =====
  */
 
+
+/* Experimental frame is frozen once per stroke. No mesh transforms or extra stroke replay. */
+float3 reference_symmetry_point(const StrokeCache &cache,
+                                      const float3 &point,
+                                      const ePaintSymmetryFlags symm)
+{
+  if (!cache.reference_symmetry || symm == 0) { return symmetry_flip(point, symm); }
+  if (cache.reference_combined) {
+    return math::transform_point(cache.reference_passes[int(symm)], point);
+  }
+  return math::transform_point(cache.reference_to_object,
+      symmetry_flip(math::transform_point(cache.object_to_reference, point), symm));
+}
+float3 reference_symmetry_direction(const StrokeCache &cache,
+                                          const float3 &direction,
+                                          const ePaintSymmetryFlags symm)
+{
+  if (!cache.reference_symmetry || symm == 0) { return symmetry_flip(direction, symm); }
+  if (cache.reference_combined) {
+    return math::transform_direction(cache.reference_passes[int(symm)], direction);
+  }
+  return math::transform_direction(cache.reference_to_object,
+      symmetry_flip(math::transform_direction(cache.object_to_reference, direction), symm));
+}
+
+static float3 reference_unmirror_point(const StrokeCache &cache, const float3 &point)
+{
+  if (cache.reference_symmetry && cache.reference_combined) {
+    return math::transform_point(cache.reference_pass_inverse, point);
+  }
+  return reference_symmetry_point(cache, point, cache.mirror_symmetry_pass);
+}
+static float3 reference_unmirror_direction(const StrokeCache &cache, const float3 &direction)
+{
+  if (cache.reference_symmetry && cache.reference_combined) {
+    return math::transform_direction(cache.reference_pass_inverse, direction);
+  }
+  return reference_symmetry_direction(cache, direction, cache.mirror_symmetry_pass);
+}
+
+static bool reference_symmetry_read(const Depsgraph &depsgraph,
+                                       Object &object,
+                                       const Sculpt &sd,
+                                       const Brush &brush,
+                                       bool &requested,
+                                       float4x4 &matrix,
+                                       ReportList *reports)
+{
+  requested = false;
+  const char *enabled = std::getenv("BLENDER_SCULPT_SYMMETRY_REFERENCE_V01");
+  if (!enabled || enabled[0] != '1' || enabled[1] != '\0') { return true; }
+  PointerRNA owner = RNA_id_pointer_create(&object.id);
+  PropertyRNA *property = RNA_struct_find_property(&owner, "sculpt_symref_preview");
+  if (!property) { return true; }
+  PointerRNA settings = RNA_property_pointer_get(&owner, property);
+  if (!settings.data || !RNA_boolean_get(&settings, "use_for_strokes")) { return true; }
+  requested = true;
+  const auto reject = [&](const char *message) {
+    if (reports) { BKE_report(reports, RPT_ERROR, message); }
+    return false;
+  };
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(object);
+  if (!pbvh) { return reject("Custom symmetry: sculpt geometry is not ready"); }
+  if (pbvh->type() == bke::pbvh::Type::BMesh && RNA_boolean_get(&settings, "anchored")) {
+    return reject("Detach the reference vertex anchor before using Dyntopo");
+  }
+  PointerRNA brush_ptr = RNA_id_pointer_create(const_cast<ID *>(&brush.id));
+  if (PropertyRNA *transport = RNA_struct_find_property(&brush_ptr, "sculpt_draw_transport_v01")) {
+    if (RNA_property_boolean_get(&brush_ptr, transport)) {
+      return reject("Disable Draw Transport for the custom symmetry prototype");
+    }
+  }
+  const Mesh &mesh = *id_cast<Mesh *>(object.data);
+  if (mesh.radial_symmetry[0] != 1 || mesh.radial_symmetry[1] != 1 ||
+      mesh.radial_symmetry[2] != 1 ||
+      (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))) {
+    return reject("Custom symmetry prototype does not support radial symmetry or tiling yet");
+  }
+  const float4x4 &world = object.object_to_world();
+  const float3 x = world.x_axis(), y = world.y_axis(), z = world.z_axis();
+  const float sx = math::length(x), sy = math::length(y), sz = math::length(z);
+  if (!std::isfinite(sx) || sx < 1e-8f ||
+      std::abs(sx-sy) > sx*1e-5f || std::abs(sx-sz) > sx*1e-5f ||
+      std::abs(math::dot(x,y)) > sx*sx*1e-5f ||
+      std::abs(math::dot(x,z)) > sx*sx*1e-5f ||
+      std::abs(math::dot(y,z)) > sx*sx*1e-5f || math::dot(math::cross(x,y),z) <= 0) {
+    return reject("Custom symmetry prototype requires a positive uniform object scale without shear");
+  }
+  float3 location, rotation;
+  RNA_float_get_array(&settings, "location", location);
+  RNA_float_get_array(&settings, "rotation", rotation);
+  if (RNA_boolean_get(&settings, "anchored")) {
+    int topology[3];RNA_int_get_array(&settings, "topology", topology);
+    const int vertex = RNA_int_get(&settings,"vertex"), face = RNA_int_get(&settings,"face");
+    PointerRNA anchor_mesh = RNA_pointer_get(&settings,"anchor_mesh");
+    if (anchor_mesh.data != &mesh || topology[0]!=mesh.verts_num ||
+        topology[1]!=mesh.edges_num || topology[2]!=mesh.faces_num ||
+        vertex<0 || vertex>=mesh.verts_num || face<0 || face>=mesh.faces_num) {
+      return reject("Custom symmetry anchor is no longer compatible; detach or bind it again");
+    }
+    const std::string signature = RNA_string_get(&settings, "face_signature");
+    std::string current;
+    for (const int i : mesh.corner_verts().slice(mesh.faces()[face])) {
+      if (!current.empty()) { current += ','; }
+      current += std::to_string(i);
+    }
+    if (signature != current) { return reject("Custom symmetry anchor topology changed"); }
+    const Object *evaluated = DEG_get_evaluated(&depsgraph, &object);
+    const Mesh *evaluated_mesh = evaluated ? BKE_object_get_evaluated_mesh(evaluated) : nullptr;
+    if (!evaluated_mesh) { evaluated_mesh = &mesh; }
+    if (evaluated_mesh->verts_num != mesh.verts_num) {
+      return reject("Custom symmetry anchor requires topology-preserving deformation");
+    }
+    float3 offset;RNA_float_get_array(&settings,"anchor_offset",offset);
+    location = evaluated_mesh->vert_positions()[vertex] + offset;
+  }
+  for (int i=0;i<3;i++) {
+    if (!std::isfinite(location[i]) || !std::isfinite(rotation[i])) {
+      return reject("Custom symmetry reference must be finite");
+    }
+  }
+  eul_to_mat4(matrix.ptr(), rotation);
+  matrix.location() = location;
+  return true;
+}
+
+
+/* A bounded ordered composition: custom reference first, object-local second. */
+static bool reference_combined_passes(Object &object, const float4x4 &frame,
+                                     const Sculpt &sd, const Brush &brush,
+                                     bool &combined, Vector<float4x4> &passes,
+                                     ReportList *reports)
+{
+  combined = false;
+  passes.clear();
+  PointerRNA owner = RNA_id_pointer_create(&object.id);
+  PropertyRNA *property = RNA_struct_find_property(&owner, "sculpt_symref_preview");
+  if (!property) { return true; }
+  PointerRNA settings = RNA_property_pointer_get(&owner, property);
+  PropertyRNA *option = RNA_struct_find_property(&settings, "combine_local");
+  if (!option || !RNA_property_boolean_get(&settings, option)) { return true; }
+  combined = true;
+  const auto reject = [&](const char *message) {
+    if (reports) { BKE_report(reports, RPT_ERROR, message); }
+    return false;
+  };
+  bool axes[3]; RNA_boolean_get_array(&settings, "reference_axes", axes);
+  const int reference = int(axes[0]) | (int(axes[1]) << 1) | (int(axes[2]) << 2);
+  const int local = int(mesh_symmetry_xyz_get(object));
+  if ((reference & (reference - 1)) || (local & (local - 1))) {
+    return reject("Combined symmetry preview: choose at most one reference axis and one local axis");
+  }
+  const float4x4 inverse = math::invert(frame);
+  for (int l = 0; l <= local; l++) {
+    if (l != 0 && l != local) { continue; }
+    float4x4 local_matrix = float4x4::identity();
+    for (int axis = 0; axis < 3; axis++) {
+      if (l & (1 << axis)) { local_matrix[axis][axis] = -1.0f; }
+    }
+    for (int r = 0; r <= reference; r++) {
+      if (r != 0 && r != reference) { continue; }
+      float4x4 custom = float4x4::identity();
+      if (r != 0) {
+        float4x4 flip = float4x4::identity();
+        for (int axis = 0; axis < 3; axis++) {
+          if (r & (1 << axis)) { flip[axis][axis] = -1.0f; }
+        }
+        custom = frame * flip * inverse;
+      }
+      const float4x4 candidate = local_matrix * custom;
+      bool duplicate = false;
+      for (const float4x4 &existing : passes) {
+        float difference = 0.0f;
+        for (int c = 0; c < 4; c++) {
+          for (int row = 0; row < 4; row++) {
+            difference = std::max(difference, std::abs(candidate[c][row] - existing[c][row]));
+          }
+        }
+        if (difference == 0.0f) { duplicate = true; break; }
+        /* Do not silently merge geometrically distinct near-coincident planes. */
+        if (difference < 1e-6f) {
+          return reject("Combined symmetry planes are almost coincident; reset or separate the reference");
+        }
+      }
+      if (!duplicate) { passes.append(candidate); }
+    }
+  }
+  return true;
+}
+
+static bool reference_symmetry_prepare(const Depsgraph &depsgraph,
+                                       Object &object,
+                                       const Sculpt &sd,
+                                       const Brush &brush,
+                                       ReportList *reports)
+{
+  StrokeCache &cache = *object.runtime->sculpt_session->cache;
+  bool requested = false;
+  cache.reference_symmetry = false;
+  cache.reference_combined = false;
+  cache.reference_passes.clear();
+  if (!reference_symmetry_read(depsgraph, object, sd, brush, requested,
+                               cache.reference_to_object, reports)) { return false; }
+  if (requested) {
+    cache.object_to_reference = math::invert(cache.reference_to_object);
+    if (!reference_combined_passes(object, cache.reference_to_object, sd, brush,
+                                   cache.reference_combined, cache.reference_passes, reports)) {
+      return false;
+    }
+    cache.reference_symmetry = true;
+  }
+  return true;
+}
+
+bool reference_symmetry_matrix_get(const Depsgraph &depsgraph,
+                                   Object &object,
+                                   const Sculpt &sd,
+                                   const Brush &brush,
+                                   float4x4 &matrix)
+{
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (ss && ss->cache && ss->cache->reference_symmetry) {
+    matrix = ss->cache->reference_to_object;
+    return true;
+  }
+  bool requested = false;
+  return reference_symmetry_read(depsgraph, object, sd, brush, requested, matrix, nullptr) && requested;
+}
+
+bool reference_combined_matrices_get(const Depsgraph &depsgraph, Object &object,
+                                     const Sculpt &sd, const Brush &brush,
+                                     Vector<float4x4> &passes)
+{
+  const SculptSession *ss = object.runtime->sculpt_session;
+  if (ss && ss->cache && ss->cache->reference_symmetry) {
+    if (!ss->cache->reference_combined) { return false; }
+    passes = ss->cache->reference_passes;
+    return true;
+  }
+  float4x4 frame;
+  if (!reference_symmetry_matrix_get(depsgraph, object, sd, brush, frame)) { return false; }
+  bool combined = false;
+  return reference_combined_passes(object, frame, sd, brush, combined, passes, nullptr) && combined;
+}
+
 static float calc_overlap(const StrokeCache &cache,
                           const ePaintSymmetryFlags symm,
                           const char axis,
                           const float angle)
 {
-  float3 mirror = symmetry_flip(cache.location, symm);
+  float3 mirror = reference_symmetry_point(cache, cache.location, symm);
 
   if (axis != 0) {
     float mat[3][3];
@@ -2724,7 +2969,7 @@ void sculpt_apply_texture(const SculptSession &ss,
     if (cache.radial_symmetry_pass) {
       mul_m4_v3(cache.symm_rot_mat_inv.ptr(), point);
     }
-    float3 symm_point = symmetry_flip(point, cache.mirror_symmetry_pass);
+    float3 symm_point = reference_unmirror_point(cache, float3(point));
 
     /* Still no symmetry supported for other paint modes.
      * Sculpt does it DIY. */
@@ -2822,7 +3067,7 @@ void sculpt_apply_texture(const SculptSession &ss,
             if (cache.radial_symmetry_pass) {
               mul_mat3_m4_v3(cache.symm_rot_mat_inv.ptr(), n);
             }
-            n = symmetry_flip(n, cache.mirror_symmetry_pass);
+            n = reference_unmirror_direction(cache, n);
             mul_mat3_m4_v3(cache.brush_local_mat.ptr(), n);
             if (normalize_v3(n) > 1.0e-6f && n.z > 0.15f) {
               const float radial_tilt = (n.x * x + n.y * y) / planar_radius;
@@ -2888,7 +3133,7 @@ void calc_vertex_displacement(const SculptSession &ss, const Brush &brush, float
   if (ss.cache->radial_symmetry_pass) {
     mul_m4_v3(ss.cache->symm_rot_mat.ptr(), translation);
   }
-  copy_v3_v3(translation, symmetry_flip(translation, ss.cache->mirror_symmetry_pass));
+  copy_v3_v3(translation, reference_symmetry_direction(*ss.cache, float3(translation), ss.cache->mirror_symmetry_pass));
 }
 
 bool node_fully_masked_or_hidden(const bke::pbvh::Node &node)
@@ -3077,7 +3322,7 @@ static void update_sculpt_normal(const Depsgraph &depsgraph,
     copy_v3_v3(cache.sculpt_normal_symm, cache.sculpt_normal);
   }
   else {
-    cache.sculpt_normal_symm = symmetry_flip(cache.sculpt_normal, cache.mirror_symmetry_pass);
+    cache.sculpt_normal_symm = reference_symmetry_direction(cache, cache.sculpt_normal, cache.mirror_symmetry_pass);
     mul_m4_v3(cache.symm_rot_mat.ptr(), cache.sculpt_normal_symm);
   }
 }
@@ -3190,6 +3435,12 @@ float3 tilt_apply_to_normal(const float3 &normal,
                             const StrokeCache &cache,
                             const float tilt_strength)
 {
+  if (cache.reference_symmetry && cache.mirror_symmetry_pass != 0) {
+    const float3 source_normal = reference_unmirror_direction(cache, normal);
+    const float3 tilted = tilt_apply_to_normal(*cache.vc->obact,
+        float4x4(cache.vc->rv3d->viewinv), source_normal, cache.tilt, tilt_strength);
+    return reference_symmetry_direction(cache, tilted, cache.mirror_symmetry_pass);
+  }
   return tilt_apply_to_normal(
       *cache.vc->obact, float4x4(cache.vc->rv3d->viewinv), normal, cache.tilt, tilt_strength);
 }
@@ -3442,11 +3693,11 @@ void calc_brush_plane(const Depsgraph &depsgraph,
     BLI_assert(math::is_zero(ss.cache->symm_rot_mat.location().xyz()));
 
     r_area_no = ss.cache->sculpt_normal;
-    r_area_no = symmetry_flip(r_area_no, ss.cache->mirror_symmetry_pass);
+    r_area_no = reference_symmetry_direction(*ss.cache, r_area_no, ss.cache->mirror_symmetry_pass);
     r_area_no = math::transform_direction(ss.cache->symm_rot_mat, r_area_no);
 
     r_area_co = ss.cache->last_center;
-    r_area_co = symmetry_flip(r_area_co, ss.cache->mirror_symmetry_pass);
+    r_area_co = reference_symmetry_point(*ss.cache, r_area_co, ss.cache->mirror_symmetry_pass);
     r_area_co = math::transform_point(ss.cache->symm_rot_mat, r_area_co);
 
     /* Shift the plane for the current tile. */
@@ -4614,8 +4865,8 @@ static void anchor_surface_path_prepare(const Brush &brush, Object &ob)
                         cache.brush_local_mat_inv[1][1],
                         cache.brush_local_mat_inv[1][2]};
   if (wants_v5) {
-    reference_axis = symmetry_flip(reference_axis, cache.mirror_symmetry_pass);
-    reference_y = symmetry_flip(reference_y, cache.mirror_symmetry_pass);
+    reference_axis = reference_symmetry_direction(cache, reference_axis, cache.mirror_symmetry_pass);
+    reference_y = reference_symmetry_direction(cache, reference_y, cache.mirror_symmetry_pass);
     mul_mat3_m4_v3(cache.symm_rot_mat.ptr(), reference_axis);
     mul_mat3_m4_v3(cache.symm_rot_mat.ptr(), reference_y);
   }
@@ -5426,14 +5677,14 @@ void cache_calc_brushdata_symm(StrokeCache &cache,
                                const char axis,
                                const float angle)
 {
-  cache.location_symm = symmetry_flip(cache.location, symm);
-  cache.last_location_symm = symmetry_flip(cache.last_location, symm);
-  cache.grab_delta_symm = symmetry_flip(cache.grab_delta, symm);
-  cache.view_normal_symm = symmetry_flip(cache.view_normal, symm);
-  cache.view_origin_symm = symmetry_flip(cache.view_origin, symm);
+  cache.location_symm = reference_symmetry_point(cache, cache.location, symm);
+  cache.last_location_symm = reference_symmetry_point(cache, cache.last_location, symm);
+  cache.grab_delta_symm = reference_symmetry_direction(cache, cache.grab_delta, symm);
+  cache.view_normal_symm = reference_symmetry_direction(cache, cache.view_normal, symm);
+  cache.view_origin_symm = reference_symmetry_point(cache, cache.view_origin, symm);
 
-  cache.initial_location_symm = symmetry_flip(cache.initial_location, symm);
-  cache.initial_normal_symm = symmetry_flip(cache.initial_normal, symm);
+  cache.initial_location_symm = reference_symmetry_point(cache, cache.initial_location, symm);
+  cache.initial_normal_symm = reference_symmetry_direction(cache, cache.initial_normal, symm);
 
   /* XXX This reduces the length of the grab delta if it approaches the line of symmetry
    * XXX However, a different approach appears to be needed. */
@@ -5464,7 +5715,7 @@ void cache_calc_brushdata_symm(StrokeCache &cache,
   mul_m4_v3(cache.symm_rot_mat.ptr(), cache.grab_delta_symm);
 
   if (cache.supports_gravity) {
-    cache.gravity_direction_symm = symmetry_flip(cache.gravity_direction, symm);
+    cache.gravity_direction_symm = reference_symmetry_direction(cache, cache.gravity_direction, symm);
     mul_m4_v3(cache.symm_rot_mat.ptr(), cache.gravity_direction_symm);
   }
 
@@ -5474,7 +5725,18 @@ void cache_calc_brushdata_symm(StrokeCache &cache,
                     cache.rake_rotation->x,
                     cache.rake_rotation->y,
                     cache.rake_rotation->z);
-    flip_qt_qt(new_quat, existing, symm);
+    if (cache.reference_symmetry && symm != 0) {
+      float4x4 basis = float4x4::identity();
+      basis.x_axis() = reference_symmetry_direction(cache, float3(1,0,0), symm);
+      basis.y_axis() = reference_symmetry_direction(cache, float3(0,1,0), symm);
+      basis.z_axis() = reference_symmetry_direction(cache, float3(0,0,1), symm);
+      float4x4 rotation; quat_to_mat4(rotation.ptr(), existing);
+      rotation = basis * rotation * math::invert(basis);
+      mat4_to_quat(new_quat, rotation.ptr());
+    }
+    else {
+      flip_qt_qt(new_quat, existing, symm);
+    }
     cache.rake_rotation_symm = math::Quaternion(new_quat);
   }
 }
@@ -5601,6 +5863,31 @@ static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
+
+  if (cache.reference_combined) {
+    float feather = 1.0f;
+    if (sd.paint.symmetry_flags & PAINT_SYMMETRY_FEATHER) {
+      float overlap = 0.0f;
+      for (const float4x4 &matrix : cache.reference_passes) {
+        const float distance = math::distance(math::transform_point(matrix, cache.location), cache.location);
+        overlap += std::max(0.0f, 1.0f - distance / (2.0f * cache.radius));
+      }
+      feather = 1.0f / std::max(1.0f, overlap);
+    }
+    cache.bstrength = brush_strength(sd, cache, feather, paint_mode_settings);
+    if (sculpt_uniform_accumulation_enabled(brush)) {
+      cache.bstrength *= sd.paint.runtime->overlap_factor;
+    }
+    for (const int index : cache.reference_passes.index_range()) {
+      cache.reference_pass_matrix = cache.reference_passes[index];
+      cache.reference_pass_inverse = math::invert(cache.reference_pass_matrix);
+      cache.mirror_symmetry_pass = ePaintSymmetryFlags(index);
+      cache.radial_symmetry_pass = 0;
+      cache_calc_brushdata_symm(cache, ePaintSymmetryFlags(index), 0, 0);
+      do_tiled(depsgraph, scene, sd, ob, brush, paint_mode_settings, action);
+    }
+    return;
+  }
 
   float feather = calc_symmetry_feather(sd, symm, mesh, *ss.cache);
 
@@ -7630,6 +7917,9 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     ED_view3d_init_mats_rv3d(&ob, this->vc.rv3d);
 
     stroke_cache_init(mval);
+    if (brush && !reference_symmetry_prepare(*this->depsgraph, ob, *sculpt_, *brush, op->reports)) {
+      return false;
+    }
     if (brush && brush_type_is_paint(brush->sculpt_brush_type)) {
       BKE_curvemapping_init(brush->curve_rand_hue);
       BKE_curvemapping_init(brush->curve_rand_saturation);
@@ -9941,7 +10231,7 @@ void filter_region_clip_factors(const SculptSession &ss,
   const int radial_symmetry_pass = ss.cache ? ss.cache->radial_symmetry_pass : 0;
   const float4x4 symm_rot_mat_inv = ss.cache ? ss.cache->symm_rot_mat_inv : float4x4::identity();
   for (const int i : verts.index_range()) {
-    float3 symm_co = symmetry_flip(positions[verts[i]], mirror_symmetry_pass);
+    float3 symm_co = ss.cache ? reference_unmirror_point(*ss.cache, positions[verts[i]]) : symmetry_flip(positions[verts[i]], mirror_symmetry_pass);
     if (radial_symmetry_pass) {
       symm_co = math::transform_point(symm_rot_mat_inv, symm_co);
     }
@@ -9969,7 +10259,7 @@ void filter_region_clip_factors(const SculptSession &ss,
   const int radial_symmetry_pass = ss.cache ? ss.cache->radial_symmetry_pass : 0;
   const float4x4 symm_rot_mat_inv = ss.cache ? ss.cache->symm_rot_mat_inv : float4x4::identity();
   for (const int i : positions.index_range()) {
-    float3 symm_co = symmetry_flip(positions[i], mirror_symmetry_pass);
+    float3 symm_co = ss.cache ? reference_unmirror_point(*ss.cache, positions[i]) : symmetry_flip(positions[i], mirror_symmetry_pass);
     if (radial_symmetry_pass) {
       symm_co = math::transform_point(symm_rot_mat_inv, symm_co);
     }

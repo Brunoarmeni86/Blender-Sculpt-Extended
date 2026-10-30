@@ -395,24 +395,43 @@ static void tiling_preview_draw(const uint gpuattr,
   (void)tile_pass; /* Quiet set-but-unused warning (may be removed). */
 }
 
-static void point_with_symmetry_draw(const PaintMode paint_mode,
+static void point_with_symmetry_draw(const Depsgraph &depsgraph,
+                                     const Brush &brush,
+                                     const PaintMode paint_mode,
                                      const uint gpuattr,
                                      const ARegion *region,
                                      const float true_location[3],
                                      const Sculpt *sd,
-                                     const Object &ob,
+                                     Object &ob,
                                      const float radius)
 {
   const Mesh *mesh = id_cast<const Mesh *>(ob.data);
   const char symm = mesh_symmetry_xyz_get(ob);
   float3 location;
   float symm_rot_mat[4][4];
+  float4x4 frame;
+  const bool custom = paint_mode == PaintMode::Sculpt && sd &&
+      reference_symmetry_matrix_get(depsgraph, ob, *sd, brush, frame);
+  Vector<float4x4> combined;
+  if (custom && reference_combined_matrices_get(depsgraph, ob, *sd, brush, combined)) {
+    for (const float4x4 &matrix : combined) {
+      const float3 point = math::transform_point(matrix, float3(true_location));
+      screen_space_point_draw(gpuattr, region, point, ob.object_to_world().ptr(), 3);
+    }
+    return;
+  }
+  const float4x4 inverse = custom ? math::invert(frame) : float4x4::identity();
+  const auto mirrored = [&](const ePaintSymmetryFlags pass) {
+    if (!custom || pass == 0) { return symmetry_flip(true_location, pass); }
+    return math::transform_point(frame,
+        symmetry_flip(math::transform_point(inverse, float3(true_location)), pass));
+  };
 
   for (int i = 0; i <= symm; i++) {
     if (is_symmetry_iteration_valid(i, symm)) {
 
       /* Axis Symmetry. */
-      location = symmetry_flip(true_location, ePaintSymmetryFlags(i));
+      location = mirrored(ePaintSymmetryFlags(i));
       screen_space_point_draw(gpuattr, region, location, ob.object_to_world().ptr(), 3);
 
       /* Tiling. */
@@ -425,7 +444,7 @@ static void point_with_symmetry_draw(const PaintMode paint_mode,
       for (char raxis = 0; raxis < 3; raxis++) {
         for (int r = 1; r < mesh->radial_symmetry[raxis]; r++) {
           float angle = 2 * M_PI * r / mesh->radial_symmetry[int(raxis)];
-          location = symmetry_flip(true_location, ePaintSymmetryFlags(i));
+          location = mirrored(ePaintSymmetryFlags(i));
           unit_m4(symm_rot_mat);
           rotate_m4(symm_rot_mat, raxis + 'X', angle);
           mul_m4_v3(symm_rot_mat, location);
@@ -554,7 +573,9 @@ static void screen_space_overlays_draw(const PaintCursorContext &pcontext)
   /* Cursor location symmetry points. */
   if (math::distance(active_vertex_co, pcontext.location) < pcontext.radius) {
     immUniformColor3fvAlpha(pcontext.outline_col, pcontext.outline_alpha);
-    point_with_symmetry_draw(pcontext.mode,
+    point_with_symmetry_draw(*pcontext.depsgraph,
+                             brush,
+                             pcontext.mode,
                              pcontext.pos,
                              pcontext.region,
                              active_vertex_co,

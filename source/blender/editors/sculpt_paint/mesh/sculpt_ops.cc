@@ -15,6 +15,7 @@
 #include "BLI_path_utils.hh"
 #include "BLI_time.h"
 #include <cstdio>
+#include "bmesh.hh"
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -46,6 +47,8 @@
 #include "BKE_customdata.hh"
 #include "BKE_layer.hh"
 #include "BKE_main.hh"
+#include "BKE_lib_id.hh"
+#include <cstring>
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_runtime.hh"
@@ -1577,6 +1580,68 @@ static void SCULPT_OT_multires_layer_delete(wmOperatorType *ot)
   ot->exec = sculpt_multires_layer_delete_exec;
   ot->poll = sculpt_mode_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+
+static wmOperatorStatus sculpt_multires_detail_symmetrize_exec(bContext *C, wmOperator *op)
+{
+  const char *preview = std::getenv("BLENDER_SCULPT_SYMMETRY_REFERENCE_V01");
+  if (!preview || preview[0] != '1' || preview[1] != '\0') return OPERATOR_CANCELLED;
+  Object *ob = CTX_data_active_object(C);
+  if (!ob || !sculpt_multires_layer_modifier(*ob)) return OPERATOR_CANCELLED;
+  const SculptSession *session = ob->runtime->sculpt_session;
+  if (!session || session->cache || session->filter_cache || session->bm) {
+    BKE_report(op->reports, RPT_ERROR, "Finish the stroke/filter before symmetrizing Multires");
+    return OPERATOR_CANCELLED;
+  }
+  int multires_count=0;
+  for (const ModifierData &md : ob->modifiers) multires_count += md.type == eModifierType_Multires;
+  if (multires_count != 1) return OPERATOR_CANCELLED;
+  const MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
+  if (!mmd || mmd->totlvl < 1 || mmd->sculptlvl != mmd->totlvl ||
+      (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh)) {
+    BKE_report(op->reports, RPT_ERROR, "Preview: use the highest Sculpt level and disable Sculpt Base Mesh");
+    return OPERATOR_CANCELLED;
+  }
+  if (UndoStack *stack = ED_undo_stack_get()) {
+    BKE_undosys_sculpt_step_pair_memfile(stack, C);
+    ED_undosys_stack_memfile_id_changed_tag(stack, &ob->id);
+    ED_undosys_stack_memfile_id_changed_tag(stack, ob->data);
+  }
+  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  float3 origin, normal;
+  RNA_float_get_array(op->ptr, "plane_origin", origin);
+  RNA_float_get_array(op->ptr, "plane_normal", normal);
+  std::string error;
+  const auto transfer = RNA_boolean_get(op->ptr, "base_surface") ?
+      bke::multires_layers::symmetrize_multires_base : bke::multires_layers::symmetrize_active_detail;
+  if (!transfer(*ob, origin, normal,
+        RNA_boolean_get(op->ptr, "positive_source") ? 1.0f : -1.0f,
+        RNA_float_get(op->ptr, "distance"), RNA_boolean_get(op->ptr, "respect_mask"), error)) {
+    BKE_report(op->reports, RPT_ERROR, error.c_str());
+    return OPERATOR_CANCELLED;
+  }
+  multires_force_sculpt_rebuild(ob);
+  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_OT_multires_detail_symmetrize_preview(wmOperatorType *ot)
+{
+  ot->name = "Symmetrize Active Multires Detail";
+  ot->idname = "SCULPT_OT_multires_detail_symmetrize_preview";
+  ot->description = "Mirror active layer high-resolution detail, preserving cage, other layers and masks";
+  ot->exec = sculpt_multires_detail_symmetrize_exec;
+  ot->poll = sculpt_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  const float origin[3] = {0, 0, 0}, normal[3] = {1, 0, 0};
+  RNA_def_float_vector(ot->srna, "plane_origin", 3, origin, -FLT_MAX, FLT_MAX, "Plane origin", "Object-space point", -10000, 10000);
+  RNA_def_float_vector(ot->srna, "plane_normal", 3, normal, -1, 1, "Plane normal", "Unit object-space normal", -1, 1);
+  RNA_def_boolean(ot->srna, "base_surface", false, "Native base", "Mirror cage and native Multires base; rebase retained layer detail");
+  RNA_def_boolean(ot->srna, "positive_source", true, "Positive source", "Copy positive side to negative side");
+  RNA_def_boolean(ot->srna, "respect_mask", true, "Respect mask", "Protect masked destination samples");
+  RNA_def_float(ot->srna, "distance", 0.001f, 1e-7f, 10000, "Correspondence distance", "Maximum coarse-vertex matching distance", 1e-7f, 1.0f);
 }
 
 static wmOperatorStatus sculpt_multires_layer_duplicate_exec(bContext *C, wmOperator *op)
@@ -3593,6 +3658,64 @@ static void SCULPT_OT_mask_from_boundary(wmOperatorType *ot)
 
 void SCULPT_OT_draw_transport_activate_v03(wmOperatorType *ot);
 
+
+/* Opt-in, read-only probe for regression fixtures. No mesh/undo/mode changes. */
+static wmOperatorStatus reference_geometry_audit_exec(bContext *C, wmOperator * /*op*/)
+{
+  const char *path = std::getenv("BLENDER_SCULPT_REFERENCE_AUDIT_PATH");
+  if (!path || !path[0]) { return OPERATOR_CANCELLED; }
+  Object *object = CTX_data_active_object(C);
+  if (!object || !object->runtime->sculpt_session) { return OPERATOR_CANCELLED; }
+  const SculptSession &ss = *object->runtime->sculpt_session;
+  FILE *file = std::fopen(path, "wb");
+  if (!file) { return OPERATOR_CANCELLED; }
+  std::fprintf(file, "{\"pivot\":[%.9g,%.9g,%.9g],\"positions\":[",
+                double(ss.pivot_pos.x), double(ss.pivot_pos.y), double(ss.pivot_pos.z));
+  bool first = true;
+  const auto emit = [&](const float3 &co) {
+    std::fprintf(file, "%s[%.9g,%.9g,%.9g]", first ? "" : ",", double(co.x), double(co.y), double(co.z));
+    first = false;
+  };
+  int edges = 0, faces = 0;
+  if (ss.bm) {
+    BMIter iterator; BMVert *vertex;
+    BM_ITER_MESH(vertex, &iterator, ss.bm, BM_VERTS_OF_MESH) { emit(float3(vertex->co)); }
+    edges = ss.bm->totedge; faces = ss.bm->totface;
+  }
+  else if (ss.subdiv_ccg) {
+    for (const float3 &co : ss.subdiv_ccg->positions) { emit(co); }
+  }
+  else {
+    for (const float3 &co : bke::pbvh::vert_positions_eval(*CTX_data_ensure_evaluated_depsgraph(C), *object)) { emit(co); }
+    const Mesh &mesh = *id_cast<Mesh *>(object->data); edges = mesh.edges_num; faces = mesh.faces_num;
+  }
+  std::fprintf(file, "],\"edges\":%d,\"faces\":%d,\"mask_hash\":", edges, faces);
+  MultiresAuditHash mask_hash;
+  if (ss.subdiv_ccg) { for (const float value : ss.subdiv_ccg->masks) mask_hash.scalar(value); }
+  std::fprintf(file, "\"%llu\",\"layer_hashes\":[", static_cast<unsigned long long>(mask_hash.value));
+  bool first_layer = true;
+  if (MultiresModifierData *mmd = sculpt_multires_layer_modifier(*object)) {
+    for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+      const MultiresAuditHash hash = multires_audit_disps(layer.disps, layer.grids_num);
+      std::fprintf(file, "%s\"%llu\"", first_layer ? "" : ",", static_cast<unsigned long long>(hash.value));
+      first_layer = false;
+    }
+  }
+  std::fprintf(file, "]}");
+  const bool failed = std::ferror(file); std::fclose(file);
+  return failed ? OPERATOR_CANCELLED : OPERATOR_FINISHED;
+}
+static void SCULPT_OT_reference_geometry_audit(wmOperatorType *ot)
+{
+  ot->name = "Reference Geometry Audit";
+  ot->idname = "SCULPT_OT_reference_geometry_audit";
+  ot->exec = reference_geometry_audit_exec;
+  ot->poll = sculpt_mode_poll;
+  ot->flag = OPTYPE_INTERNAL;
+}
+
+#include "sculpt_reference_parameterize_preview.hh"
+
 void operatortypes_sculpt()
 {
   WM_operatortype_append(SCULPT_OT_facesets_brush_activate_v05);
@@ -3607,6 +3730,8 @@ void operatortypes_sculpt()
   WM_operatortype_append(OBJECT_OT_facesets_rebuild_l0_assign_v01);
   WM_operatortype_append(OBJECT_OT_facesets_rebuild_l0_audit_v01);
   WM_operatortype_append(SCULPT_OT_brush_stroke);
+  WM_operatortype_append(SCULPT_OT_reference_geometry_audit);
+  WM_operatortype_append(SCULPT_OT_reference_harmonic_solve_preview);
   WM_operatortype_append(SCULPT_OT_draw_transport_activate_v03);
   WM_operatortype_append(SCULPT_OT_sculptmode_toggle);
   WM_operatortype_append(SCULPT_OT_set_persistent_base);
@@ -3632,6 +3757,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_multires_detail_transfer_import_v01);
   WM_operatortype_append(SCULPT_OT_multires_layer_delete);
   WM_operatortype_append(SCULPT_OT_multires_layer_duplicate);
+  WM_operatortype_append(SCULPT_OT_multires_detail_symmetrize_preview);
   WM_operatortype_append(SCULPT_OT_multires_layer_set_active);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_create);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_add_active);

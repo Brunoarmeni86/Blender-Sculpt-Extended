@@ -330,6 +330,14 @@ struct StrokeCache {
   /* The face set being painted. */
   int paint_face_set = face_set_none_id;
 
+  /* Opt-in custom frame; ordinary symmetry has identical arithmetic when disabled. */
+  bool reference_symmetry = false;
+  bool reference_combined = false;
+  Vector<float4x4> reference_passes;
+  float4x4 reference_pass_matrix = float4x4::identity();
+  float4x4 reference_pass_inverse = float4x4::identity();
+  float4x4 reference_to_object = float4x4::identity();
+  float4x4 object_to_reference = float4x4::identity();
   /* The symmetry pass we are currently on between 0 and 7. */
   ePaintSymmetryFlags mirror_symmetry_pass = ePaintSymmetryFlags(0);
   float3 view_normal = float3(0);
@@ -849,6 +857,18 @@ void calc_smooth_translations(const Depsgraph &depsgraph,
  * Flip all the edit-data across the axis/axes specified by \a symm.
  * Used to calculate multiple modifications to the mesh when symmetry is enabled.
  */
+/** Same validated frame for cursor previews and actual brush passes. */
+float3 reference_symmetry_point(const StrokeCache &cache, const float3 &point, ePaintSymmetryFlags symm);
+float3 reference_symmetry_direction(const StrokeCache &cache, const float3 &direction, ePaintSymmetryFlags symm);
+bool reference_combined_matrices_get(const Depsgraph &depsgraph,
+                                     Object &object, const Sculpt &sd, const Brush &brush,
+                                     Vector<float4x4> &passes);
+bool reference_symmetry_matrix_get(const Depsgraph &depsgraph,
+                                   Object &object,
+                                   const Sculpt &sd,
+                                   const Brush &brush,
+                                   float4x4 &matrix);
+
 void cache_calc_brushdata_symm(ed::sculpt_paint::StrokeCache &cache,
                                ePaintSymmetryFlags symm,
                                char axis,

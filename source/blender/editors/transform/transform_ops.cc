@@ -987,7 +987,7 @@ static void TRANSFORM_OT_rotate(wmOperatorType *ot)
 
   properties_register(ot,
                       P_ORIENT_AXIS | P_ORIENT_MATRIX | P_CONSTRAINT | P_PROPORTIONAL | P_MIRROR |
-                          P_GEO_SNAP | P_GPENCIL_EDIT | P_CENTER);
+                          P_GEO_SNAP | P_GPENCIL_EDIT | P_CENTER | P_CURSOR_EDIT);
 }
 
 static bool tilt_poll(bContext *C)

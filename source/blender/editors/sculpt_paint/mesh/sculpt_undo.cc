@@ -376,6 +376,7 @@ struct StepData {
 
   float3 pivot_pos;
   float4 pivot_rot;
+  bool pivot_only = false;
 
   /* Geometry modification operations. */
   /* Original geometry is stored before the modification and is restored from when undoing. */
@@ -1489,6 +1490,9 @@ static void restore_geometry(StepData &step_data, Object &object)
  * returns false to indicate the non-dyntopo code should run. */
 static int bmesh_restore(bContext *C, Depsgraph &depsgraph, StepData &step_data, Object &object)
 {
+  if (step_data.type == Type::None && !step_data.bmesh.bm_entry) {
+    return false;
+  }
   SculptSession &ss = *object.runtime->sculpt_session;
   switch (step_data.type) {
     case Type::DyntopoBegin:
@@ -2265,6 +2269,24 @@ static bool restore_mask_master_step(Object &object, StepData &step)
 
 static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
 {
+  /* A pivot placement is a runtime metadata transaction. Do not refresh or
+   * publish Multires coordinates when undoing it. Exchange for exact redo. */
+  if (step_data.pivot_only) {
+    Object *object = CTX_data_active_object(C);
+    if (object && object->id.name == step_data.object_name && object->runtime->sculpt_session) {
+      SculptSession &ss = *object->runtime->sculpt_session;
+      std::swap(ss.pivot_pos, step_data.pivot_pos);
+      std::swap(ss.pivot_rot, step_data.pivot_rot);
+      if (Paint *paint = BKE_paint_get_active_from_context(C)) {
+        paint->runtime->average_stroke_accum = ss.pivot_pos;
+        paint->runtime->average_stroke_counter = 1;
+        paint->runtime->last_stroke_valid = true;
+      }
+      WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, object);
+    }
+    return;
+  }
+
   PRF_scope(ProfileCategory::Editor);
   const Main *bmain = CTX_data_main(C);
   Scene *scene = CTX_data_scene(C);
@@ -3691,6 +3713,16 @@ static bool sculpt_layer_first_stroke_anchor_eligible(const UndoStack &ustack,
   const SculptSession *ss = ob.runtime->sculpt_session;
   const SubdivCCG *ccg = ss ? ss->subdiv_ccg : nullptr;
   const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  /* Keep a live BMLog across the first stroke after a global checkpoint.
+   * Decoding that checkpoint during stroke Undo replaces the session/log and
+   * leaves the stroke's topology entry disconnected for Redo. */
+  if (!mesh.id.lib && ss && ss->bm && ss->bm_log && !ss->filter_cache &&
+      !ss->expand_cache && pbvh && pbvh->type() == bke::pbvh::Type::BMesh &&
+      G_MAIN && G_MAIN->is_memfile_undo_written)
+  {
+    r_reason = "READY_DYNTOPO";
+    return true;
+  }
   if (mesh.id.lib || !ss || ss->bm || ss->filter_cache || ss->expand_cache ||
       !ccg || !pbvh || pbvh->type() != bke::pbvh::Type::Grids ||
       ccg->dirty.coords || ccg->dirty.hidden || ccg->dirty.masks ||
@@ -3803,8 +3835,10 @@ static void sculpt_layer_first_stroke_anchor_ensure(UndoStack &ustack, Object &o
   }
   save_common_data(ob, anchor);
   save_active_attribute(ob, &anchor->active_color_end);
-  anchor->data.grids.grids_num = ob.runtime->sculpt_session->subdiv_ccg->grids_num;
-  anchor->data.grids.grid_size = ob.runtime->sculpt_session->subdiv_ccg->grid_size;
+  if (const SubdivCCG *ccg = ob.runtime->sculpt_session->subdiv_ccg) {
+    anchor->data.grids.grids_num = ccg->grids_num;
+    anchor->data.grids.grid_size = ccg->grid_size;
+  }
   anchor->data.layer_add_boundary_anchor = true;
 
   const eUndoPushReturn result = BKE_undosys_step_push(&ustack, nullptr, nullptr);
@@ -3888,6 +3922,20 @@ void push_begin_ex(const Scene & /*scene*/, Object &ob, const char *name)
       break;
     }
   }
+}
+
+void push_pivot_begin(Object &ob, const wmOperator *op)
+{
+  UndoStack *ustack = ED_undo_stack_get();
+  SculptUndoStep *us = reinterpret_cast<SculptUndoStep *>(
+      BKE_undosys_step_push_init_with_type(ustack, nullptr, op->type->name, BKE_UNDOSYS_TYPE_SCULPT));
+  us->data.object_name = ob.id.name;
+  us->data.pivot_only = true;
+  const SculptSession &ss = *ob.runtime->sculpt_session;
+  us->data.pivot_pos = ss.pivot_pos;
+  us->data.pivot_rot = ss.pivot_rot;
+  save_active_attribute(ob, &us->active_color_start);
+  save_active_attribute(ob, &us->active_color_end);
 }
 
 void push_begin(const Scene &scene, Object &ob, const wmOperator *op)

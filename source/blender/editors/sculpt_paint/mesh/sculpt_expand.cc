@@ -580,6 +580,10 @@ Vector<int> find_symm_verts_mesh(const Depsgraph &depsgraph,
                                  const float max_distance)
 {
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
+  const StrokeCache *reference_cache = object.runtime->sculpt_session->cache;
+  const bool combined = reference_cache && reference_cache->reference_symmetry && reference_cache->reference_combined;
+  const int pass_limit = combined ? int(reference_cache->reference_passes.size()) : int(symm) + 1;
+
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const bool use_original = false;
 
@@ -592,11 +596,11 @@ Vector<int> find_symm_verts_mesh(const Depsgraph &depsgraph,
   const VArraySpan hide_vert = *attributes.lookup<bool>(".hide_vert", bke::AttrDomain::Point);
 
   const float3 location = positions[original_vert];
-  for (int symm_it = 1; symm_it <= symm; symm_it++) {
-    if (!is_symmetry_iteration_valid(symm_it, symm)) {
+  for (int symm_it = 1; symm_it < pass_limit; symm_it++) {
+    if (!combined && !is_symmetry_iteration_valid(symm_it, symm)) {
       continue;
     }
-    const float3 symm_location = symmetry_flip(location, ePaintSymmetryFlags(symm_it));
+    const float3 symm_location = (object.runtime->sculpt_session->cache ? reference_symmetry_point(*object.runtime->sculpt_session->cache, location, ePaintSymmetryFlags(symm_it)) : symmetry_flip(location, ePaintSymmetryFlags(symm_it)));
     const std::optional<int> nearest = nearest_vert_calc_mesh(
         pbvh, positions, hide_vert, symm_location, max_distance, use_original);
     if (!nearest) {
@@ -614,6 +618,10 @@ Vector<int> find_symm_verts_grids(const Object &object,
                                   const float max_distance)
 {
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
+  const StrokeCache *reference_cache = object.runtime->sculpt_session->cache;
+  const bool combined = reference_cache && reference_cache->reference_symmetry && reference_cache->reference_combined;
+  const int pass_limit = combined ? int(reference_cache->reference_passes.size()) : int(symm) + 1;
+
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const bool use_original = false;
 
@@ -625,11 +633,11 @@ Vector<int> find_symm_verts_grids(const Object &object,
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
   const Span<float3> positions = subdiv_ccg.positions;
   const float3 location = positions[original_vert];
-  for (int symm_it = 1; symm_it <= symm; symm_it++) {
-    if (!is_symmetry_iteration_valid(symm_it, symm)) {
+  for (int symm_it = 1; symm_it < pass_limit; symm_it++) {
+    if (!combined && !is_symmetry_iteration_valid(symm_it, symm)) {
       continue;
     }
-    const float3 symm_location = symmetry_flip(location, ePaintSymmetryFlags(symm_it));
+    const float3 symm_location = (object.runtime->sculpt_session->cache ? reference_symmetry_point(*object.runtime->sculpt_session->cache, location, ePaintSymmetryFlags(symm_it)) : symmetry_flip(location, ePaintSymmetryFlags(symm_it)));
     const std::optional<SubdivCCGCoord> nearest = nearest_vert_calc_grids(
         pbvh, subdiv_ccg, symm_location, max_distance, use_original);
     if (!nearest) {
@@ -647,6 +655,10 @@ Vector<int> find_symm_verts_bmesh(const Object &object,
                                   const float max_distance)
 {
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
+  const StrokeCache *reference_cache = object.runtime->sculpt_session->cache;
+  const bool combined = reference_cache && reference_cache->reference_symmetry && reference_cache->reference_combined;
+  const int pass_limit = combined ? int(reference_cache->reference_passes.size()) : int(symm) + 1;
+
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const bool use_original = false;
 
@@ -657,11 +669,11 @@ Vector<int> find_symm_verts_bmesh(const Object &object,
   BMesh &bm = *ss.bm;
   const BMVert *original_bm_vert = BM_vert_at_index(&bm, original_vert);
   const float3 location = original_bm_vert->co;
-  for (int symm_it = 1; symm_it <= symm; symm_it++) {
-    if (!is_symmetry_iteration_valid(symm_it, symm)) {
+  for (int symm_it = 1; symm_it < pass_limit; symm_it++) {
+    if (!combined && !is_symmetry_iteration_valid(symm_it, symm)) {
       continue;
     }
-    const float3 symm_location = symmetry_flip(location, ePaintSymmetryFlags(symm_it));
+    const float3 symm_location = (object.runtime->sculpt_session->cache ? reference_symmetry_point(*object.runtime->sculpt_session->cache, location, ePaintSymmetryFlags(symm_it)) : symmetry_flip(location, ePaintSymmetryFlags(symm_it)));
     const std::optional<BMVert *> nearest = nearest_vert_calc_bmesh(
         pbvh, symm_location, max_distance, use_original);
     if (!nearest) {
@@ -716,6 +728,10 @@ std::array<int, PAINT_SYMM_AREAS> find_all_symm_verts_mesh(const Depsgraph &deps
                                                            const float max_distance)
 {
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
+  const StrokeCache *reference_cache = object.runtime->sculpt_session->cache;
+  const bool combined = reference_cache && reference_cache->reference_symmetry && reference_cache->reference_combined;
+  const int pass_limit = combined ? int(reference_cache->reference_passes.size()) : int(symm) + 1;
+
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const bool use_original = false;
 
@@ -729,11 +745,11 @@ std::array<int, PAINT_SYMM_AREAS> find_all_symm_verts_mesh(const Depsgraph &deps
   const VArraySpan hide_vert = *attributes.lookup<bool>(".hide_vert", bke::AttrDomain::Point);
 
   const float3 location = positions[original_vert];
-  for (int symm_it = 1; symm_it <= PAINT_SYMM_AREAS; symm_it++) {
-    if (!is_symmetry_iteration_valid(symm_it, symm)) {
+  for (int symm_it = 1; symm_it < pass_limit; symm_it++) {
+    if (!combined && !is_symmetry_iteration_valid(symm_it, symm)) {
       continue;
     }
-    const float3 symm_location = symmetry_flip(location, ePaintSymmetryFlags(symm_it));
+    const float3 symm_location = (object.runtime->sculpt_session->cache ? reference_symmetry_point(*object.runtime->sculpt_session->cache, location, ePaintSymmetryFlags(symm_it)) : symmetry_flip(location, ePaintSymmetryFlags(symm_it)));
     const std::optional<int> nearest = nearest_vert_calc_mesh(
         pbvh, positions, hide_vert, symm_location, max_distance, use_original);
     if (!nearest) {
@@ -750,6 +766,10 @@ std::array<int, PAINT_SYMM_AREAS> find_all_symm_verts_grids(const Object &object
                                                             const float max_distance)
 {
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
+  const StrokeCache *reference_cache = object.runtime->sculpt_session->cache;
+  const bool combined = reference_cache && reference_cache->reference_symmetry && reference_cache->reference_combined;
+  const int pass_limit = combined ? int(reference_cache->reference_passes.size()) : int(symm) + 1;
+
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const bool use_original = false;
 
@@ -762,11 +782,11 @@ std::array<int, PAINT_SYMM_AREAS> find_all_symm_verts_grids(const Object &object
   const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
   const Span<float3> positions = subdiv_ccg.positions;
   const float3 location = positions[original_vert];
-  for (int symm_it = 1; symm_it <= PAINT_SYMM_AREAS; symm_it++) {
-    if (!is_symmetry_iteration_valid(symm_it, symm)) {
+  for (int symm_it = 1; symm_it < pass_limit; symm_it++) {
+    if (!combined && !is_symmetry_iteration_valid(symm_it, symm)) {
       continue;
     }
-    const float3 symm_location = symmetry_flip(location, ePaintSymmetryFlags(symm_it));
+    const float3 symm_location = (object.runtime->sculpt_session->cache ? reference_symmetry_point(*object.runtime->sculpt_session->cache, location, ePaintSymmetryFlags(symm_it)) : symmetry_flip(location, ePaintSymmetryFlags(symm_it)));
     const std::optional<SubdivCCGCoord> nearest = nearest_vert_calc_grids(
         pbvh, subdiv_ccg, symm_location, max_distance, use_original);
     if (!nearest) {
@@ -783,6 +803,10 @@ std::array<int, PAINT_SYMM_AREAS> find_all_symm_verts_bmesh(const Object &object
                                                             const float max_distance)
 {
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
+  const StrokeCache *reference_cache = object.runtime->sculpt_session->cache;
+  const bool combined = reference_cache && reference_cache->reference_symmetry && reference_cache->reference_combined;
+  const int pass_limit = combined ? int(reference_cache->reference_passes.size()) : int(symm) + 1;
+
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const bool use_original = false;
 
@@ -794,11 +818,11 @@ std::array<int, PAINT_SYMM_AREAS> find_all_symm_verts_bmesh(const Object &object
   BMesh &bm = *ss.bm;
   const BMVert *original_bm_vert = BM_vert_at_index(&bm, original_vert);
   const float3 location = original_bm_vert->co;
-  for (int symm_it = 1; symm_it <= PAINT_SYMM_AREAS; symm_it++) {
-    if (!is_symmetry_iteration_valid(symm_it, symm)) {
+  for (int symm_it = 1; symm_it < pass_limit; symm_it++) {
+    if (!combined && !is_symmetry_iteration_valid(symm_it, symm)) {
       continue;
     }
-    const float3 symm_location = symmetry_flip(location, ePaintSymmetryFlags(symm_it));
+    const float3 symm_location = (object.runtime->sculpt_session->cache ? reference_symmetry_point(*object.runtime->sculpt_session->cache, location, ePaintSymmetryFlags(symm_it)) : symmetry_flip(location, ePaintSymmetryFlags(symm_it)));
     const std::optional<BMVert *> nearest = nearest_vert_calc_bmesh(
         pbvh, symm_location, max_distance, use_original);
     if (!nearest) {

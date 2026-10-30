@@ -2,6 +2,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #pragma once
 
+#include <string>
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
 #include "BLI_math_vector_types.hh"
@@ -24,6 +25,9 @@ struct MultiresColorGrid;
 struct MultiresFaceSetGrid;
 
 namespace bke::multires_layers {
+
+bool symmetrize_active_detail(Object &object, const float3 &origin, const float3 &normal, float source_sign, float tolerance, bool respect_mask, std::string &error);
+bool symmetrize_multires_base(Object &object, const float3 &origin, const float3 &normal, float source_sign, float tolerance, bool respect_mask, std::string &error);
 
 /* Zero is reserved for new BMesh elements. V2 avoids interpreting legacy zero-based IDs as
  * the first surviving corner. Seed these attributes before converting the mesh to BMesh. */

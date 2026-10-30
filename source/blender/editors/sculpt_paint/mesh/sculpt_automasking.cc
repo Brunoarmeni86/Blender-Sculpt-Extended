@@ -1702,10 +1702,12 @@ std::unique_ptr<Cache> cache_init(const Depsgraph &depsgraph,
     const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
 
     for (int symm_it = 0; symm_it < PAINT_SYMM_AREAS; symm_it++) {
-      if (!is_symmetry_iteration_valid(symm_it, symm)) {
+      const bool combined = ss.cache && ss.cache->reference_symmetry && ss.cache->reference_combined;
+      if (combined ? symm_it >= ss.cache->reference_passes.size() : !is_symmetry_iteration_valid(symm_it, symm)) {
         continue;
       }
-      BLI_assert(symm_verts[symm_it] != -1);
+      if (symm_verts[symm_it] == -1) { continue; }
+
       automasking->settings.initial_island_nr[symm_it] = islands::vert_id_get(ss,
                                                                               symm_verts[symm_it]);
     }

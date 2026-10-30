@@ -48,6 +48,10 @@ BLI_NOINLINE static void calc_translations(const Span<float3> positions,
   BLI_assert(positions.size() == translations.size());
 
   for (const int i : positions.index_range()) {
+    if (angles[i] == 0.0f) {
+      translations[i] = float3(0.0f);
+      continue;
+    }
     const math::AxisAngle rotation(axis, angles[i]);
     const float3x3 matrix = math::from_rotation<float3x3>(rotation);
     const float3 rotated = math::transform_point(matrix, positions[i] - center);

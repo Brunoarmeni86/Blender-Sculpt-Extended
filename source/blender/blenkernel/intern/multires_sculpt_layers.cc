@@ -5,6 +5,9 @@
  */
 
 #include <algorithm>
+#include <map>
+#include <vector>
+#include "BLI_kdtree.hh"
 #include <cfloat>
 #include <climits>
 #include <cstring>
@@ -4599,5 +4602,7 @@ bool shape_key_fast_update(Object &object, Key &key, KeyBlock &key_block)
 
   return true;
 }
+
+#include "multires_detail_symmetry_preview.hh"
 
 }  // namespace blender::bke::multires_layers

@@ -74,6 +74,9 @@ void push_nodes(const Depsgraph &depsgraph,
  */
 void push_begin(const Scene &scene, Object &ob, const wmOperator *op);
 
+/** Runtime pivot only: no mesh, mask, or layer payload capture. */
+void push_pivot_begin(Object &ob, const wmOperator *op);
+
 /**
  * Pushes an undo step when entering Sculpt mode.
  *

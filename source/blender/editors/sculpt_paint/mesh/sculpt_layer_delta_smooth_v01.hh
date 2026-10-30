@@ -121,6 +121,7 @@ struct State {
   Object *native_object = nullptr;
   Array<float3> mesh_reference;
   bool mesh_l0 = false;
+  bool persistent_coarse_reference = false;
   SubdivCCG *ccg = nullptr;
   const MultiresSculptLayer *layer = nullptr;
   Span<int> ptex;
@@ -254,25 +255,35 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
   if (error) { BKE_report(reports, RPT_ERROR, error); return false; }
   SubdivCCG *ccg = ss->subdiv_ccg;
   const bool pending = ccg->dirty.coords;
-  bool preserved = false;
-  if (!bke::multires_layers::commit(object, &preserved)) {
-    BKE_report(reports, RPT_ERROR, "Cannot commit pending sculpt before Delta Smooth");
-    return false;
-  }
-  if (object.runtime->sculpt_session != ss || ss->subdiv_ccg != ccg) {
-    BKE_report(reports, RPT_ERROR, "Delta Smooth surface changed while committing pending sculpt");
-    return false;
-  }
-  if (pending && !preserved) {
-    /* Lower-level edits use native detail-preserving reshape at Commit. Reattach
-     * its newly stored layer data and refresh the current CCG before capturing
-     * a new stroke reference. This runs before stroke cache/Undo initialization.
-     * Keep the established maximum-level preservation requirement unchanged. */
-    if (!multires_refresh_sculpt_ccg(&object, mmd) ||
-        object.runtime->sculpt_session != ss || ss->subdiv_ccg != ccg)
-    {
-      BKE_report(reports, RPT_ERROR, "Cannot refresh Multires after sculpt Commit");
+  const char *coarse_env = std::getenv("BLENDER_SCULPT_COARSE_SMOOTH_REFERENCE_V01");
+  const bool coarse_reference = coarse_env && coarse_env[0] == '1' && coarse_env[1] == '\0' &&
+      ccg->level < mmd->totlvl && ccg->subdiv && ccg->subdiv->displacement_evaluator &&
+      mmd->modifier.prev == nullptr && mmd->modifier.next == nullptr;
+  /* The persistent evaluator does not contain pending CCG edits. Sampling it
+   * minus the stored active layer gives the protected reference even across
+   * consecutive strokes, without publishing a full-resolution reshape here.
+   * Keep dirty flags and the change journal intact for normal commit/Undo. */
+  if (!coarse_reference) {
+    bool preserved = false;
+    if (!bke::multires_layers::commit(object, &preserved)) {
+      BKE_report(reports, RPT_ERROR, "Cannot commit pending sculpt before Delta Smooth");
       return false;
+    }
+    if (object.runtime->sculpt_session != ss || ss->subdiv_ccg != ccg) {
+      BKE_report(reports, RPT_ERROR, "Delta Smooth surface changed while committing pending sculpt");
+      return false;
+    }
+    if (pending && !preserved) {
+      /* Lower-level edits use native detail-preserving reshape at Commit. Reattach
+       * its newly stored layer data and refresh the current CCG before capturing
+       * a new stroke reference. This runs before stroke cache/Undo initialization.
+       * Keep the established maximum-level preservation requirement unchanged. */
+      if (!multires_refresh_sculpt_ccg(&object, mmd) ||
+          object.runtime->sculpt_session != ss || ss->subdiv_ccg != ccg)
+      {
+        BKE_report(reports, RPT_ERROR, "Cannot refresh Multires after sculpt Commit");
+        return false;
+      }
     }
   }
   layer = bke::multires_layers::active(*mmd);
@@ -289,6 +300,7 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
       (ccg->grid_size - 1) * s.sample_stride != s.stored_grid_size - 1)
   { reset(); return false; }
   s.object = &object; s.ccg = ccg; s.layer = layer;
+  s.persistent_coarse_reference = coarse_reference;
   s.raw_offsets.configure(ccg->grid_area);
   s.reference.configure(ccg->grid_area);
   const char *reuse = std::getenv("BLENDER_SCULPT_DELTA_PREPARE_REUSE");
@@ -299,8 +311,8 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
     return false;
   }
   s.ready = true;
-  std::fprintf(stderr, "[LAYER_DELTA_SMOOTH_V01] begin level=%d strength=%.6f pending_commit=%d\n",
-               ccg->level, layer->strength, int(pending));
+  std::fprintf(stderr, "[LAYER_DELTA_SMOOTH_V01] begin level=%d strength=%.6f pending_commit=%d persistent_reference=%d\n",
+               ccg->level, layer->strength, int(pending), int(coarse_reference));
   return true;
 }
 /* Evaluator calls and all map insertions stay serial. Workers only read captured references. */
@@ -369,6 +381,25 @@ inline bool raw_offset(const int index, float3 &out)
 {
   return raw_offset(state(), index, out);
 }
+/* Evaluate the committed surface, never the live coordinates being edited. */
+inline bool persistent_position(State &s, const int index, float3 &out)
+{
+  const SubdivCCG &ccg = *s.ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(ccg);
+  const SubdivCCGCoord coord = SubdivCCGCoord::from_index(key, index);
+  const int face_index = BKE_subdiv_ccg_grid_to_face_index(ccg, coord.grid_index);
+  const IndexRange face = ccg.faces[face_index];
+  const int corner = coord.grid_index - face.start();
+  const float gu = float(coord.x) / float(key.grid_size - 1);
+  const float gv = float(coord.y) / float(key.grid_size - 1);
+  const bool quad = face.size() == 4;
+  const int ptex = s.ptex[face_index] + (quad ? 0 : corner);
+  float u, v;
+  if (quad) { bke::subdiv::rotate_grid_to_quad(corner, gu, gv, &u, &v); }
+  else { bke::subdiv::grid_uv_to_ptex_face_uv(gu, gv, &u, &v); }
+  out = bke::subdiv::eval_final_point(ccg.subdiv, ptex, u, v);
+  return finite(out);
+}
 inline bool capture(const int index)
 {
   State &s = state();
@@ -389,14 +420,21 @@ inline bool capture(const int index)
   }
   /* Identical accumulation order on every copy of a stitched physical sample. */
   std::sort(aliases.begin(), aliases.end());
-  float3 offset(0.0f);
+  float3 offset(0.0f), persistent(0.0f);
   for (const int alias : aliases) {
     float3 other;
     if (!raw_offset(alias, other)) { return false; }
     offset += other;
+    if (s.persistent_coarse_reference) {
+      float3 point;
+      if (!persistent_position(s, alias, point)) { return fail("nonfinite_persistent_reference"); }
+      persistent += point;
+    }
   }
   offset /= float(aliases.size());
-  const float3 ref = ccg.positions[index] - offset;
+  const float3 surface = s.persistent_coarse_reference ?
+      persistent / float(aliases.size()) : ccg.positions[index];
+  const float3 ref = surface - offset;
   if (!finite(ref)) { return fail("nonfinite_reference"); }
   s.reference.add(index, ref);
   return true;

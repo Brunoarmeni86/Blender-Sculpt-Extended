@@ -615,6 +615,7 @@ enum class PivotPositionMode {
   MaskBorder = 2,
   ActiveVert = 3,
   CursorSurface = 4,
+  Cursor3D = 5,
 };
 
 static EnumPropertyItem prop_sculpt_pivot_position_types[] = {
@@ -643,6 +644,11 @@ static EnumPropertyItem prop_sculpt_pivot_position_types[] = {
      0,
      "Surface",
      "Sets the pivot position to the surface under the cursor"},
+    {int(PivotPositionMode::Cursor3D),
+     "CURSOR",
+     0,
+     "3D Cursor",
+     "Sets the sculpt transform pivot to the 3D cursor, including snapped interior positions"},
     {0, nullptr, 0, nullptr, nullptr},
 };
 
@@ -954,6 +960,14 @@ static wmOperatorStatus set_pivot_position_exec(bContext *C, wmOperator *op)
       if (cursor_geometry_info_update(C, mval, false)) {
         ss.pivot_pos = ss.active_vert_position(*depsgraph, ob);
       }
+      break;
+    }
+    case PivotPositionMode::Cursor3D: {
+      const Scene *scene = CTX_data_scene(C);
+      const float3 world_position(scene->cursor.location);
+      undo::push_pivot_begin(ob, op);
+      ss.pivot_pos = math::transform_point(ob.world_to_object(), world_position);
+      undo::push_end(ob);
       break;
     }
     case PivotPositionMode::CursorSurface: {

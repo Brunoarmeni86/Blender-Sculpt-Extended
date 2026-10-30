@@ -29,6 +29,9 @@
 #include "BKE_context.hh"
 #include "BKE_global.hh"
 #include "BKE_lib_id.hh"
+#include "BKE_idprop.hh"
+#include "BKE_undo_system.hh"
+#include "ED_undo.hh"
 #include "BKE_library.hh"
 #include "BKE_main.hh"
 #include "BKE_mesh.hh"
@@ -113,6 +116,42 @@ static wmOperatorStatus voxel_remesh_exec(bContext *C, wmOperator *op)
   Object *ob = CTX_data_active_object(C);
 
   Mesh *mesh = id_cast<Mesh *>(ob->data);
+
+  /* Preview-only local remesh dispatch; independent of attribute reprojection. */
+  const char *mask_preview = std::getenv("BLENDER_SCULPT_MASK_REMESH_V01");
+  const IDProperty *properties = IDP_GetProperties(&mesh->id);
+  const IDProperty *protect = properties ? IDP_GetPropertyFromGroup(properties, "sculpt_remesh_protect_mask_preview") : nullptr;
+  const bool protect_mask = protect &&
+      ((protect->type == IDP_BOOLEAN && IDP_bool_get(protect)) ||
+       (protect->type == IDP_INT && IDP_int_get(protect) != 0));
+  bool has_mask = false;
+  if (mask_preview && mask_preview[0] == '1' && mask_preview[1] == '\0' && protect_mask) {
+    const auto mask = mesh->attributes().lookup<float>(".sculpt_mask", bke::AttrDomain::Point);
+    if (mask) {
+      for (const int i : mesh->vert_positions().index_range()) {
+        if (!std::isfinite(mask.varray[i])) {
+          BKE_report(op->reports, RPT_ERROR, "Invalid mask values; mesh unchanged");
+          return OPERATOR_CANCELLED;
+        }
+        has_mask |= mask.varray[i] > 1e-6f;
+      }
+    }
+  }
+  if (has_mask) {
+    if (ob->mode == OB_MODE_SCULPT) {
+      if (UndoStack *stack = ED_undo_stack_get()) {
+        BKE_undosys_sculpt_step_pair_memfile(stack, C);
+        ED_undosys_stack_memfile_id_changed_tag(stack, &ob->id);
+        ED_undosys_stack_memfile_id_changed_tag(stack, &mesh->id);
+      }
+    }
+    if (!WM_operatortype_find("OBJECT_OT_voxel_remesh_protected_preview", true)) {
+      BKE_report(op->reports, RPT_ERROR, "Protected remesh preview is not registered; mesh unchanged");
+      return OPERATOR_CANCELLED;
+    }
+    return WM_operator_name_call(C, "OBJECT_OT_voxel_remesh_protected_preview",
+                                  wm::OpCallContext::ExecDefault, nullptr, nullptr);
+  }
 
   if (mesh->remesh_voxel_size <= 0.0f) {
     BKE_report(op->reports, RPT_ERROR, "Voxel remesher cannot run with a voxel size of 0.0");
