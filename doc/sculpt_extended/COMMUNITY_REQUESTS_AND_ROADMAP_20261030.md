@@ -168,3 +168,8 @@ Source: https://developer.blender.org/docs/release_notes/5.3/sculpt/ and https:/
 5. **Architecture study only:** per-level Multires displacement, Delete Lower, one-draw-call PBVH, cross-stroke persistent cache and fully sparse layer payload.
 
 All candidate upstream PRs/commits must be checked for exact integrated status at cherry-pick time, compiled on Windows and Linux separately, and tested with 3+ layer arrangements, L0, hidden grids, masks, UVs, high-resolution face sets, Undo/Redo and save/reload.
+
+
+## Detailed follow-up: Sculpt/Paint/Multires features (30 October 2026)
+
+A deeper, pivot-excluding review of 22 additional feature/technical leads with upstream maturity, direct source links, implementation strategy, risks, and test order lives in [FEATURE_DEEP_DIVE_20261030.md](FEATURE_DEEP_DIVE_20261030.md). It supplements rather than replaces this roadmap. No compiled Blender code or stable checkpoint was changed.
