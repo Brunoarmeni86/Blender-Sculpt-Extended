@@ -87,3 +87,84 @@ Users and requests:
 - Compare OFF/ON reproducibly (hashes/tolerance depending on path); test Undo/Redo and save/reload, including partial failure and cancellation; never silently drop protected data.
 - Measure cold/warm strokes at ~5M, ~30–40M and ~120M samples when hardware allows; record time per stage and memory peaks. Any 'faster' claim needs benchmark evidence.
 - Preserve approved Windows source checkpoint and distinguish Linux build provenance.
+
+
+---
+
+## Blender development audit — official upstream, 30 October 2026
+
+**Baseline:** Sculpt Extended approved source is Blender 5.2.3 with custom changes. Blender 5.3 is in beta (expected release 10 Nov 2026), 5.4 is in active development. The entries below are **upstream findings or proposals, not integrated Sculpt Extended features** unless an explicit comparison/cherry-pick and build verification say otherwise. Never import patch ranges without checking our custom sculpt layers, undo and CCG changes.
+
+### 5.2 features already upstream: compare, don't reinvent
+
+- **Scene Project brush**: Blender 5.2 officially includes projecting sculpt vertices to other scene objects, like a local shrinkwrap brush. Compare with our custom layer-aware Shrinkwrap → active Sculpt Layer workflow. Upstream reference: https://developer.blender.org/docs/release_notes/5.2/sculpt/
+- **Add Primitive in Sculpt Mode**: official 5.2 already adds primitive operators; research unification with Edit Mode primitives (WIP PR #164094) only if it benefits current sculpt workflow.
+- **Voxel Remesh vertex/corner attributes**: 5.2 improved interpolation of color attributes when remeshing. Our HR Face Set/Polypaint master still requires explicit coverage and separate cross-resolution tests.
+
+### Blender 5.3 beta — features documented as integrated upstream
+
+| Feature | Evidence | Sculpt Extended action |
+|---|---|---|
+| **Multires generic attribute display and textures** | 5.3 release notes: generic mesh/color attributes interpolated and textures display in Sculpt+Multires | P1: compare data domains and render paths with HR Polypaint/color layers, preserving separate CCG master; avoid duplicating upstream rendering fixes. |
+| **Transform Only Pivot** | 5.3 release notes | P2: reference UI/controls for Quick Pose / Posed Symmetry; does NOT itself solve posed topology symmetry. |
+| **Pressure curves: Hardness, Auto-Smooth, Spacing** | 5.3 release notes and GSoC 2026 general brush engine | P2: review compatibility of stroke interpolation with native layer-only brushes, avoid duplicate controls. |
+| **Per-brush unified scene settings opt-in** | 5.3 release notes | P2: useful for brush asset UX and project overrides; respect asset persistence. |
+| **Tip roundness / rounded box cursor** | 5.3 notes and Oct 13 meeting | P2: improve hard-surface tip shape; report stair-stepping on sharp corners as quality concern before copying. |
+| **Texture Paint image/UDIM undo and efficient mipmaps** | 5.3 release notes | P1: upstream foundation for Texture Paint Surface Wrap; distinguish image Undo from mesh/layer Undo. |
+| **Vertex and Weight Paint automasking** | 5.3 notes | P2: survey shared mask/falloff computations to reuse in color/texture painting as appropriate. |
+
+Source: https://developer.blender.org/docs/release_notes/5.3/sculpt/ and https://devtalk.blender.org/t/gsoc-2026-general-brush-engine-improvements/45188
+
+### Current October 2026 commits / in-review / experiments
+
+| Item | Upstream status / evidence | Proposed Sculpt Extended work |
+|---|---|---|
+| **Optimize calc_vertex_displacement** | Official weekly updates 26 Oct (Nicola Dessi), reported merged | P1: backport feasibility, benchmark Draw/Clay/Plane with active-layer-only policy |
+| **Simplify plane sampling / avoid unnecessary calc_brush_plane** | 26 Oct weekly; separate PR #165216 had been WIP in 13 Oct meeting | P1: benchmark and reference for HPolish/Trim; don't claim entire experimental PR has been merged |
+| **Reduce Sculpt Buffers** | Jeroen Bakker PR #162144 in Aug review, shown in October weekly changes | P1: compare GPU buffer memory/dirty-node updates with our shared Multires index buffer |
+| **PBVH GPU-culling / Multi Draw Indirect** | 28 Aug project meeting says multi-phase development, single-draw-call prototype WIP | P1: investigate compatible viewport path on experimental branch, not automatic port to OpenGL/Vulkan |
+| **Brush rake promoted to brush-local control** | October module meeting, work by Jerry Wei | P2: coordinate with Surface Wrap alpha / stencil / tip transforms, avoid double rotation |
+| **Roll curve mapping** | March and September module meetings; community PR under review with performance questions | P2: use as reference for seam/stitch/wrinkle strokes, validate corner cases |
+| **Texture Paint Blur/Smooth spatial structure** | October module meeting: KDTree 9-neighbor query costly, investigating brush-radius hash grid, octree, 2D fallback | P1: reuse lessons for surface-follow paint and sparse buffer access; avoid blindly porting KDTree |
+| **3D Texture Paint Mask brush** | Oct 13 module meeting: landed | P2: integration candidate for Texture Paint brush system |
+| **Shape-preserving / Polish brush limitations** | Sept 1 module meeting reports digging into surface, artificial side edges, flattening concavities and inability to preserve hard edges | P1/P2: HPolish V2 with curvature-aware plane, tangent-space masks, stable hard-edge constraints |
+| **Multires reshape coordinate traversal** | Hans Goudey official commits around Oct 28: no foreach callbacks | P1: investigate local commit/reshape speed and compatibility with layer persistence |
+| **Smooth Taubin/HC/Frequency-Aware** | GSoC 2026 Smooth Modifier research and PRs; not to be described as all present in Sculpt Smooth | P2: Taubin-style layer-isolated Smooth experiment; frequency-aware likely offline/global mesh filter |
+| **Delete Lower Multires** | 28 Apr module meeting says a worthwhile missing feature requiring nontrivial displacement rebuilding | P2/P3: potentially Promote Level as Base with full layer/Mask/Polypaint remap and reversibility test |
+| **Multires per-level displacement prototype and spike fix** | Feb/Mar meetings; narrow spike patch shelved in March | P1: compare hierarchical per-level idea to our full-resolution layer masters and sparse-grid plan; no automatic mixing of representations |
+| **Sculpt on Mirror modifier virtual side** | Aug 4 meeting, idea to route raycasts and mirrored strokes to real vertices | P2: could complement Posed Symmetry but not equivalent; needs topology mapping and layer correctness |
+| **Applying Multires preserves mask/hidden** | Feb 3 module meeting notes known missing attribute transfer | P1/P2: apply/bake/export roundtrip preserving mask, Face Sets, color, other layers |
+| **UV Smooth settings for Multires** | New 29 Oct proposal: Keep Boundaries may create overlaps; suggest Keep Corners, Junctions and Concave as more sensible default, study seam-aware future method | P1: add non-destructive warning/preset and validation for UV bake & UDIM. Do **not** change existing-file defaults silently |
+| **Actual UV seam overlay** | Idea posted 29 Oct: show true UV island boundaries, not only manually marked edges | P2: valuable for detecting seams in multi-res texture/displacement and surface wrap |
+| **Sculpt-side UV grid/stretch visualization** | Aug/Sept Sculpt meetings, exploratory UX idea | P2: optional UV stretch/overlap overlay while painting without leaving Sculpt |
+| **Transform data allocation reduction** | Oct 26 Modeling meeting reports huge benefit in one isolated case (2 TB → 600 MB, PR #165506), unrelated scope | Research-only: audit only allocation pattern; never transfer the reported benchmark to Multires/our build |
+| **Sculpt on high-density scene quality / autosave** | direct user feedback in earlier roadmap; official Texture Paint has saved image undo/cache fixes | P1: maintain separate memory and autosave profiling, don't confuse paint image caching with .blend CCG serialization |
+
+### Important external references
+
+- Upstream 5.3 release notes: https://developer.blender.org/docs/release_notes/5.3/sculpt/
+- Upstream 5.2 release notes: https://developer.blender.org/docs/release_notes/5.2/sculpt/
+- Oct 13 Sculpt/Paint meeting: https://devtalk.blender.org/t/2026-10-13-sculpt-paint-texture-module-meeting/46025
+- Sept 1 Sculpt/Paint meeting: https://devtalk.blender.org/t/2026-09-01-sculpt-paint-texture-module-meeting/45793
+- Aug 4 Sculpt/Paint meeting: https://devtalk.blender.org/t/2026-08-04-sculpt-paint-texture-module-meeting/45660
+- Mar 3 Sculpt/Paint meeting: https://devtalk.blender.org/t/2026-03-03-sculpt-paint-texture-module-meeting/44512
+- Feb 3 Sculpt/Paint meeting: https://devtalk.blender.org/t/2026-02-03-sculpt-paint-texture-module-meeting/44257
+- Apr 28 Sculpt/Paint meeting: https://devtalk.blender.org/t/2026-04-28-sculpt-paint-texture-module-meeting/45209
+- 28 Aug PBVH project discussion: https://devtalk.blender.org/t/2026-08-28-project-updates-meeting/45739
+- 26 Oct weekly changes: https://devtalk.blender.org/t/26-october-2026/46071
+- 28 Oct Blender Today sculpt and draw commit roundup: https://devtalk.blender.org/t/touch-your-blender-blender-today-live-292/46170
+- New UV smoothing idea (29 Oct): https://devtalk.blender.org/t/uv-better-default-uv-smoothing-on-subdivision-multires-modifiers/46187
+- New true UV seam overlay proposal (29 Oct): https://devtalk.blender.org/t/uv-actual-uv-seam-overlay/46191
+- Brush engine GSoC 2026: https://devtalk.blender.org/t/gsoc-2026-general-brush-engine-improvements/45188
+- Smooth methods 2026: https://devtalk.blender.org/t/feedback-wanted-new-hc-taubin-frequency-aware-smoothing-in-the-smooth-modifier/45726
+- Official developer architecture notes (Mesh/BMesh/CCG): https://developer.blender.org/docs/features/sculpt_paint/mesh_paint/
+
+### Short implementation order proposal
+
+1. **Review and measure** Oct 2026 upstream C++ low-risk brush calculations (`calc_vertex_displacement`, plane sampling, Multires reshape traversal) against approved checkpoint; source code inspection and tests required before import.
+2. **Compare** upstream attribute display and GPU sculpt buffer reductions to our HR polypaint/viewport branch; possible improvements without adding user-visible complexity.
+3. **Prototype** HPolish V2, Taubin-style delta smooth and rake/roll surface-follow on isolated branches.
+4. **Explore** UV Smooth presets and actual-seam overlay with tests for saved files, UDIM and bake.
+5. **Architecture study only:** per-level Multires displacement, Delete Lower, one-draw-call PBVH, cross-stroke persistent cache and fully sparse layer payload.
+
+All candidate upstream PRs/commits must be checked for exact integrated status at cherry-pick time, compiled on Windows and Linux separately, and tested with 3+ layer arrangements, L0, hidden grids, masks, UVs, high-resolution face sets, Undo/Redo and save/reload.
