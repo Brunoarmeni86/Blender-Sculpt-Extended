@@ -1,0 +1,17 @@
+{
+  "samples": 120,
+  "previous_vs_1x": {
+    "rms_degrees": 1.0830024697964475,
+    "max_degrees": 2.666404041153574
+  },
+  "corrected_vs_1x": {
+    "rms_degrees": 0.28512783510357276,
+    "max_degrees": 0.8726380149009072
+  },
+  "previous_vs_corrected": {
+    "rms_degrees": 1.0403929929505495,
+    "max_degrees": 2.2665813315356003
+  },
+  "corrected_closer_to_center_reference": true,
+  "scope": "Native bake and Cycles-equation decode; 1x center vs 4x4 filtered samples. Not a render correctness assertion."
+}
