@@ -1,3 +1,4 @@
+# Build trigger requested 2026-10-31: Linux parity with the integrated 2026-10-30 Windows source.
 name: Rocky 8 portable with CUDA OptiX HIP oneAPI
 on:
   push:
