@@ -24,6 +24,7 @@
  */
 #include "sculpt_undo.hh"
 #include "sculpt_facesets_l0_snapshot_v02.hh"
+#include "sculpt_layer_delta_smooth_v01.hh"
 #include "BKE_sculpt_facesets_visibility_rc2.hh"
 #include "BKE_modifier.hh"
 
@@ -4298,7 +4299,9 @@ static void sculpt_layer_restore_position_boundary_frame(bContext *C,
    * avoid freeing the CCG/PBVH after a certified local
    * publication or an already clean CCG. Changed levels/weights still rebuild. */
   const char *boundary_env = std::getenv("BLENDER_SCULPT_UNDO_BOUNDARY_METADATA");
-  const bool boundary_fast = boundary_env && boundary_env[0] == '1' && boundary_env[1] == '\0';
+  /* Metadata-only Undo boundaries are the normal path when every structural
+   * and dirty-state guard below succeeds. Set to 0 for the legacy rebuild. */
+  const bool boundary_fast = !boundary_env || boundary_env[0] == '\0' || boundary_env[0] != '0';
   SculptSession *boundary_ss = object->runtime->sculpt_session;
   SubdivCCG *boundary_ccg = boundary_ss ? boundary_ss->subdiv_ccg : nullptr;
   if (boundary_fast && !level_changed && !weights_changed && boundary_ss && boundary_ccg &&
@@ -4446,6 +4449,10 @@ static void step_decode(
   });
   /* NOTE: behavior for undo/redo closely matches image undo. */
   BLI_assert(dir != STEP_INVALID);
+  /* Undo/Redo changes the live CCG and/or persistent layer payload outside a
+   * brush transaction.  Never reuse a protected Smooth reference captured in
+   * the previous coordinate frame. */
+  layer_delta_smooth_v01::reset();
   sculpt_layer_undo_trace_state(
       C, *reinterpret_cast<const SculptUndoStep *>(us_p), "DECODE_ENTER");
 

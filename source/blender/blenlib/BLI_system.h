@@ -5,6 +5,7 @@
 #pragma once
 
 #include <stdio.h>
+#include <stdint.h>
 
 namespace blender {
 
@@ -39,6 +40,8 @@ void BLI_hostname_get(char *buffer, size_t buffer_maxncpy);
 size_t BLI_system_memory_max_in_megabytes();
 /** Get maximum addressable memory in megabytes (clamped to #INT_MAX). */
 int BLI_system_memory_max_in_megabytes_int();
+/** Installed physical memory in bytes, or zero when the platform cannot report it. */
+uint64_t BLI_system_memory_physical_total_bytes();
 
 /**
  * Ensure the process can open many files simultaneously.

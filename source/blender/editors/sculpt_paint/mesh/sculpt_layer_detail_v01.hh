@@ -79,11 +79,12 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports,
   /* With no other contribution, ordinary sculpting already preserves everything.
    * Do not impose isolation-only stroke/level/cage restrictions on that case. */
   if (!has_other_layers) { return true; }
-  if (ss->subdiv_ccg->level != mmd->totlvl || mmd->sculpt_displacement_enabled ||
+  if (ss->subdiv_ccg->level < 1 || ss->subdiv_ccg->level > mmd->totlvl ||
+      ss->subdiv_ccg->level != mmd->sculptlvl || mmd->sculpt_displacement_enabled ||
       mmd->sculpt_shrinkwrap_enabled || brush.deform_target != BRUSH_DEFORM_TARGET_GEOMETRY ||
       !ELEM(brush.stroke_method, BRUSH_STROKE_SPACE, BRUSH_STROKE_ANCHORED))
   {
-    BKE_report(reports, RPT_ERROR, "Preserve Other Layers: use Space or Anchored strokes at the highest Multires level, a visible active layer and no live deformers");
+    BKE_report(reports, RPT_ERROR, "Preserve Other Layers: use Space or Anchored strokes at a valid Multires level, a visible active layer and no live deformers");
     return false;
   }
   State &s = state(); s.object = &object; s.ccg = ss->subdiv_ccg;
@@ -109,15 +110,22 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports,
       }
     }
     if (&layer == active) { continue; }
-    if (layer.level != s.ccg->level || !layer.disps) {
+    if (layer.level != mmd->totlvl || !layer.disps) {
       reset();
-      BKE_report(reports, RPT_ERROR, "Preserve Other Layers requires layers stored at the current Multires level");
+      BKE_report(reports, RPT_ERROR, "Preserve Other Layers requires maximum-resolution layer grids");
       return false;
     }
     layer_delta_smooth_v01::State other;
     other.ccg=s.ccg; other.layer=&layer;
     other.ptex=bke::subdiv::face_ptex_offset_get(s.ccg->subdiv);
-    other.stored_grid_size=s.ccg->grid_size; other.sample_stride=1;
+    other.stored_grid_size=bke::subdiv::grid_size_from_level(layer.level);
+    other.sample_stride=(other.stored_grid_size-1)/(s.ccg->grid_size-1);
+    if (other.sample_stride < 1 ||
+        (s.ccg->grid_size-1)*other.sample_stride != other.stored_grid_size-1) {
+      reset();
+      BKE_report(reports, RPT_ERROR, "Preserve Other Layers found incompatible Multires grid levels");
+      return false;
+    }
     if (s.compact) { other.raw_offsets.configure(s.ccg->grid_area); }
     s.others.append(std::move(other));
   }

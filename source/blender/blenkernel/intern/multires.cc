@@ -28,6 +28,7 @@
 #include "BLI_task.h"
 #include "BLI_task.hh"
 #include "BLI_time.h"
+#include "BLI_system.h"
 #include "BLI_vector_set.hh"
 #include "BLI_vector.hh"
 #include "BLI_memory_utils.hh"
@@ -1185,14 +1186,22 @@ static bool multires_sculpt_commit_base_frame_cache_enabled()
   return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
-/* Opt-in total budget. Absent preserves the validated legacy policy.
+/* Total budget shared by the frame and layer-delta caches. An explicit setting wins;
+ * otherwise use 2% of installed RAM, clamped for predictable laptop/workstation behavior.
  * Read once per process; restart Blender after changing the budget. */
 static int64_t multires_layer_cache_budget_bytes()
 {
   static const int64_t bytes = []() -> int64_t {
     const char *value = BLI_getenv("BLENDER_SCULPT_LAYER_CACHE_MB");
     if (value == nullptr || value[0] == '\0') {
-      return -1;
+      constexpr int64_t mib = int64_t(1024) * 1024;
+      constexpr int64_t min_budget = 128 * mib;
+      constexpr int64_t max_budget = 1024 * mib;
+      const uint64_t physical = BLI_system_memory_physical_total_bytes();
+      if (physical == 0) {
+        return 256 * mib;
+      }
+      return std::clamp<int64_t>(int64_t(physical / 50), min_budget, max_budget);
     }
     char *end = nullptr;
     const long parsed = std::strtol(value, &end, 10);
@@ -1324,7 +1333,7 @@ static int64_t multires_weight_multi_cache_budget()
 {
   static const int64_t bytes = []() -> int64_t {
     const char *v = BLI_getenv("BLENDER_SCULPT_WEIGHT_MULTI_CACHE_MB");
-    if (!v || !v[0]) return int64_t(2048) * 1024 * 1024;
+    if (!v || !v[0]) return std::max<int64_t>(0, multires_layer_cache_budget_bytes() / 2);
     char *end = nullptr;
     const long mb = std::strtol(v, &end, 10);
     /* Invalid settings disable the new cache rather than request unbounded RAM. */
@@ -1613,38 +1622,77 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
     MultiresModifierData &mmd,
     MultiresSculptLayer &layer,
     SubdivCCG &ccg,
-    const SculptChangeSet &changes)
+    const SculptChangeSet &changes,
+    const char **r_route_reason)
 {
+  if (r_route_reason) {
+    *r_route_reason = "local_internal_failure";
+  }
+  const auto not_applicable = [&](const char *reason) {
+    if (r_route_reason) {
+      *r_route_reason = reason;
+    }
+    return MultiresLocalCommitResult::NotApplicable;
+  };
+  const auto failure = [&](const char *reason) {
+    if (r_route_reason) {
+      *r_route_reason = reason;
+    }
+    return MultiresLocalCommitResult::Failure;
+  };
   const bool commit_trace = multires_layer_commit_trace_enabled();
   const bool use_fast_tangent_solve = multires_sculpt_fast_tangent_solve_enabled();
   const double commit_total_start = commit_trace ? BLI_time_now_seconds() : 0.0;
 
-  if (!multires_sculpt_local_commit_enabled() || changes.positions_full ||
-      changes.topology_changed || ccg.dirty.hidden || ccg.dirty.masks ||
-      ccg.level != mmd.totlvl || mmd.sculptlvl != mmd.totlvl || mmd.totlvl <= 0)
-  {
-    return MultiresLocalCommitResult::NotApplicable;
+  if (!multires_sculpt_local_commit_enabled()) {
+    return not_applicable("local_disabled");
+  }
+  if (changes.positions_full) {
+    return not_applicable("positions_full");
+  }
+  if (changes.topology_changed) {
+    return not_applicable("topology_changed");
+  }
+  if (ccg.dirty.hidden) {
+    return not_applicable("hidden_dirty");
+  }
+  if (ccg.dirty.masks) {
+    return not_applicable("mask_dirty");
+  }
+  if (ccg.level != mmd.sculptlvl) {
+    return not_applicable("sculpt_level_mismatch");
+  }
+  if (mmd.totlvl <= 0) {
+    return not_applicable("no_multires_levels");
   }
 
   const int dirty_grids = sculpt_change_count(changes.position_grids);
-  if (dirty_grids == 0 || dirty_grids * 2 > ccg.grids_num) {
-    return MultiresLocalCommitResult::NotApplicable;
+  if (dirty_grids == 0) {
+    return not_applicable("no_dirty_grids");
+  }
+  if (dirty_grids * 2 > ccg.grids_num) {
+    return not_applicable("dirty_grids_over_half");
   }
 
-  const int side = bke::subdiv::grid_size_from_level(mmd.totlvl);
+  const int side = bke::subdiv::grid_size_from_level(ccg.level);
   const int area = side * side;
+  const int storage_side = bke::subdiv::grid_size_from_level(mmd.totlvl);
+  const int storage_area = storage_side * storage_side;
+  const bool lower_level_commit = ccg.level < mmd.totlvl;
+  const int storage_factor = lower_level_commit ? (storage_side - 1) / (side - 1) : 1;
   if (side < 2 || ccg.grid_size != side || ccg.grid_area != area ||
+      storage_side < side || (storage_side - 1) % (side - 1) != 0 ||
       ccg.grids_num != mesh.corners_num ||
       ccg.positions.size() != int64_t(ccg.grids_num) * int64_t(area) ||
       changes.position_grids.size() > ccg.grids_num || !bke::multires_layers::is_effective(layer))
   {
-    return MultiresLocalCommitResult::Failure;
+    return failure("ccg_shape_mismatch");
   }
 
   const MDisps *base = static_cast<const MDisps *>(
       CustomData_get_layer(&mesh.corner_data, CD_MDISPS));
   if (!base || !layer.disps || layer.grids_num != ccg.grids_num || layer.level != mmd.totlvl) {
-    return MultiresLocalCommitResult::Failure;
+    return failure("layer_storage_mismatch");
   }
 
   Vector<const MultiresSculptLayer *> other_layers;
@@ -1659,7 +1707,7 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
   const Span<int> grids = changes.position_grids.as_span();
   for (const int grid : grids) {
     if (grid < 0 || grid >= ccg.grids_num) {
-      return MultiresLocalCommitResult::Failure;
+      return failure("dirty_grid_out_of_range");
     }
   }
 
@@ -1697,7 +1745,7 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
 
   std::unique_lock<std::mutex> exact_sample_lock;
 
-  if (sample_journal_enabled && grid_journal_enabled) {
+  if (!lower_level_commit && sample_journal_enabled && grid_journal_enabled) {
     exact_sample_lock = std::unique_lock<std::mutex>(ccg.sculpt_dirty_position_grids_mutex);
 
     bool journals_match =
@@ -1760,14 +1808,16 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
   /* Validate all persistent inputs before staging output. */
   for (const int grid : grids) {
     if (/* V4.5a sparse Sculpt Layer foundation: null layer payload == implicit zero grid. */
-        !base[grid].disps || base[grid].level != mmd.totlvl || base[grid].totdisp != area ||
-        layer.disps[grid].level != mmd.totlvl || layer.disps[grid].totdisp != area)
+        !base[grid].disps || base[grid].level != mmd.totlvl ||
+        base[grid].totdisp != storage_area || layer.disps[grid].level != mmd.totlvl ||
+        layer.disps[grid].totdisp != storage_area)
     {
       return MultiresLocalCommitResult::Failure;
     }
     for (const MultiresSculptLayer *other : other_layers) {
       if (!other->disps || grid >= other->grids_num ||
-          other->disps[grid].level != mmd.totlvl || other->disps[grid].totdisp != area)
+          other->disps[grid].level != mmd.totlvl ||
+          other->disps[grid].totdisp != storage_area)
       {
         return MultiresLocalCommitResult::Failure;
       }
@@ -1808,7 +1858,7 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
     commit_frame_cache_lock =
         std::unique_lock<std::mutex>(multires_sculpt_commit_base_frame_cache_mutex());
     MultiresCommitBaseFrameCache &frame_cache = multires_sculpt_commit_base_frame_cache();
-    const uint64_t fingerprint = multires_sculpt_commit_base_fingerprint(context, mmd.totlvl);
+    const uint64_t fingerprint = multires_sculpt_commit_base_fingerprint(context, ccg.level);
     commit_frame_capacity = bke::multires_layers::cache_budget::frame_capacity(
         multires_sculpt_commit_base_frame_cache_capacity(),
         area,
@@ -1823,14 +1873,14 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
 
     const bool cache_matches = frame_cache.mesh == &mesh && frame_cache.mmd == &mmd &&
                                frame_cache.fingerprint == fingerprint &&
-                               frame_cache.level == mmd.totlvl && frame_cache.side == side &&
+                               frame_cache.level == ccg.level && frame_cache.side == side &&
                                frame_cache.area == area && frame_cache.grids_num == ccg.grids_num &&
                                frame_cache.capacity_grids == commit_frame_capacity;
     if (!cache_matches) {
       frame_cache.configure(mesh,
                             mmd,
                             fingerprint,
-                            mmd.totlvl,
+                            ccg.level,
                             side,
                             area,
                             ccg.grids_num,
@@ -1992,8 +2042,11 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
    * arithmetic are unchanged. All output is still staged before publication.
    * Never use this layout with an incomplete or mismatched sample journal. */
   const char *compact_env = BLI_getenv("BLENDER_SCULPT_COMPACT_COMMIT_STAGING");
-  const bool compact_staging_enabled = compact_env && compact_env[0] == '1' &&
-                                       compact_env[1] == '\0';
+  /* The packed layout is now the default when the exact, locked sample journal
+   * proves that it saves meaningful memory. It preserves the same solve and
+   * publication order; set the variable to 0 only for emergency A/B fallback. */
+  const bool compact_staging_enabled = compact_env == nullptr || compact_env[0] == '\0' ||
+                                       compact_env[0] != '0';
   const int64_t full_staging_bytes = full_sample_count * int64_t(sizeof(float3));
   const int64_t compact_metadata_bytes = (int64_t(grids.size()) + 1) * int64_t(sizeof(int64_t));
   const int64_t compact_saved_bytes =
@@ -2115,10 +2168,12 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
         const float3 object_delta = ccg_grid[i] - base_frame.P;
         float3 delta = multires_sculpt_tangent_solve_dual(base_frame, object_delta);
 
-        delta -= float3(base[grid].disps[i]);
+        const int storage_i = (i / side) * storage_factor * storage_side +
+                              (i % side) * storage_factor;
+        delta -= float3(base[grid].disps[storage_i]);
         for (const MultiresSculptLayer *other : other_layers) {
           if (other->disps[grid].disps != nullptr) {
-            delta -= float3(other->disps[grid].disps[i]) * other->strength;
+            delta -= float3(other->disps[grid].disps[storage_i]) * other->strength;
           }
         }
 
@@ -2130,7 +2185,11 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
           return false;
         }
 
-        staged_grid[compact_staging ? staged_sample++ : i] = delta;
+        const float3 active_old = layer.disps[grid].disps ?
+                                      float3(layer.disps[grid].disps[storage_i]) :
+                                      float3(0.0f);
+        staged_grid[compact_staging ? staged_sample++ : i] =
+            lower_level_commit ? delta - active_old : delta;
       }
 
       return !compact_staging || staged_sample == staged_grid.size();
@@ -2173,10 +2232,11 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
                       multires_sculpt_tangent_solve_fast(tangent, object_delta) :
                       math::invert(tangent) * object_delta;
         }
-        delta -= float3(base[grid].disps[i]);
+        const int storage_i = y * storage_factor * storage_side + x * storage_factor;
+        delta -= float3(base[grid].disps[storage_i]);
         for (const MultiresSculptLayer *other : other_layers) {
           if (other->disps[grid].disps != nullptr) {
-          delta -= float3(other->disps[grid].disps[i]) * other->strength;
+          delta -= float3(other->disps[grid].disps[storage_i]) * other->strength;
         }
         }
 
@@ -2191,7 +2251,11 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
           return false;
         }
 
-        staged_grid[compact_staging ? staged_sample++ : i] = delta;
+        const float3 active_old = layer.disps[grid].disps ?
+                                      float3(layer.disps[grid].disps[storage_i]) :
+                                      float3(0.0f);
+        staged_grid[compact_staging ? staged_sample++ : i] =
+            lower_level_commit ? delta - active_old : delta;
       }
     }
 
@@ -2265,13 +2329,36 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
         continue;
       }
       const int64_t sample_base = int64_t(grid) * int64_t(area);
-      for (int i = 0; i < area; i++) {
-        if (use_exact_samples &&
-            !ccg.sculpt_dirty_position_sample_flags[sample_base + i])
-        {
-          continue;
+      if (lower_level_commit) {
+        /* Preserve the layer's existing fine detail and lift only the newly
+         * recorded coarse correction. Grid coordinates are nested exactly
+         * between Multires levels, so bilinear cell interpolation keeps the
+         * committed coarse samples exact and avoids a global reshape. */
+        for (int fy = 0; fy < storage_side; fy++) {
+          const int cy = std::min(fy / storage_factor, side - 2);
+          const float ty = float(fy - cy * storage_factor) / float(storage_factor);
+          for (int fx = 0; fx < storage_side; fx++) {
+            const int cx = std::min(fx / storage_factor, side - 2);
+            const float tx = float(fx - cx * storage_factor) / float(storage_factor);
+            const float3 c00 = staged_grid[cy * side + cx];
+            const float3 c10 = staged_grid[cy * side + cx + 1];
+            const float3 c01 = staged_grid[(cy + 1) * side + cx];
+            const float3 c11 = staged_grid[(cy + 1) * side + cx + 1];
+            const float3 correction = math::interpolate(
+                math::interpolate(c00, c10, tx), math::interpolate(c01, c11, tx), ty);
+            add_v3_v3(layer_grid[fy * storage_side + fx], correction);
+          }
         }
-        copy_v3_v3(layer_grid[i], staged_grid[compact_staging ? staged_sample++ : i]);
+      }
+      else {
+        for (int i = 0; i < area; i++) {
+          if (use_exact_samples &&
+              !ccg.sculpt_dirty_position_sample_flags[sample_base + i])
+          {
+            continue;
+          }
+          copy_v3_v3(layer_grid[i], staged_grid[compact_staging ? staged_sample++ : i]);
+        }
       }
       BLI_assert(!compact_staging || staged_sample == staged_grid.size());
       publish_ok[dirty_i] = 1;
@@ -2380,6 +2467,9 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
     }
   }
 
+  if (r_route_reason) {
+    *r_route_reason = "local_success";
+  }
   return MultiresLocalCommitResult::Success;
 }
 
@@ -2476,9 +2566,25 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
     {
       return fail();
     }
+    const bool commit_route_trace = multires_layer_commit_trace_enabled();
+    const double commit_route_start = commit_route_trace ? BLI_time_now_seconds() : 0.0;
+    const char *commit_route_reason = "unknown";
     const MultiresLocalCommitResult local_result = multires_sculpt_layer_commit_top_level_local(
-        *mesh, *mmd, *layer, *ccg, changes);
+        *mesh, *mmd, *layer, *ccg, changes, &commit_route_reason);
     if (local_result == MultiresLocalCommitResult::Success) {
+      if (commit_route_trace) {
+        std::printf(
+            "[LAYER_COMMIT_ROUTE] route=LOCAL reason=%s level=%d top=%d dirty_grids=%d/%d "
+            "ccg_cpu_mib=%.3f total_ms=%.3f\n",
+            commit_route_reason,
+            ccg->level,
+            mmd->totlvl,
+            int(changes.position_grids.size()),
+            ccg->grids_num,
+            double(ccg->positions.size()) * double(sizeof(float3)) / (1024.0 * 1024.0),
+            (BLI_time_now_seconds() - commit_route_start) * 1000.0);
+        std::fflush(stdout);
+      }
       ccg->dirty.coords = false;
       ccg->dirty.hidden = false;
       ccg->dirty.masks = false;
@@ -2491,6 +2597,22 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
         *r_local_surface_preserved = true;
       }
       return true;
+    }
+    if (commit_route_trace) {
+      std::printf(
+          "[LAYER_COMMIT_ROUTE] route=GLOBAL reason=%s local_result=%s level=%d top=%d "
+          "dirty_grids=%d/%d full=%d mask_dirty=%d hidden_dirty=%d ccg_cpu_mib=%.3f\n",
+          commit_route_reason,
+          local_result == MultiresLocalCommitResult::Failure ? "FAILURE" : "NOT_APPLICABLE",
+          ccg->level,
+          mmd->totlvl,
+          int(changes.position_grids.size()),
+          ccg->grids_num,
+          int(changes.positions_full),
+          int(ccg->dirty.masks),
+          int(ccg->dirty.hidden),
+          double(ccg->positions.size()) * double(sizeof(float3)) / (1024.0 * 1024.0));
+      std::fflush(stdout);
     }
 
     const bool live_displacement_active = mmd->sculpt_displacement_enabled != 0 &&
@@ -2506,6 +2628,18 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
                                         !live_displacement_active;
     const bool compose_trace = multires_layer_commit_trace_enabled();
     const double compose_start = compose_trace ? BLI_time_now_seconds() : 0.0;
+    double phase_start = compose_start;
+    const auto trace_phase = [&](const char *phase) {
+      if (!compose_trace) {
+        return;
+      }
+      const double now = BLI_time_now_seconds();
+      std::printf("[LAYER_COMMIT_PHASE] phase=%s level=%d top=%d dirty_grids=%d full=%d ms=%.3f\n",
+                  phase, ccg->level, mmd->totlvl, int(changes.position_grids.size()),
+                  int(changes.positions_full), (now - phase_start) * 1000.0);
+      std::fflush(stdout);
+      phase_start = now;
+    };
     int64_t skipped_reference_samples = 0;
 
     /* Reshape writes displacement AND masks. Isolate both on a temporary mesh;
@@ -2516,6 +2650,7 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
      * wrong reference surface and can introduce grid-like artifacts. */
     Mesh *scratch = BKE_mesh_copy_for_eval(*mesh);
     BLI_SCOPED_DEFER([&]() { BKE_id_free(nullptr, scratch); });
+    trace_phase("scratch_copy");
     Vector<const MultiresSculptLayer *> effective_layers;
     Vector<const MultiresSculptLayer *> effective_other_layers;
     effective_layers.reserve(mmd->sculpt_layers.count());
@@ -2538,6 +2673,7 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
     if (!scratch_base) {
       return fail();
     }
+    /* Validate descriptors once before parallel work. Publication remains transactional. */
     for (const MultiresSculptLayer *visible_layer : effective_layers) {
       for (int corner = 0; corner < mesh->corners_num; corner++) {
         if (!scratch_base[corner].disps || !visible_layer->disps ||
@@ -2555,16 +2691,29 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
         }
         if (skip_reference_compose) {
           skipped_reference_samples += scratch_base[corner].totdisp;
-          continue;
-        }
-
-        for (int i = 0; i < scratch_base[corner].totdisp; i++) {
-          for (int axis = 0; axis < 3; axis++) {
-            scratch_base[corner].disps[i][axis] +=
-                layer_grid[i][axis] * visible_layer->strength;
-          }
         }
       }
+    }
+    if (!skip_reference_compose) {
+      /* Each corner owns an independent displacement grid. Compose all effective layers in one
+       * parallel pass to improve locality and avoid a layer-major full-grid traversal. */
+      threading::parallel_for(IndexRange(mesh->corners_num), 1, [&](const IndexRange range) {
+        for (const int corner : range) {
+          MDisps &base_grid = scratch_base[corner];
+          for (const MultiresSculptLayer *visible_layer : effective_layers) {
+            const float (*layer_grid)[3] = visible_layer->disps[corner].disps;
+            if (layer_grid == nullptr) {
+              continue;
+            }
+            const float strength = visible_layer->strength;
+            for (int i = 0; i < base_grid.totdisp; i++) {
+              for (int axis = 0; axis < 3; axis++) {
+                base_grid.disps[i][axis] += layer_grid[i][axis] * strength;
+              }
+            }
+          }
+        }
+      });
     }
     /* Live procedural displacement belongs to the evaluated reference, not to
      * recorded layer offsets. Include it during reshape and remove it below. */
@@ -2612,9 +2761,11 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
         }
       }
     }
+    trace_phase("reference_compose");
     if (!multiresModifier_reshapeFromCCG(mmd->totlvl, scratch, ccg)) {
       return fail();
     }
+    trace_phase("native_reshape");
     const MDisps *base = static_cast<const MDisps *>(
         CustomData_get_layer(&mesh->corner_data, CD_MDISPS));
     MDisps *result = static_cast<MDisps *>(CustomData_get_layer_for_write(
@@ -2629,25 +2780,46 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
           result[corner].totdisp != base[corner].totdisp) {
         return fail();
       }
-      for (int i = 0; i < result[corner].totdisp; i++) {
-        float3 delta = float3(result[corner].disps[i]) - float3(base[corner].disps[i]);
-        for (const MultiresSculptLayer *other : effective_other_layers) {
-          /* Sparse null payloads represent zero displacement. Descriptor
-           * metadata was validated above while composing scratch_base. */
-          if (other->disps[corner].disps != nullptr) {
-            delta -= float3(other->disps[corner].disps[i]) * other->strength;
+    }
+    Array<int> extract_ok(mesh->corners_num, 1);
+    const auto extract_range = [&](const IndexRange range) {
+      for (const int corner : range) {
+        for (int i = 0; i < result[corner].totdisp; i++) {
+          float3 delta = float3(result[corner].disps[i]) - float3(base[corner].disps[i]);
+          for (const MultiresSculptLayer *other : effective_other_layers) {
+            /* Sparse null payloads represent zero displacement. Descriptor
+             * metadata was validated above while composing scratch_base. */
+            if (other->disps[corner].disps != nullptr) {
+              delta -= float3(other->disps[corner].disps[i]) * other->strength;
+            }
           }
+          if (live_context_created) {
+            delta.z -= live_delta(corner, i);
+          }
+          delta /= layer->strength;
+          if (!std::isfinite(delta.x) || !std::isfinite(delta.y) ||
+              !std::isfinite(delta.z))
+          {
+            extract_ok[corner] = 0;
+            break;
+          }
+          copy_v3_v3(result[corner].disps[i], delta);
         }
-        if (live_context_created) {
-          delta.z -= live_delta(corner, i);
-        }
-        delta /= layer->strength;
-        if (!std::isfinite(delta.x) || !std::isfinite(delta.y) || !std::isfinite(delta.z)) {
-          return fail();
-        }
-        copy_v3_v3(result[corner].disps[i], delta);
+      }
+    };
+    if (live_context_created) {
+      /* Procedural texture evaluation may own shared state. Preserve its serial behavior. */
+      extract_range(IndexRange(mesh->corners_num));
+    }
+    else {
+      threading::parallel_for(IndexRange(mesh->corners_num), 1, extract_range);
+    }
+    for (const int corner : IndexRange(mesh->corners_num)) {
+      if (!extract_ok[corner]) {
+        return fail();
       }
     }
+    trace_phase("extract_active_layer");
     GridPaintMask *masks = ccg->dirty.masks ? static_cast<GridPaintMask *>(
         CustomData_get_layer_for_write(&scratch->corner_data, CD_GRID_PAINT_MASK,
                                       scratch->corners_num)) : nullptr;
@@ -2663,6 +2835,7 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
         }
       }
     }
+    trace_phase("validate_masks");
     /* No fallible conversion remains beyond this point. */
     for (int corner = 0; corner < mesh->corners_num; corner++) {
       /* Both buffers are exclusively owned and have identical dimensions.
@@ -2678,6 +2851,15 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
         std::swap(dst[corner].data, masks[corner].data);
         std::swap(dst[corner].level, masks[corner].level);
       }
+    }
+    trace_phase("publish");
+    if (commit_route_trace) {
+      std::printf("[LAYER_COMMIT_GLOBAL_TOTAL] reason=%s level=%d top=%d total_ms=%.3f\n",
+                  commit_route_reason,
+                  ccg->level,
+                  mmd->totlvl,
+                  (BLI_time_now_seconds() - commit_route_start) * 1000.0);
+      std::fflush(stdout);
     }
   }
   ccg->dirty.coords = false;

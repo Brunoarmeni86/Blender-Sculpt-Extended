@@ -25,6 +25,11 @@
 
 #  include "BLI_winstuff.h"
 #else
+#  if defined(__linux__)
+#    include <sys/sysinfo.h>
+#  elif defined(__APPLE__)
+#    include <sys/sysctl.h>
+#  endif
 #  if defined(HAVE_EXECINFO_H)
 #    include <execinfo.h>
 #  endif
@@ -220,6 +225,24 @@ int BLI_system_memory_max_in_megabytes_int()
   const size_t limit_megabytes = BLI_system_memory_max_in_megabytes();
   /* NOTE: The result will fit into integer. */
   return int(min_zz(limit_megabytes, size_t(INT_MAX)));
+}
+
+uint64_t BLI_system_memory_physical_total_bytes()
+{
+#if defined(WIN32)
+  MEMORYSTATUSEX status{};
+  status.dwLength = sizeof(status);
+  return GlobalMemoryStatusEx(&status) ? uint64_t(status.ullTotalPhys) : 0;
+#elif defined(__linux__)
+  struct sysinfo info {};
+  return sysinfo(&info) == 0 ? uint64_t(info.totalram) * uint64_t(info.mem_unit) : 0;
+#elif defined(__APPLE__)
+  uint64_t bytes = 0;
+  size_t size = sizeof(bytes);
+  return sysctlbyname("hw.memsize", &bytes, &size, nullptr, 0) == 0 ? bytes : 0;
+#else
+  return 0;
+#endif
 }
 
 void BLI_system_max_open_files_ensure()

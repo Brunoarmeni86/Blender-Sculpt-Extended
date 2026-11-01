@@ -124,6 +124,7 @@ struct State {
   bool persistent_coarse_reference = false;
   SubdivCCG *ccg = nullptr;
   const MultiresSculptLayer *layer = nullptr;
+  float layer_strength = 0.0f;
   Span<int> ptex;
   /* Borrowed from this live CCG's single coarse reference; no per-stroke topology. */
   const bke::multires_layers::SmoothL0Reference *base_delta_reference = nullptr;
@@ -138,6 +139,28 @@ struct State {
 };
 inline State &state() { static State value; return value; }
 inline void reset() { state() = State{}; }
+
+/* Keep the protected surface captured by the previous stroke while its active-layer
+ * coordinates are still pending in the live CCG.  Rebuilding that same reference
+ * used to require a full Multires Commit at the start of every Smooth stroke.
+ * Pointer/shape/strength checks deliberately make this a very narrow reuse path:
+ * any layer-stack, level or evaluated-surface change falls back to normal setup. */
+inline bool can_reuse_pending_reference(const State &s,
+                                        Object &object,
+                                        const SculptSession &ss,
+                                        const MultiresModifierData &mmd,
+                                        const MultiresSculptLayer *layer)
+{
+  const SubdivCCG *ccg = ss.subdiv_ccg;
+  return s.ready && !s.mesh_l0 && !s.persistent_coarse_reference &&
+         s.object == &object && s.ccg == ccg && s.layer == layer &&
+         ccg && ccg->grid_size > 1 && ccg->dirty.coords && layer && layer->disps &&
+         layer->strength == s.layer_strength &&
+         ccg->level == mmd.sculptlvl && layer->level == mmd.totlvl &&
+         layer->grids_num == ccg->grids_num &&
+         s.stored_grid_size == bke::subdiv::grid_size_from_level(layer->level) &&
+         s.sample_stride == (s.stored_grid_size - 1) / (ccg->grid_size - 1);
+}
 inline bool isolation_requested(const Brush &brush)
 {
   PointerRNA ptr = RNA_id_pointer_create(const_cast<ID *>(&brush.id));
@@ -202,12 +225,15 @@ inline bool mesh_protected_offsets(Object &object, const MultiresModifierData &m
 }
 inline bool begin(Object &object, const Brush &brush, ReportList *reports, const bool force_smooth = false)
 {
-  reset();
   if (!enabled() || (!force_smooth && brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_SMOOTH &&
-                     brush.autosmooth_factor <= 0.0f)) { return true; }
+                     brush.autosmooth_factor <= 0.0f)) {
+    reset();
+    return true;
+  }
   /* Disabling isolation must bypass both its preflight and its brush dispatcher.
    * L0 layer data remains untouched and is handled by ordinary Multires Commit. */
   if (!isolation_requested(brush)) {
+    reset();
     state().native_object = &object;
     return true;
   }
@@ -216,6 +242,7 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
   if (ss && !ss->subdiv_ccg) {
     if (auto *base = bke::multires_layers::base_modifier(object)) {
       if (base->sculptlvl == 0 && targets_layer(*base)) {
+        reset();
         State &s = state();
         if (!mesh_protected_offsets(object, *base, s.mesh_reference, reports)) { reset(); return false; }
         const Span<float3> positions = id_cast<Mesh *>(object.data)->vert_positions();
@@ -225,14 +252,22 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
       }
     }
   }
-  if (!ss || !ss->subdiv_ccg || !mmd) { return true; }
+  if (!ss || !ss->subdiv_ccg || !mmd) { reset(); return true; }
   /* Delta Smooth isolates the active layer from the evaluated surface. When
    * Sculpt Base Mesh is the selected target there is no layer to isolate:
    * leave this state empty and let Blender's regular Smooth brush operate on
    * the base mesh, regardless of hidden or zero-strength layers. */
-  if (!targets_layer(*mmd)) { return true; }
-  if (mmd->sculpt_layers.is_empty()) { return true; }
+  if (!targets_layer(*mmd)) { reset(); return true; }
+  if (mmd->sculpt_layers.is_empty()) { reset(); return true; }
   const MultiresSculptLayer *layer = bke::multires_layers::active(*mmd);
+  if (can_reuse_pending_reference(state(), object, *ss, *mmd, layer)) {
+    std::fprintf(stderr,
+                 "[LAYER_DELTA_SMOOTH_V01] reuse_pending_reference level=%d strength=%.6f\n",
+                 ss->subdiv_ccg->level,
+                 layer->strength);
+    return true;
+  }
+  reset();
   const char *error = nullptr;
   if (ss->cache || ss->filter_cache) { error = "Another sculpt operation is active"; }
   else if (!layer ||
@@ -263,7 +298,7 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
    * minus the stored active layer gives the protected reference even across
    * consecutive strokes, without publishing a full-resolution reshape here.
    * Keep dirty flags and the change journal intact for normal commit/Undo. */
-  if (!coarse_reference) {
+  if (!coarse_reference && pending) {
     bool preserved = false;
     if (!bke::multires_layers::commit(object, &preserved)) {
       BKE_report(reports, RPT_ERROR, "Cannot commit pending sculpt before Delta Smooth");
@@ -299,7 +334,7 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
   if (s.sample_stride < 1 ||
       (ccg->grid_size - 1) * s.sample_stride != s.stored_grid_size - 1)
   { reset(); return false; }
-  s.object = &object; s.ccg = ccg; s.layer = layer;
+  s.object = &object; s.ccg = ccg; s.layer = layer; s.layer_strength = layer->strength;
   s.persistent_coarse_reference = coarse_reference;
   s.raw_offsets.configure(ccg->grid_area);
   s.reference.configure(ccg->grid_area);

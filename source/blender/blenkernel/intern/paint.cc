@@ -2074,7 +2074,9 @@ void BKE_sculptsession_bm_to_me(Object *ob)
     const SubdivCCG *ccg = ss.subdiv_ccg;
     const MultiresModifierData *mmd = ss.multires_modifier;
     const char *skip_env = std::getenv("BLENDER_SCULPT_SKIP_EMPTY_BM_FLUSH");
-    const bool opt_in = skip_env && skip_env[0] == '1' && skip_env[1] == '\0';
+    /* Default on after validation on large Multires layer meshes. Set to 0
+     * only as an emergency compatibility fallback. */
+    const bool opt_in = !skip_env || skip_env[0] == '\0' || skip_env[0] != '0';
     const bool skip_empty_flush = opt_in && (ob->mode & OB_MODE_SCULPT) && !ss.bm && ccg &&
                                   mmd && !mmd->sculpt_layers.is_empty() &&
                                   mmd->sculptlvl > 0 && mmd->sculptlvl == mmd->totlvl &&

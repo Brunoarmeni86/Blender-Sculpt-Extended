@@ -924,7 +924,9 @@ static wmOperatorStatus sculpt_multires_layer_commit_exec(bContext *C, wmOperato
    * persistent modifier data, as empty Add Layer already does. This does not
    * cancel geometry updates that other operations have already requested. */
   const char *keep_env = BLI_getenv("BLENDER_SCULPT_COMMIT_KEEP_CCG");
-  const bool opt_in = keep_env && keep_env[0] == '1' && keep_env[1] == '\0';
+  /* Default on after the local-publication and empty-BMesh-flush paths were
+   * validated together. Set to 0 to restore the legacy geometry rebuild. */
+  const bool opt_in = !keep_env || keep_env[0] == '\0' || keep_env[0] != '0';
   const SculptSession *ss = ob->runtime->sculpt_session;
   bool keep_ccg = opt_in && local_surface_preserved && ss && ss->subdiv_ccg &&
                   ss->multires_modifier == mmd &&
@@ -941,17 +943,34 @@ static wmOperatorStatus sculpt_multires_layer_commit_exec(bContext *C, wmOperato
   const char *trace_env = BLI_getenv("BLENDER_LAYER_RESP_TRACE");
   const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
   const double request_start = trace ? BLI_time_now_seconds() : 0.0;
-  DEG_id_tag_update(&ob->id, keep_ccg ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
+  /* The local commit has already published persistent layer data and the live
+   * CCG/PBVH is the committed surface. Tagging SYNC_TO_EVAL here makes the
+   * depsgraph rebuild every one of the object's grids during the following
+   * Undo push (34 million samples on large meshes). Defer that synchronization
+   * until an operation that actually changes/recreates evaluated geometry:
+   * level, layer controls, modifiers, Undo/Redo and file reload all tag it.
+   * Set BLENDER_SCULPT_COMMIT_DEFER_SYNC=0 for the previous behavior. */
+  const char *defer_env = BLI_getenv("BLENDER_SCULPT_COMMIT_DEFER_SYNC");
+  const bool defer_sync = keep_ccg &&
+                          (!defer_env || defer_env[0] == '\0' || defer_env[0] != '0');
+  if (!defer_sync) {
+    DEG_id_tag_update(&ob->id, keep_ccg ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
+  }
   if (trace) {
     std::printf("[LAYER_COMMIT_REFRESH] request=%s opt_in=%d local_surface_preserved=%d "
                 "tag=%.3fms\n",
-                keep_ccg ? "SYNC_ONLY" : "GEOMETRY",
+                defer_sync ? "DEFERRED" : (keep_ccg ? "SYNC_ONLY" : "GEOMETRY"),
                 int(opt_in),
                 int(local_surface_preserved),
                 (BLI_time_now_seconds() - request_start) * 1000.0);
     std::fflush(stdout);
   }
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  /* ND_MODIFIER schedules a complete Multires evaluation even without a
+   * depsgraph geometry tag. The local commit has no visible surface change;
+   * later layer/level operations issue their own notifier and rebuild. */
+  if (!defer_sync) {
+    WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  }
   BKE_report(op->reports,
              RPT_INFO,
              bke::multires_layers::base_has_visible_layers(*mmd) ?
@@ -1671,7 +1690,11 @@ static void SCULPT_OT_multires_layer_duplicate(wmOperatorType *ot)
 
 static wmOperatorStatus sculpt_multires_layer_set_active_exec(bContext *C, wmOperator *op)
 {
-  /* LAYER_SELECT_OPERATOR_V02: preserve live geometry on a metadata-only switch. */
+  /* LAYER_SELECT_OPERATOR_V03: selecting another layer is metadata-only when
+   * pending coordinates were either absent or published locally. In that case
+   * the live CCG/PBVH already is the exact visible surface: tagging the object
+   * (even SYNC_TO_EVAL) or sending ND_MODIFIER needlessly schedules a Multires
+   * evaluation on large meshes. Only redraw the UI/viewport. */
   Object *ob = CTX_data_active_object(C);
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
@@ -1695,17 +1718,21 @@ static wmOperatorStatus sculpt_multires_layer_set_active_exec(bContext *C, wmOpe
                             bke::object::pbvh_get(*ob) && (!pending || surface_preserved);
   bke::multires_layers::set_active(*mmd, index);
   if (keep_surface) {
-    DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL);
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
   }
   else {
     multires_force_sculpt_rebuild(ob);
     DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
   }
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
   const char *trace = BLI_getenv("BLENDER_LAYER_RESP_TRACE");
   if (trace && trace[0] == '1') {
-    std::printf("[LAYER_SELECT_OPERATOR_V02] target=%d pending=%d rebuild=%d commit_ms=%.3f total_ms=%.3f\n",
-                index, int(pending), int(!keep_surface),
+    std::printf("[LAYER_SELECT_OPERATOR_V03] target=%d pending=%d rebuild=%d refresh=%s "
+                "commit_ms=%.3f total_ms=%.3f\n",
+                index,
+                int(pending),
+                int(!keep_surface),
+                keep_surface ? "DRAW_ONLY" : "GEOMETRY",
                 (committed - started) * 1000.0, (BLI_time_now_seconds() - started) * 1000.0);
   }
   return OPERATOR_FINISHED;

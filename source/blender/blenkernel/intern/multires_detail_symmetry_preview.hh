@@ -1,5 +1,255 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Included inside multires_layers: transactional, topology-preserving detail transfer. */
+
+static bool build_topological_mirror_map(const Mesh &mesh,
+                                         const float3 &origin,
+                                         const float3 &normal,
+                                         const float tolerance,
+                                         Array<int> &vertex_map,
+                                         Array<int> &corner_map,
+                                         std::string &error)
+{
+  const Span<float3> positions = mesh.vert_positions();
+  const OffsetIndices faces = mesh.faces();
+  const Span<int> verts = mesh.corner_verts();
+  const auto fail = [&](const char *message) { error = message; return false; };
+  const auto reflect = [&](const float3 &p) {
+    return p - 2.0f * normal * math::dot(p - origin, normal);
+  };
+
+  /* Geometry supplies only trustworthy seeds. Connectivity propagates each seed over the
+   * component, so an intentionally sculpted side does not need to remain geometrically equal. */
+  KDTree<float3> *tree = kdtree_new<float3>(positions.size());
+  for (const int i : positions.index_range()) {
+    kdtree_insert(tree, i, positions[i]);
+  }
+  kdtree_balance(tree);
+  Array<int> nearest(positions.size(), -1);
+  Array<int> relaxed_nearest(positions.size(), -1);
+  for (const int i : positions.index_range()) {
+    KDTreeNearest<float3> hits[2];
+    const int count = kdtree_find_nearest_n(tree, reflect(positions[i]), hits, 2);
+    if (count && (count < 2 || hits[1].dist - hits[0].dist >= 1.0e-7f))
+    {
+      relaxed_nearest[i] = hits[0].index;
+      if (hits[0].dist <= tolerance) {
+        nearest[i] = hits[0].index;
+      }
+    }
+  }
+  kdtree_free(tree);
+  for (Array<int> *candidates : {&nearest, &relaxed_nearest}) {
+    for (const int i : candidates->index_range()) {
+      if ((*candidates)[i] >= 0 && (*candidates)[(*candidates)[i]] != i) {
+        (*candidates)[i] = -1;
+      }
+    }
+  }
+
+  std::map<std::vector<int>, int> face_lookup;
+  std::map<std::pair<int, int>, std::vector<int>> edge_faces;
+  for (const int f : faces.index_range()) {
+    std::vector<int> key;
+    for (const int c : faces[f]) {
+      key.push_back(verts[c]);
+      const int next = faces[f][(c - faces[f].start() + 1) % faces[f].size()];
+      edge_faces[std::minmax(verts[c], verts[next])].push_back(f);
+    }
+    std::sort(key.begin(), key.end());
+    if (!face_lookup.emplace(key, f).second) {
+      return fail("Duplicate cage faces are ambiguous");
+    }
+  }
+  for (const auto &item : edge_faces) {
+    if (item.second.size() > 2) {
+      return fail("Non-manifold cage edges are ambiguous");
+    }
+  }
+
+  vertex_map.fill(-1);
+  corner_map.fill(-1);
+  Array<int> face_map(faces.size(), -1);
+  std::vector<std::pair<int, int>> queue;
+  size_t queue_index = 0;
+
+  const auto assign_vertex = [&](const int a, const int b) {
+    if ((vertex_map[a] >= 0 && vertex_map[a] != b) ||
+        (vertex_map[b] >= 0 && vertex_map[b] != a))
+    {
+      return false;
+    }
+    vertex_map[a] = b;
+    vertex_map[b] = a;
+    return true;
+  };
+  const auto assign_face = [&](const int source_face,
+                               const int target_face,
+                               const int source_start,
+                               const int target_start) {
+    const IndexRange source = faces[source_face];
+    const IndexRange target = faces[target_face];
+    if (source.size() != target.size() ||
+        (face_map[source_face] >= 0 && face_map[source_face] != target_face) ||
+        (face_map[target_face] >= 0 && face_map[target_face] != source_face))
+    {
+      return false;
+    }
+    face_map[source_face] = target_face;
+    face_map[target_face] = source_face;
+    for (const int step : IndexRange(source.size())) {
+      const int sc = source[(source_start + step) % source.size()];
+      const int tc = target[(target_start + target.size() - step) % target.size()];
+      if (!assign_vertex(verts[sc], verts[tc]) ||
+          (corner_map[sc] >= 0 && corner_map[sc] != tc) ||
+          (corner_map[tc] >= 0 && corner_map[tc] != sc))
+      {
+        return false;
+      }
+      corner_map[sc] = tc;
+      corner_map[tc] = sc;
+    }
+    queue.emplace_back(source_face, target_face);
+    return true;
+  };
+
+  const auto propagate = [&]() {
+    while (queue_index < queue.size()) {
+      const auto [source_face, target_face] = queue[queue_index++];
+      const IndexRange source = faces[source_face];
+      for (const int j : IndexRange(source.size())) {
+        const int c = source[j];
+        const int next = source[(j + 1) % source.size()];
+        const int a = verts[c], b = verts[next];
+        const std::vector<int> &source_adjacent = edge_faces.at(std::minmax(a, b));
+        const std::vector<int> &target_adjacent = edge_faces.at(
+            std::minmax(vertex_map[a], vertex_map[b]));
+        if (source_adjacent.size() != target_adjacent.size()) {
+          return false;
+        }
+        if (source_adjacent.size() == 1) {
+          continue;
+        }
+        const int source_other = source_adjacent[0] == source_face ? source_adjacent[1] :
+                                                                      source_adjacent[0];
+        const int target_other = target_adjacent[0] == target_face ? target_adjacent[1] :
+                                                                      target_adjacent[0];
+        if (face_map[source_other] >= 0) {
+          if (face_map[source_other] != target_other) {
+            return false;
+          }
+          continue;
+        }
+        const IndexRange source_next = faces[source_other];
+        const IndexRange target_next = faces[target_other];
+        int source_start = -1, target_start = -1;
+        for (const int k : IndexRange(source_next.size())) {
+          if (verts[source_next[k]] == b &&
+              verts[source_next[(k + 1) % source_next.size()]] == a)
+          {
+            source_start = k;
+            break;
+          }
+        }
+        for (const int k : IndexRange(target_next.size())) {
+          if (verts[target_next[k]] == vertex_map[b] &&
+              verts[target_next[(k + target_next.size() - 1) % target_next.size()]] ==
+                  vertex_map[a])
+          {
+            target_start = k;
+            break;
+          }
+        }
+        if (source_start < 0 || target_start < 0 ||
+            !assign_face(source_other, target_other, source_start, target_start))
+        {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+
+  const auto seed_components = [&](const Span<int> candidates) {
+    bool progress = true;
+    while (progress) {
+      progress = false;
+      for (const int f : faces.index_range()) {
+        if (face_map[f] >= 0) {
+          continue;
+        }
+        const IndexRange source = faces[f];
+        std::vector<int> key;
+        bool complete = true;
+        for (const int c : source) {
+          const int target_vertex = candidates[verts[c]];
+          if (target_vertex < 0) {
+            complete = false;
+            break;
+          }
+          key.push_back(target_vertex);
+        }
+        if (!complete) {
+          continue;
+        }
+        std::sort(key.begin(), key.end());
+        const auto found = face_lookup.find(key);
+        if (found == face_lookup.end()) {
+          continue;
+        }
+        const IndexRange target = faces[found->second];
+        int target_start = -1;
+        for (const int k : IndexRange(target.size())) {
+          if (verts[target[k]] == candidates[verts[source[0]]] &&
+              verts[target[(k + target.size() - 1) % target.size()]] ==
+                  candidates[verts[source[1]]])
+          {
+            target_start = k;
+            break;
+          }
+        }
+        if (target_start < 0 || !assign_face(f, found->second, 0, target_start) ||
+            !propagate())
+        {
+          return false;
+        }
+        progress = true;
+      }
+    }
+    return true;
+  };
+  /* Prefer strict geometric seeds. If a whole component was sculpted away from its mirror,
+   * retry with reciprocal nearest candidates at any distance. Connectivity remains the final
+   * authority and must still validate every face, edge, corner and vertex before publication. */
+  if (!seed_components(nearest) || !seed_components(relaxed_nearest)) {
+    return fail("Cage topology has an ambiguous mirror correspondence");
+  }
+
+  /* Loose vertices cannot be propagated through faces; accept only strict reciprocal seeds. */
+  for (const int i : vertex_map.index_range()) {
+    if (vertex_map[i] < 0 && nearest[i] >= 0 && vertex_map[nearest[i]] < 0) {
+      if (!assign_vertex(i, nearest[i])) {
+        return fail("Ambiguous loose vertex mirror correspondence");
+      }
+    }
+  }
+  for (const int f : face_map.index_range()) {
+    if (face_map[f] < 0) {
+      return fail("Cage topology cannot be seeded from the selected symmetry plane");
+    }
+  }
+  for (const int i : vertex_map.index_range()) {
+    if (vertex_map[i] < 0 || vertex_map[vertex_map[i]] != i) {
+      return fail("Cage vertices have no reciprocal topological mirror correspondence");
+    }
+  }
+  for (const int c : corner_map.index_range()) {
+    if (corner_map[c] < 0 || corner_map[corner_map[c]] != c) {
+      return fail("Non-reciprocal corner mapping");
+    }
+  }
+  return true;
+}
+
 bool symmetrize_active_detail(Object &object,
                              const float3 &origin,
                              const float3 &normal,
@@ -28,10 +278,6 @@ bool symmetrize_active_detail(Object &object,
     return fail("Invalid symmetry plane or correspondence distance");
   }
   const int side = subdiv::grid_size_from_level(layer->level), area = side * side;
-  /* Bound the transaction before allocating dense payloads. No per-stroke cache. */
-  if (int64_t(mesh->corners_num) * area * sizeof(float3) > 512LL * 1024 * 1024) {
-    return fail("Preview transaction exceeds 512 MiB; use a lower stored subdivision level");
-  }
   for (const MDisps &grid : Span(layer->disps, layer->grids_num)) {
     if (grid.disps && (grid.level != layer->level || grid.totdisp != area)) {
       return fail("Incompatible layer grid metadata");
@@ -45,61 +291,12 @@ bool symmetrize_active_detail(Object &object,
   };
   const Span<float3> positions = mesh->vert_positions();
   for (const float3 &p : positions) { if (!finite(p)) return fail("Non-finite cage coordinate"); }
-  KDTree<float3> *tree = kdtree_new<float3>(positions.size());
-  for (const int i : positions.index_range()) kdtree_insert(tree, i, positions[i]);
-  kdtree_balance(tree);
   Array<int> vertex_map(positions.size(), -1);
-  bool mapping_ok = true;
-  for (const int i : positions.index_range()) {
-    KDTreeNearest<float3> nearest[2];
-    const int count = kdtree_find_nearest_n(tree, reflect(positions[i]), nearest, 2);
-    if (!count || nearest[0].dist > tolerance ||
-        (count > 1 && nearest[1].dist - nearest[0].dist < 1e-7f)) {
-      mapping_ok = false;
-      break;
-    }
-    vertex_map[i] = nearest[0].index;
-  }
-  kdtree_free(tree);
-  if (mapping_ok) {
-    for (const int i : positions.index_range()) {
-      if (vertex_map[vertex_map[i]] != i) mapping_ok = false;
-    }
-  }
-  if (!mapping_ok) return fail("Cage vertices have no unique reciprocal mirror correspondence");
   const OffsetIndices faces = mesh->faces();
   const Span<int> verts = mesh->corner_verts();
-  std::map<std::vector<int>, int> lookup;
-  for (const int f : faces.index_range()) {
-    std::vector<int> key;
-    for (const int c : faces[f]) key.push_back(verts[c]);
-    std::sort(key.begin(), key.end());
-    if (!lookup.emplace(key, f).second) return fail("Duplicate cage faces are ambiguous");
-  }
   Array<int> corner_map(mesh->corners_num, -1);
-  for (const int f : faces.index_range()) {
-    const IndexRange face = faces[f];
-    std::vector<int> key;
-    for (const int c : face) key.push_back(vertex_map[verts[c]]);
-    std::sort(key.begin(), key.end());
-    auto found = lookup.find(key);
-    if (found == lookup.end()) return fail("Cage topology is not mirror compatible");
-    const IndexRange target = faces[found->second];
-    for (const int j : IndexRange(face.size())) {
-      const int c = face[j], next = face[(j + 1) % face.size()];
-      for (const int k : IndexRange(target.size())) {
-        if (verts[target[k]] == vertex_map[verts[c]] &&
-            verts[target[(k + target.size() - 1) % target.size()]] == vertex_map[verts[next]]) {
-          corner_map[c] = target[k];
-          break;
-        }
-      }
-      if (corner_map[c] < 0) return fail("Mirrored face winding does not match");
-    }
-  }
-  for (const int c : corner_map.index_range()) {
-    if (corner_map[corner_map[c]] != c) return fail("Non-reciprocal corner mapping");
-  }
+  if (!build_topological_mirror_map(
+          *mesh, origin, normal, tolerance, vertex_map, corner_map, error)) return false;
   const GridPaintMask *masks = respect_mask ? static_cast<const GridPaintMask *>(
       CustomData_get_layer(&mesh->corner_data, CD_GRID_PAINT_MASK)) : nullptr;
   if (respect_mask && !masks) {
@@ -149,43 +346,91 @@ bool symmetrize_active_detail(Object &object,
     ~Payload() { if (data) MEM_delete(data); }
   };
   std::unique_ptr<Payload[]> staged(new Payload[layer->grids_num]);
-  int changed = 0;
+  Array<int> changed_per_grid(layer->grids_num, 0);
+  Array<int> failure_per_grid(layer->grids_num, 0);
   const float inv = 1.0f / (side - 1);
-  for (const int g : IndexRange(layer->grids_num)) {
-    const int source_grid = corner_map[g];
-    const MDisps &source = layer->disps[source_grid], &destination = layer->disps[g];
-    if (!source.disps && !destination.disps) continue;
-    for (int y = 0; y < side; y++) {
-      for (int x = 0; x < side; x++) {
-        const float u = x * inv, v = y * inv;
-        float3 p; float3x3 target_basis;
-        const GridCoord target_coord{g, u, v};
-        multires_reshape_evaluate_base_mesh_limit_at_grid(&context, &target_coord, p, target_basis);
-        if (math::dot(p - origin, normal) * source_sign >= -1e-7f) continue;
-        const float weight = 1.0f - mask_at(g, u, v);
-        if (weight == 0.0f) continue;
-        if (std::abs(math::determinant(target_basis)) < 1e-10f) return fail("Degenerate destination surface frame");
-        float3 desired(0.0f);
-        if (source.disps) {
-          float3 sp; float3x3 source_basis;
-          const GridCoord source_coord{source_grid, v, u};
-          multires_reshape_evaluate_base_mesh_limit_at_grid(&context, &source_coord, sp, source_basis);
-          if (std::abs(math::determinant(source_basis)) < 1e-10f) return fail("Degenerate source surface frame");
-          desired = math::invert(target_basis) * reflect_vector(source_basis * float3(source.disps[x * side + y]));
+  threading::parallel_for(IndexRange(layer->grids_num), 1, [&](const IndexRange range) {
+    for (const int g : range) {
+      const int source_grid = corner_map[g];
+      const MDisps &source = layer->disps[source_grid], &destination = layer->disps[g];
+      if (!source.disps && !destination.disps) {
+        continue;
+      }
+      if (respect_mask && masks && masks[g].data && masks[g].level >= 1 &&
+          masks[g].level <= 13)
+      {
+        const int mask_side = subdiv::grid_size_from_level(masks[g].level);
+        bool fully_masked = true;
+        for (int i = 0; i < mask_side * mask_side && fully_masked; i++) {
+          fully_masked = masks[g].data[i] >= 1.0f;
         }
-        const int i = y * side + x;
-        const float3 old = destination.disps ? float3(destination.disps[i]) : float3(0.0f);
-        const float3 value = math::interpolate(old, desired, weight);
-        if (!finite(value)) return fail("Non-finite layer displacement; nothing transferred");
-        if (value == old) continue;
-        if (!staged[g].data) {
-          staged[g].data = MEM_new_array_zeroed<float[3]>(area, "staged mirrored layer");
-          if (destination.disps) std::memcpy(staged[g].data, destination.disps, size_t(area)*sizeof(float3));
+        if (fully_masked) {
+          continue;
         }
-        copy_v3_v3(staged[g].data[i], value);
-        changed++;
+      }
+      for (int y = 0; y < side && failure_per_grid[g] == 0; y++) {
+        for (int x = 0; x < side; x++) {
+          const float u = x * inv, v = y * inv;
+          float3 p;
+          float3x3 target_basis;
+          const GridCoord target_coord{g, u, v};
+          multires_reshape_evaluate_base_mesh_limit_at_grid(
+              &context, &target_coord, p, target_basis);
+          if (math::dot(p - origin, normal) * source_sign >= -1e-7f) {
+            continue;
+          }
+          const float weight = 1.0f - mask_at(g, u, v);
+          if (weight == 0.0f) {
+            continue;
+          }
+          if (std::abs(math::determinant(target_basis)) < 1e-10f) {
+            failure_per_grid[g] = 1;
+            break;
+          }
+          float3 desired(0.0f);
+          if (source.disps) {
+            float3 sp;
+            float3x3 source_basis;
+            const GridCoord source_coord{source_grid, v, u};
+            multires_reshape_evaluate_base_mesh_limit_at_grid(
+                &context, &source_coord, sp, source_basis);
+            if (std::abs(math::determinant(source_basis)) < 1e-10f) {
+              failure_per_grid[g] = 2;
+              break;
+            }
+            desired = math::invert(target_basis) *
+                      reflect_vector(source_basis * float3(source.disps[x * side + y]));
+          }
+          const int i = y * side + x;
+          const float3 old = destination.disps ? float3(destination.disps[i]) :
+                                                 float3(0.0f);
+          const float3 value = math::interpolate(old, desired, weight);
+          if (!finite(value)) {
+            failure_per_grid[g] = 3;
+            break;
+          }
+          if (value == old) {
+            continue;
+          }
+          if (!staged[g].data) {
+            staged[g].data = MEM_new_array_zeroed<float[3]>(area, "staged mirrored layer");
+            if (destination.disps) {
+              std::memcpy(
+                  staged[g].data, destination.disps, size_t(area) * sizeof(float3));
+            }
+          }
+          copy_v3_v3(staged[g].data[i], value);
+          changed_per_grid[g]++;
+        }
       }
     }
+  });
+  int changed = 0;
+  for (const int g : IndexRange(layer->grids_num)) {
+    if (failure_per_grid[g] == 1) return fail("Degenerate destination surface frame");
+    if (failure_per_grid[g] == 2) return fail("Degenerate source surface frame");
+    if (failure_per_grid[g] == 3) return fail("Non-finite layer displacement; nothing transferred");
+    changed += changed_per_grid[g];
   }
   if (!changed) return fail("No unmasked destination detail to change");
   /* Publication cannot fail: allocations and all correspondence checks finished above. */
@@ -238,9 +483,6 @@ bool symmetrize_multires_base(Object &object,
     if (layer.level != level || layer.grids_num != mesh->corners_num) return fail("Incompatible retained layer grids");
     payloads.push_back(layer.disps); layers.push_back(&layer);
   }
-  if (int64_t(payloads.size())*mesh->corners_num*area*sizeof(float3)>512LL*1024*1024) {
-    return fail("Base preview transaction exceeds 512 MiB");
-  }
   for (const MDisps *payload : payloads) {
     for (int g=0;g<mesh->corners_num;g++) {
       if (payload[g].disps && (payload[g].level!=level || payload[g].totdisp!=area)) return fail("Incompatible base/layer grid metadata");
@@ -249,61 +491,12 @@ bool symmetrize_multires_base(Object &object,
   const auto reflect = [&](const float3 &p) { return p-2.0f*normal*math::dot(p-origin,normal); };
   const Span<float3> positions=mesh->vert_positions();
   for (const float3 &p : positions) { if (!finite(p)) return fail("Non-finite cage coordinate"); }
-  KDTree<float3> *tree = kdtree_new<float3>(positions.size());
-  for (const int i : positions.index_range()) kdtree_insert(tree, i, positions[i]);
-  kdtree_balance(tree);
   Array<int> vertex_map(positions.size(), -1);
-  bool mapping_ok = true;
-  for (const int i : positions.index_range()) {
-    KDTreeNearest<float3> nearest[2];
-    const int count = kdtree_find_nearest_n(tree, reflect(positions[i]), nearest, 2);
-    if (!count || nearest[0].dist > tolerance ||
-        (count > 1 && nearest[1].dist - nearest[0].dist < 1e-7f)) {
-      mapping_ok = false;
-      break;
-    }
-    vertex_map[i] = nearest[0].index;
-  }
-  kdtree_free(tree);
-  if (mapping_ok) {
-    for (const int i : positions.index_range()) {
-      if (vertex_map[vertex_map[i]] != i) mapping_ok = false;
-    }
-  }
-  if (!mapping_ok) return fail("Cage vertices have no unique reciprocal mirror correspondence");
   const OffsetIndices faces = mesh->faces();
   const Span<int> verts = mesh->corner_verts();
-  std::map<std::vector<int>, int> lookup;
-  for (const int f : faces.index_range()) {
-    std::vector<int> key;
-    for (const int c : faces[f]) key.push_back(verts[c]);
-    std::sort(key.begin(), key.end());
-    if (!lookup.emplace(key, f).second) return fail("Duplicate cage faces are ambiguous");
-  }
   Array<int> corner_map(mesh->corners_num, -1);
-  for (const int f : faces.index_range()) {
-    const IndexRange face = faces[f];
-    std::vector<int> key;
-    for (const int c : face) key.push_back(vertex_map[verts[c]]);
-    std::sort(key.begin(), key.end());
-    auto found = lookup.find(key);
-    if (found == lookup.end()) return fail("Cage topology is not mirror compatible");
-    const IndexRange target = faces[found->second];
-    for (const int j : IndexRange(face.size())) {
-      const int c = face[j], next = face[(j + 1) % face.size()];
-      for (const int k : IndexRange(target.size())) {
-        if (verts[target[k]] == vertex_map[verts[c]] &&
-            verts[target[(k + target.size() - 1) % target.size()]] == vertex_map[verts[next]]) {
-          corner_map[c] = target[k];
-          break;
-        }
-      }
-      if (corner_map[c] < 0) return fail("Mirrored face winding does not match");
-    }
-  }
-  for (const int c : corner_map.index_range()) {
-    if (corner_map[corner_map[c]] != c) return fail("Non-reciprocal corner mapping");
-  }
+  if (!build_topological_mirror_map(
+          *mesh, origin, normal, tolerance, vertex_map, corner_map, error)) return false;
 
   const GridPaintMask *masks=respect_mask ? static_cast<const GridPaintMask *>(CustomData_get_layer(&mesh->corner_data,CD_GRID_PAINT_MASK)) : nullptr;
   const VArray<float> point_masks=mesh->attributes().lookup_or_default<float>(".sculpt_mask",AttrDomain::Point,0.0f).varray;
@@ -376,13 +569,20 @@ bool symmetrize_multires_base(Object &object,
   struct Payload { float(*data)[3]=nullptr;~Payload(){if(data)MEM_delete(data);} };
   const int grids=mesh->corners_num;
   std::unique_ptr<Payload[]> staged(new Payload[payloads.size()*grids]);
-  int changed=0;const float inv=1.0f/(side-1);
-  for(int g=0;g<grids;g++) {
-    for(int y=0;y<side;y++)for(int x=0;x<side;x++) {
+  Array<int> changed_per_grid(grids,0),failure_per_grid(grids,0);
+  const float inv=1.0f/(side-1);
+  threading::parallel_for(IndexRange(grids),1,[&](const IndexRange range){
+   for(const int g:range) {
+    if(respect_mask && masks && masks[g].data && masks[g].level>=1 && masks[g].level<=13) {
+      const int mask_side=subdiv::grid_size_from_level(masks[g].level);bool fully_masked=true;
+      for(int i=0;i<mask_side*mask_side && fully_masked;i++)fully_masked=masks[g].data[i]>=1.0f;
+      if(fully_masked)continue;
+    }
+    for(int y=0;y<side && failure_per_grid[g]==0;y++)for(int x=0;x<side;x++) {
       const float u=x*inv,v=y*inv;const int i=y*side+x;
       float3 old_p,new_p;float3x3 old_t,new_t;
       old_eval.eval(g,u,v,old_p,old_t);new_eval.eval(g,u,v,new_p,new_t);
-      if(std::abs(math::determinant(new_t))<1e-10f)return fail("Degenerate new cage tangent frame");
+      if(std::abs(math::determinant(new_t))<1e-10f){failure_per_grid[g]=1;break;}
       const float3x3 inverse=math::invert(new_t);
       for(int k=0;k<int(payloads.size());k++) {
         const MDisps &grid=payloads[k][g];
@@ -403,13 +603,19 @@ bool symmetrize_multires_base(Object &object,
           value=inverse*(desired-new_p);
         }
         else value=inverse*(old_t*old_value);
-        if(!finite(value))return fail("Non-finite rebased displacement; no base changes applied");
+        if(!finite(value)){failure_per_grid[g]=2;break;}
         if(value==old_value)continue;
         Payload &stage=staged[k*grids+g];
         if(!stage.data){stage.data=MEM_new_array_zeroed<float[3]>(area,"staged symmetrized base");if(grid.disps)std::memcpy(stage.data,grid.disps,size_t(area)*sizeof(float3));}
-        copy_v3_v3(stage.data[i],value);changed++;
+        copy_v3_v3(stage.data[i],value);changed_per_grid[g]++;
       }
     }
+   }
+  });
+  int changed=0;for(int g=0;g<grids;g++){
+    if(failure_per_grid[g]==1)return fail("Degenerate new cage tangent frame");
+    if(failure_per_grid[g]==2)return fail("Non-finite rebased displacement; no base changes applied");
+    changed+=changed_per_grid[g];
   }
 
   if(!changed && !cage_changed)return fail("No unmasked base changes");

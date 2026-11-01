@@ -1119,13 +1119,23 @@ static void reshape_subdiv_refine(const MultiresReshapeSmoothContext *reshape_sm
 
   for (int first = 0; first < num_vertices; first += batch_size) {
     const int count = std::min(num_vertices - first, batch_size);
-    for (int j = 0; j < count; j++) {
+    const auto fill_positions = [&](const IndexRange range) {
+    for (const int j : range) {
       const Vertex *vert = &reshape_smooth_context->geometry.vertices[first + j];
       float3 P;
       coarse_position_cb(reshape_smooth_context, vert, P);
       positions[j * 3] = P[0];
       positions[j * 3 + 1] = P[1];
       positions[j * 3 + 2] = P[2];
+    }
+    };
+    /* Final coordinates only read immutable displacement grids. Keep evaluator
+     * calls and uploads serial; original coordinates may enter an evaluator. */
+    if (coarse_position_cb == reshape_subdiv_refine_final_P) {
+      threading::parallel_for(IndexRange(count), 512, fill_positions);
+    }
+    else {
+      fill_positions(IndexRange(count));
     }
     reshape_subdiv->evaluator->eval_output->setCoarsePositions(
         positions.data(), first, count);
@@ -1316,6 +1326,9 @@ static void linear_grid_element_delta_interpolate(
 static void evaluate_linear_delta_grids(MultiresReshapeSmoothContext *reshape_smooth_context)
 {
   const MultiresReshapeContext *reshape_context = reshape_smooth_context->reshape_context;
+  if (reshape_context->preserve_paint_mask) {
+    return;
+  }
   const int num_grids = reshape_context->num_grids;
   const int top_level = reshape_context->top.level;
 
@@ -1336,6 +1349,9 @@ static void propagate_linear_data_delta(MultiresReshapeSmoothContext *reshape_sm
                                         const GridCoord *grid_coord)
 {
   const MultiresReshapeContext *reshape_context = reshape_smooth_context->reshape_context;
+  if (reshape_context->preserve_paint_mask) {
+    return;
+  }
 
   LinearGridElement *linear_delta_element = linear_grid_element_get(
       &reshape_smooth_context->linear_delta_grids, grid_coord);
@@ -1618,21 +1634,42 @@ void multires_reshape_smooth_object_grids_with_details(
     return;
   }
   MultiresSubdivideLeaseV03 shared(reshape_smooth_context, true);
+  const char *trace_env = std::getenv("BLENDER_LAYER_RESP_TRACE");
+  const bool trace = trace_env && trace_env[0] && trace_env[0] != '0';
+  double phase_start = trace ? BLI_time_now_seconds() : 0.0;
+  const auto phase = [&](const char *name) {
+    if (trace) {
+      const double now = BLI_time_now_seconds();
+      std::printf("[LOWER_RESHAPE_PHASE] phase=%s preserve_mask=%d ms=%.3f\n",
+                  name, int(reshape_context->preserve_paint_mask),
+                  (now - phase_start) * 1000.0);
+      std::fflush(stdout);
+      phase_start = now;
+    }
+  };
   if (!shared.topology_hit) {
     geometry_create(&reshape_smooth_context);
   }
+  phase("geometry_create");
   evaluate_linear_delta_grids(&reshape_smooth_context);
+  phase("mask_interpolation");
   if (!shared.topology_hit) {
     reshape_subdiv_create(&reshape_smooth_context);
   }
+  phase("evaluator_create");
   if (!shared.base_hit) {
     base_surface_grids_allocate(&reshape_smooth_context);
+    phase("detail_allocate");
     reshape_subdiv_refine_orig(&reshape_smooth_context);
+    phase("original_refine");
     evaluate_base_surface_grids(&reshape_smooth_context);
+    phase("detail_encode");
   }
 
   reshape_subdiv_refine_final(&reshape_smooth_context);
+  phase("edited_refine");
   evaluate_higher_grid_positions_with_details(&reshape_smooth_context);
+  phase("detail_decode");
 #else
   UNUSED_VARS(reshape_context);
 #endif

@@ -192,6 +192,16 @@ void ED_undo_push(bContext *C, const char *str)
   }
 
   eUndoPushReturn push_retval;
+  double trace_phase_start = trace_commit ? BLI_time_now_seconds() : 0.0;
+  const auto trace_phase = [&](const char *phase) {
+    if (trace_commit) {
+      const double now = BLI_time_now_seconds();
+      std::printf("[LAYER_COMMIT_UNDO_PHASE] phase=%s ms=%.3f\n",
+                  phase, (now - trace_phase_start) * 1000.0);
+      std::fflush(stdout);
+      trace_phase_start = now;
+    }
+  };
 
   /* Only apply limit if this is the last undo step. */
   if (wm->runtime->undo_stack->step_active &&
@@ -199,13 +209,16 @@ void ED_undo_push(bContext *C, const char *str)
   {
     BKE_undosys_stack_limit_steps_and_memory(wm->runtime->undo_stack, steps - 1, 0);
   }
+  trace_phase("pre_limit");
 
   push_retval = BKE_undosys_step_push(wm->runtime->undo_stack, C, str);
+  trace_phase("encode");
 
   if (U.undomemory != 0) {
     const size_t memory_limit = size_t(U.undomemory) * 1024 * 1024;
     BKE_undosys_stack_limit_steps_and_memory(wm->runtime->undo_stack, -1, memory_limit);
   }
+  trace_phase("memory_limit");
 
   if (CLOG_CHECK(&LOG, CLG_LEVEL_DEBUG)) {
     BKE_undosys_print(wm->runtime->undo_stack);

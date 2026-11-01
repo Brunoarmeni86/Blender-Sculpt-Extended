@@ -7903,6 +7903,23 @@ bool SculptPaintStroke::test_start(wmOperator *op, const float mval[2])
     Object &ob = *this->object;
     Brush *brush = this->brush;
 
+    /* Finish pending geometry before opening a mask-only Undo transaction.
+     * A general reshape may update the persistent layer surface, so refresh
+     * the displayed CCG before capturing the new stroke's reference. */
+    if (brush && brush->sculpt_brush_type == SCULPT_BRUSH_TYPE_MASK) {
+      SculptSession &ss = *ob.runtime->sculpt_session;
+      if (ss.subdiv_ccg && ss.multires_modifier && ss.subdiv_ccg->dirty.coords) {
+        bool surface_preserved = false;
+        if (!multires_flush_sculpt_updates(&ob, &surface_preserved) ||
+            (!surface_preserved && !multires_refresh_sculpt_ccg(&ob, ss.multires_modifier)))
+        {
+          BKE_report(op->reports, RPT_ERROR,
+                     "Cannot finish pending Multires geometry before mask stroke");
+          return false;
+        }
+      }
+    }
+
     /* NOTE: This should be removed when paint mode is available. Paint mode can force based on the
      * canvas it is painting on. (ref. use_sculpt_texture_paint). */
     if (brush && brush_type_is_paint(brush->sculpt_brush_type) &&
@@ -8170,7 +8187,12 @@ void SculptPaintStroke::done(bool is_cancel, bool stroke_started)
     ED_workspace_status_text(this->evil_C, nullptr);
     draw_transport.reset();
   }
-  layer_delta_smooth_v01::reset();
+  /* A successful Delta Smooth stroke keeps its protected reference while the
+   * resulting active-layer coordinates remain pending.  The next compatible
+   * stroke can start without forcing a full Multires Commit. */
+  if (is_cancel || !stroke_started) {
+    layer_delta_smooth_v01::reset();
+  }
   layer_detail_v01::reset();
   Object &ob = *this->object;
   SculptSession &ss = *ob.runtime->sculpt_session;

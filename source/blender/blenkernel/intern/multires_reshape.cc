@@ -18,6 +18,7 @@
 #include "BKE_multires_sculpt_layers.hh"
 #include "BKE_object.hh"
 #include "BKE_subdiv.hh"
+#include "BKE_subdiv_ccg.hh"
 
 #include <vector>
 #include <cstring>
@@ -225,6 +226,19 @@ bool multiresModifier_reshapeFromCCG(const int tot_level, Mesh *coarse_mesh, Sub
   }
 
   multires_ensure_external_read(coarse_mesh, reshape_context.top.level);
+
+  /* Fine masks are independent of coordinate detail transport. Avoid a full
+   * top-level interpolation buffer when no mask writer has pending changes. */
+  reshape_context.preserve_paint_mask = subdiv_ccg->dirty.coords &&
+                                        !subdiv_ccg->dirty.masks;
+  if (reshape_context.preserve_paint_mask && reshape_context.grid_paint_masks) {
+    for (int grid = 0; grid < reshape_context.num_grids; ++grid) {
+      if (reshape_context.grid_paint_masks[grid].level < reshape_context.top.level) {
+        reshape_context.preserve_paint_mask = false;
+        break;
+      }
+    }
+  }
 
   /* At equal levels, smoothing returns before reading original grids.
    * Avoid their deep copy only under the opt-in policy. Lower-level reshape
