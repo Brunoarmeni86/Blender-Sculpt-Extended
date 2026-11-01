@@ -36,6 +36,8 @@ MultiresSubdivideSmoothCacheV03 *multires_subdivide_smooth_cache_create_v03();
 void multires_subdivide_smooth_cache_free_v03(MultiresSubdivideSmoothCacheV03 *cache);
 
 struct MultiresReshapeContext {
+  /* Coordinate-only CCG commits preserve the existing fine mask verbatim. */
+  bool preserve_paint_mask = false;
   const MultiresSculptLayer *regional_source_layer_v03 = nullptr;
   MutableSpan<int8_t> regional_output_grids_v03 = {};
   mutable bool regional_active_v03 = false;
