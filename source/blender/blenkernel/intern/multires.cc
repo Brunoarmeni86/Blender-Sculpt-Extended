@@ -1877,6 +1877,26 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
                                frame_cache.area == area && frame_cache.grids_num == ccg.grids_num &&
                                frame_cache.capacity_grids == commit_frame_capacity;
     if (!cache_matches) {
+      if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+        const char *reason = frame_cache.mesh != &mesh ? "MESH" :
+                             frame_cache.mmd != &mmd ? "MODIFIER" :
+                             frame_cache.fingerprint != fingerprint ? "FINGERPRINT" :
+                             frame_cache.level != ccg.level ? "LEVEL" :
+                             frame_cache.side != side ? "SIDE" :
+                             frame_cache.area != area ? "AREA" :
+                             frame_cache.grids_num != ccg.grids_num ? "GRID_COUNT" :
+                             frame_cache.capacity_grids != commit_frame_capacity ? "CAPACITY" :
+                             "UNKNOWN";
+        std::printf("[LAYER_COMMIT_FRAME_CACHE_RESET] reason=%s old_level=%d new_level=%d "
+                    "old_grids=%d new_grids=%d old_capacity=%d new_capacity=%d\n",
+                    reason,
+                    frame_cache.level,
+                    ccg.level,
+                    frame_cache.grids_num,
+                    ccg.grids_num,
+                    frame_cache.capacity_grids,
+                    commit_frame_capacity);
+      }
       frame_cache.configure(mesh,
                             mmd,
                             fingerprint,
@@ -1903,6 +1923,15 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
 
     Vector<int> commit_frame_misses;
     commit_frame_misses.reserve(grids.size());
+
+    /* Experimental cold-start limiter. Building the entire bounded cache on
+     * the first transaction makes that transaction pay for future edits. Grow
+     * the working set in small steps instead; already cached grids are always
+     * available and correctness continues through the uncached general path. */
+    const char *progressive_env = BLI_getenv("BLENDER_SCULPT_COMMIT_PROGRESSIVE_CACHE");
+    const bool progressive_cache = progressive_env && progressive_env[0] != '\0' &&
+                                   progressive_env[0] != '0';
+    const int progressive_build_limit = progressive_cache ? 2048 : commit_frame_capacity;
 
     commit_frame_bypass_grids = 0;
 
@@ -1932,13 +1961,16 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
     /* Build an O(capacity) pool of slots available to current misses. */
     Vector<int> commit_frame_available_slots;
     commit_frame_available_slots.reserve(
-        std::min<int64_t>(commit_frame_misses.size(), commit_frame_capacity));
+        std::min<int64_t>(
+            std::min<int64_t>(commit_frame_misses.size(), commit_frame_capacity),
+            progressive_build_limit));
 
     const int cached_before = frame_cache.cached_grids;
 
     /* Never-used capacity costs no eviction. */
     while (frame_cache.cached_grids < frame_cache.capacity_grids &&
-           commit_frame_available_slots.size() < commit_frame_misses.size())
+           commit_frame_available_slots.size() < commit_frame_misses.size() &&
+           commit_frame_available_slots.size() < progressive_build_limit)
     {
       const int slot = frame_cache.cached_grids++;
       frame_cache.slot_grids[slot] = -1;
@@ -1949,7 +1981,8 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
     /* Existing stale slots are scanned only once, in ring order. */
     int ring_scanned = 0;
     if (frame_cache.capacity_grids > 0 &&
-        commit_frame_available_slots.size() < commit_frame_misses.size())
+        commit_frame_available_slots.size() < commit_frame_misses.size() &&
+        commit_frame_available_slots.size() < progressive_build_limit)
     {
       for (int scan = 0; scan < frame_cache.capacity_grids; scan++) {
         const int candidate =
@@ -1968,7 +2001,9 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
         }
 
         commit_frame_available_slots.append(candidate);
-        if (commit_frame_available_slots.size() >= commit_frame_misses.size()) {
+        if (commit_frame_available_slots.size() >= commit_frame_misses.size() ||
+            commit_frame_available_slots.size() >= progressive_build_limit)
+        {
           break;
         }
       }
@@ -2007,6 +2042,16 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
     }
 
     commit_frame_cached_grids = frame_cache.cached_grids;
+    if (commit_trace && progressive_cache) {
+      std::printf("[LAYER_COMMIT_PROGRESSIVE_CACHE] build_limit=%d cached=%d/%d "
+                  "misses=%d assigned=%d bypass=%d\n",
+                  progressive_build_limit,
+                  commit_frame_cached_grids,
+                  commit_frame_capacity,
+                  int(commit_frame_misses.size()),
+                  int(commit_frame_available_slots.size()),
+                  commit_frame_bypass_grids);
+    }
   }
 
   const double commit_frame_cache_ms =
@@ -2530,14 +2575,25 @@ bool multires_flush_sculpt_updates(Object *object, bool *r_local_surface_preserv
     std::fflush(stdout);
     return true;
   }
-  if (ccg->dirty.masks && !ccg->dirty.coords && !ccg->dirty.hidden) {
+  /* Masks are an independent persistent domain. Publish them before coordinate
+   * commit routing so a pending local layer edit cannot turn a mask stroke into
+   * a full geometric reshape. Keep position tracking intact. */
+  if (ccg->dirty.masks && !ccg->dirty.hidden) {
     const BitVector<> *mask_subset = changes.masks_full ? nullptr : &changes.mask_grids;
     if (!multires_flush_mask_updates_impl(*ccg, *mesh, mmd->totlvl, mask_subset)) {
       return false;
     }
     ccg->dirty.masks = false;
-    multires_sculpt_changes_clear(ss, *pbvh);
-    return true;
+    changes.mask_grids.clear();
+    changes.masks_full = false;
+    if (!ccg->dirty.coords) {
+      multires_sculpt_changes_clear(ss, *pbvh);
+      return true;
+    }
+    if (multires_layer_commit_trace_enabled()) {
+      std::printf("[LAYER_MASK_DOMAIN_SPLIT] mask_published=1 coords_pending=1 reshape=0\n");
+      std::fflush(stdout);
+    }
   }
   MultiresSculptLayer *layer = bke::multires_layers::active(*mmd);
   if (ccg->dirty.coords && layer != nullptr) {

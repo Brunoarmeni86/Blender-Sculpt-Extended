@@ -25,6 +25,48 @@ def native_operator(layout, identifier, text, icon='NONE', **properties):
     return pointer
 
 
+class SCULPT_OT_multires_layer_strength_deferred(bpy.types.Operator):
+    """Edit the numeric value freely, then evaluate dense Multires only once."""
+    bl_idname = "sculpt.multires_layer_strength_deferred"
+    bl_label = "Set Layer Strength"
+    bl_description = "Adjust Strength without rebuilding Multires until you confirm"
+    bl_options = {'REGISTER'}
+
+    modifier_name: bpy.props.StringProperty(options={'HIDDEN'})
+    layer_index: bpy.props.IntProperty(options={'HIDDEN'})
+    strength: bpy.props.FloatProperty(name="Strength", default=1.0, min=-10.0, max=10.0)
+
+    def _layer(self, context):
+        obj = context.object
+        modifier = obj.modifiers.get(self.modifier_name) if obj else None
+        if modifier is None or not hasattr(modifier, 'sculpt_layers'):
+            return None
+        if not 0 <= self.layer_index < len(modifier.sculpt_layers):
+            return None
+        return modifier.sculpt_layers[self.layer_index]
+
+    def invoke(self, context, event):
+        layer = self._layer(context)
+        if layer is None:
+            return {'CANCELLED'}
+        self.strength = layer.strength
+        return context.window_manager.invoke_props_dialog(self, width=320)
+
+    def draw(self, context):
+        column = self.layout.column()
+        column.prop(self, 'strength', slider=True)
+        column.label(text="La superficie viene aggiornata solo con OK", icon='INFO')
+
+    def execute(self, context):
+        layer = self._layer(context)
+        if layer is None:
+            return {'CANCELLED'}
+        if abs(layer.strength - self.strength) <= 1.0e-12:
+            return {'CANCELLED'}
+        layer.strength = self.strength
+        return {'FINISHED'}
+
+
 class VIEW3D_PT_sculpt_multires_sidebar(bpy.types.Panel):
     bl_idname = "VIEW3D_PT_sculpt_multires_sidebar"
     bl_label = "Multiresolution"
@@ -130,7 +172,15 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
                 icon='RADIOBUT_ON' if index == active_index else 'RADIOBUT_OFF')
             op.index = index
             item.prop(layer, 'name', text='')
-            item.prop(layer, 'strength', text='')
+            # Keep the native field available and add a deferred editor. The
+            # latter avoids evaluating a dense 122M-sample layer for every
+            # mouse-move event; exact RNA evaluation happens once on OK.
+            strength = item.row(align=True)
+            strength.prop(layer, 'strength', text='')
+            deferred = strength.operator(
+                'sculpt.multires_layer_strength_deferred', text='', icon='TIME')
+            deferred.modifier_name = modifier.name
+            deferred.layer_index = index
             item.prop(layer, 'visible', text='', emboss=False,
                       icon='HIDE_OFF' if layer.visible else 'HIDE_ON')
         if not modifier.sculpt_layers:
@@ -244,5 +294,6 @@ class VIEW3D_PT_multires_polypaint_attributes(bpy.types.Panel):
             button.attribute_name = active.name
 
 
-classes = (VIEW3D_PT_sculpt_multires_sidebar, VIEW3D_PT_sculpt_multires_layers_sidebar,
+classes = (SCULPT_OT_multires_layer_strength_deferred,
+           VIEW3D_PT_sculpt_multires_sidebar, VIEW3D_PT_sculpt_multires_layers_sidebar,
            MULTIRES_OT_polypaint_manage, VIEW3D_PT_multires_polypaint_attributes)

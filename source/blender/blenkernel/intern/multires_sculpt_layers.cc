@@ -269,8 +269,12 @@ bool payload_grids(const MultiresSculptLayer &layer,
   }
   const int side = subdiv::grid_size_from_level(layer.level);
   const int area = side * side;
+  /* The index stores one int per occupied grid for the current hot layer and is
+   * invalidated by every payload allocation/mutation path. Keep it enabled by
+   * default: repeated Strength updates should not rescan every grid descriptor.
+   * Set BLENDER_SCULPT_LAYER_SUPPORT_CACHE=0 for diagnostics/A-B comparison. */
   const char *value = BLI_getenv("BLENDER_SCULPT_LAYER_SUPPORT_CACHE");
-  const bool enabled = value != nullptr && value[0] == '1' && value[1] == '\0';
+  const bool enabled = value == nullptr || value[0] == '\0' || value[0] != '0';
   std::lock_guard<std::mutex> lock(payload_index_mutex());
   LayerPayloadIndex &cache = payload_index();
   const bool hit = enabled && cache.layer == &layer && cache.descriptors == layer.disps &&

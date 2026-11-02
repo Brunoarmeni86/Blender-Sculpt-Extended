@@ -669,6 +669,25 @@ struct Object {
   /** Irradiance caches baked for this object (light-probes only). */
   struct LightProbeObjectCache *lightprobe_cache = nullptr;
 
+  /**
+   * Sculpt Extended symmetry frame in stable object-local space.
+   * These are tool metadata, not geometry inputs. Their RNA properties explicitly avoid
+   * dependency-graph tagging so moving the reference cannot rebuild Multires/CCG.
+   */
+  float sculpt_symmetry_reference_location[3] = {};
+  float sculpt_symmetry_reference_rotation[3] = {};
+  float sculpt_symmetry_reference_display_size = 2.0f;
+  float sculpt_transform_pivot_location[3] = {};
+  float sculpt_symmetry_anchor_offset[3] = {};
+  char sculpt_symmetry_reference_valid = 0;
+  char sculpt_symmetry_reference_mode = 0;
+  char sculpt_symmetry_reference_enabled = 0;
+  char sculpt_symmetry_reference_use_for_strokes = 0;
+  char sculpt_transform_pivot_enabled = 0;
+  char sculpt_transform_pivot_linked = 1;
+  char sculpt_symmetry_reference_locked = 0;
+  char _pad_sculpt_transform_pivot[5] = {};
+
   bke::ObjectRuntime *runtime = nullptr;
 
 #ifdef __cplusplus

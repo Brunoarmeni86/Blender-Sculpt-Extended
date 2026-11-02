@@ -936,6 +936,7 @@ static wmOperatorStatus set_pivot_position_exec(bContext *C, wmOperator *op)
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
 
   const PivotPositionMode mode = PivotPositionMode(RNA_enum_get(op->ptr, "mode"));
+  const bool metadata_only = RNA_boolean_get(op->ptr, "metadata_only");
 
   const View3D *v3d = CTX_wm_view3d(C);
   const Base *base = CTX_data_active_base(C);
@@ -943,7 +944,12 @@ static wmOperatorStatus set_pivot_position_exec(bContext *C, wmOperator *op)
     return OPERATOR_CANCELLED;
   }
 
-  BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
+  /* Moving the shared transform pivot from the 3D cursor only changes SculptSession
+   * metadata.  In particular it must not flush pending multires layer coordinates or
+   * rebuild the CCG.  The regular operator path is kept for all native Blender uses. */
+  if (!(metadata_only && mode == PivotPositionMode::Cursor3D)) {
+    BKE_sculpt_update_object_for_edit(depsgraph, &ob, false);
+  }
 
   switch (mode) {
     case PivotPositionMode::Origin:
@@ -965,9 +971,13 @@ static wmOperatorStatus set_pivot_position_exec(bContext *C, wmOperator *op)
     case PivotPositionMode::Cursor3D: {
       const Scene *scene = CTX_data_scene(C);
       const float3 world_position(scene->cursor.location);
-      undo::push_pivot_begin(ob, op);
+      if (!metadata_only) {
+        undo::push_pivot_begin(ob, op);
+      }
       ss.pivot_pos = math::transform_point(ob.world_to_object(), world_position);
-      undo::push_end(ob);
+      if (!metadata_only) {
+        undo::push_end(ob);
+      }
       break;
     }
     case PivotPositionMode::CursorSurface: {
@@ -988,7 +998,9 @@ static wmOperatorStatus set_pivot_position_exec(bContext *C, wmOperator *op)
   paint_runtime->last_stroke_valid = true;
 
   ED_region_tag_redraw(region);
-  WM_event_add_notifier(C, NC_GEOM | ND_SELECT, ob.data);
+  if (!metadata_only) {
+    WM_event_add_notifier(C, NC_GEOM | ND_SELECT, ob.data);
+  }
 
   return OPERATOR_FINISHED;
 }
@@ -1032,6 +1044,14 @@ void SCULPT_OT_set_pivot_position(wmOperatorType *ot)
                int(PivotPositionMode::Unmasked),
                "Mode",
                "");
+
+  PropertyRNA *prop = RNA_def_boolean(
+      ot->srna,
+      "metadata_only",
+      false,
+      "Metadata Only",
+      "Set a cursor-based sculpt pivot without evaluating or tagging mesh geometry");
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_SKIP_SAVE);
 
   RNA_def_float(ot->srna,
                 "mouse_x",

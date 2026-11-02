@@ -24,20 +24,26 @@ def install(ref):
   @classmethod
   def poll(cls,c):return c.area and c.area.type=='VIEW_3D' and c.mode in {'SCULPT','EDIT_MESH'} and c.object and hasattr(c.object,'sculpt_symref_preview')
   def apply_reference(self,c):
-   if self.target!='REFERENCE' and not self.ob.sculpt_symref_preview.transform_pivot_linked:return
+   if self.target!='REFERENCE' and not self.ob.sculpt_transform_pivot_linked:return
+   self.persistent_changed=True
    if self.mode=='G':
     if not ref.set_world_location(self.ob,c.scene.cursor.location):
      raise RuntimeError('Ancoraggio non valido; sgancia il riferimento prima di spostarlo')
-   else:self.ob.sculpt_symref_preview.rotation=(self.ob.matrix_world.to_quaternion().inverted()@c.scene.cursor.matrix.to_quaternion()).to_euler('XYZ')
+   else:ref.set_reference_rotation(self.ob,(self.ob.matrix_world.to_quaternion().inverted()@c.scene.cursor.matrix.to_quaternion()).to_euler('XYZ'))
    ref.redraw()
-  def apply_scale(self,c,factor):
-   size=max(.01,self.saved['display_size']*factor)
-   if abs(c.object.sculpt_symref_preview.display_size-size)>1e-9:
-    c.object.sculpt_symref_preview.display_size=size
+  def apply_scale(self,c,factor,preview=False):
+   size=max(.01,self.saved_native[2]*factor)
+   if preview:
+    self.preview_size=size
+    ref.set_modal_reference_preview(c.object,size=size)
+   elif abs(c.object.sculpt_symmetry_reference_display_size-size)>1e-9:
+    c.object.sculpt_symmetry_reference_display_size=size
     ref.redraw()
   def finish_scale(self,c,cancel=False):
-   if cancel:
-    for key,value in self.saved.items():setattr(c.object.sculpt_symref_preview,key,value)
+   if not cancel and hasattr(self,'preview_size'):
+    self.persistent_changed=True
+    c.object.sculpt_symmetry_reference_display_size=self.preview_size
+   ref.clear_modal_reference_preview(c.object)
    if c.area:c.area.header_text_set(None)
    ref.redraw()
    return {'CANCELLED'} if cancel else {'FINISHED'}
@@ -51,24 +57,28 @@ def install(ref):
    try:factor=float(self.numeric) if self.numeric else max(.001,1+(event.mouse_region_x-self.start_mouse_x)*.01)
    except ValueError:return {'RUNNING_MODAL'}
    if event.ctrl:factor=max(.001,round(factor*10.0)/10.0)
-   self.apply_scale(c,factor)
+   self.apply_scale(c,factor,preview=True)
    return {'RUNNING_MODAL'}
   def cleanup(self,c,restore_reference=False):
    if getattr(self,'timer',None):
     c.window_manager.event_timer_remove(self.timer);self.timer=None
+   ref.clear_modal_reference_preview(self.ob)
    c.scene.cursor.rotation_mode=self.cursor_mode;c.scene.cursor.matrix=self.cursor_before
-   if restore_reference and (self.target=='REFERENCE' or self.ob.sculpt_symref_preview.transform_pivot_linked):
-    for key,value in self.saved.items():setattr(self.ob.sculpt_symref_preview,key,value)
+   if restore_reference and getattr(self,'persistent_changed',False) and (self.target=='REFERENCE' or self.ob.sculpt_transform_pivot_linked):
+    ref.restore_native_reference(self.ob,self.saved_native)
    if c.area:c.area.header_text_set(None)
    ref.redraw()
   def invoke(self,c,event):
-   if c.object.sculpt_symref_preview.locked and (self.target=='REFERENCE' or c.object.sculpt_symref_preview.transform_pivot_linked):return {'CANCELLED'}
+   ref.ensure_native_reference(c.object)
+   if c.object.sculpt_symmetry_reference_locked and (self.target=='REFERENCE' or c.object.sculpt_transform_pivot_linked):return {'CANCELLED'}
    if self.target=='REFERENCE':
-    if c.object.sculpt_symref_preview.locked:return {'CANCELLED'}
+    if c.object.sculpt_symmetry_reference_locked:return {'CANCELLED'}
     if not ref.ensure_tool_session(c):return {'CANCELLED'}
    elif c.mode!='SCULPT':return {'CANCELLED'}
-   self.ob=c.object;self.saved=ref.snapshot(self.ob.sculpt_symref_preview)
-   if self.target=='REFERENCE':self.ob.sculpt_symref_preview.mode={'G':'MOVE','R':'ROTATE','S':'SIZE'}[self.mode]
+   self.ob=c.object;self.saved=ref.snapshot(self.ob.sculpt_symref_preview);self.saved_native=ref.native_reference_snapshot(self.ob);self.persistent_changed=False
+   if self.target=='REFERENCE':
+    requested_mode={'G':'MOVE','R':'ROTATE','S':'SIZE'}[self.mode]
+    if self.ob.sculpt_symmetry_reference_mode!=requested_mode:self.ob.sculpt_symmetry_reference_mode=requested_mode
    if self.mode=='S':
     if self.target!='REFERENCE':return {'CANCELLED'}
     self.start_mouse_x=event.mouse_region_x;self.numeric=''
@@ -80,7 +90,7 @@ def install(ref):
     self.frame=ref.reference_matrix(self.ob,c.evaluated_depsgraph_get())[0]
    else:
     s=self.ob.sculpt_symref_preview
-    self.frame=ref.reference_matrix(self.ob,c.evaluated_depsgraph_get())[0] if s.transform_pivot_linked else self.ob.matrix_world@Matrix.Translation(Vector(s.transform_pivot_location))
+    self.frame=ref.reference_matrix(self.ob,c.evaluated_depsgraph_get())[0] if self.ob.sculpt_transform_pivot_linked else self.ob.matrix_world@Matrix.Translation(Vector(self.ob.sculpt_transform_pivot_location))
    c.scene.cursor.matrix=self.frame
    self.timer=c.window_manager.event_timer_add(.03,window=c.window)
    c.window_manager.modal_handler_add(self)
@@ -96,13 +106,14 @@ def install(ref):
     self.cleanup(c,True);self.report({'ERROR'},str(ex));return {'CANCELLED'}
    return {'RUNNING_MODAL'}
   def execute(self,c):
+   ref.ensure_native_reference(c.object)
    if not self.has_result:return {'CANCELLED'}
-   if c.object.sculpt_symref_preview.locked and (self.target=='REFERENCE' or c.object.sculpt_symref_preview.transform_pivot_linked):return {'CANCELLED'}
-   if self.target=='REFERENCE' and c.object.sculpt_symref_preview.locked:return {'CANCELLED'}
+   if c.object.sculpt_symmetry_reference_locked and (self.target=='REFERENCE' or c.object.sculpt_transform_pivot_linked):return {'CANCELLED'}
+   if self.target=='REFERENCE' and c.object.sculpt_symmetry_reference_locked:return {'CANCELLED'}
    self.ob=c.object
    if self.mode=='S':
     if self.target!='REFERENCE':return {'CANCELLED'}
-    self.saved=ref.snapshot(self.ob.sculpt_symref_preview)
+    self.saved=ref.snapshot(self.ob.sculpt_symref_preview);self.saved_native=ref.native_reference_snapshot(self.ob)
     self.apply_scale(c,self.result_scale)
     return {'FINISHED'}
    cursor=c.scene.cursor.matrix.copy();rotation_mode=c.scene.cursor.rotation_mode
@@ -110,9 +121,9 @@ def install(ref):
     c.scene.cursor.rotation_mode='XYZ';c.scene.cursor.location=self.result_location;c.scene.cursor.rotation_euler=self.result_rotation
     if self.target=='PIVOT':
      s=self.ob.sculpt_symref_preview
-     if s.transform_pivot_linked:self.apply_reference(c)
-     s.transform_pivot_location=self.ob.matrix_world.inverted_safe()@c.scene.cursor.location
-     return bpy.ops.sculpt.set_pivot_position('EXEC_REGION_WIN',True,mode='CURSOR')
+     if self.ob.sculpt_transform_pivot_linked:self.apply_reference(c)
+     self.ob.sculpt_transform_pivot_location=self.ob.matrix_world.inverted_safe()@c.scene.cursor.location
+     return bpy.ops.sculpt.set_pivot_position('EXEC_REGION_WIN',False,mode='CURSOR',metadata_only=True)
     self.apply_reference(c);return {'FINISHED'}
    finally:
     c.scene.cursor.rotation_mode=rotation_mode;c.scene.cursor.matrix=cursor
@@ -121,14 +132,16 @@ def install(ref):
    if event.type!='TIMER':return {'PASS_THROUGH'}
    try:
     running=any(op.bl_idname in {'TRANSFORM_OT_translate','TRANSFORM_OT_rotate'} for op in c.window.modal_operators)
-    self.apply_reference(c)
+    if self.target=='REFERENCE' or self.ob.sculpt_transform_pivot_linked:
+     ref.set_modal_reference_preview(self.ob,c.scene.cursor.matrix)
     if running:return {'PASS_THROUGH'}
     changed=not same_matrix(c.scene.cursor.matrix,self.frame)
     if changed:
      self.result_location=c.scene.cursor.location;self.result_rotation=c.scene.cursor.matrix.to_euler('XYZ');self.has_result=True
+     self.apply_reference(c)
     if changed and self.target=='PIVOT':
-     c.object.sculpt_symref_preview.transform_pivot_location=c.object.matrix_world.inverted_safe()@c.scene.cursor.location
-     if bpy.ops.sculpt.set_pivot_position('EXEC_REGION_WIN',True,mode='CURSOR')!={'FINISHED'}:
+     c.object.sculpt_transform_pivot_location=c.object.matrix_world.inverted_safe()@c.scene.cursor.location
+     if bpy.ops.sculpt.set_pivot_position('EXEC_REGION_WIN',False,mode='CURSOR',metadata_only=True)!={'FINISHED'}:
       raise RuntimeError('Impossibile posizionare il pivot Sculpt')
     self.cleanup(c,not changed)
     return {'FINISHED'} if changed else {'CANCELLED'}
@@ -143,7 +156,7 @@ def install(ref):
   bl_options={'REGISTER','UNDO'}
   @classmethod
   def poll(cls,c):return c.mode=='SCULPT' and c.object and c.area and c.area.type=='VIEW_3D'
-  def execute(self,c):return bpy.ops.sculpt.set_pivot_position('EXEC_REGION_WIN',True,mode='CURSOR')
+  def execute(self,c):return bpy.ops.sculpt.set_pivot_position('EXEC_REGION_WIN',False,mode='CURSOR',metadata_only=True)
 
  class SculptPivotUseReference(bpy.types.Operator):
   bl_idname='sculpt.pivot_use_reference_preview'
@@ -157,8 +170,8 @@ def install(ref):
    cursor=c.scene.cursor.matrix.copy()
    try:
     c.scene.cursor.matrix=frame
-    result=bpy.ops.sculpt.set_pivot_position('EXEC_REGION_WIN',True,mode='CURSOR')
-    if result=={'FINISHED'}:s.transform_pivot_location=c.object.matrix_world.inverted_safe()@frame.translation
+    result=bpy.ops.sculpt.set_pivot_position('EXEC_REGION_WIN',False,mode='CURSOR',metadata_only=True)
+    if result=={'FINISHED'}:c.object.sculpt_transform_pivot_location=c.object.matrix_world.inverted_safe()@frame.translation
     return result
    finally:c.scene.cursor.matrix=cursor
 
@@ -168,7 +181,7 @@ def install(ref):
   bl_space_type='VIEW_3D';bl_region_type='WINDOW';bl_options={'3D','PERSISTENT'}
   @classmethod
   def poll(cls,c):
-   return c.mode=='SCULPT' and c.object and hasattr(c.object,'sculpt_symref_preview') and c.object.sculpt_symref_preview.transform_pivot_enabled
+   return c.mode=='SCULPT' and c.object and hasattr(c.object,'sculpt_symref_preview') and c.object.sculpt_transform_pivot_enabled
   def setup(self,c):
    self.handles=[]
    colors=((1.,.18,.18),(.3,1.,.3),(.25,.55,1.))
@@ -180,7 +193,7 @@ def install(ref):
     self.handles.append((axis,gz))
   def draw_prepare(self,c):
    s=c.object.sculpt_symref_preview
-   frame=ref.reference_matrix(c.object,c.evaluated_depsgraph_get())[0] if s.transform_pivot_linked else c.object.matrix_world@Matrix.Translation(Vector(s.transform_pivot_location))
+   frame=ref.reference_matrix(c.object,c.evaluated_depsgraph_get())[0] if c.object.sculpt_transform_pivot_linked else c.object.matrix_world@Matrix.Translation(Vector(c.object.sculpt_transform_pivot_location))
    for axis,gz in self.handles:
     direction=frame.to_3x3().col[axis].normalized()
     basis=Vector((0,0,1)).rotation_difference(direction).to_matrix().to_4x4();basis.translation=frame.translation
@@ -197,11 +210,11 @@ def install(ref):
    row=layout.row(align=True);row.prop(ts,'use_snap',text='Snap',icon='SNAP_ON');row.prop(ts,'snap_elements',text='')
    if 'VOLUME' in ts.snap_elements:layout.prop(ts,'use_snap_peel_object',text='Oggetti separati')
    s=c.object.sculpt_symref_preview
-   layout.prop(s,'transform_pivot_enabled',toggle=True,icon='ORIENTATION_GIMBAL')
-   layout.prop(s,'transform_pivot_linked')
+   layout.prop(c.object,'sculpt_transform_pivot_enabled',text='Mostra pivot trasformazioni',toggle=True,icon='ORIENTATION_GIMBAL')
+   layout.prop(c.object,'sculpt_transform_pivot_linked',text='Condividi con simmetria')
    layout.operator_context='INVOKE_REGION_WIN'
    op=layout.operator('sculpt.reference_native_transform_preview',text='Posiziona pivot con snap',icon='PIVOT_CURSOR');op.target='PIVOT';op.mode='G'
-   if s.transform_pivot_linked:layout.operator('sculpt.pivot_use_reference_preview',icon='LINKED')
+   if c.object.sculpt_transform_pivot_linked:layout.operator('sculpt.pivot_use_reference_preview',icon='LINKED')
    layout.operator('sculpt.snap_pivot_from_cursor_preview',icon='PIVOT_CURSOR')
    layout.label(text='G sposta il pivot · Ruota e Scala usano il pivot')
    layout.label(text='X/Y/Z · Ctrl snap · Esc annulla')

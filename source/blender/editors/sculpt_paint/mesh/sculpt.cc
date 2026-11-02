@@ -1588,7 +1588,12 @@ static bool reference_symmetry_read(const Depsgraph &depsgraph,
   PropertyRNA *property = RNA_struct_find_property(&owner, "sculpt_symref_preview");
   if (!property) { return true; }
   PointerRNA settings = RNA_property_pointer_get(&owner, property);
-  if (!settings.data || !RNA_boolean_get(&settings, "use_for_strokes")) { return true; }
+  if (!settings.data) { return true; }
+  const bool native_settings = RNA_boolean_get(&owner, "sculpt_symmetry_reference_valid");
+  const bool use_for_strokes = native_settings ?
+                                   RNA_boolean_get(&owner, "sculpt_symmetry_reference_use_for_strokes") :
+                                   RNA_boolean_get(&settings, "use_for_strokes");
+  if (!use_for_strokes) { return true; }
   requested = true;
   const auto reject = [&](const char *message) {
     if (reports) { BKE_report(reports, RPT_ERROR, message); }
@@ -1622,8 +1627,16 @@ static bool reference_symmetry_read(const Depsgraph &depsgraph,
     return reject("Custom symmetry prototype requires a positive uniform object scale without shear");
   }
   float3 location, rotation;
-  RNA_float_get_array(&settings, "location", location);
-  RNA_float_get_array(&settings, "rotation", rotation);
+  PointerRNA object_ptr = RNA_id_pointer_create(&object.id);
+  const bool native_frame = RNA_boolean_get(&object_ptr, "sculpt_symmetry_reference_valid");
+  if (native_frame) {
+    RNA_float_get_array(&object_ptr, "sculpt_symmetry_reference_location", location);
+    RNA_float_get_array(&object_ptr, "sculpt_symmetry_reference_rotation", rotation);
+  }
+  else {
+    RNA_float_get_array(&settings, "location", location);
+    RNA_float_get_array(&settings, "rotation", rotation);
+  }
   if (RNA_boolean_get(&settings, "anchored")) {
     int topology[3];RNA_int_get_array(&settings, "topology", topology);
     const int vertex = RNA_int_get(&settings,"vertex"), face = RNA_int_get(&settings,"face");
@@ -1646,7 +1659,13 @@ static bool reference_symmetry_read(const Depsgraph &depsgraph,
     if (evaluated_mesh->verts_num != mesh.verts_num) {
       return reject("Custom symmetry anchor requires topology-preserving deformation");
     }
-    float3 offset;RNA_float_get_array(&settings,"anchor_offset",offset);
+    float3 offset;
+    if (native_frame) {
+      RNA_float_get_array(&object_ptr, "sculpt_symmetry_anchor_offset", offset);
+    }
+    else {
+      RNA_float_get_array(&settings, "anchor_offset", offset);
+    }
     location = evaluated_mesh->vert_positions()[vertex] + offset;
   }
   for (int i=0;i<3;i++) {

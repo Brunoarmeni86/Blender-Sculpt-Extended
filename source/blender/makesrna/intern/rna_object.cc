@@ -3795,6 +3795,90 @@ static void rna_def_object(BlenderRNA *brna)
       "Push the shadow terminator towards the light to hide artifacts on low poly geometry");
   RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
 
+  prop = RNA_def_property(srna, "sculpt_symmetry_reference_location", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_symmetry_reference_location");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Sculpt Symmetry Reference Location", "Stable object-local symmetry frame origin");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_symmetry_reference_rotation", PROP_FLOAT, PROP_EULER);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_symmetry_reference_rotation");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Sculpt Symmetry Reference Rotation", "Stable object-local symmetry frame rotation");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_symmetry_reference_display_size", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_symmetry_reference_display_size");
+  RNA_def_property_range(prop, 0.01f, 100000.0f);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Sculpt Symmetry Reference Size", "Viewport size of the symmetry reference planes");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_symmetry_reference_valid", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_symmetry_reference_valid", 1);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Sculpt Symmetry Reference Valid", "Use the native metadata-only symmetry frame");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  static const EnumPropertyItem sculpt_symmetry_reference_mode_items[] = {
+      {0, "MOVE", 0, "Move", "Move the symmetry reference"},
+      {1, "ROTATE", 0, "Rotate", "Rotate the symmetry reference"},
+      {2, "SIZE", 0, "Size", "Change only the displayed plane size"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_symmetry_reference_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_symmetry_reference_mode");
+  RNA_def_property_enum_items(prop, sculpt_symmetry_reference_mode_items);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Sculpt Symmetry Reference Mode", "Active reference gizmo mode");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_symmetry_reference_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_symmetry_reference_enabled", 1);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Sculpt Symmetry Reference Enabled", "Display the custom symmetry reference");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_symmetry_reference_use_for_strokes", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_symmetry_reference_use_for_strokes", 1);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Use Sculpt Symmetry Reference", "Use the custom frame for sculpt stroke symmetry");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_transform_pivot_location", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_transform_pivot_location");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Sculpt Transform Pivot", "Stable object-local pivot for Move, Rotate and Scale");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_symmetry_anchor_offset", PROP_FLOAT, PROP_TRANSLATION);
+  RNA_def_property_float_sdna(prop, nullptr, "sculpt_symmetry_anchor_offset");
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Sculpt Symmetry Anchor Offset", "Metadata-only offset from the anchored topology vertex");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_transform_pivot_enabled", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_transform_pivot_enabled", 1);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Sculpt Transform Pivot Enabled", "Display the shared sculpt transform pivot");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_transform_pivot_linked", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_transform_pivot_linked", 1);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Shared Sculpt Pivot", "Share the symmetry reference with transform brushes");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_symmetry_reference_locked", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_symmetry_reference_locked", 1);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop, "Lock Sculpt Symmetry Reference", "Protect reference and shared pivot placement");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
   RNA_define_lib_overridable(false);
 
   /* anim */

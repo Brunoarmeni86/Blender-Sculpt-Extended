@@ -1480,7 +1480,16 @@ static void rna_MultiresSculptLayer_strength_set(PointerRNA *ptr, float value)
   const float old_value=layer->strength;
   if (old_value==value) return;
 
-  bool prepared=bke::multires_layers::commit(*ob);
+  const SculptSession *ss = ob->runtime ? ob->runtime->sculpt_session : nullptr;
+  const bool pending_positions = ss && ss->subdiv_ccg && ss->subdiv_ccg->dirty.coords;
+  /* Strength changes layer composition, but only pending coordinates need to be
+   * recorded against the old strength first. Avoid entering the commit engine
+   * for the common already-published case. Mask/hidden state is independent of
+   * the layer recording destination and remains owned by the live CCG. */
+  const bool prepared = !pending_positions || bke::multires_layers::commit(*ob);
+  if (!pending_positions && rna_multires_visible_trace_enabled()) {
+    std::printf("[LAYER_COMMIT_SKIP] op=STRENGTH reason=NO_PENDING_COORDS\n");
+  }
   if (!prepared) {
     multires_force_sculpt_rebuild(ob);
     DEG_id_tag_update(ptr->owner_id,ID_RECALC_GEOMETRY);
@@ -1991,9 +2000,15 @@ static void rna_MultiresModifier_active_layer_set(PointerRNA *ptr, int value)
   bool surface_preserved = false;
   const double started = BLI_time_now_seconds();
   /* Commit while the OLD active index/strength/visibility still owns pending coordinates. */
-  if (!bke::multires_layers::commit(*ob, &surface_preserved)) {
+  if (pending_positions && !bke::multires_layers::commit(*ob, &surface_preserved)) {
     BKE_modifier_set_error(ob, &mmd->modifier, "Commit pending sculpt before changing layer");
     return;
+  }
+  if (!pending_positions) {
+    const char *trace = std::getenv("BLENDER_LAYER_RESP_TRACE");
+    if (trace && trace[0] == '1') {
+      std::printf("[LAYER_COMMIT_SKIP] op=SELECT_RNA reason=NO_PENDING_COORDS\n");
+    }
   }
   const double committed = BLI_time_now_seconds();
   const bool rebuild = pending_positions && !surface_preserved;

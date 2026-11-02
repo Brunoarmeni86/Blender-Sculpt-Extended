@@ -18,7 +18,10 @@ _session = None
 _handle = None
 _panels = []
 _last_anchor = {}
+_anchor_eval_cache = {}
 _debug_last_group = None
+_modal_reference_preview = None
+_native_migration_pending = set()
 _colors = ((0.95, .18, .14), (.22, .8, .25), (.22, .45, 1.))
 _deform_modifiers = {'ARMATURE', 'LATTICE', 'SIMPLE_DEFORM', 'DISPLACE', 'CAST', 'HOOK', 'SMOOTH', 'CORRECTIVE_SMOOTH'}
 
@@ -71,10 +74,10 @@ def ensure_tool_session(context):
     if not ob or not tool_selected(context):return False
     if _session and _session['pointer']==ob.as_pointer():return True
     s=ob.sculpt_symref_preview
-    session={'pointer':ob.as_pointer(),'before':snapshot(s),'tool':'builtin.select_box' if context.mode=='EDIT_MESH' else 'builtin.brush','pick':False}
-    if not s.enabled:s.display_size=max(.1,max(ob.dimensions)*.75)
-    s.enabled=True
-    if NATIVE_BACKEND and context.mode=='SCULPT':s.use_for_strokes=True
+    session={'pointer':ob.as_pointer(),'before':snapshot(s),'native_before':native_reference_snapshot(ob),'tool':'builtin.select_box' if context.mode=='EDIT_MESH' else 'builtin.brush','pick':False}
+    if not ob.sculpt_symmetry_reference_enabled:ob.sculpt_symmetry_reference_display_size=max(.1,max(ob.dimensions)*.75)
+    ob.sculpt_symmetry_reference_enabled=True
+    if NATIVE_BACKEND and context.mode=='SCULPT':ob.sculpt_symmetry_reference_use_for_strokes=True
     _session=session
     redraw();return True
 
@@ -96,13 +99,91 @@ def anchor_position(ob, depsgraph):
     if (len(mesh.vertices), len(mesh.edges), len(mesh.polygons)) != tuple(s.topology): return None
     if not 0 <= s.vertex < len(mesh.vertices) or not 0 <= s.face < len(mesh.polygons): return None
     if ','.join(str(v) for v in mesh.polygons[s.face].vertices) != s.face_signature: return None
+    key=(ob.as_pointer(),depsgraph.as_pointer(),s.vertex,s.face,tuple(s.topology))
+    if key in _anchor_eval_cache:return _anchor_eval_cache[key].copy()
     evaluated = ob.evaluated_get(depsgraph)
     if evaluated.type != 'MESH' or len(evaluated.data.vertices) != len(mesh.vertices): return None
-    return Vector(evaluated.data.vertices[s.vertex].co)
+    point=Vector(evaluated.data.vertices[s.vertex].co)
+    _anchor_eval_cache[key]=point.copy()
+    return point
+
+def invalidate_anchor_cache(scene, depsgraph):
+    if any(isinstance(update.id,(bpy.types.Object,bpy.types.Mesh)) for update in depsgraph.updates):
+        _anchor_eval_cache.clear()
+
+def ensure_native_reference(ob):
+    """Migrate the legacy Python settings once, without tagging object geometry."""
+    if ob.sculpt_symmetry_reference_valid:return True
+    def migrate(target):
+        s = target.sculpt_symref_preview
+        target.sculpt_symmetry_reference_location = s.location
+        target.sculpt_symmetry_reference_rotation = s.rotation
+        target.sculpt_symmetry_reference_display_size = max(.01, s.display_size)
+        target.sculpt_symmetry_reference_mode = s.mode
+        target.sculpt_symmetry_reference_enabled = s.enabled
+        target.sculpt_symmetry_reference_use_for_strokes = s.use_for_strokes
+        target.sculpt_transform_pivot_location = s.transform_pivot_location
+        target.sculpt_transform_pivot_enabled = s.transform_pivot_enabled
+        target.sculpt_transform_pivot_linked = s.transform_pivot_linked
+        target.sculpt_symmetry_reference_locked = s.locked
+        target.sculpt_symmetry_anchor_offset = s.anchor_offset
+        target.sculpt_symmetry_reference_valid = True
+    try:
+        migrate(ob);return True
+    except AttributeError as ex:
+        if 'Writing to ID classes in this context is not allowed' not in str(ex):raise
+        pointer=ob.as_pointer()
+        if pointer not in _native_migration_pending:
+            _native_migration_pending.add(pointer)
+            def deferred():
+                try:
+                    target=next((item for item in bpy.data.objects if item.as_pointer()==pointer),None)
+                    if target and not target.sculpt_symmetry_reference_valid:migrate(target)
+                finally:_native_migration_pending.discard(pointer)
+                redraw();return None
+            bpy.app.timers.register(deferred,first_interval=0.0)
+        return False
+
+def native_reference_snapshot(ob):
+    ensure_native_reference(ob)
+    return (tuple(ob.sculpt_symmetry_reference_location),
+            tuple(ob.sculpt_symmetry_reference_rotation),
+            ob.sculpt_symmetry_reference_display_size,
+            ob.sculpt_symmetry_reference_mode,
+            ob.sculpt_symmetry_reference_enabled,
+            ob.sculpt_symmetry_reference_use_for_strokes,
+            tuple(ob.sculpt_transform_pivot_location),
+            ob.sculpt_transform_pivot_enabled,
+            ob.sculpt_transform_pivot_linked,
+            ob.sculpt_symmetry_reference_locked,
+            tuple(ob.sculpt_symmetry_anchor_offset))
+
+def restore_native_reference(ob, state):
+    ob.sculpt_symmetry_reference_location = state[0]
+    ob.sculpt_symmetry_reference_rotation = state[1]
+    ob.sculpt_symmetry_reference_display_size = state[2]
+    ob.sculpt_symmetry_reference_mode = state[3]
+    ob.sculpt_symmetry_reference_enabled = state[4]
+    ob.sculpt_symmetry_reference_use_for_strokes = state[5]
+    ob.sculpt_transform_pivot_location = state[6]
+    ob.sculpt_transform_pivot_enabled = state[7]
+    ob.sculpt_transform_pivot_linked = state[8]
+    ob.sculpt_symmetry_reference_locked = state[9]
+    ob.sculpt_symmetry_anchor_offset = state[10]
+
+def set_reference_rotation(ob, rotation):
+    ensure_native_reference(ob)
+    ob.sculpt_symmetry_reference_rotation = rotation
+    redraw()
 
 def reference_matrix(ob, depsgraph=None):
+    if (_modal_reference_preview and
+            _modal_reference_preview['pointer'] == ob.as_pointer() and
+            _modal_reference_preview.get('matrix') is not None):
+        return _modal_reference_preview['matrix'].copy(), True
+    native=ensure_native_reference(ob)
     s = ob.sculpt_symref_preview
-    local = Vector(s.location)
+    local = Vector(ob.sculpt_symmetry_reference_location if native else s.location)
     valid = True
     if s.anchored:
         point = anchor_position(ob, depsgraph or bpy.context.evaluated_depsgraph_get())
@@ -110,22 +191,50 @@ def reference_matrix(ob, depsgraph=None):
         key=(ob.as_pointer(),s.vertex,s.face)
         if valid:
             _last_anchor[key]=point.copy()
-            local = point + Vector(s.anchor_offset)
-        elif key in _last_anchor:local=_last_anchor[key]+Vector(s.anchor_offset)
-    rotation = ob.matrix_world.to_quaternion() @ Euler(s.rotation, 'XYZ').to_quaternion()
+            local = point + Vector(ob.sculpt_symmetry_anchor_offset if native else s.anchor_offset)
+        elif key in _last_anchor:local=_last_anchor[key]+Vector(ob.sculpt_symmetry_anchor_offset if native else s.anchor_offset)
+    rotation = ob.matrix_world.to_quaternion() @ Euler(ob.sculpt_symmetry_reference_rotation if native else s.rotation, 'XYZ').to_quaternion()
     result = rotation.to_matrix().to_4x4()
     result.translation = ob.matrix_world @ local
     return result, valid
 
+def reference_display_size(ob):
+    if (_modal_reference_preview and
+            _modal_reference_preview['pointer'] == ob.as_pointer() and
+            _modal_reference_preview.get('size') is not None):
+        return _modal_reference_preview['size']
+    return ob.sculpt_symmetry_reference_display_size if ensure_native_reference(ob) else ob.sculpt_symref_preview.display_size
+
+def set_modal_reference_preview(ob, matrix=None, size=None):
+    """Viewport-only G/R/S state. Never writes an Object RNA property."""
+    global _modal_reference_preview
+    current = (_modal_reference_preview if _modal_reference_preview and
+               _modal_reference_preview['pointer'] == ob.as_pointer() else
+               {'pointer': ob.as_pointer(), 'matrix': None, 'size': None})
+    if matrix is not None:
+        current['matrix'] = matrix.copy()
+    if size is not None:
+        current['size'] = float(size)
+    _modal_reference_preview = current
+    redraw()
+
+def clear_modal_reference_preview(ob=None):
+    global _modal_reference_preview
+    if ob is None or (_modal_reference_preview and
+                      _modal_reference_preview['pointer'] == ob.as_pointer()):
+        _modal_reference_preview = None
+    redraw()
+
 def set_world_location(ob, point):
+    ensure_native_reference(ob)
     s = ob.sculpt_symref_preview
-    if s.locked:return False
+    if ob.sculpt_symmetry_reference_locked:return False
     local = ob.matrix_world.inverted_safe() @ Vector(point)
     if s.anchored:
         anchor = anchor_position(ob, bpy.context.evaluated_depsgraph_get())
         if anchor is None: return False
-        s.anchor_offset = local - anchor
-    s.location = local
+        ob.sculpt_symmetry_anchor_offset = local - anchor
+    ob.sculpt_symmetry_reference_location = local
     redraw()
     return True
 
@@ -133,7 +242,7 @@ def from_cursor(context):
     ob = sculpt_object(context); s = ob.sculpt_symref_preview
     matrix = context.scene.cursor.matrix.copy()
     set_world_location(ob, matrix.translation)
-    s.rotation = (ob.matrix_world.to_quaternion().inverted() @ matrix.to_quaternion()).to_euler('XYZ')
+    set_reference_rotation(ob, (ob.matrix_world.to_quaternion().inverted() @ matrix.to_quaternion()).to_euler('XYZ'))
 
 def snapshot(s):
     return {p.identifier: (tuple(getattr(s,p.identifier)) if getattr(p,'is_array',False) else getattr(s,p.identifier))
@@ -170,16 +279,16 @@ class SCULPT_OT_symref_edit_preview(bpy.types.Operator):
     bl_description='Imposta posizione e rotazione del riferimento per la simmetria Sculpt'
     bl_options={'REGISTER','UNDO'}
     @classmethod
-    def poll(cls,c): return bool(sculpt_object(c)) and not editing(c) and not c.object.sculpt_symref_preview.locked
+    def poll(cls,c): return bool(sculpt_object(c)) and not editing(c) and not c.object.sculpt_symmetry_reference_locked
     def execute(self,c):
         global _session
         ob=sculpt_object(c);s=ob.sculpt_symref_preview
         active=c.workspace.tools.from_space_view3d_mode(c.mode,create=False)
-        _session={'pointer':ob.as_pointer(),'before':snapshot(s),'tool':active.idname if active else 'builtin.brush','pick':False}
-        if not s.enabled:
-            s.display_size=max(.1,max(ob.dimensions)*.75)
-        s.enabled=True
-        if NATIVE_BACKEND and c.mode=='SCULPT':s.use_for_strokes=True
+        _session={'pointer':ob.as_pointer(),'before':snapshot(s),'native_before':native_reference_snapshot(ob),'tool':active.idname if active else 'builtin.brush','pick':False}
+        if not ob.sculpt_symmetry_reference_enabled:
+            ob.sculpt_symmetry_reference_display_size=max(.1,max(ob.dimensions)*.75)
+        ob.sculpt_symmetry_reference_enabled=True
+        if NATIVE_BACKEND and c.mode=='SCULPT':ob.sculpt_symmetry_reference_use_for_strokes=True
         try: bpy.ops.wm.tool_set_by_id(name=EDIT_TOOL if c.mode=='EDIT_MESH' else TOOL)
         except Exception:
             _session=None
@@ -197,8 +306,9 @@ class SCULPT_OT_symref_finish_preview(bpy.types.Operator):
         data=_session;ob=sculpt_object(c)
         if self.cancel:
             for key,value in data['before'].items(): setattr(ob.sculpt_symref_preview,key,value)
+            restore_native_reference(ob,data['native_before'])
         elif NATIVE_BACKEND and c.mode=='SCULPT':
-            ob.sculpt_symref_preview.use_for_strokes=True
+            ob.sculpt_symmetry_reference_use_for_strokes=True
         _session=None
         try: bpy.ops.wm.tool_set_by_id(name=data['tool'])
         except RuntimeError: bpy.ops.wm.tool_set_by_id(name='builtin.select_box' if c.mode=='EDIT_MESH' else 'builtin.brush')
@@ -208,19 +318,19 @@ class SCULPT_OT_symref_cursor_preview(bpy.types.Operator):
     bl_idname='sculpt.symref_cursor_preview';bl_label='Dal cursore 3D'
     bl_options={'REGISTER','UNDO'}
     @classmethod
-    def poll(cls,c): return bool(sculpt_object(c)) and not c.object.sculpt_symref_preview.locked
+    def poll(cls,c): return bool(sculpt_object(c)) and not c.object.sculpt_symmetry_reference_locked
     def execute(self,c):
         s=c.object.sculpt_symref_preview
         if s.anchored and anchor_position(c.object,c.evaluated_depsgraph_get()) is None:
             self.report({'WARNING'},'Aggancio non valido: sgancia il riferimento prima di spostarlo');return {'CANCELLED'}
-        from_cursor(c);s.enabled=True
-        if NATIVE_BACKEND and c.mode=='SCULPT':s.use_for_strokes=True
+        from_cursor(c);c.object.sculpt_symmetry_reference_enabled=True
+        if NATIVE_BACKEND and c.mode=='SCULPT':c.object.sculpt_symmetry_reference_use_for_strokes=True
         return {'FINISHED'}
 
 class SCULPT_OT_symref_anchor_preview(bpy.types.Operator):
     bl_idname='sculpt.symref_anchor_preview';bl_label='Scegli vertice di ancoraggio'
     @classmethod
-    def poll(cls,c): return editing(c) and anchor_supported(c.object) and not c.object.sculpt_symref_preview.locked
+    def poll(cls,c): return editing(c) and anchor_supported(c.object) and not c.object.sculpt_symmetry_reference_locked
     def execute(self,c):
         _session['pick']=True
         self.report({'INFO'},'Clicca sulla mesh per scegliere il vertice vicino alla superficie');return {'FINISHED'}
@@ -229,7 +339,7 @@ class SCULPT_OT_symref_detach_preview(bpy.types.Operator):
     bl_idname='sculpt.symref_detach_preview';bl_label='Sgancia'
     bl_options={'REGISTER','UNDO'}
     @classmethod
-    def poll(cls,c): return bool(sculpt_object(c)) and c.object.sculpt_symref_preview.anchored and not c.object.sculpt_symref_preview.locked
+    def poll(cls,c): return bool(sculpt_object(c)) and c.object.sculpt_symref_preview.anchored and not c.object.sculpt_symmetry_reference_locked
     def execute(self,c):
         ob=c.object;matrix,_=reference_matrix(ob,c.evaluated_depsgraph_get())
         ob.sculpt_symref_preview.anchored=False
@@ -245,13 +355,14 @@ def bind_anchor(ob,vertex,face,context):
     point=anchor_position(ob,context.evaluated_depsgraph_get())
     if point is None:
         s.anchored=False;raise RuntimeError('Corrispondenza del vertice non valida')
-    s.anchor_offset=ob.matrix_world.inverted_safe()@matrix.translation-point
-    s.location=ob.matrix_world.inverted_safe()@matrix.translation
+    ob.sculpt_symmetry_anchor_offset=ob.matrix_world.inverted_safe()@matrix.translation-point
+    ensure_native_reference(ob)
+    ob.sculpt_symmetry_reference_location=ob.matrix_world.inverted_safe()@matrix.translation
 
 class SCULPT_OT_symref_place_preview(bpy.types.Operator):
     bl_idname='sculpt.symref_place_preview';bl_label='Posiziona riferimento'
     @classmethod
-    def poll(cls,c): return editing(c) and not c.object.sculpt_symref_preview.locked
+    def poll(cls,c): return editing(c) and not c.object.sculpt_symmetry_reference_locked
     def invoke(self,c,event):
         ob=c.object
         if _session['pick']:
@@ -277,7 +388,7 @@ class VIEW3D_GGT_sculpt_symref_preview(bpy.types.GizmoGroup):
     bl_idname='VIEW3D_GGT_sculpt_symref_preview';bl_label='Riferimento simmetria'
     bl_space_type='VIEW_3D';bl_region_type='WINDOW';bl_options={'3D','PERSISTENT','TOOL_FALLBACK_KEYMAP'}
     @classmethod
-    def poll(cls,c):return tool_selected(c) and not c.object.sculpt_symref_preview.locked
+    def poll(cls,c):return tool_selected(c) and not c.object.sculpt_symmetry_reference_locked
     @classmethod
     def setup_keymap(cls,keyconfig):
         km=keyconfig.keymaps.new(name='Sculpt Symmetry Reference Gizmo',space_type='EMPTY',region_type='WINDOW')
@@ -304,13 +415,15 @@ class VIEW3D_GGT_sculpt_symref_preview(bpy.types.GizmoGroup):
         c=bpy.context
         if not editing(c) or (mode,axis) not in self.frames:return
         frame,size=self.frames[(mode,axis)];ob=c.object;s=ob.sculpt_symref_preview
-        if s.locked:return
+        if ob.sculpt_symmetry_reference_locked:return
         direction=frame.to_3x3().col[axis].normalized()
         if mode=='MOVE':set_world_location(ob,frame.translation+direction*value)
         elif mode=='ROTATE':
             rotation=Quaternion(direction,value)@frame.to_quaternion()
-            s.rotation=(ob.matrix_world.to_quaternion().inverted()@rotation).to_euler('XYZ')
-        else:s.display_size=max(.01,size+value)
+            set_reference_rotation(ob,(ob.matrix_world.to_quaternion().inverted()@rotation).to_euler('XYZ'))
+        else:
+            ensure_native_reference(ob)
+            ob.sculpt_symmetry_reference_display_size=max(.01,size+value)
         redraw()
     def refresh(self,c):
         global _debug_last_group
@@ -318,10 +431,11 @@ class VIEW3D_GGT_sculpt_symref_preview(bpy.types.GizmoGroup):
         defer_tool_activation(c)
     def draw_prepare(self,c):
         matrix,valid=reference_matrix(c.object,c.evaluated_depsgraph_get());s=c.object.sculpt_symref_preview
+        display_size=reference_display_size(c.object)
         for mode,axis,gz in self.handles:
-            gz.hide=mode!=s.mode or not valid
+            gz.hide=mode!=c.object.sculpt_symmetry_reference_mode or not valid
             if gz.is_modal:continue
-            self.frames[(mode,axis)]=(matrix.copy(),s.display_size)
+            self.frames[(mode,axis)]=(matrix.copy(),display_size)
             direction=matrix.to_3x3().col[axis].normalized()
             basis=Vector((0,0,1)).rotation_difference(direction).to_matrix().to_4x4()
             basis.translation=matrix.translation;gz.matrix_basis=basis
@@ -331,14 +445,14 @@ class SCULPT_OT_symref_reset_preview(bpy.types.Operator):
     bl_options={'REGISTER','UNDO'}
     what: EnumProperty(items=[('POSITION','Posizione','Torna all\'origine dell\'oggetto e sgancia'),('ROTATION','Rotazione','Allinea agli assi locali dell\'oggetto'),('ALL','Tutto','Ripristina posizione e rotazione, sganciando il riferimento')],default='ALL')
     @classmethod
-    def poll(cls,c):return bool(sculpt_object(c)) and not c.object.sculpt_symref_preview.locked
+    def poll(cls,c):return bool(sculpt_object(c)) and not c.object.sculpt_symmetry_reference_locked
     def execute(self,c):
         s=c.object.sculpt_symref_preview
         if self.what in {'POSITION','ALL'}:
             s.anchored=False;s.anchor_mesh=None;s.vertex=-1;s.face=-1
-            s.location=(0,0,0);s.anchor_offset=(0,0,0)
-        if self.what in {'ROTATION','ALL'}:s.rotation=(0,0,0)
-        s.enabled=True;redraw();return {'FINISHED'}
+            ensure_native_reference(c.object);c.object.sculpt_symmetry_reference_location=(0,0,0);c.object.sculpt_symmetry_anchor_offset=(0,0,0)
+        if self.what in {'ROTATION','ALL'}:set_reference_rotation(c.object,(0,0,0))
+        c.object.sculpt_symmetry_reference_enabled=True;redraw();return {'FINISHED'}
 
 def draw_settings(layout,c):
     ob=sculpt_object(c)
@@ -346,7 +460,7 @@ def draw_settings(layout,c):
     s=ob.sculpt_symref_preview
     box=layout.box();box.label(text='Riferimento simmetria · Anteprima')
     if NATIVE_BACKEND and c.mode=='SCULPT':
-        box.prop(s,'use_for_strokes')
+        ensure_native_reference(ob);box.prop(ob,'sculpt_symmetry_reference_use_for_strokes',text='Usa riferimento per i pennelli')
         box.prop(s,'combine_local')
         if s.combine_local:
             box.prop(s,'reference_axes',toggle=True)
@@ -361,7 +475,7 @@ def draw_settings(layout,c):
         box.operator('mesh.symmetrize_reference_preview',text='Symmetrize · maschera',icon='MOD_MIRROR')
         box.operator('mesh.symmetrize_reference_shape_preview')
         box.label(text='Ricostruisce la topologia sul lato destinazione',icon='INFO')
-    box.prop(s,'enabled')
+    ensure_native_reference(ob);box.prop(ob,'sculpt_symmetry_reference_enabled',text='Mostra piani')
     if c.mode=='SCULPT':
         box.prop(s,'edit_direction',text='Symmetrize: sorgente')
         if any(m.type=='MULTIRES' for m in ob.modifiers):
@@ -374,10 +488,10 @@ def draw_settings(layout,c):
         else:
             box.operator('mesh.symmetrize_reference_preview',text='Symmetrize · maschera',icon='MOD_MIRROR')
             box.operator('mesh.symmetrize_reference_shape_preview')
-    box.prop(s,'locked',icon='LOCKED' if s.locked else 'UNLOCKED',toggle=True)
+    box.prop(ob,'sculpt_symmetry_reference_locked',text='Blocca riferimento',icon='LOCKED' if ob.sculpt_symmetry_reference_locked else 'UNLOCKED',toggle=True)
     if editing(c):
-        row=box.row(align=True);row.enabled=not s.locked;row.prop(s,'mode',expand=True)
-        row=box.row(align=True);row.enabled=not s.locked
+        ensure_native_reference(ob);row=box.row(align=True);row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_mode',expand=True)
+        row=box.row(align=True);row.enabled=not ob.sculpt_symmetry_reference_locked
         row.operator('sculpt.reference_native_transform_preview',text='Sposta · G').mode='G'
         row.operator('sculpt.reference_native_transform_preview',text='Ruota · R').mode='R'
         row.operator('sculpt.reference_native_transform_preview',text='Scala · S').mode='S'
@@ -387,16 +501,18 @@ def draw_settings(layout,c):
         if _session['pick']:box.label(text='Clicca sulla mesh: scegli un vertice',icon='RESTRICT_SELECT_OFF')
     else:box.operator('sculpt.symref_edit_preview',icon='ORIENTATION_GIMBAL')
     box.operator('sculpt.symref_cursor_preview',icon='PIVOT_CURSOR')
-    if s.enabled:
-        row=box.column();row.enabled=not s.anchored and not s.locked;row.prop(s,'location')
+    ensure_native_reference(ob)
+    if ob.sculpt_symmetry_reference_enabled:
+        row=box.column();row.enabled=not s.anchored and not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_location',text='Posizione')
         if s.anchored:
-            row=box.row();row.enabled=not s.locked;row.prop(s,'anchor_offset',text='Offset ancoraggio')
-        row=box.row();row.enabled=not s.locked;row.prop(s,'rotation')
-        row=box.row(align=True);row.enabled=not s.locked
+            row=box.row();row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_anchor_offset',text='Offset ancoraggio')
+        row=box.row();row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_rotation',text='Rotazione')
+        row=box.row(align=True);row.enabled=not ob.sculpt_symmetry_reference_locked
         row.operator('sculpt.symref_reset_preview',text='Reset pos.').what='POSITION'
         row.operator('sculpt.symref_reset_preview',text='Reset rot.').what='ROTATION'
         row.operator('sculpt.symref_reset_preview',text='Reset tutto').what='ALL'
-        box.prop(s,'display_size');box.prop(s,'opacity')
+        ensure_native_reference(ob)
+        box.prop(ob,'sculpt_symmetry_reference_display_size',text='Dimensione piani');box.prop(s,'opacity')
         if s.anchored:
             _,valid=reference_matrix(ob,c.evaluated_depsgraph_get())
             box.label(text=('Vertice '+str(s.vertex)) if valid else 'Aggancio sospeso: geometria cambiata',icon='LINKED' if valid else 'ERROR')
@@ -420,7 +536,7 @@ class SculptSymmetryReferenceTool(bpy.types.WorkSpaceTool):
     def draw_settings(c,layout,tool):
         defer_tool_activation(c)
         if sculpt_object(c):
-            row=layout.row(align=True);row.enabled=not c.object.sculpt_symref_preview.locked;row.prop(c.object.sculpt_symref_preview,'mode',expand=True)
+            ensure_native_reference(c.object);row=layout.row(align=True);row.enabled=not c.object.sculpt_symmetry_reference_locked;row.prop(c.object,'sculpt_symmetry_reference_mode',expand=True)
         row=layout.row(align=True)
         row.operator('sculpt.symref_cursor_preview',text='',icon='PIVOT_CURSOR')
         row.operator('sculpt.symref_finish_preview',text='Conferma',icon='CHECKMARK')
@@ -434,8 +550,10 @@ def draw_planes():
     if not ob or not c.space_data.overlay.show_overlays:return
     defer_tool_activation(c)
     s=ob.sculpt_symref_preview
-    if not s.enabled:return
+    ensure_native_reference(ob)
+    if not ob.sculpt_symmetry_reference_enabled:return
     matrix,valid=reference_matrix(ob,c.evaluated_depsgraph_get())
+    display_size=reference_display_size(ob)
     shader=gpu.shader.from_builtin('UNIFORM_COLOR')
     old_blend=gpu.state.blend_get();old_depth=gpu.state.depth_test_get();old_mask=gpu.state.depth_mask_get()
     gpu.state.blend_set('ALPHA');gpu.state.depth_test_set('LESS_EQUAL');gpu.state.depth_mask_set(False)
@@ -443,8 +561,8 @@ def draw_planes():
         axes=tuple(a==s.edit_direction[-1] for a in 'XYZ') if c.mode=='EDIT_MESH' else (s.reference_axes if s.combine_local else (ob.data.use_mirror_x,ob.data.use_mirror_y,ob.data.use_mirror_z))
         for axis,enabled in enumerate(axes):
             if not enabled:continue
-            u=matrix.to_3x3().col[(axis+1)%3]*s.display_size*.5
-            v=matrix.to_3x3().col[(axis+2)%3]*s.display_size*.5
+            u=matrix.to_3x3().col[(axis+1)%3]*display_size*.5
+            v=matrix.to_3x3().col[(axis+2)%3]*display_size*.5
             center=matrix.translation
             points=[center-u-v,center+u-v,center+u+v,center-u+v]
             color=_colors[axis] if valid else (.8,.5,.1)
@@ -454,7 +572,7 @@ def draw_planes():
             batch_for_shader(shader,'LINE_STRIP',{'pos':points+[points[0]]}).draw(shader)
             if c.mode=='EDIT_MESH':
                 sign=-1 if s.edit_direction.startswith('-') else 1
-                end=center+matrix.to_3x3().col[axis]*s.display_size*.3*sign
+                end=center+matrix.to_3x3().col[axis]*display_size*.3*sign
                 shader.uniform_float('color',(1.,.8,.15,1.))
                 batch_for_shader(shader,'LINES',{'pos':[center,end]}).draw(shader)
     finally:
@@ -557,10 +675,15 @@ def register():
     for name in ('VIEW3D_PT_sculpt_symmetry','VIEW3D_PT_sculpt_symmetry_for_topbar'):
         panel=getattr(space_view3d_toolbar,name);panel.append(draw_panel);_panels.append(panel)
     _handle=bpy.types.SpaceView3D.draw_handler_add(draw_planes,(),'WINDOW','POST_VIEW')
+    if invalidate_anchor_cache not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(invalidate_anchor_cache)
     print('SYMMETRY_REFERENCE_PREVIEW_REGISTERED',flush=True)
 
 def unregister():
     global _handle,_session
+    clear_modal_reference_preview()
+    if invalidate_anchor_cache in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(invalidate_anchor_cache)
     if _handle:bpy.types.SpaceView3D.draw_handler_remove(_handle,'WINDOW');_handle=None
     for panel in _panels:panel.remove(draw_panel)
     _panels.clear()

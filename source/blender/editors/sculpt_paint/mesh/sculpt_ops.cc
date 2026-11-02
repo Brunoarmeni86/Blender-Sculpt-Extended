@@ -986,7 +986,13 @@ static void SCULPT_OT_multires_layer_commit(wmOperatorType *ot)
   ot->description = "Record pending strokes in the active layer without merging; save the blend file separately";
   ot->exec = sculpt_multires_layer_commit_exec;
   ot->poll = sculpt_mode_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* Commit changes storage ownership from pending CCG coordinates to the
+   * active persistent layer without changing the visible surface. Sculpt
+   * strokes already own their native Undo steps; pushing another global
+   * operator Undo here serializes the complete multi-gigabyte object and can
+   * take tens of seconds. Ctrl-Z therefore continues with the last stroke,
+   * which is also the user-visible action. */
+  ot->flag = OPTYPE_REGISTER;
 }
 
 static wmOperatorStatus sculpt_multires_layer_snapshot_exec(bContext *C, wmOperator *op)
@@ -1709,8 +1715,14 @@ static wmOperatorStatus sculpt_multires_layer_set_active_exec(bContext *C, wmOpe
   const bool pending = old_ccg && old_ccg->dirty.coords;
   bool surface_preserved = false;
   /* Pending coordinates still belong to the OLD selected layer. */
-  if (!sculpt_multires_layer_commit(*ob, *op, &surface_preserved)) {
+  if (pending && !sculpt_multires_layer_commit(*ob, *op, &surface_preserved)) {
     return OPERATOR_CANCELLED;
+  }
+  if (!pending) {
+    const char *trace = BLI_getenv("BLENDER_LAYER_RESP_TRACE");
+    if (trace && trace[0] == '1') {
+      std::printf("[LAYER_COMMIT_SKIP] op=SELECT_OPERATOR reason=NO_PENDING_COORDS\n");
+    }
   }
   const double committed = BLI_time_now_seconds();
   ss = ob->runtime->sculpt_session;
@@ -1745,7 +1757,12 @@ static void SCULPT_OT_multires_layer_set_active(wmOperatorType *ot)
   ot->description = "Make the selected sculpt layer active";
   ot->exec = sculpt_multires_layer_set_active_exec;
   ot->poll = sculpt_mode_poll;
-  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  /* Active layer selection changes the recording destination, not the visible
+   * surface or persistent layer payload. Pending strokes already own their
+   * Sculpt Undo step and are committed above before the index changes. A full
+   * operator Undo push here can encode an unnecessary layer boundary/memfile on
+   * every row click, which is especially expensive on large Multires objects. */
+  ot->flag = OPTYPE_REGISTER;
   RNA_def_int(ot->srna, "index", 0, 0, INT_MAX, "Layer", "Layer index", 0, 1000);
 }
 

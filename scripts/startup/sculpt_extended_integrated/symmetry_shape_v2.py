@@ -307,8 +307,7 @@ def install(reference_module):
         @classmethod
         def poll(cls,c):return c.mode in {'EDIT_MESH','SCULPT'} and c.object and c.object.type=='MESH'
         def invoke(self,c,event):
-            s=c.object.sculpt_symref_preview
-            self.space='REFERENCE' if s.enabled and (c.mode=='EDIT_MESH' or s.use_for_strokes) else 'LOCAL'
+            self.space='REFERENCE' if c.object.sculpt_symmetry_reference_enabled and (c.mode=='EDIT_MESH' or c.object.sculpt_symmetry_reference_use_for_strokes) else 'LOCAL'
             return c.window_manager.invoke_props_dialog(self)
         def draw(self,c):
             self.layout.prop(self,'method');self.layout.prop(self,'space');self.layout.prop(c.object.sculpt_symref_preview,'edit_direction',text='Lato sorgente')
