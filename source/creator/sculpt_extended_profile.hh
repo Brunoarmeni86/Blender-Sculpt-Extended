@@ -47,7 +47,7 @@ inline void initialize_defaults()
   BLI_setenv_if_new("BLENDER_SCULPT_EMPTY_LAYER_SUBDIVIDE", "0");
   BLI_setenv_if_new("BLENDER_SCULPT_FAST_TANGENT_SOLVE", "1");
   BLI_setenv_if_new("BLENDER_SCULPT_LAYER_BAKE_BASE", "1");
-  BLI_setenv_if_new("BLENDER_SCULPT_LAYER_CACHE_MB", "256");
+  BLI_setenv_if_new("BLENDER_SCULPT_LAYER_CACHE_ADAPTIVE", "1");
   BLI_setenv_if_new("BLENDER_SCULPT_LAYER_DELTA_SMOOTH", "1");
   BLI_setenv_if_new("BLENDER_SCULPT_LAYER_READONLY_WEIGHT", "1");
   BLI_setenv_if_new("BLENDER_SCULPT_LAYER_REGION_V01", "1");

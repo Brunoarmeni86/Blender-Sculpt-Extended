@@ -278,6 +278,9 @@ static void blend_read(BlendDataReader *reader, ModifierData *md)
       }
     }
   }
+  /* Upgrade legacy dense zero payloads at the non-interactive file-load
+   * boundary. This reduces resident memory without adding work to strokes. */
+  bke::multires_layers::compact_legacy_zero_payloads(*mmd);
   if (mmd->sculpt_color_grids_num > 0 && mmd->sculpt_color_grids) {
     if (!BLO_read_array(reader, &mmd->sculpt_color_grids, mmd->sculpt_color_grids_num)) {
       mmd->sculpt_color_grids = nullptr;

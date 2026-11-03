@@ -295,8 +295,20 @@ fallback sono piu importanti della sola media per la fluidita percepita.
 | 2026-11-02 | Confronto build stabile/candidata | Strength stabile 3228 ms contro candidata 3291 ms: nessun guadagno dimostrato, differenza nel rumore |
 | 2026-11-02 | Strength differito aggiunto alla UI | Pulsante orologio: modifica locale fluida, una sola valutazione esatta con OK; campo RNA nativo preservato come fallback |
 | 2026-11-02 | Test interattivo cache progressiva | Regressione: primo commit 342.6 ms contro baseline 161.8 ms; disabilitata nel launcher, codice conservato opt-in |
+| 2026-11-03 | Validata rimozione compattazione legacy dalla pennellata | Smooth normalmente 0.15-0.30 ms; `node_gather` e `preserve_extend` trascurabili. La compattazione resta solo opt-in/offline. |
+| 2026-11-03 | Baseline commit deformazione estesa | 183415/424456 griglie, 52.77 M campioni esatti: solve 914.978 ms, publish 1057.888 ms, totale 2072.844 ms. Il prossimo intervento deve ridurre allocazioni/page fault nel publish senza allargare il journal. |
+| 2026-11-03 | Invalidazione cache publish raggruppata | Le nuove griglie di un commit rimandano l'invalidazione della cache al termine della transazione, evitando un mutex globale per ogni payload. |
+| 2026-11-03 | Upgrade memoria legacy al caricamento | Le griglie dense esattamente nulle vengono rilevate in parallelo e convertite in zero implicito durante `blend_read`, mai durante la pennellata. Trace: `LAYER_LEGACY_COMPACT`. |
+| 2026-11-03 | Budget cache adattivo alla RAM disponibile | Oltre alla RAM installata considera la memoria fisica libera: 0 MiB sotto 2 GiB, 64 MiB sotto 4 GiB, 128 MiB sotto 8 GiB, 256 MiB sotto 16 GiB; un override esplicito conserva la precedenza. |
+| 2026-11-03 | Test interattivo gestione memoria | Working set circa 15 GB contro 23 GB e private circa 29 GB contro 39 GB nel test precedente. Commit 8813 griglie: solve 34.875 ms, publish 3.011 ms, totale route 47.353 ms. Restano picchi di primo accesso da page fault e serve isteresi del budget. |
+| 2026-11-03 | Isteresi budget RAM | Riduzione immediata sotto pressione; crescita solo con margine aggiuntivo (3/6/10/18 GiB), evitando ricostruzioni ripetute vicino alle soglie. |
+| 2026-11-03 | Revisione compressione layer inattivi | Un layer non selezionato ma visibile resta necessario alla composizione. La compressione fredda deve limitarsi a contributi nulli/nascosti e coprire Show, selezione, salvataggio, copia e Undo prima dell'attivazione. |
 | 2026-11-02 | Isolato costo Commit esplicito | Commit locale 9-375 ms, ma Undo globale 9.6-60.3 s e CCG 8-17 s; rimosso Undo operatore ridondante e forzati KEEP_CCG/DEFER_SYNC |
 | 2026-11-02 | Strength sparso validato | Primo build 257 ms, successivi cache-hit 82-96 ms su 22964/424456 griglie |
+| 2026-11-03 | Migrazione legacy regionale autosufficiente | Test respinto sul percorso stroke: Preserve caldo ~1.2 ms, scansione payload freddi 40-390 ms; disabilitata nel launcher e da spostare in idle/salvataggio |
+| 2026-11-03 | Profilazione pennellata separata | Implementata: `node_gather` e `preserve_extend` distinti nel trace `SculptMeshV3` |
+| 2026-11-03 | Falloff condiviso Pose e G/R/S | Progetto successivo: curva topologica/geodesica condivisa, preview e fallback lineare; da affrontare dopo validazione runtime manager |
+| 2026-11-03 | A/B compattazione durante stroke | 17425 grid liberati, solo 58.7 MiB, 4.40 s cumulativi/401 eventi; percorso reso opt-in e disabilitato nella preview |
 
 ## Ricognizione cold commit e reattivita UI (2026-11-02)
 

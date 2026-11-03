@@ -1186,31 +1186,66 @@ static bool multires_sculpt_commit_base_frame_cache_enabled()
   return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
-/* Total budget shared by the frame and layer-delta caches. An explicit setting wins;
- * otherwise use 2% of installed RAM, clamped for predictable laptop/workstation behavior.
- * Read once per process; restart Blender after changing the budget. */
+/* Total budget shared by the frame and layer-delta caches. An explicit setting wins.
+ * The automatic budget also observes currently available RAM, so a large scene does not retain
+ * workstation-sized rebuildable caches while the operating system is under pressure. */
 static int64_t multires_layer_cache_budget_bytes()
 {
-  static const int64_t bytes = []() -> int64_t {
-    const char *value = BLI_getenv("BLENDER_SCULPT_LAYER_CACHE_MB");
-    if (value == nullptr || value[0] == '\0') {
-      constexpr int64_t mib = int64_t(1024) * 1024;
-      constexpr int64_t min_budget = 128 * mib;
-      constexpr int64_t max_budget = 1024 * mib;
-      const uint64_t physical = BLI_system_memory_physical_total_bytes();
-      if (physical == 0) {
-        return 256 * mib;
-      }
-      return std::clamp<int64_t>(int64_t(physical / 50), min_budget, max_budget);
-    }
+  constexpr int64_t mib = int64_t(1024) * 1024;
+  const char *value = BLI_getenv("BLENDER_SCULPT_LAYER_CACHE_MB");
+  if (value != nullptr && value[0] != '\0') {
     char *end = nullptr;
     const long parsed = std::strtol(value, &end, 10);
     if (end == value || *end != '\0' || parsed < 0) {
       return -1;
     }
-    return int64_t(std::min<long>(parsed, 32768)) * 1024 * 1024;
-  }();
-  return bytes;
+    return int64_t(std::min<long>(parsed, 32768)) * mib;
+  }
+
+  const uint64_t physical = BLI_system_memory_physical_total_bytes();
+  int64_t budget = physical == 0 ? 256 * mib :
+      std::clamp<int64_t>(int64_t(physical / 50), 128 * mib, 1024 * mib);
+  const char *adaptive = BLI_getenv("BLENDER_SCULPT_LAYER_CACHE_ADAPTIVE");
+  if (adaptive != nullptr && adaptive[0] == '0' && adaptive[1] == '\0') {
+    return budget;
+  }
+  const uint64_t available = BLI_system_memory_physical_available_bytes();
+  if (available == 0) {
+    return budget;
+  }
+  const int64_t available_mib = int64_t(available / uint64_t(mib));
+  const int64_t desired_cap = available_mib < 2048 ? 0 :
+                              available_mib < 4096 ? 64 * mib :
+                              available_mib < 8192 ? 128 * mib :
+                              available_mib < 16384 ? 256 * mib : budget;
+
+  /* Drop cache capacity immediately under pressure, but require extra headroom
+   * before growing again. This prevents repeated cache rebuilds when the OS
+   * reports memory close to a tier boundary. */
+  static std::mutex tier_mutex;
+  static int64_t retained_cap = -1;
+  std::lock_guard<std::mutex> lock(tier_mutex);
+  if (retained_cap < 0 || desired_cap < retained_cap) {
+    retained_cap = desired_cap;
+  }
+  else if (desired_cap > retained_cap) {
+    const int64_t grow_threshold_mib = retained_cap < 64 * mib ? 3072 :
+                                       retained_cap < 128 * mib ? 6144 :
+                                       retained_cap < 256 * mib ? 10240 : 18432;
+    if (available_mib >= grow_threshold_mib) {
+      retained_cap = desired_cap;
+    }
+  }
+  const int64_t result = std::min(budget, retained_cap);
+  if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+    std::printf("[LAYER_CACHE_ADAPTIVE] available=%.1fMiB desired=%.1fMiB retained=%.1fMiB base=%.1fMiB result=%.1fMiB\n",
+                double(available) / double(mib),
+                double(desired_cap) / double(mib),
+                double(retained_cap) / double(mib),
+                double(budget) / double(mib),
+                double(result) / double(mib));
+  }
+  return result;
 }
 
 static int multires_sculpt_commit_base_frame_cache_capacity()
@@ -1745,7 +1780,12 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
 
   std::unique_lock<std::mutex> exact_sample_lock;
 
-  if (!lower_level_commit && sample_journal_enabled && grid_journal_enabled) {
+  /* The sample journal is expressed in the currently evaluated CCG layout,
+   * not in top-level storage coordinates. It is therefore valid at lower
+   * sculpt levels as well. Lower-level publication expands the sparse coarse
+   * correction into fine storage; samples outside this support must remain
+   * explicit zero corrections (see staging initialization below). */
+  if (sample_journal_enabled && grid_journal_enabled) {
     exact_sample_lock = std::unique_lock<std::mutex>(ccg.sculpt_dirty_position_grids_mutex);
 
     bool journals_match =
@@ -1866,9 +1906,10 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
         multires_layer_cache_budget_bytes(),
         sizeof(MultiresCommitBaseFrame));
     if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
-      std::printf("[LAYER_CACHE_BUDGET] frame_capacity=%d budget=%.1fMiB\n",
+      std::printf("[LAYER_CACHE_BUDGET] frame_capacity=%d budget=%.1fMiB available=%.1fMiB\n",
                   commit_frame_capacity,
-                  double(multires_layer_cache_budget_bytes()) / (1024.0 * 1024.0));
+                  double(multires_layer_cache_budget_bytes()) / (1024.0 * 1024.0),
+                  double(BLI_system_memory_physical_available_bytes()) / (1024.0 * 1024.0));
     }
 
     const bool cache_matches = frame_cache.mesh == &mesh && frame_cache.mmd == &mmd &&
@@ -2096,7 +2137,11 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
   const int64_t compact_metadata_bytes = (int64_t(grids.size()) + 1) * int64_t(sizeof(int64_t));
   const int64_t compact_saved_bytes =
       (full_sample_count - solved_sample_count) * int64_t(sizeof(float3)) - compact_metadata_bytes;
+  /* Lower-level publication needs random access to the complete coarse grid
+   * while bilinearly lifting it into top-level storage. Keep its staging dense;
+   * untouched journal samples are initialized to zero corrections below. */
   const bool compact_staging = compact_staging_enabled && use_exact_samples &&
+                               !lower_level_commit &&
                                commit_dense_sample_hot_grids == 0 &&
                                compact_saved_bytes > 0 &&
                                compact_saved_bytes >= full_staging_bytes / 8;
@@ -2109,6 +2154,12 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
     BLI_assert(staged_offsets[grids.size()] == solved_sample_count);
   }
   Array<float3> staged(compact_staging ? solved_sample_count : full_sample_count);
+  if (lower_level_commit && use_exact_samples) {
+    /* Array<T> storage is intentionally uninitialized. Sparse lower-level
+     * solving skips untouched samples, and the lifting pass must see those as
+     * a zero correction rather than stale memory. */
+    staged.fill(float3(0.0f));
+  }
   const double commit_alloc_ms =
       commit_trace ? (BLI_time_now_seconds() - commit_alloc_start) * 1000.0 : 0.0;
   if (commit_trace && compact_staging_enabled) {
@@ -2369,7 +2420,8 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
           compact_staging ? staged_offsets[dirty_i] : int64_t(dirty_i) * area,
           compact_staging ? exact_sample_counts[dirty_i] : area);
       int staged_sample = 0;
-      float (*layer_grid)[3] = bke::multires_layers::grid_ensure(layer, grid);
+      float (*layer_grid)[3] =
+          bke::multires_layers::grid_ensure_deferred_cache_invalidation(layer, grid);
       if (layer_grid == nullptr) {
         continue;
       }
@@ -2440,6 +2492,11 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
   else {
     publish_range(grids.index_range());
   }
+
+  /* All payload writes above belong to one atomic commit publication. Cache
+   * contents are not observed until this operation returns, so invalidate once
+   * instead of taking the global cache mutex once per newly allocated grid. */
+  bke::multires_layers::weight_hot_delta_cache_invalidate(&layer);
 
   for (const int ok : publish_ok) {
     if (ok == 0) {

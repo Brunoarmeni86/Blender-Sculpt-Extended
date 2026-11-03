@@ -248,6 +248,20 @@ static std::mutex &payload_index_mutex()
   return mutex;
 }
 
+struct LegacyZeroGridScan {
+  const MDisps *descriptors = nullptr;
+  int grids_num = 0;
+  int level = 0;
+  std::vector<uint8_t> checked;
+};
+
+static std::unordered_map<const MultiresSculptLayer *, LegacyZeroGridScan> &
+legacy_zero_grid_scans()
+{
+  static std::unordered_map<const MultiresSculptLayer *, LegacyZeroGridScan> scans;
+  return scans;
+}
+
 void payload_index_invalidate(const MultiresSculptLayer *layer)
 {
   std::lock_guard<std::mutex> lock(payload_index_mutex());
@@ -255,6 +269,116 @@ void payload_index_invalidate(const MultiresSculptLayer *layer)
   if (layer == nullptr || cache.layer == layer) {
     cache.clear();
   }
+  if (layer == nullptr) {
+    legacy_zero_grid_scans().clear();
+  }
+  else {
+    legacy_zero_grid_scans().erase(layer);
+  }
+}
+
+int64_t compact_legacy_zero_grid(MultiresSculptLayer &layer, const int grid_index)
+{
+  const char *env = BLI_getenv("BLENDER_SCULPT_LAYER_LEGACY_COMPACT");
+  if (env == nullptr || env[0] != '1' || env[1] != '\0' || layer.disps == nullptr ||
+      grid_index < 0 || grid_index >= layer.grids_num ||
+      layer.level <= 0 || layer.level > 13)
+  {
+    return 0;
+  }
+
+  const int side = subdiv::grid_size_from_level(layer.level);
+  const int area = side * side;
+  std::lock_guard<std::mutex> lock(payload_index_mutex());
+  LegacyZeroGridScan &scan = legacy_zero_grid_scans()[&layer];
+  if (scan.descriptors != layer.disps || scan.grids_num != layer.grids_num ||
+      scan.level != layer.level || scan.checked.size() != size_t(layer.grids_num))
+  {
+    scan.descriptors = layer.disps;
+    scan.grids_num = layer.grids_num;
+    scan.level = layer.level;
+    scan.checked.assign(layer.grids_num, uint8_t(0));
+  }
+  if (scan.checked[grid_index]) {
+    return 0;
+  }
+  scan.checked[grid_index] = 1;
+
+  MDisps &grid = layer.disps[grid_index];
+  if (grid.disps == nullptr || grid.level != layer.level || grid.totdisp != area) {
+    return 0;
+  }
+  for (int i = 0; i < area; i++) {
+    const float *value = grid.disps[i];
+    if (value[0] != 0.0f || value[1] != 0.0f || value[2] != 0.0f) {
+      return 0;
+    }
+  }
+
+  MEM_SAFE_DELETE(grid.disps);
+  LayerPayloadIndex &payload_cache = payload_index();
+  if (payload_cache.layer == &layer) {
+    payload_cache.clear();
+  }
+  return int64_t(area) * int64_t(sizeof(float[3]));
+}
+
+int64_t compact_legacy_zero_payloads(MultiresModifierData &mmd, int *r_compacted_grids)
+{
+  int compacted_grids = 0;
+  int64_t released_bytes = 0;
+  const double start = BLI_time_now_seconds();
+
+  for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (layer.disps == nullptr || layer.grids_num <= 0 || layer.level <= 0 ||
+        layer.level > 13)
+    {
+      continue;
+    }
+    const int side = subdiv::grid_size_from_level(layer.level);
+    const int area = side * side;
+    Array<uint8_t> zero_payloads(layer.grids_num, uint8_t(0));
+    threading::parallel_for(IndexRange(layer.grids_num), 64, [&](const IndexRange range) {
+      for (const int grid_index : range) {
+        const MDisps &grid = layer.disps[grid_index];
+        if (grid.disps == nullptr || grid.level != layer.level || grid.totdisp != area) {
+          continue;
+        }
+        bool is_zero = true;
+        for (int i = 0; i < area; i++) {
+          const float *value = grid.disps[i];
+          if (value[0] != 0.0f || value[1] != 0.0f || value[2] != 0.0f) {
+            is_zero = false;
+            break;
+          }
+        }
+        zero_payloads[grid_index] = is_zero ? uint8_t(1) : uint8_t(0);
+      }
+    });
+    for (const int grid_index : IndexRange(layer.grids_num)) {
+      if (!zero_payloads[grid_index]) {
+        continue;
+      }
+      MEM_SAFE_DELETE(layer.disps[grid_index].disps);
+      compacted_grids++;
+      released_bytes += int64_t(area) * int64_t(sizeof(float[3]));
+    }
+  }
+
+  if (compacted_grids > 0) {
+    weight_hot_delta_cache_invalidate();
+  }
+  if (r_compacted_grids) {
+    *r_compacted_grids = compacted_grids;
+  }
+  if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+    std::printf("[LAYER_LEGACY_COMPACT] boundary=FILE_LOAD grids=%d released=%.1fMiB total=%.3fms\n",
+                compacted_grids,
+                double(released_bytes) / (1024.0 * 1024.0),
+                (BLI_time_now_seconds() - start) * 1000.0);
+    std::fflush(stdout);
+  }
+  return released_bytes;
 }
 
 bool payload_grids(const MultiresSculptLayer &layer,
@@ -3851,7 +3975,9 @@ bool bake_texture_displacement_to_active(Depsgraph *depsgraph,
  * The MDisps descriptor array stays dense and cheap, while the high-resolution float[3] payload
  * can be materialized one CCG grid at a time. A null payload is semantically an all-zero layer
  * contribution for that grid. */
-float (*grid_ensure(MultiresSculptLayer &layer, const int corner))[3]
+static float (*grid_ensure_impl(MultiresSculptLayer &layer,
+                                const int corner,
+                                const bool invalidate_cache))[3]
 {
   if (layer.disps == nullptr || corner < 0 || corner >= layer.grids_num ||
       layer.level <= 0 || layer.level > 13)
@@ -3880,10 +4006,23 @@ float (*grid_ensure(MultiresSculptLayer &layer, const int corner))[3]
 
   if (grid.disps == nullptr) {
     grid.disps = MEM_new_array_zeroed<float[3]>(area, "multires sparse sculpt layer grid");
-    weight_hot_delta_cache_invalidate(&layer);
+    if (invalidate_cache) {
+      weight_hot_delta_cache_invalidate(&layer);
+    }
   }
 
   return grid.disps;
+}
+
+float (*grid_ensure(MultiresSculptLayer &layer, const int corner))[3]
+{
+  return grid_ensure_impl(layer, corner, true);
+}
+
+float (*grid_ensure_deferred_cache_invalidation(MultiresSculptLayer &layer,
+                                                const int corner))[3]
+{
+  return grid_ensure_impl(layer, corner, false);
 }
 bool sample_tangent(const MultiresSculptLayer &layer,
                     const int corner,

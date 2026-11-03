@@ -5254,6 +5254,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
        std::getenv("BLENDER_SCULPT_STROKE_PROFILE_LOG")[0]);
   const double sculpt_mesh_v3_probe_total_start = BLI_time_now_seconds();
   double sculpt_mesh_v3_probe_gather_ms = 0.0;
+  double sculpt_mesh_v3_probe_node_gather_ms = 0.0;
+  double sculpt_mesh_v3_probe_preserve_extend_ms = 0.0;
   double sculpt_mesh_v3_probe_undo_ms = 0.0;
   double sculpt_mesh_v3_probe_prebrush_ms = 0.0;
   int64_t sculpt_mesh_v3_probe_nodes = 0;
@@ -5263,6 +5265,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
     const Brush &brush;
     const int64_t &nodes;
     const double &gather_ms;
+    const double &node_gather_ms;
+    const double &preserve_extend_ms;
     const double &undo_ms;
     const double &prebrush_ms;
     double start;
@@ -5280,11 +5284,14 @@ static void do_brush_action(const Depsgraph &depsgraph,
           0.0, total_ms - gather_ms - undo_ms - prebrush_ms);
       std::fprintf(stderr,
                    "[SculptMeshV3] brush=%s nodes=%lld total=%.3f ms "
-                   "gather=%.3f undo=%.3f prebrush=%.3f brush/rest=%.3f\n",
+                   "gather=%.3f node_gather=%.3f preserve_extend=%.3f "
+                   "undo=%.3f prebrush=%.3f brush/rest=%.3f\n",
                    sculpt_brush_type_name(brush),
                    static_cast<long long>(nodes),
                    total_ms,
                    gather_ms,
+                   node_gather_ms,
+                   preserve_extend_ms,
                    undo_ms,
                    prebrush_ms,
                    rest_ms);
@@ -5294,6 +5301,8 @@ static void do_brush_action(const Depsgraph &depsgraph,
       brush,
       sculpt_mesh_v3_probe_nodes,
       sculpt_mesh_v3_probe_gather_ms,
+      sculpt_mesh_v3_probe_node_gather_ms,
+      sculpt_mesh_v3_probe_preserve_extend_ms,
       sculpt_mesh_v3_probe_undo_ms,
       sculpt_mesh_v3_probe_prebrush_ms,
       sculpt_mesh_v3_probe_total_start};
@@ -5380,9 +5389,16 @@ static void do_brush_action(const Depsgraph &depsgraph,
   } detail_scope;
   brushes::CursorSampleResult cursor_sample_result = calc_brush_node_mask(
       depsgraph, ob, brush, memory);
+  const double sculpt_mesh_v3_probe_after_node_gather = BLI_time_now_seconds();
   cursor_sample_result.node_mask = layer_detail_v01::extend_shared_region(
       ob, brush, cursor_sample_result.node_mask, memory);
+  const double sculpt_mesh_v3_probe_after_preserve_extend = BLI_time_now_seconds();
   const IndexMask node_mask = cursor_sample_result.node_mask;
+  sculpt_mesh_v3_probe_node_gather_ms =
+      (sculpt_mesh_v3_probe_after_node_gather - sculpt_mesh_v3_probe_gather_start) * 1000.0;
+  sculpt_mesh_v3_probe_preserve_extend_ms =
+      (sculpt_mesh_v3_probe_after_preserve_extend - sculpt_mesh_v3_probe_after_node_gather) *
+      1000.0;
   sculpt_mesh_v3_probe_gather_ms =
       (BLI_time_now_seconds() - sculpt_mesh_v3_probe_gather_start) * 1000.0;
   sculpt_mesh_v3_probe_nodes = node_mask.size();

@@ -5,6 +5,7 @@
 #include "RNA_access.hh"
 #include "BLI_listbase.h"
 #include "BLI_math_geom.h"
+#include "BLI_time.h"
 #include "BKE_mesh.hh"
 
 namespace blender::ed::sculpt_paint::layer_detail_v01 {
@@ -242,6 +243,12 @@ inline bool prepare(Object &object,const IndexMask &mask)
   const auto nodes=pbvh.nodes<bke::pbvh::GridsNode>();
   const auto key=BKE_subdiv_ccg_key_top_level(*s.ccg);
   bool ok=true;
+  int legacy_checked_grids=0, legacy_compacted_grids=0;
+  int64_t legacy_released_bytes=0;
+  const char *legacy_compact_env=std::getenv("BLENDER_SCULPT_LAYER_LEGACY_COMPACT");
+  const bool legacy_compact_enabled=legacy_compact_env && legacy_compact_env[0]=='1' &&
+                                    legacy_compact_env[1]=='\0';
+  const double legacy_start=BLI_time_now_seconds();
   mask.foreach_index([&](int n) {
     if(!ok) { return; }
     for (const int grid : nodes[n].grids()) {
@@ -253,9 +260,29 @@ inline bool prepare(Object &object,const IndexMask &mask)
       for (int j = 0; j < key.grid_area; j++) {
         if (!capture(grid * key.grid_area + j)) { ok = false; return; }
       }
+      /* The samples above have already paged each contributing legacy payload
+       * into memory. Recheck those now-hot buffers once and convert exactly-zero
+       * grids to the sparse null representation used by new layers. Captured
+       * offsets keep the current stroke independent from this representation-only
+       * migration. */
+      if (legacy_compact_enabled) {
+        for (auto &other : s.others) {
+          legacy_checked_grids++;
+          const int64_t released=bke::multires_layers::compact_legacy_zero_grid(
+              *const_cast<MultiresSculptLayer *>(other.layer),grid);
+          if (released>0) {legacy_compacted_grids++;legacy_released_bytes+=released;}
+        }
+      }
       if (s.reuse_prepared) { s.prepared_grids.add(grid); }
     }
   },exec_mode::serial);
+  if (legacy_compacted_grids>0 && std::getenv("BLENDER_LAYER_RESP_TRACE")) {
+    std::fprintf(stderr,
+                 "[LAYER_LEGACY_COMPACT] checked=%d compacted=%d released=%.1fMiB ms=%.3f\n",
+                 legacy_checked_grids,legacy_compacted_grids,
+                 double(legacy_released_bytes)/(1024.0*1024.0),
+                 (BLI_time_now_seconds()-legacy_start)*1000.0);
+  }
   if (ok && !s.anchored) {
     const float3 location = object.runtime->sculpt_session->cache->location_symm;
     if (!s.grid_sample_ready || location != s.grid_sample_location) {

@@ -42,6 +42,8 @@ size_t BLI_system_memory_max_in_megabytes();
 int BLI_system_memory_max_in_megabytes_int();
 /** Installed physical memory in bytes, or zero when the platform cannot report it. */
 uint64_t BLI_system_memory_physical_total_bytes();
+/** Physical memory currently available to applications, or zero when unknown. */
+uint64_t BLI_system_memory_physical_available_bytes();
 
 /**
  * Ensure the process can open many files simultaneously.

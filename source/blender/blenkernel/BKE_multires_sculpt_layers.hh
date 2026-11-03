@@ -2,6 +2,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include "BLI_span.hh"
 #include "BLI_vector.hh"
@@ -41,6 +42,16 @@ inline constexpr char vertex_id_attribute[] = ".sculpt_layer_vertex_id";
  * Invalidation accompanies payload allocation, free and existing layer edits. */
 bool payload_grids(const MultiresSculptLayer &layer, int expected_grids, Vector<int> &r_grids);
 void payload_index_invalidate(const MultiresSculptLayer *layer = nullptr);
+
+/** Progressively migrate legacy dense storage to sparse storage.
+ * Returns the number of payload bytes released when the requested grid is
+ * finite and exactly zero. Each unchanged grid is scanned at most once until
+ * that layer is edited or its descriptor storage changes. */
+int64_t compact_legacy_zero_grid(MultiresSculptLayer &layer, int grid);
+/** Convert fully zero legacy payloads to implicit sparse grids.
+ * Intended for file-load, explicit maintenance, or other non-interactive boundaries. */
+int64_t compact_legacy_zero_payloads(MultiresModifierData &mmd,
+                                     int *r_compacted_grids = nullptr);
 
 /** True when a layer contributes to evaluation at all: visible, finite and non-zero strength.
  * This is useful for performance-sensitive callers which want to pre-filter layers before
@@ -294,6 +305,14 @@ bool faceset_grid_swap(MultiresModifierData &mmd, int corner, MutableSpan<int> u
  * A null per-grid displacement payload represents an implicit all-zero grid.
  * grid_ensure() materializes only the requested grid. */
 float (*grid_ensure(MultiresSculptLayer &layer, int corner))[3];
+
+/**
+ * Materialize a grid while a caller-owned batch transaction is in progress.
+ * The caller must call weight_hot_delta_cache_invalidate(&layer) exactly once
+ * after the batch, including failure paths. This avoids serializing thousands
+ * of independent allocations on the global cache mutex.
+ */
+float (*grid_ensure_deferred_cache_invalidation(MultiresSculptLayer &layer, int corner))[3];
 bool sample_tangent(const MultiresSculptLayer &layer,
                     int corner,
                     int grid_size,

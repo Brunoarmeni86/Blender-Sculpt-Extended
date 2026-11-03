@@ -28,6 +28,7 @@
 #  if defined(__linux__)
 #    include <sys/sysinfo.h>
 #  elif defined(__APPLE__)
+#    include <mach/mach.h>
 #    include <sys/sysctl.h>
 #  endif
 #  if defined(HAVE_EXECINFO_H)
@@ -240,6 +241,36 @@ uint64_t BLI_system_memory_physical_total_bytes()
   uint64_t bytes = 0;
   size_t size = sizeof(bytes);
   return sysctlbyname("hw.memsize", &bytes, &size, nullptr, 0) == 0 ? bytes : 0;
+#else
+  return 0;
+#endif
+}
+
+uint64_t BLI_system_memory_physical_available_bytes()
+{
+#if defined(WIN32)
+  MEMORYSTATUSEX status{};
+  status.dwLength = sizeof(status);
+  return GlobalMemoryStatusEx(&status) ? uint64_t(status.ullAvailPhys) : 0;
+#elif defined(__linux__)
+  struct sysinfo info {};
+  return sysinfo(&info) == 0 ? uint64_t(info.freeram + info.bufferram) *
+                                  uint64_t(info.mem_unit) :
+                              0;
+#elif defined(__APPLE__)
+  mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+  vm_statistics64_data_t vm_stats{};
+  mach_port_t host = mach_host_self();
+  if (host_statistics64(host, HOST_VM_INFO64, reinterpret_cast<host_info64_t>(&vm_stats),
+                        &count) != KERN_SUCCESS)
+  {
+    return 0;
+  }
+  vm_size_t page_size = 0;
+  if (host_page_size(host, &page_size) != KERN_SUCCESS) {
+    return 0;
+  }
+  return uint64_t(vm_stats.free_count + vm_stats.inactive_count) * page_size;
 #else
   return 0;
 #endif

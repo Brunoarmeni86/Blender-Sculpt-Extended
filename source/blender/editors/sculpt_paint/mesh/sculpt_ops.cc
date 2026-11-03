@@ -914,6 +914,9 @@ static wmOperatorStatus sculpt_multires_layer_commit_exec(bContext *C, wmOperato
   if (!ob) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (!mmd || !bke::multires_layers::active(*mmd)) return OPERATOR_CANCELLED;
+  const SculptSession *ss_before = ob->runtime->sculpt_session;
+  const bool had_pending_coords = ss_before && ss_before->subdiv_ccg &&
+                                  ss_before->subdiv_ccg->dirty.coords;
   bool local_surface_preserved = false;
   if (!sculpt_multires_layer_commit(*ob, *op, &local_surface_preserved)) {
     return OPERATOR_CANCELLED;
@@ -928,7 +931,8 @@ static wmOperatorStatus sculpt_multires_layer_commit_exec(bContext *C, wmOperato
    * validated together. Set to 0 to restore the legacy geometry rebuild. */
   const bool opt_in = !keep_env || keep_env[0] == '\0' || keep_env[0] != '0';
   const SculptSession *ss = ob->runtime->sculpt_session;
-  bool keep_ccg = opt_in && local_surface_preserved && ss && ss->subdiv_ccg &&
+  const bool surface_unchanged = !had_pending_coords || local_surface_preserved;
+  bool keep_ccg = opt_in && surface_unchanged && ss && ss->subdiv_ccg &&
                   ss->multires_modifier == mmd &&
                   !mmd->sculpt_displacement_enabled && !mmd->sculpt_shrinkwrap_enabled;
   /* Later enabled modifiers may require their own geometry evaluation. */
@@ -951,16 +955,18 @@ static wmOperatorStatus sculpt_multires_layer_commit_exec(bContext *C, wmOperato
    * level, layer controls, modifiers, Undo/Redo and file reload all tag it.
    * Set BLENDER_SCULPT_COMMIT_DEFER_SYNC=0 for the previous behavior. */
   const char *defer_env = BLI_getenv("BLENDER_SCULPT_COMMIT_DEFER_SYNC");
-  const bool defer_sync = keep_ccg &&
+  const bool defer_sync = (!had_pending_coords || keep_ccg) &&
                           (!defer_env || defer_env[0] == '\0' || defer_env[0] != '0');
   if (!defer_sync) {
     DEG_id_tag_update(&ob->id, keep_ccg ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
   }
   if (trace) {
-    std::printf("[LAYER_COMMIT_REFRESH] request=%s opt_in=%d local_surface_preserved=%d "
+    std::printf("[LAYER_COMMIT_REFRESH] request=%s opt_in=%d pending=%d local_surface_preserved=%d "
                 "tag=%.3fms\n",
-                defer_sync ? "DEFERRED" : (keep_ccg ? "SYNC_ONLY" : "GEOMETRY"),
+                !had_pending_coords ? "NO_PENDING" :
+                (defer_sync ? "DEFERRED" : (keep_ccg ? "SYNC_ONLY" : "GEOMETRY")),
                 int(opt_in),
+                int(had_pending_coords),
                 int(local_surface_preserved),
                 (BLI_time_now_seconds() - request_start) * 1000.0);
     std::fflush(stdout);
