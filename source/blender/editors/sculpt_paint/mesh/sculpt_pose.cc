@@ -13,6 +13,7 @@
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector.hh"
+#include "BLI_path_utils.hh"
 
 #include "DNA_brush_types.h"
 #include "DNA_object_types.h"
@@ -39,6 +40,7 @@
 #include "bmesh.hh"
 
 #include <cmath>
+#include <cstdio>
 
 namespace blender::ed::sculpt_paint::pose {
 
@@ -1994,6 +1996,40 @@ static std::unique_ptr<IKChain> ik_chain_init(const Depsgraph &depsgraph,
   return ik_chain;
 }
 
+/* A fixed number of vertex-ring blur passes becomes progressively narrower in
+ * object space as a Multires grid gets denser. Scale the requested artistic
+ * width with the CCG resolution so the Pose hinge remains comparable between
+ * subdivision levels. This is preview opt-in until interactive validation. */
+static int pose_falloff_smooth_iterations(const Object &ob, const int requested_iterations)
+{
+  const char *setting = BLI_getenv("BLENDER_SCULPT_POSE_ADAPTIVE_FALLOFF");
+  if (requested_iterations <= 0 || setting == nullptr || setting[0] != '1') {
+    return requested_iterations;
+  }
+
+  const SculptSession *ss = ob.runtime->sculpt_session;
+  const bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  if (ss == nullptr || ss->subdiv_ccg == nullptr || pbvh == nullptr ||
+      pbvh->type() != bke::pbvh::Type::Grids)
+  {
+    return requested_iterations;
+  }
+
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss->subdiv_ccg);
+  /* A moderate scale is intentional: iterative blur width grows roughly with
+   * the square root of the pass count, while cost grows linearly. */
+  const int resolution_scale = std::clamp((key.grid_size - 1) / 8, 1, 4);
+  const int result = std::min(requested_iterations * resolution_scale, 32);
+  if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+    std::printf("[POSE_ADAPTIVE_FALLOFF] requested=%d grid_size=%d scale=%d result=%d\n",
+                requested_iterations,
+                key.grid_size,
+                resolution_scale,
+                result);
+  }
+  return result;
+}
+
 static bool pose_brush_init(const Depsgraph &depsgraph,
                             Object &ob,
                             SculptSession &ss,
@@ -2008,8 +2044,10 @@ static bool pose_brush_init(const Depsgraph &depsgraph,
   }
 
   /* Smooth the weights of each segment for cleaner deformation. */
+  const int smooth_iterations = pose_falloff_smooth_iterations(
+      ob, brush.pose_smooth_iterations);
   for (IKChainSegment &segment : ss.cache->pose_ik_chain->segments) {
-    smooth::blur_geometry_data_array(ob, brush.pose_smooth_iterations, segment.weights);
+    smooth::blur_geometry_data_array(ob, smooth_iterations, segment.weights);
   }
 
   return true;

@@ -293,7 +293,9 @@ fallback sono piu importanti della sola media per la fluidita percepita.
 | 2026-11-02 | Profilato primo commit su 24047 griglie | 161.8 ms cold contro 107.4 ms hot; circa 54 ms sono costruzione iniziale di 8192 frame cache |
 | 2026-11-02 | Benchmark headless su `zombie dragon.blend` (3 GB) | Selezione mediana 0.0018 ms; Strength denso mediana 3291 ms, massimo 3478 ms |
 | 2026-11-02 | Confronto build stabile/candidata | Strength stabile 3228 ms contro candidata 3291 ms: nessun guadagno dimostrato, differenza nel rumore |
-| 2026-11-02 | Strength differito aggiunto alla UI | Pulsante orologio: modifica locale fluida, una sola valutazione esatta con OK; campo RNA nativo preservato come fallback |
+| 2026-11-02 | Strength differito aggiunto alla UI | Pulsante orologio opzionale: una sola valutazione esatta con OK; il campo nativo resta disponibile per l'anteprima durante il trascinamento |
+| 2026-11-03 | Valutato Strength differito come controllo principale | Respinto: il trascinamento serve principalmente per l'anteprima visiva; mantenuto soltanto come alternativa per input numerico preciso |
+| 2026-11-03 | Pose adaptive falloff A/B | Su PBVH Grids scala moderatamente gli anelli di smoothing in base alla risoluzione CCG (4 -> 8 su griglia 17, massimo 32); la prima prova 4 -> 16 eliminava la cerniera ma risultava lenta |
 | 2026-11-02 | Test interattivo cache progressiva | Regressione: primo commit 342.6 ms contro baseline 161.8 ms; disabilitata nel launcher, codice conservato opt-in |
 | 2026-11-03 | Validata rimozione compattazione legacy dalla pennellata | Smooth normalmente 0.15-0.30 ms; `node_gather` e `preserve_extend` trascurabili. La compattazione resta solo opt-in/offline. |
 | 2026-11-03 | Baseline commit deformazione estesa | 183415/424456 griglie, 52.77 M campioni esatti: solve 914.978 ms, publish 1057.888 ms, totale 2072.844 ms. Il prossimo intervento deve ridurre allocazioni/page fault nel publish senza allargare il journal. |
