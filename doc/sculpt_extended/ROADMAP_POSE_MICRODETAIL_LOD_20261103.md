@@ -82,3 +82,19 @@ Smentita la precedente dicitura *“solo dichiarata dall'utente, non verificata 
 - P0 trasversale: evitare regressioni degli spikes e dell'Undo e rispettare il checkpoint Windows approvato; Linux certificato separatamente.
 - Aprire PR o branch esperimenti distinti, con opt-in, test su mesh sintetica e scene reali, confronti OFF/ON.
 - Non confondere **codice presente**, **flag opt-in**, **test registrato** e **funzione validata nella Build distribuita**.
+
+
+## Funzioni della comparazione ZBrush/SculptForge fuori dalle tre priorità
+
+Queste voci erano state prospettate come *nuove* nel primo confronto; sono riclassificate per non generare backlog duplicato:
+
+| Voce originaria | Classificazione | Nota |
+|---|---|---|
+| VDM / Vector Displacement brush | **PRESENTE (UPSTREAM)** | `source/blender/editors/sculpt_paint/mesh/brushes/draw_vector_displacement.cc`. Eventuali miglioramenti non sono una nuova implementazione del brush. |
+| Elastic Grab e Twist | **PRESENTE + OTTIMIZZAZIONI CUSTOM** | `brushes/elastic_deform.cc` seleziona `BRUSH_SCULPT_ELASTIC_EXACT` o `ACCELERATED` (opt-in); usa `elastic_grab_exact.hh` e `elastic_grab_level_one.hh`. |
+| DamStandard / hPolish | **STRUMENTI ANALOGHI PRESENTI, NON EQUIVALENZA VALIDATA** | Crease, Draw Sharp, Plane, Multiplane Scrape sono già in `brushes/`. Un nuovo brush va proposto solo dopo confronto del comportamento con gli asset/parametri esistenti. |
+| Selection Sets / Morph Brush | **CAPACITÀ PARZIALI** | Face Sets, maschere, snapshot e layer nascosti esistono. Non verificato uno stack multicanale di Selection Sets e Morph-to-saved-shape come quello di SculptForge; progetto separato a bassa priorità. |
+| Paint Layers con Blend Modes | **NON EQUIVALENTE AL POLYPAINT HR** | Ci sono Color Attributes nominati e master HR indipendenti, ma non è stata verificata una composizione completa di layer colore (Overlay/Screen/Multiply) nel sistema nativo Multires. |
+| Quad Remesh guidato | **QUADRIFLOW PRESENTE (UPSTREAM), GUIDE NON VERIFICATE** | `source/blender/editors/object/object_remesh.cc` contiene QuadriFlow; guide di flusso e preservation avanzata restano eventuali estensioni, non un nuovo remesher. |
+
+**Nota:** “non verificato” non significa prova di assenza nell'intero repository. Per promuovere una voce a implementazione nuova sono necessari grep completo, conferma delle API e un test operativo.
