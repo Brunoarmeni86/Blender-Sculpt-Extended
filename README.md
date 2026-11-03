@@ -20,3 +20,9 @@ The checkpoint retains Multires mask persistence, layer Undo fixes and optional 
 Custom distribution, not an official Blender release. Approved checkpoint does not mean every bug is resolved. Previous releases remain available. Windows and Linux currently use different source revisions, identified above. Previous Linux includes CUDA/OptiX, HIP and oneAPI kernels; no new physical GPU testing is claimed.
 
 Blender is distributed under the GNU GPL; see [COPYING](COPYING) and the source tree for license details.
+
+## Development priorities — 3 November 2026
+
+Next planned native sculpt features (not part of the approved build): **Poseable Symmetry + Quick Pose**, **MicroDetail** and **Adaptive Sculpt LOD**. Surface Projection is already reported in the current workflow; its integration will be checked rather than implemented again.
+
+See the [priority roadmap](doc/sculpt_extended/ROADMAP_POSE_MICRODETAIL_LOD_20261103.md) and tracking issues [#6](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/6), [#7](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/7) and [#8](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/8). Existing stability audit: [#3](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/3).
