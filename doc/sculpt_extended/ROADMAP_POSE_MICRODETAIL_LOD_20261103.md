@@ -98,3 +98,9 @@ Queste voci erano state prospettate come *nuove* nel primo confronto; sono ricla
 | Quad Remesh guidato | **QUADRIFLOW PRESENTE (UPSTREAM), GUIDE NON VERIFICATE** | `source/blender/editors/object/object_remesh.cc` contiene QuadriFlow; guide di flusso e preservation avanzata restano eventuali estensioni, non un nuovo remesher. |
 
 **Nota:** “non verificato” non significa prova di assenza nell'intero repository. Per promuovere una voce a implementazione nuova sono necessari grep completo, conferma delle API e un test operativo.
+
+## Audit addizionale — 4 novembre 2026
+
+Ulteriori componenti **già presenti nel sorgente**, loro limiti e gap reali sono documentati in [ADDITIONAL_EXISTING_FEATURES_AUDIT_20261104.md](ADDITIONAL_EXISTING_FEATURES_AUDIT_20261104.md). Comprendono HR Extract Mask/Face Sets, Detail Transfer sperimentale, displacement procedurale e bake verso layer, Polypaint UV bake singolo tile, Shape Key fast update, Delta Smooth, Draw Transport, Morph Brush mancante e layer blend modes mancanti.
+
+**Vincolo per Quick Pose:** distinguere isolamento dei payload layer da preservazione visiva del dettaglio durante Pose/Grab/Elastic; il secondo richiede trasporto del dettaglio e test specifici. **Prestazioni:** prima di introdurre nuovi snapshot microdetail, verificare i percorsi Undo/memfile Polypaint già misurati come potenzialmente molto costosi.
