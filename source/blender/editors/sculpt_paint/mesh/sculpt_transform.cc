@@ -15,6 +15,7 @@
 #include "BLI_math_rotation.h"
 #include "BLI_math_vector.h"
 #include "BLI_math_vector_types.hh"
+#include "BLI_path_utils.hh"
 #include "BLI_span.hh"
 
 #include "BKE_attribute.hh"
@@ -23,6 +24,7 @@
 #include "BKE_kelvinlet.h"
 #include "BKE_layer.hh"
 #include "BKE_mesh.hh"
+#include "BKE_mesh_mapping.hh"
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
@@ -50,8 +52,143 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <limits>
+#include <queue>
 
 namespace blender::ed::sculpt_paint {
+
+struct TransformDistanceVert {
+  float distance;
+  int vert;
+
+  bool operator>(const TransformDistanceVert &other) const
+  {
+    return distance > other.distance;
+  }
+};
+
+static void transform_topology_weights_init(const Depsgraph &depsgraph,
+                                            Object &ob,
+                                            const float blend)
+{
+  SculptSession &ss = *ob.runtime->sculpt_session;
+  filter::Cache &cache = *ss.filter_cache;
+  cache.transform_topology_weights = {};
+  if (blend <= 0.0f) {
+    return;
+  }
+
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  if (!pbvh || pbvh->type() != bke::pbvh::Type::Mesh) {
+    return;
+  }
+
+  Mesh &mesh = *id_cast<Mesh *>(ob.data);
+  const MeshAttributeData attributes(mesh);
+  if (attributes.mask.is_empty()) {
+    return;
+  }
+
+  const Span<float3> positions = bke::pbvh::vert_positions_eval(depsgraph, ob);
+  const Span<int2> edges = mesh.edges();
+  if (positions.is_empty() || edges.is_empty()) {
+    return;
+  }
+  if (ss.vert_to_edge_map.is_empty()) {
+    ss.vert_to_edge_map = bke::mesh::build_vert_to_edge_map(
+        edges, mesh.verts_num, ss.vert_to_edge_offsets, ss.vert_to_edge_indices);
+  }
+
+  float3 bounds_min = positions.first();
+  float3 bounds_max = positions.first();
+  for (const float3 &position : positions.drop_front(1)) {
+    bounds_min = math::min(bounds_min, position);
+    bounds_max = math::max(bounds_max, position);
+  }
+  /* Give the low end enough physical width to cross several edge rings. A square-root response
+   * keeps zero exact while making artistically useful values live in the first third of the UI. */
+  const float reach = math::distance(bounds_min, bounds_max) * (0.5f * std::sqrt(blend));
+  if (reach <= std::numeric_limits<float>::epsilon()) {
+    return;
+  }
+
+  Array<float> distances(mesh.verts_num, std::numeric_limits<float>::max());
+  std::priority_queue<TransformDistanceVert,
+                      std::vector<TransformDistanceVert>,
+                      std::greater<TransformDistanceVert>>
+      queue;
+  int boundary_num = 0;
+  /* Seed the distance on the fully masked side of the boundary. Do not threshold the painted
+   * transition at 0.5: that turns an anti-aliased mask into a jagged binary contour and produces
+   * spikes under large rotations. */
+  constexpr float hard_mask = 0.999f;
+  for (const int vert : positions.index_range()) {
+    if (attributes.mask[vert] < hard_mask ||
+        (!attributes.hide_vert.is_empty() && attributes.hide_vert[vert]))
+    {
+      continue;
+    }
+    for (const int edge_i : ss.vert_to_edge_map[vert]) {
+      const int2 edge = edges[edge_i];
+      const int other = edge[0] == vert ? edge[1] : edge[0];
+      if (attributes.mask[other] < hard_mask) {
+        distances[vert] = 0.0f;
+        queue.push({0.0f, vert});
+        boundary_num++;
+        break;
+      }
+    }
+  }
+  if (boundary_num == 0) {
+    return;
+  }
+
+  while (!queue.empty()) {
+    const TransformDistanceVert current = queue.top();
+    queue.pop();
+    if (current.distance != distances[current.vert] || current.distance >= reach) {
+      continue;
+    }
+    for (const int edge_i : ss.vert_to_edge_map[current.vert]) {
+      const int2 edge = edges[edge_i];
+      const int other = edge[0] == current.vert ? edge[1] : edge[0];
+      if (!attributes.hide_vert.is_empty() && attributes.hide_vert[other])
+      {
+        continue;
+      }
+      const float candidate = current.distance +
+                              math::distance(positions[current.vert], positions[other]);
+      if (candidate < distances[other] && candidate < reach) {
+        distances[other] = candidate;
+        queue.push({candidate, other});
+      }
+    }
+  }
+
+  cache.transform_topology_weights.reinitialize(mesh.verts_num);
+  for (const int vert : positions.index_range()) {
+    float weight = 1.0f;
+    if ((!attributes.hide_vert.is_empty() && attributes.hide_vert[vert]) ||
+        attributes.mask[vert] >= hard_mask)
+    {
+      weight = 0.0f;
+    }
+    else if (distances[vert] < reach) {
+      const float t = std::clamp(distances[vert] / reach, 0.0f, 1.0f);
+      /* Quintic smoother-step has zero first and second derivatives at both ends. This avoids the
+       * visible curvature break produced by cubic smooth-step around a hard mask boundary. */
+      const float smooth = t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+      weight = smooth;
+    }
+    /* Keep painted protection, including disconnected components outside the distance front. */
+    cache.transform_topology_weights[vert] = std::min(
+        weight, std::clamp(1.0f - attributes.mask[vert], 0.0f, 1.0f));
+  }
+  printf("[SCULPT_TRANSFORM_TOPOLOGY] mode=MESH boundary=%d reach=%.6f verts=%d\n",
+         boundary_num,
+         reach,
+         mesh.verts_num);
+}
 
 void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char *undo_name)
 {
@@ -75,6 +212,13 @@ void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char 
 
   filter::cache_init(C, ob, sd, undo::Type::Position, mval_fl, 5.0, 1.0f);
 
+  const char *falloff_blend = BLI_getenv("BLENDER_SCULPT_TRANSFORM_FALLOFF_BLEND");
+  ss.filter_cache->transform_falloff_blend =
+      (falloff_blend && falloff_blend[0] == '1') ?
+          std::clamp(sd.transform_falloff_blend, 0.0f, 1.0f) * 0.2f :
+          0.0f;
+  transform_topology_weights_init(*depsgraph, ob, ss.filter_cache->transform_falloff_blend);
+
   if (sd.transform_mode == SCULPT_TRANSFORM_MODE_RADIUS_ELASTIC) {
     ss.filter_cache->transform_displacement_mode = TransformDisplacementMode::Incremental;
   }
@@ -85,7 +229,8 @@ void init_transform(bContext *C, Object &ob, const float mval_fl[2], const char 
 
 static std::array<float4x4, 8> transform_matrices_init(const SculptSession &ss,
                                                        const ePaintSymmetryFlags symm,
-                                                       const TransformDisplacementMode t_mode)
+                                                       const TransformDisplacementMode t_mode,
+                                                       const float weight = 1.0f)
 {
   std::array<float4x4, 8> mats;
 
@@ -121,18 +266,35 @@ static std::array<float4x4, 8> transform_matrices_init(const SculptSession &ss,
 
     /* Translation matrix. */
     sub_v3_v3v3(d_t, ss.pivot_pos, start_pivot_pos);
+    mul_v3_fl(d_t, weight);
     d_t = flip_v3_by_symm_area(d_t, symm, v_symm, ss.init_pivot_pos);
     translate_m4(t_mat, d_t[0], d_t[1], d_t[2]);
 
     /* Rotation matrix. */
     sub_qt_qtqt(d_r, ss.pivot_rot, start_pivot_rot);
     normalize_qt(d_r);
+    if (weight < 1.0f) {
+      float identity[4], weighted_rotation[4];
+      unit_qt(identity);
+      interp_qt_qtqt(weighted_rotation, identity, d_r, weight);
+      copy_qt_qt(d_r, weighted_rotation);
+    }
     flip_quat_by_symm_area(d_r, symm, v_symm, ss.init_pivot_pos);
     quat_to_mat4(r_mat, d_r);
 
-    /* Scale matrix. */
-    sub_v3_v3v3(d_s, ss.pivot_scale, start_pivot_scale);
-    add_v3_fl(d_s, 1.0f);
+    /* Scale matrix. Interpolate positive scale ratios geometrically so equal topology-weight
+     * steps produce equal relative changes. Linear interpolation bunches deformation close to
+     * the fixed side when shrinking and is one source of a visible waist at the transition. */
+    for (int axis = 0; axis < 3; axis++) {
+      const float start = start_pivot_scale[axis];
+      const float current = ss.pivot_scale[axis];
+      if (start > 1.0e-8f && current > 1.0e-8f) {
+        d_s[axis] = std::pow(current / start, weight);
+      }
+      else {
+        d_s[axis] = 1.0f + (current - start) * weight;
+      }
+    }
     size_to_mat4(s_mat, d_s);
 
     /* Pivot matrix. */
@@ -151,12 +313,50 @@ static std::array<float4x4, 8> transform_matrices_init(const SculptSession &ss,
 }
 
 static constexpr float transform_mirror_max_distance_eps = 0.00002f;
+static constexpr int transform_weight_levels = 1024;
+
+static Vector<float4x4> transform_weighted_matrices_init(const SculptSession &ss,
+                                                         const ePaintSymmetryFlags symm,
+                                                         const TransformDisplacementMode mode)
+{
+  Vector<float4x4> matrices((transform_weight_levels + 1) * PAINT_SYMM_AREAS);
+  for (int level = 0; level <= transform_weight_levels; level++) {
+    const float weight = float(level) / float(transform_weight_levels);
+    const std::array<float4x4, 8> level_matrices = transform_matrices_init(
+        ss, symm, mode, weight);
+    for (int area = 0; area < PAINT_SYMM_AREAS; area++) {
+      matrices[level * PAINT_SYMM_AREAS + area] = level_matrices[area];
+    }
+  }
+  return matrices;
+}
 
 struct TransformLocalData {
   Vector<float3> positions;
   Vector<float> factors;
   Vector<float3> translations;
+  Vector<float3> volume_translations;
 };
+
+static constexpr float transform_preserve_volume_mix = 0.35f;
+
+BLI_NOINLINE static void blend_preserve_volume_translations(
+    const Span<float3> volume_translations,
+    const Span<float> factors,
+    const MutableSpan<float3> translations)
+{
+  BLI_assert(volume_translations.size() == translations.size());
+  BLI_assert(factors.size() == translations.size());
+  for (const int i : translations.index_range()) {
+    /* The angular solution is useful around the bend, but applying a constant amount to fully
+     * fixed or fully transformed vertices creates a bulb. Restrict volume preservation to the
+     * actual skinning transition and keep both endpoints exact. */
+    const float transition = 4.0f * factors[i] * (1.0f - factors[i]);
+    const float mix = transform_preserve_volume_mix * std::clamp(transition, 0.0f, 1.0f);
+    translations[i] = math::interpolate(
+        translations[i], volume_translations[i], mix);
+  }
+}
 
 BLI_NOINLINE static void calc_symm_area_transform_translations(
     const Span<float3> positions,
@@ -167,6 +367,27 @@ BLI_NOINLINE static void calc_symm_area_transform_translations(
     const ePaintSymmetryAreas symm_area = get_vertex_symm_area(positions[i]);
     const float3 transformed = math::transform_point(transform_mats[symm_area], positions[i]);
     translations[i] = transformed - positions[i];
+  }
+}
+
+BLI_NOINLINE static void calc_weighted_transform_translations(
+    const Span<float3> positions,
+    const Span<float> factors,
+    const Span<float4x4> weighted_mats,
+    const MutableSpan<float3> translations)
+{
+  BLI_assert(positions.size() == factors.size());
+  for (const int i : positions.index_range()) {
+    const float scaled_weight = std::clamp(factors[i], 0.0f, 1.0f) *
+                                transform_weight_levels;
+    const int level = int(scaled_weight);
+    const int next_level = std::min(level + 1, transform_weight_levels);
+    const ePaintSymmetryAreas area = get_vertex_symm_area(positions[i]);
+    const float4x4 &matrix = weighted_mats[level * PAINT_SYMM_AREAS + area];
+    const float4x4 &next_matrix = weighted_mats[next_level * PAINT_SYMM_AREAS + area];
+    translations[i] = math::interpolate(math::transform_point(matrix, positions[i]),
+                                        math::transform_point(next_matrix, positions[i]),
+                                        scaled_weight - level) - positions[i];
   }
 }
 
@@ -192,6 +413,7 @@ BLI_NOINLINE static void filter_translations_with_symmetry(const Span<float3> po
 
 static void transform_node_mesh(const Sculpt &sd,
                                 const std::array<float4x4, 8> &transform_mats,
+                                const Span<float4x4> weighted_mats,
                                 const MeshAttributeData &attribute_data,
                                 const bke::pbvh::MeshNode &node,
                                 Object &object,
@@ -206,11 +428,24 @@ static void transform_node_mesh(const Sculpt &sd,
   tls.factors.resize(verts.size());
   const MutableSpan<float> factors = tls.factors;
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
+  if (!ss.filter_cache->transform_topology_weights.is_empty()) {
+    array_utils::gather(ss.filter_cache->transform_topology_weights.as_span(), verts, factors);
+  }
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
-  calc_symm_area_transform_translations(orig_data.positions, transform_mats, translations);
-  scale_translations(translations, factors);
+  if (weighted_mats.is_empty()) {
+    calc_symm_area_transform_translations(orig_data.positions, transform_mats, translations);
+    scale_translations(translations, factors);
+  }
+  else {
+    calc_symm_area_transform_translations(orig_data.positions, transform_mats, translations);
+    scale_translations(translations, factors);
+    tls.volume_translations.resize(verts.size());
+    calc_weighted_transform_translations(
+        orig_data.positions, factors, weighted_mats, tls.volume_translations);
+    blend_preserve_volume_translations(tls.volume_translations, factors, translations);
+  }
 
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
   filter_translations_with_symmetry(orig_data.positions, symm, translations);
@@ -221,6 +456,7 @@ static void transform_node_mesh(const Sculpt &sd,
 
 static void transform_node_grids(const Sculpt &sd,
                                  const std::array<float4x4, 8> &transform_mats,
+                                 const Span<float4x4> weighted_mats,
                                  const bke::pbvh::GridsNode &node,
                                  Object &object,
                                  TransformLocalData &tls)
@@ -240,9 +476,18 @@ static void transform_node_grids(const Sculpt &sd,
 
   tls.translations.resize(grid_verts_num);
   const MutableSpan<float3> translations = tls.translations;
-  calc_symm_area_transform_translations(orig_data.positions, transform_mats, translations);
-
-  scale_translations(translations, factors);
+  if (weighted_mats.is_empty()) {
+    calc_symm_area_transform_translations(orig_data.positions, transform_mats, translations);
+    scale_translations(translations, factors);
+  }
+  else {
+    calc_symm_area_transform_translations(orig_data.positions, transform_mats, translations);
+    scale_translations(translations, factors);
+    tls.volume_translations.resize(grid_verts_num);
+    calc_weighted_transform_translations(
+        orig_data.positions, factors, weighted_mats, tls.volume_translations);
+    blend_preserve_volume_translations(tls.volume_translations, factors, translations);
+  }
 
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
   filter_translations_with_symmetry(orig_data.positions, symm, translations);
@@ -253,6 +498,7 @@ static void transform_node_grids(const Sculpt &sd,
 
 static void transform_node_bmesh(const Sculpt &sd,
                                  const std::array<float4x4, 8> &transform_mats,
+                                 const Span<float4x4> weighted_mats,
                                  bke::pbvh::BMeshNode &node,
                                  Object &object,
                                  TransformLocalData &tls)
@@ -271,9 +517,18 @@ static void transform_node_bmesh(const Sculpt &sd,
 
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
-  calc_symm_area_transform_translations(orig_positions, transform_mats, translations);
-
-  scale_translations(translations, factors);
+  if (weighted_mats.is_empty()) {
+    calc_symm_area_transform_translations(orig_positions, transform_mats, translations);
+    scale_translations(translations, factors);
+  }
+  else {
+    calc_symm_area_transform_translations(orig_positions, transform_mats, translations);
+    scale_translations(translations, factors);
+    tls.volume_translations.resize(verts.size());
+    calc_weighted_transform_translations(
+        orig_positions, factors, weighted_mats, tls.volume_translations);
+    blend_preserve_volume_translations(tls.volume_translations, factors, translations);
+  }
 
   const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(object);
   filter_translations_with_symmetry(orig_positions, symm, translations);
@@ -291,6 +546,15 @@ static void sculpt_transform_all_vertices(const Depsgraph &depsgraph, const Scul
 
   std::array<float4x4, 8> transform_mats = transform_matrices_init(
       ss, symm, ss.filter_cache->transform_displacement_mode);
+  /* Hybrid linear / rotation interpolation. Pure linear skinning pinches the inside of a bend;
+   * pure angular interpolation creates a spherical bulge. A conservative preserve-volume mix
+   * balances both while keeping the topology falloff as the sole spatial control. */
+  const Vector<float4x4> weighted_mats = ss.filter_cache->transform_falloff_blend > 0.0f ?
+                                              transform_weighted_matrices_init(
+                                                  ss,
+                                                  symm,
+                                                  ss.filter_cache->transform_displacement_mode) :
+                                              Vector<float4x4>();
 
   /* Regular transform applies all symmetry passes at once as it is split by symmetry areas
    * (each vertex can only be transformed once by the transform matrix of its area). */
@@ -308,7 +572,7 @@ static void sculpt_transform_all_vertices(const Depsgraph &depsgraph, const Scul
           [&](const int i) {
             TransformLocalData &tls = all_tls.local();
             transform_node_mesh(
-                sd, transform_mats, attribute_data, nodes[i], ob, tls, position_data);
+                sd, transform_mats, weighted_mats, attribute_data, nodes[i], ob, tls, position_data);
             bke::pbvh::update_node_bounds_mesh(position_data.eval, nodes[i]);
           },
           exec_mode::grain_size(1));
@@ -321,7 +585,7 @@ static void sculpt_transform_all_vertices(const Depsgraph &depsgraph, const Scul
       node_mask.foreach_index(
           [&](const int i) {
             TransformLocalData &tls = all_tls.local();
-            transform_node_grids(sd, transform_mats, nodes[i], ob, tls);
+            transform_node_grids(sd, transform_mats, weighted_mats, nodes[i], ob, tls);
             bke::pbvh::update_node_bounds_grids(subdiv_ccg.grid_area, positions, nodes[i]);
           },
           exec_mode::grain_size(1));
@@ -332,7 +596,7 @@ static void sculpt_transform_all_vertices(const Depsgraph &depsgraph, const Scul
       node_mask.foreach_index(
           [&](const int i) {
             TransformLocalData &tls = all_tls.local();
-            transform_node_bmesh(sd, transform_mats, nodes[i], ob, tls);
+            transform_node_bmesh(sd, transform_mats, weighted_mats, nodes[i], ob, tls);
             bke::pbvh::update_node_bounds_bmesh(nodes[i]);
           },
           exec_mode::grain_size(1));
@@ -355,12 +619,26 @@ BLI_NOINLINE static void calc_transform_translations(const float4x4 &elastic_tra
 
 BLI_NOINLINE static void apply_kelvinet_to_translations(const KelvinletParams &params,
                                                         const float3 &elastic_transform_pivot,
+                                                        const float falloff_blend,
                                                         const Span<float3> positions,
                                                         const MutableSpan<float3> translations)
 {
+  const float exponent = math::interpolate(1.0f, 0.35f, falloff_blend);
   for (const int i : positions.index_range()) {
+    const float input_length = math::length(translations[i]);
     BKE_kelvinlet_grab_triscale(
         translations[i], &params, positions[i], elastic_transform_pivot, translations[i]);
+    if (falloff_blend <= 0.0f || input_length <= 1.0e-12f) {
+      continue;
+    }
+    const float output_length = math::length(translations[i]);
+    if (output_length <= 1.0e-12f) {
+      continue;
+    }
+    const float attenuation = std::clamp(output_length / input_length, 0.0f, 1.0f);
+    if (attenuation > 1.0e-8f && attenuation < 1.0f) {
+      translations[i] *= std::pow(attenuation, exponent) / attenuation;
+    }
   }
 }
 
@@ -388,7 +666,11 @@ static void elastic_transform_node_mesh(const Sculpt &sd,
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
   calc_transform_translations(elastic_transform_mat, positions, translations);
-  apply_kelvinet_to_translations(params, elastic_transform_pivot, positions, translations);
+  apply_kelvinet_to_translations(params,
+                                 elastic_transform_pivot,
+                                 ss.filter_cache->transform_falloff_blend,
+                                 positions,
+                                 translations);
 
   scale_translations(translations, factors);
 
@@ -419,7 +701,11 @@ static void elastic_transform_node_grids(const Sculpt &sd,
   tls.translations.resize(positions.size());
   const MutableSpan<float3> translations = tls.translations;
   calc_transform_translations(elastic_transform_mat, positions, translations);
-  apply_kelvinet_to_translations(params, elastic_transform_pivot, positions, translations);
+  apply_kelvinet_to_translations(params,
+                                 elastic_transform_pivot,
+                                 ss.filter_cache->transform_falloff_blend,
+                                 positions,
+                                 translations);
 
   scale_translations(translations, factors);
 
@@ -448,7 +734,11 @@ static void elastic_transform_node_bmesh(const Sculpt &sd,
   tls.translations.resize(verts.size());
   const MutableSpan<float3> translations = tls.translations;
   calc_transform_translations(elastic_transform_mat, positions, translations);
-  apply_kelvinet_to_translations(params, elastic_transform_pivot, positions, translations);
+  apply_kelvinet_to_translations(params,
+                                 elastic_transform_pivot,
+                                 ss.filter_cache->transform_falloff_blend,
+                                 positions,
+                                 translations);
 
   scale_translations(translations, factors);
 

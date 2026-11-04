@@ -314,7 +314,9 @@ class _defs_transform:
     def draw_transform_sculpt_tool_settings(context, layout):
         if context.mode != 'SCULPT':
             return
-        layout.prop(context.tool_settings.sculpt, "transform_mode")
+        sculpt = context.tool_settings.sculpt
+        layout.prop(sculpt, "transform_mode")
+        layout.prop(sculpt, "transform_falloff_blend", slider=True)
 
     @ToolDef.from_fn
     def translate():

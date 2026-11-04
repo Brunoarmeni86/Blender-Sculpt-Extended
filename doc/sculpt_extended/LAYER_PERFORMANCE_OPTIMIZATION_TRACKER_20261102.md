@@ -296,6 +296,10 @@ fallback sono piu importanti della sola media per la fluidita percepita.
 | 2026-11-02 | Strength differito aggiunto alla UI | Pulsante orologio opzionale: una sola valutazione esatta con OK; il campo nativo resta disponibile per l'anteprima durante il trascinamento |
 | 2026-11-03 | Valutato Strength differito come controllo principale | Respinto: il trascinamento serve principalmente per l'anteprima visiva; mantenuto soltanto come alternativa per input numerico preciso |
 | 2026-11-03 | Pose adaptive falloff A/B | Su PBVH Grids scala moderatamente gli anelli di smoothing in base alla risoluzione CCG (4 -> 8 su griglia 17, massimo 32); la prima prova 4 -> 16 eliminava la cerniera ma risultava lenta |
+| 2026-11-03 | Pose regional falloff A/B | Rileva griglie di confine e halo, limita il blur ai relativi nodi PBVH; fallback globale oltre il 75% delle griglie o se il dominio non e verificabile |
+| 2026-11-03 | Pose wide regional falloff | Ripristinata la larghezza 4 -> 16 su griglia 17: e la configurazione che elimina la cerniera; il dominio regionale sostituisce il precedente compromesso 4 -> 8 |
+| 2026-11-03 | Pose overlapping segment weights A/B | Rimappa con esponente 0.5 e normalizza i pesi dei segmenti conservando l'inviluppo Pose originale; obiettivo: eliminare gli angoli tra segmenti multipli |
+| 2026-11-03 | Pose Segment Blend UI | Nuovo controllo 0..1 salvato nel Brush: 0 mantiene i pesi nativi, valori crescenti ampliano la sovrapposizione normalizzata fra segmenti |
 | 2026-11-02 | Test interattivo cache progressiva | Regressione: primo commit 342.6 ms contro baseline 161.8 ms; disabilitata nel launcher, codice conservato opt-in |
 | 2026-11-03 | Validata rimozione compattazione legacy dalla pennellata | Smooth normalmente 0.15-0.30 ms; `node_gather` e `preserve_extend` trascurabili. La compattazione resta solo opt-in/offline. |
 | 2026-11-03 | Baseline commit deformazione estesa | 183415/424456 griglie, 52.77 M campioni esatti: solve 914.978 ms, publish 1057.888 ms, totale 2072.844 ms. Il prossimo intervento deve ridurre allocazioni/page fault nel publish senza allargare il journal. |
@@ -309,8 +313,10 @@ fallback sono piu importanti della sola media per la fluidita percepita.
 | 2026-11-02 | Strength sparso validato | Primo build 257 ms, successivi cache-hit 82-96 ms su 22964/424456 griglie |
 | 2026-11-03 | Migrazione legacy regionale autosufficiente | Test respinto sul percorso stroke: Preserve caldo ~1.2 ms, scansione payload freddi 40-390 ms; disabilitata nel launcher e da spostare in idle/salvataggio |
 | 2026-11-03 | Profilazione pennellata separata | Implementata: `node_gather` e `preserve_extend` distinti nel trace `SculptMeshV3` |
-| 2026-11-03 | Falloff condiviso Pose e G/R/S | Progetto successivo: curva topologica/geodesica condivisa, preview e fallback lineare; da affrontare dopo validazione runtime manager |
+| 2026-11-03 | Falloff condiviso Pose e S/R/T | Prima tranche integrata: `Transform Blend` persistente rimappa il falloff Kelvinlet nel percorso Elastic comune; valore 0 nativo, stessa curva per sposta/ruota/scala. Pesi topologici regionali restano fase successiva. |
+| 2026-11-03 | S/R/T weighted transform V01 | In All Vertices, con blend attivo, 1025 matrici per livello di peso applicano traslazione, rotazione quaternion e scala realmente parziali; blend 0 conserva il percorso nativo. Build e startup superati, test maschera/Rotate/Scale richiesto. |
 | 2026-11-03 | A/B compattazione durante stroke | 17425 grid liberati, solo 58.7 MiB, 4.40 s cumulativi/401 eventi; percorso reso opt-in e disabilitato nella preview |
+| 2026-11-04 | Trasporto stabile Pose da livelli Multires inferiori | Risolti gli spike al ritorno al livello massimo: la correzione grossolana viene decodificata nello spazio oggetto, interpolata e ricodificata nel frame tangente di ogni campione fine. Validato interattivamente nella preview v11. |
 
 ## Ricognizione cold commit e reattivita UI (2026-11-02)
 
@@ -355,4 +361,43 @@ fallback sono piu importanti della sola media per la fluidita percepita.
   symmetry converts the same frame to a stable object-local plane.
 - Automated verification: dependency-graph update list remained empty after frame edits, and a
   save/reopen round-trip preserved location, rotation, size, and validity.
+
+## Shared-pivot S/R/T falloff integration (decision 2026-11-03)
+
+- Scope is the shared-pivot Sculpt Scale/Rotate/Translate path in `sculpt_transform.cc`, not three
+  independent brush implementations.
+- Reuse the validated Pose sequence: initialize weights once, resolution-adaptive smoothing,
+  PBVH-regional processing with a safe native fallback, and a user-controlled blend strength.
+- Cache the resulting weights for the complete modal gesture. Invalidate them on completion,
+  cancellation, topology/level change, mask change, or a changed transform radius.
+- Apply exactly the same cached factors to translation, rotation and scale so switching operation
+  cannot change the deformation envelope.
+- Keep `blend = 0` bit-compatible with the native transform and do not tag geometry while only
+  moving the shared pivot.
+- Measure initialization separately from modal update cost; never rebuild or blur weights on every
+  mouse event.
+- Deferred Pose phase: replace the single rigid transform with internal virtual influences for a
+  genuinely curved long-limb deformation. This is intentionally separate from the S/R/T port.
+
+## SculptForge transform reference audit (2026-11-03)
+
+- Audited public GPL-3.0 source `DevFrancois/sculptforge` at commit
+  `4fb4da87d91ae3b6167318299320c47a8dca4826`, primarily `src/core/MeshTransform.*`,
+  `src/app/Gizmo.cpp`, and `tests/test_transform.cpp`.
+- Its soft joint is topology-aware: a bounded multi-source Dijkstra starts at the hard-mask border,
+  measures distance along mesh edges, stops at a reach expressed as a fraction of the bounding-box
+  diagonal, then converts distance to a smoothstep weight.
+- Weighted transforms are evaluated mathematically, not by scaling a final displacement: translation
+  is multiplied by weight, rotation uses `angle * weight`, and scale interpolates from one to the
+  requested scale. This is the key candidate for avoiding hinge/collapse in our Rotate and Scale.
+- Interactive sessions retain original positions/normals/layer offsets and always re-evaluate from
+  the gesture start, preventing cumulative drift. Weights are quantized to 4096 levels and matrices
+  are precomputed only for levels actually present.
+- Only vertices with non-zero weight are stored and updated; normals are recomputed only at partial-
+  weight boundaries, and the BVH uses partial refit unless more than one quarter of the mesh moved.
+- Sculpt layers receive the same linear transform as the base surface so their offsets remain
+  coherent after posing. Blender adaptation must preserve Multires displacement/layer semantics.
+- Planned Blender port: PBVH-regional geodesic weights cached per modal gesture, weighted rotation
+  and scale matrices, partial normal/bounds updates, exact native fallback at blend zero. Do not copy
+  SculptForge containers or mesh assumptions directly; adapt the algorithm to Mesh/Grids/BMesh.
 

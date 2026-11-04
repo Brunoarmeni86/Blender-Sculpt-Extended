@@ -1486,6 +1486,9 @@ struct Sculpt {
 
   /** Transform tool. */
   eSculptTransformMode transform_mode = SCULPT_TRANSFORM_MODE_ALL_VERTICES;
+  /** Softness of the shared-pivot elastic S/R/T deformation envelope. */
+  float transform_falloff_blend = 0.5f;
+  char _pad_transform_falloff_blend[4] = {};
 
   /** Deprecated. \see MeshAutomaskingSettings */
   DNA_DEPRECATED int automasking_flags = 0;

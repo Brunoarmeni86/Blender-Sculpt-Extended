@@ -7,6 +7,7 @@
  */
 
 #include "BLI_enumerable_thread_specific.hh"
+#include "BLI_array.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
@@ -2016,10 +2017,10 @@ static int pose_falloff_smooth_iterations(const Object &ob, const int requested_
   }
 
   const CCGKey key = BKE_subdiv_ccg_key_top_level(*ss->subdiv_ccg);
-  /* A moderate scale is intentional: iterative blur width grows roughly with
-   * the square root of the pass count, while cost grows linearly. */
-  const int resolution_scale = std::clamp((key.grid_size - 1) / 8, 1, 4);
-  const int result = std::min(requested_iterations * resolution_scale, 32);
+  /* Preserve the wide transition that removes the visible Pose hinge. The
+   * regional solver below makes this width affordable on dense CCG meshes. */
+  const int resolution_scale = std::clamp((key.grid_size - 1) / 4, 1, 8);
+  const int result = std::min(requested_iterations * resolution_scale, 64);
   if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
     std::printf("[POSE_ADAPTIVE_FALLOFF] requested=%d grid_size=%d scale=%d result=%d\n",
                 requested_iterations,
@@ -2028,6 +2029,226 @@ static int pose_falloff_smooth_iterations(const Object &ob, const int requested_
                 result);
   }
   return result;
+}
+
+/* Blur only the CCG grids intersecting the binary Pose boundary, plus one grid
+ * of halo. With the capped falloff width the frontier cannot cross that halo.
+ * Return false when a regional solve is not useful so the exact global path
+ * remains the fallback. */
+static bool pose_blur_weights_regional_grids(Object &ob,
+                                             const int iterations,
+                                             const MutableSpan<float> data)
+{
+  const char *setting = BLI_getenv("BLENDER_SCULPT_POSE_REGIONAL_FALLOFF");
+  SculptSession *ss = ob.runtime->sculpt_session;
+  bke::pbvh::Tree *pbvh = bke::object::pbvh_get(ob);
+  if (iterations <= 0 || data.is_empty() || setting == nullptr || setting[0] != '1' ||
+      ss == nullptr || ss->subdiv_ccg == nullptr || pbvh == nullptr ||
+      pbvh->type() != bke::pbvh::Type::Grids)
+  {
+    return false;
+  }
+
+  const SubdivCCG &subdiv_ccg = *ss->subdiv_ccg;
+  const CCGKey key = BKE_subdiv_ccg_key_top_level(subdiv_ccg);
+  const int grids_num = data.size() / key.grid_area;
+  if (grids_num == 0 || grids_num * key.grid_area != data.size()) {
+    return false;
+  }
+
+  Array<uint8_t> active_grids(grids_num, uint8_t(0));
+  threading::parallel_for(IndexRange(grids_num), 256, [&](const IndexRange range) {
+    for (const int grid : range) {
+      const Span<float> values = data.slice(grid * key.grid_area, key.grid_area);
+      float minimum = values[0];
+      float maximum = values[0];
+      for (const float value : values.drop_front(1)) {
+        minimum = std::min(minimum, value);
+        maximum = std::max(maximum, value);
+      }
+      active_grids[grid] = (maximum - minimum > 1.0e-6f) ? 1 : 0;
+    }
+  });
+
+  auto mark_cross_grid_boundary = [&](const int grid, Array<uint8_t> &active) {
+    const std::array<SubdivCCGCoord, 4> corners = {
+        SubdivCCGCoord{grid, 0, 0},
+        SubdivCCGCoord{grid, short(key.grid_size - 1), 0},
+        SubdivCCGCoord{grid, 0, short(key.grid_size - 1)},
+        SubdivCCGCoord{grid, short(key.grid_size - 1), short(key.grid_size - 1)}};
+    for (const SubdivCCGCoord coord : corners) {
+      SubdivCCGNeighbors neighbors;
+      BKE_subdiv_ccg_neighbor_coords_get(subdiv_ccg, coord, true, neighbors);
+      const float value = data[coord.to_index(key)];
+      for (const SubdivCCGCoord neighbor : neighbors.coords) {
+        if (std::abs(value - data[neighbor.to_index(key)]) > 1.0e-6f) {
+          active[grid] = 1;
+          active[neighbor.grid_index] = 1;
+        }
+      }
+    }
+  };
+
+  /* Detect a boundary exactly on a grid seam, where both grids are internally
+   * uniform and would otherwise be missed. */
+  for (const int grid : IndexRange(grids_num)) {
+    if (!active_grids[grid]) {
+      mark_cross_grid_boundary(grid, active_grids);
+    }
+  }
+
+  /* One full grid halo is enough for the current maximum of 32 vertex-ring
+   * passes, and makes seam propagation independent of PBVH node grouping. */
+  Array<uint8_t> boundary_grids = active_grids;
+  for (const int grid : IndexRange(grids_num)) {
+    if (!boundary_grids[grid]) {
+      continue;
+    }
+    const std::array<SubdivCCGCoord, 4> corners = {
+        SubdivCCGCoord{grid, 0, 0},
+        SubdivCCGCoord{grid, short(key.grid_size - 1), 0},
+        SubdivCCGCoord{grid, 0, short(key.grid_size - 1)},
+        SubdivCCGCoord{grid, short(key.grid_size - 1), short(key.grid_size - 1)}};
+    for (const SubdivCCGCoord coord : corners) {
+      SubdivCCGNeighbors neighbors;
+      BKE_subdiv_ccg_neighbor_coords_get(subdiv_ccg, coord, true, neighbors);
+      for (const SubdivCCGCoord neighbor : neighbors.coords) {
+        active_grids[neighbor.grid_index] = 1;
+      }
+    }
+  }
+
+  int active_count = 0;
+  for (const uint8_t active : active_grids) {
+    active_count += active != 0;
+  }
+  if (active_count == 0) {
+    return true;
+  }
+  if (active_count * 4 > grids_num * 3) {
+    return false;
+  }
+
+  struct LocalData {
+    Vector<float> new_factors;
+  };
+  threading::EnumerableThreadSpecific<LocalData> all_tls;
+  const Span<bke::pbvh::GridsNode> nodes = pbvh->nodes<bke::pbvh::GridsNode>();
+  const BitGroupVector<> &grid_hidden = subdiv_ccg.grid_hidden;
+  int active_nodes = 0;
+  for (const bke::pbvh::GridsNode &node : nodes) {
+    for (const int grid : node.grids()) {
+      if (active_grids[grid]) {
+        active_nodes++;
+        break;
+      }
+    }
+  }
+
+  for ([[maybe_unused]] const int iteration : IndexRange(iterations)) {
+    threading::parallel_for(nodes.index_range(), 1, [&](const IndexRange range) {
+      LocalData &tls = all_tls.local();
+      for (const int node_index : range) {
+        const Span<int> grids = nodes[node_index].grids();
+        bool active = false;
+        for (const int grid : grids) {
+          active |= active_grids[grid] != 0;
+        }
+        if (!active) {
+          continue;
+        }
+
+        tls.new_factors.resize(key.grid_area * grids.size());
+        smooth::average_data_grids(
+            subdiv_ccg, data.as_span(), grids, tls.new_factors.as_mutable_span());
+        if (grid_hidden.is_empty()) {
+          scatter_data_grids(subdiv_ccg, tls.new_factors.as_span(), grids, data);
+        }
+        else {
+          for (const int i : grids.index_range()) {
+            const int node_start = i * key.grid_area;
+            BKE_subdiv_ccg_foreach_visible_grid_vert(
+                key, grid_hidden, grids[i], [&](const int offset) {
+                  data[grids[i] * key.grid_area + offset] =
+                      tls.new_factors[node_start + offset];
+                });
+          }
+        }
+      }
+    });
+  }
+
+  if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+    std::printf("[POSE_REGIONAL_FALLOFF] grids=%d/%d nodes=%d/%d iterations=%d\n",
+                active_count,
+                grids_num,
+                active_nodes,
+                int(nodes.size()),
+                iterations);
+  }
+  return true;
+}
+
+/* Convert the independently generated segment masks into overlapping skinning weights.
+ * Preserve their already blurred total coverage exactly: changing the outer coverage with a
+ * concave power made the deformation extend abruptly into nearly fixed vertices. The blend now
+ * only redistributes influence between IK segments, like normalized bone weights. With a single
+ * segment it deliberately leaves the smooth mask untouched. */
+static void pose_blend_segment_weights(IKChain &chain, const float blend)
+{
+  const char *setting = BLI_getenv("BLENDER_SCULPT_POSE_WEIGHT_BLEND");
+  if (setting == nullptr || setting[0] != '1' || chain.segments.is_empty() || blend <= 0.0f) {
+    return;
+  }
+
+  const float exponent = std::max(0.15f, 1.0f - std::clamp(blend, 0.0f, 1.0f));
+
+  const int verts_num = chain.segments.first().weights.size();
+  for (const IKChainSegment &segment : chain.segments) {
+    if (segment.weights.size() != verts_num) {
+      return;
+    }
+  }
+
+  threading::parallel_for(IndexRange(verts_num), 4096, [&](const IndexRange range) {
+    for (const int vert : range) {
+      float coverage = 0.0f;
+      float shaped_sum = 0.0f;
+      for (const IKChainSegment &segment : chain.segments) {
+        const float weight = std::clamp(segment.weights[vert], 0.0f, 1.0f);
+        coverage += weight;
+        shaped_sum += std::pow(weight, exponent);
+      }
+
+      coverage = std::clamp(coverage, 0.0f, 1.0f);
+      if (coverage <= 1.0e-8f || shaped_sum <= 1.0e-8f) {
+        for (IKChainSegment &segment : chain.segments) {
+          segment.weights[vert] = 0.0f;
+        }
+        continue;
+      }
+
+      /* Widen the outer transition with a bounded polynomial. Unlike pow(weight, exponent),
+       * this has a finite slope at zero and cannot amplify tiny numerical weights into spikes.
+       * It also makes Segment Blend useful for a single IK segment. */
+      const float shaped_coverage = coverage +
+                                    std::clamp(blend, 0.0f, 1.0f) * coverage *
+                                        (1.0f - coverage);
+      const float normalization = shaped_coverage / shaped_sum;
+      for (IKChainSegment &segment : chain.segments) {
+        segment.weights[vert] =
+            std::pow(std::clamp(segment.weights[vert], 0.0f, 1.0f), exponent) * normalization;
+      }
+    }
+  });
+
+  if (BLI_getenv("BLENDER_LAYER_RESP_TRACE")) {
+    std::printf("[POSE_WEIGHT_BLEND] segments=%d verts=%d blend=%.3f exponent=%.3f normalized=1\n",
+                int(chain.segments.size()),
+                verts_num,
+                blend,
+                exponent);
+  }
 }
 
 static bool pose_brush_init(const Depsgraph &depsgraph,
@@ -2047,8 +2268,11 @@ static bool pose_brush_init(const Depsgraph &depsgraph,
   const int smooth_iterations = pose_falloff_smooth_iterations(
       ob, brush.pose_smooth_iterations);
   for (IKChainSegment &segment : ss.cache->pose_ik_chain->segments) {
-    smooth::blur_geometry_data_array(ob, smooth_iterations, segment.weights);
+    if (!pose_blur_weights_regional_grids(ob, smooth_iterations, segment.weights)) {
+      smooth::blur_geometry_data_array(ob, smooth_iterations, segment.weights);
+    }
   }
+  pose_blend_segment_weights(*ss.cache->pose_ik_chain, brush.pose_segment_blend);
 
   return true;
 }

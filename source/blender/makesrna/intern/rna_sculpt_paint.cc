@@ -1283,6 +1283,15 @@ static void rna_def_sculpt(BlenderRNA *brna)
       prop, "Transform Mode", "How the transformation is going to be applied to the target");
   RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
 
+  prop = RNA_def_property(srna, "transform_falloff_blend", PROP_FLOAT, PROP_FACTOR);
+  RNA_def_property_float_sdna(prop, nullptr, "transform_falloff_blend");
+  RNA_def_property_range(prop, 0.0f, 1.0f);
+  RNA_def_property_ui_range(prop, 0.0f, 1.0f, 0.01f, 2);
+  RNA_def_property_ui_text(prop,
+                           "Transform Blend",
+                           "Normalized width of the topology falloff shared by Sculpt move, rotate and scale");
+  RNA_def_property_update(prop, NC_SCENE | ND_TOOLSETTINGS, nullptr);
+
   prop = RNA_def_property(srna, "gravity_object", PROP_POINTER, PROP_NONE);
   RNA_def_property_flag(prop, PROP_EDITABLE);
   RNA_def_property_ui_text(

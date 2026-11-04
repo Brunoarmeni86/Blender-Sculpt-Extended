@@ -96,6 +96,9 @@ struct Cache {
   int active_face_set;
 
   TransformDisplacementMode transform_displacement_mode;
+  float transform_falloff_blend = 0.0f;
+  /* Gesture-stable topology falloff for masked S/R/T transforms. Mesh vertices only. */
+  Array<float> transform_topology_weights;
 
   std::unique_ptr<auto_mask::Cache> automasking;
   float3 initial_normal;

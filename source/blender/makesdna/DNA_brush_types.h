@@ -375,6 +375,7 @@ struct Brush {
   /* pose */
   eBrushPoseDeformType pose_deform_type = BRUSH_POSE_DEFORM_ROTATE_TWIST;
   float pose_offset = 0;
+  float pose_segment_blend = 0.5f;
   int pose_smooth_iterations = 4;
   int pose_ik_segments = 1;
   eBrushPoseOriginType pose_origin_type = BRUSH_POSE_ORIGIN_TOPOLOGY;
@@ -440,6 +441,8 @@ struct Brush {
 
   float mask_stencil_pos[2] = {256, 256};
   float mask_stencil_dimension[2] = {256, 256};
+
+  char _pad_pose_segment_blend[4] = {};
 
   struct BrushGpencilSettings *gpencil_settings = nullptr;
   struct BrushCurvesSculptSettings *curves_sculpt_settings = nullptr;

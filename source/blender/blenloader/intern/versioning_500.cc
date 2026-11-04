@@ -4518,6 +4518,24 @@ void blo_do_versions_500(FileData *fd, Library * /*lib*/, Main *bmain)
     FOREACH_NODETREE_END;
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 46) &&
+      !DNA_struct_member_exists(fd->filesdna, "Brush", "float", "pose_segment_blend"))
+  {
+    for (Brush &brush : bmain->brushes) {
+      brush.pose_segment_blend = 0.5f;
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 47) &&
+      !DNA_struct_member_exists(fd->filesdna, "Sculpt", "float", "transform_falloff_blend"))
+  {
+    for (Scene &scene : bmain->scenes) {
+      if (scene.toolsettings && scene.toolsettings->sculpt) {
+        scene.toolsettings->sculpt->transform_falloff_blend = 0.5f;
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.

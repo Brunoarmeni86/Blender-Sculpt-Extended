@@ -2428,22 +2428,59 @@ static MultiresLocalCommitResult multires_sculpt_layer_commit_top_level_local(
       const int64_t sample_base = int64_t(grid) * int64_t(area);
       if (lower_level_commit) {
         /* Preserve the layer's existing fine detail and lift only the newly
-         * recorded coarse correction. Grid coordinates are nested exactly
-         * between Multires levels, so bilinear cell interpolation keeps the
-         * committed coarse samples exact and avoids a global reshape. */
+         * recorded coarse correction.
+         *
+         * The stored values are tangent-space vectors. Interpolating their
+         * components directly is only valid while the tangent frame is
+         * effectively constant. A coarse Pose/Rotate deformation can cross
+         * strongly changing frames; direct component interpolation then
+         * reconstructs a different object-space vector at fine samples and
+         * creates spikes when returning to the highest Multires level.
+         *
+         * Decode the coarse correction to object space, interpolate there,
+         * then encode it in every fine sample's own tangent frame. This is the
+         * same frame-transport rule used by stable detail preservation: the
+         * deformation is continuous in object space while existing fine
+         * layer detail remains untouched. */
+        Array<float3> object_correction(area);
+        for (int cy = 0; cy < side; cy++) {
+          for (int cx = 0; cx < side; cx++) {
+            const int coarse_i = cy * side + cx;
+            const GridCoord coarse_coord{
+                grid, float(cx) * inv_side, float(cy) * inv_side};
+            float3 coarse_P;
+            float3x3 coarse_tangent;
+            multires_reshape_evaluate_base_mesh_limit_at_grid(
+                &context, &coarse_coord, coarse_P, coarse_tangent);
+            object_correction[coarse_i] = coarse_tangent * staged_grid[coarse_i];
+          }
+        }
+
+        const float fine_inv_side = 1.0f / float(storage_side - 1);
         for (int fy = 0; fy < storage_side; fy++) {
           const int cy = std::min(fy / storage_factor, side - 2);
           const float ty = float(fy - cy * storage_factor) / float(storage_factor);
           for (int fx = 0; fx < storage_side; fx++) {
             const int cx = std::min(fx / storage_factor, side - 2);
             const float tx = float(fx - cx * storage_factor) / float(storage_factor);
-            const float3 c00 = staged_grid[cy * side + cx];
-            const float3 c10 = staged_grid[cy * side + cx + 1];
-            const float3 c01 = staged_grid[(cy + 1) * side + cx];
-            const float3 c11 = staged_grid[(cy + 1) * side + cx + 1];
-            const float3 correction = math::interpolate(
+            const float3 c00 = object_correction[cy * side + cx];
+            const float3 c10 = object_correction[cy * side + cx + 1];
+            const float3 c01 = object_correction[(cy + 1) * side + cx];
+            const float3 c11 = object_correction[(cy + 1) * side + cx + 1];
+            const float3 object_delta = math::interpolate(
                 math::interpolate(c00, c10, tx), math::interpolate(c01, c11, tx), ty);
-            add_v3_v3(layer_grid[fy * storage_side + fx], correction);
+
+            const GridCoord fine_coord{
+                grid, float(fx) * fine_inv_side, float(fy) * fine_inv_side};
+            float3 fine_P;
+            float3x3 fine_tangent;
+            multires_reshape_evaluate_base_mesh_limit_at_grid(
+                &context, &fine_coord, fine_P, fine_tangent);
+            const float3 tangent_delta = use_fast_tangent_solve ?
+                                             multires_sculpt_tangent_solve_fast(
+                                                 fine_tangent, object_delta) :
+                                             math::invert(fine_tangent) * object_delta;
+            add_v3_v3(layer_grid[fy * storage_side + fx], tangent_delta);
           }
         }
       }
