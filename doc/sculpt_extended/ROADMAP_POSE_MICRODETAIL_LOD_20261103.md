@@ -104,3 +104,7 @@ Queste voci erano state prospettate come *nuove* nel primo confronto; sono ricla
 Ulteriori componenti **già presenti nel sorgente**, loro limiti e gap reali sono documentati in [ADDITIONAL_EXISTING_FEATURES_AUDIT_20261104.md](ADDITIONAL_EXISTING_FEATURES_AUDIT_20261104.md). Comprendono HR Extract Mask/Face Sets, Detail Transfer sperimentale, displacement procedurale e bake verso layer, Polypaint UV bake singolo tile, Shape Key fast update, Delta Smooth, Draw Transport, Morph Brush mancante e layer blend modes mancanti.
 
 **Vincolo per Quick Pose:** distinguere isolamento dei payload layer da preservazione visiva del dettaglio durante Pose/Grab/Elastic; il secondo richiede trasporto del dettaglio e test specifici. **Prestazioni:** prima di introdurre nuovi snapshot microdetail, verificare i percorsi Undo/memfile Polypaint già misurati come potenzialmente molto costosi.
+
+## Comparazione esterna (4 novembre 2026)
+
+[Audit SculptForge/ZBrush/forum Blender](COMPARATIVE_AUDIT_SCULPTFORGE_ZBRUSH_FORUMS_20261104.md): revisione di algoritmi sorgente e richieste della comunità, con classificazione **già presente / sperimentale / gap reale / porting architetturale**, riferimenti a MicroStore, MicroSculpt, FocusDetail (prototipo OFF), Selection Sets, Morph, Brush Recipe, QRemesh Guides, performance viewport e Rake/Roll. Priorità Poseable Symmetry → MicroDetail → Adaptive LOD **invariate**.
