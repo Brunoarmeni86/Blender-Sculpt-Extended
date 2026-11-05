@@ -112,8 +112,12 @@ Not all features present in the source are enabled or production-ready in the re
 - **MicroDetail:** compact editable microgeometry beyond ordinary full-resolution Multires grids.
 - **Adaptive Sculpt LOD:** mixed-resolution/detail residency per region; existing surface projection is **not** adaptive LOD.
 - Future possibilities: Morph Brush, geometry-layer blend modes, color-layer compositing and guided retopology. These are **not** claimed as finished in the November 4 build.
+- **NanoMesh Sculpt Layers (proposed):** Mask/Face Sets-controlled placement brush, persistent instances, Multires-aware anchoring, Vector Displacement and Hybrid outputs usable beyond Sculpt Mode. **Design only, not included in the released binaries**; see [design spec](doc/sculpt_extended/NANOMESH_SCULPT_LAYERS_ARCHITECTURE_20261106.md) and [issue #9](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/9).
+- **ZBrush-inspired portable tools (proposed):** PolyGroups/Face Sets operations, Rake/Roll, hard-surface brush presets, Morph Brush, Selection Sets and guided retopology; see [feature backlog](doc/sculpt_extended/ZBRUSH_PORTABILITY_FEATURE_BACKLOG_20261106.md) and [issue #10](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/10).
 
 Further technical references:
+- [NanoMesh Sculpt Layers / VDM / Hybrid architecture (6 November)](doc/sculpt_extended/NANOMESH_SCULPT_LAYERS_ARCHITECTURE_20261106.md)
+- [ZBrush portability and sculpt brush backlog (6 November)](doc/sculpt_extended/ZBRUSH_PORTABILITY_FEATURE_BACKLOG_20261106.md)
 - [Existing-feature audit (4 November)](doc/sculpt_extended/ADDITIONAL_EXISTING_FEATURES_AUDIT_20261104.md)
 - [SculptForge / ZBrush / forum comparison](doc/sculpt_extended/COMPARATIVE_AUDIT_SCULPTFORGE_ZBRUSH_FORUMS_20261104.md)
 - [Feature deep dive and UI guidance](doc/sculpt_extended/FEATURE_DEEP_DIVE_20261030.md)
