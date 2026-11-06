@@ -2,6 +2,8 @@
 
 Punto d'ingresso per le chat che lavorano su `Brunoarmeni86/Blender-Sculpt-Extended`.
 
+**Memo nuovo (6 novembre 2026):** [Blender 5.4 PBVH draw — stato upstream, integrabilità e piano test](PBVH_DRAW_54_MEMO_20261106.md). Priorità: audit e prova di `Reduce Sculpt Buffers` su branch separato; rimandare meshlet WIP.
+
 **Prestazioni:** [16 ottobre 2026 — ulteriori ottimizzazioni e prove sul kernel colore](audits/2026-10-16/PERFORMANCE-REVIEW.md).
 
 **Ultimo approfondimento sui difetti:** [16 ottobre 2026 — animazione, gruppi e identità dopo Edit](audits/2026-10-16/ANIMATION-TOPOLOGY-REVIEW.md).
