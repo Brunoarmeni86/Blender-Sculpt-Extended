@@ -5,6 +5,10 @@
 **Stato:** branch preparatorio creato da `main` del fork 5.2.3. **NON contiene ancora i sorgenti Blender 5.4**, né patch di migrazione, build o risultati di test.  
 **Regola:** preservare `main` e la release stabile 5.2.3.
 
+> **CORREZIONE CRITICA (2026-11-06):** questo branch è nato da `main`, che diverge dalla release 4 novembre; il compare GitHub mostra **207 commit release-only e 40 main-only**. Per non perdere le ottimizzazioni già distribuite la baseline autorevole del porting è il **tag `v5.2.3-sculpt-extended-20261104` (SHA `09a16d4b8482200101cb30728881ca4524edf019`)**. Creato il branch source baseline [**`migration/blender-5.4-alpha-release-baseline`**](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/tree/migration/blender-5.4-alpha-release-baseline). Questo documento rimane un piano; non assumere che i sorgenti 5.2.3 di questo branch contengano tutte le ottimizzazioni della release.
+>
+> **VINCOLO PRESTAZIONALE:** mantenere i miglioramenti già raggiunti in Commit locale, sparse layers, Multires Smooth, Undo, adaptive stroke, PBVH/redraw, gestione cache/budget RAM, Polypaint HR e Pose/Transform. [Leggere il nuovo inventario e i benchmark di preservazione](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/blob/migration/blender-5.4-alpha-release-baseline/doc/sculpt_extended/MIGRATION_54_PERFORMANCE_PRESERVATION_20261106.md).
+
 ## Scopo
 Valutare un porting completo, a checkpoint verificabili, delle nostre funzioni Sculpt Extended dalla base 5.2.3 a un **commit specifico** di Blender 5.4 Alpha, evitando due migrazioni complete consecutive (5.3 e poi 5.4). Se incompatibilità o instabilità bloccano la migrazione, considerare 5.3 stabile come fallback.
 
@@ -16,21 +20,21 @@ Valutare un porting completo, a checkpoint verificabili, delle nostre funzioni S
 - Il porting dell'intera build consente di riutilizzare il codice ufficiale, ma comporta revisioni profonde delle nostre integrazioni con Multires/Undo/PBVH.
 
 ## Fissare i checkpoint prima di scrivere codice
-1. Registrare **SHA esatto di `main`** sorgente e **SHA/tag esatto dell'upstream 5.4 alpha**; non inseguire continuamente `main` Blender.
+1. Registrare **SHA esatto del tag release 4 novembre** (sorgente autoritativo per feature/velocità), SHA di `main` e divergenze da riconciliare, e **SHA/tag esatto dell'upstream 5.4 alpha**; non inseguire continuamente `main` Blender.
 2. Salvare un elenco dei file modificati dal fork vs baseline 5.2.3 originale (includendo file aggiunti, DNA/RNA, versioning, CMake e test).
 3. Compilare prima un **Blender 5.4 ufficiale senza modifiche**, con toolchain Windows adeguata, su build dir distinto.
 4. Preparare una **nuova base 5.4** isolata (il branch attuale è soltanto la scaffolding 5.2.3 e non deve essere scambiato per il porting già eseguito).
 5. Non cambiare tag/release/artefatti stabili; non aprire PR su `main` finché non sono soddisfatti i criteri minimi.
 
 ## Ordine di migrazione (checkpoint separati)
-**M0**: audit delle modifiche + compilazione base 5.4 ufficiale.  
+**M0**: audit delle modifiche **tra tag release e `main`**, inventario delle ottimizzazioni attive e flag (vedere il Performance Preservation Contract), **baseline benchmark Windows del pacchetto release 4 novembre**, più compilazione base 5.4 ufficiale.  
 **M1**: aggiunta definizioni dati proprie (DNA, RNA, kernel, CMake, blend I/O) e compilazione iniziale; salvare/rileggere un file con metadati di layer.  
 **M2**: Sculpt Layers Multires: add/delete/select, visibility, strength, commit, Bake Visible→Base (preservare hidden), cambio livello L0↔Ln.  
 **M3**: integrazione Undo/Redo con layer, first stroke, cambio modalità, save/reopen; proteggere dalla regressione degli spikes.  
 **M4**: Polypaint HR: colore master al livello massimo, display L0, Brush Paint/Blur/Smear, attributi colore, UV bake/UDIM.  
 **M5**: Face Sets HR: display, hide/isolate, gestures, maschere e deformazione.  
 **M6**: Pose/Transform, pivot condivisi, simmetria, trasporto dei dettagli fra livelli, micro-dettaglio e strumenti speciali.  
-**M7**: ottimizzazioni: confrontare cache/PBVH del fork con il layout 5.4, portare solo le migliorie ancora utili; non sovrapporre automaticamente `MULTIRES_GEOMETRY_BUFFER_V01` e `CompactMeshNodeData` al nuovo draw system.  
+**M7**: ottimizzazioni PBVH/nuovo draw: confrontare cache del fork con il layout 5.4, portare o sostituire solo dopo A/B; non sovrapporre automaticamente `MULTIRES_GEOMETRY_BUFFER_V01` e `CompactMeshNodeData` al nuovo draw system. **Le ottimizzazioni di stroke, commit, Undo, Smooth e RAM sono requisiti trasversali M1–M8**, non un'attività rinviata alla sola M7.  
 **M8**: adattare la UI e le nuove funzioni sperimentali 5.4 (3D Texture Paint); evitare che il percorso Texture Paint interferisca con Sculpt Layers/Polypaint.  
 **M9**: benchmark, QA completo, compilazione Windows release e packaging; Linux solo dopo parità Windows.
 
@@ -41,6 +45,12 @@ Valutare un porting completo, a checkpoint verificabili, delle nostre funzioni S
 - `source/blender/makesdna/`, `source/blender/makesrna/`, `source/blender/blenloader/`: layout, versioning e lettura dei vecchi .blend.
 - `source/blender/editors/sculpt_paint/paint_stroke.cc`: Adaptive Stroke custom vs curve 5.3 e nuovi pennelli.
 - `source/blender/editors/sculpt_paint/mesh/paint_image_3d.cc` upstream: nuovo Texture Paint, ancora sperimentale.
+
+## Contratto prestazionale (obbligatorio ad ogni milestone)
+- Fare riferimento al file [MIGRATION_54_PERFORMANCE_PRESERVATION_20261106.md](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/blob/migration/blender-5.4-alpha-release-baseline/doc/sculpt_extended/MIGRATION_54_PERFORMANCE_PRESERVATION_20261106.md) del branch baseline.
+- Confrontare **la release Windows 4 novembre**, non soltanto il branch `main`, su Draw/Clay/Smooth/Pose, dab e p95, commit locale, passaggi L0/Ln, Undo/Redo, Polypaint HR, Strength/visibility, memoria/RSS/VRAM, rendering PBVH. Ripetere su scene dense con flag equiparati.
+- Non reintrodurre percorsi precedentemente respinti (compattazione durante stroke, cache progressiva regressiva, ecc.) e non considerare le proposte del tracker come ottimizzazioni già abilitate.
+- I benefici upstream non annullano il vincolo di parità delle performance: in caso di regressione mantenere un fallback custom o rinviare il singolo percorso.
 
 ## Test di sbarramento
 - File `.blend` di backup prima del test; **nessun round-trip su Blender standard** con garanzia di dati custom.
