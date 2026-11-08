@@ -128,10 +128,10 @@ def topology_pairs(bm, coordinates, tolerance):
     for edge in bm.edges:
         if not edge.is_manifold or len(edge.link_faces)!=2:continue
         a,b=(v.index for v in edge.verts)
-        if abs(ordered[a].x)>strict or abs(ordered[b].x)>strict:continue
+        if abs(coordinates[a].x)>strict or abs(coordinates[b].x)>strict:continue
         face_sides=[]
         for face in edge.link_faces:
-            values=[ordered[v.index].x for v in face.verts if v.index not in (a,b)]
+            values=[coordinates[v.index].x for v in face.verts if v.index not in (a,b)]
             face_sides.append(sum(values)/len(values) if values else 0.)
         if min(face_sides)<-strict and max(face_sides)>strict:
             seam_edges.append((a,b))

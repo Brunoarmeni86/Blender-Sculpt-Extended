@@ -6,6 +6,8 @@ from bpy.props import BoolProperty, FloatProperty
 
 def _core(bm,voxel,iterations=24,coarsening=3.0,falloff=1.0):
     bm.verts.index_update();bm.faces.index_update();bm.normal_update()
+    original_boundary_edges=sum(e.is_boundary for e in bm.edges)
+    original_overfull_edges=sum(len(e.link_faces)>2 for e in bm.edges)
     old_tree=BVHTree.FromBMesh(bm);old_pairs={tuple(sorted((a+1,b+1))) for a,b in old_tree.overlap(old_tree) if a<b}
     mask=bm.verts.layers.float.get('.sculpt_mask')
     if not mask:raise ValueError('No mask')
@@ -78,7 +80,11 @@ def _core(bm,voxel,iterations=24,coarsening=3.0,falloff=1.0):
     assert {f[face_id]:tuple(v[vertex_id] for v in f.verts) for f in bm.faces if f[protect]}==saved_faces,'Protected faces changed'
     final_tree=BVHTree.FromBMesh(bm);labels=[f[face_id] if f[face_id] else -f.index-1 for f in bm.faces]
     pairs={tuple(sorted((labels[a],labels[b]))) for a,b in final_tree.overlap(final_tree) if a<b}
-    info=dict(protected_vertices=len(saved),protected_faces=len(saved_faces),final_vertices=len(bm.verts),final_faces=len(bm.faces),iterations=rows,new_intersections=len(pairs-old_pairs),nonmanifold_edges=sum(not e.is_manifold for e in bm.edges),inconsistent_edges=sum(len(e.link_loops)==2 and e.link_loops[0].vert==e.link_loops[1].vert for e in bm.edges),protected_coordinates_exact=True,protected_topology_exact=True)
+    final_boundary_edges=sum(e.is_boundary for e in bm.edges)
+    final_overfull_edges=sum(len(e.link_faces)>2 for e in bm.edges)
+    if final_boundary_edges>original_boundary_edges or final_overfull_edges>original_overfull_edges:
+        raise RuntimeError('Il remesh introdurrebbe bordi aperti o spigoli non-manifold; nessuna modifica applicata')
+    info=dict(protected_vertices=len(saved),protected_faces=len(saved_faces),final_vertices=len(bm.verts),final_faces=len(bm.faces),iterations=rows,new_intersections=len(pairs-old_pairs),nonmanifold_edges=sum(not e.is_manifold for e in bm.edges),boundary_edges=final_boundary_edges,overfull_edges=final_overfull_edges,inconsistent_edges=sum(len(e.link_loops)==2 and e.link_loops[0].vert==e.link_loops[1].vert for e in bm.edges),protected_coordinates_exact=True,protected_topology_exact=True)
     # Report geometric diagnostics without rejecting the user's voxel size.
     return bm,info
 

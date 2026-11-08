@@ -1,7 +1,7 @@
 """Headless tests for the pre-5.4 experimental symmetry/remesh corrections.
 
 Execute with the custom Sculpt Extended Blender binary:
-  blender -b --factory-startup --python doc/sculpt_extended/tests/pre54_symmetry_remesh_regression.py
+  blender -b --factory-startup --python-exit-code 1 --python doc/sculpt_extended/tests/pre54_symmetry_remesh_regression.py
 
 This script does NOT cover interactive gizmos, the native symmetry passes, Undo,
 or the full CDT transition solver. Failing an assert means the candidate must not
@@ -84,6 +84,8 @@ def test_mask_adaptive_protected_faces():
         assert result["protected_topology_exact"], result
         assert result["protected_coordinates_exact"], result
         assert result["protected_faces"] > 0, result
+        assert result["boundary_edges"] == 24, result
+        assert result["overfull_edges"] == 0, result
         assert len(bm.verts) > 0 and len(bm.faces) > 0
         print("PASS: masked full-face protection with adaptive density")
     finally:
