@@ -4,6 +4,8 @@ You are working on **an experimental development branch**, not on the stable rel
 
 **Read this first:** [Pre-5.4 handoff: remesh, gizmo-driven Symmetrize, symmetry/gizmo](doc/sculpt_extended/PRE54_SYMMETRY_REMESH_FIXES_V01_20261108.md).
 
+**Additional priority audit (8 Nov 2026):** [Undo/Polypaint, Multires data integrity, Strength, cache, Pose and test plan](doc/sculpt_extended/PRE54_ADDITIONAL_WEAK_POINTS_AUDIT_20261108.md). Read this alongside the first handoff. Distinguish old fixed bugs from current verified issues.
+
 ## Intent and constraints
 - The user wants **proposals, candidate rewrites and well-documented experiments available on GitHub** so that Codex can resume work later. **There is no requirement to solve all issues immediately.**
 - The branch originates from **tag `v5.2.3-sculpt-extended-20261104`** and deliberately differs from divergent `main`. Keep stable release and `main` unchanged unless explicitly instructed.
