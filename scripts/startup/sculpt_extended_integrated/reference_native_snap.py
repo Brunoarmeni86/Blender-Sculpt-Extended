@@ -92,7 +92,7 @@ def install(ref):
     s=self.ob.sculpt_symref_preview
     self.frame=ref.reference_matrix(self.ob,c.evaluated_depsgraph_get())[0] if self.ob.sculpt_transform_pivot_linked else self.ob.matrix_world@Matrix.Translation(Vector(self.ob.sculpt_transform_pivot_location))
    c.scene.cursor.matrix=self.frame
-   self.timer=c.window_manager.event_timer_add(.03,window=c.window)
+   self.timer=c.window_manager.event_timer_add(.016,window=c.window)
    c.window_manager.modal_handler_add(self)
    try:
     operation=bpy.ops.transform.translate if self.mode=='G' else bpy.ops.transform.rotate
@@ -129,7 +129,8 @@ def install(ref):
     c.scene.cursor.rotation_mode=rotation_mode;c.scene.cursor.matrix=cursor
   def modal(self,c,event):
    if self.mode=='S':return self.modal_scale(c,event)
-   if event.type!='TIMER':return {'PASS_THROUGH'}
+   # Also update on pointer movement instead of relying exclusively on timer polls.
+   if event.type not in {'TIMER','MOUSEMOVE'}:return {'PASS_THROUGH'}
    try:
     running=any(op.bl_idname in {'TRANSFORM_OT_translate','TRANSFORM_OT_rotate'} for op in c.window.modal_operators)
     if self.target=='REFERENCE' or self.ob.sculpt_transform_pivot_linked:
