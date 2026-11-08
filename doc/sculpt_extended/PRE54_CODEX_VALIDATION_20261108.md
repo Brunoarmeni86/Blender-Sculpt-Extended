@@ -19,12 +19,14 @@ those flags for the non-combined dab loop, Pose loop and topology automasking se
 symmetry continues to use the mesh flags when the reference backend is inactive; Combined
 mode continues to use its bounded, deduplicated matrix list.
 
-**Evidence status:** **PROTOTYPE / STATIC-VALIDATED** for the C++ change. The Python state
+**Evidence status:** **PROTOTYPE / COMPILE-VALIDATED / BLENDER-RUNTIME-SMOKE-VALIDATED**
+for the C++ change. The modified sculpt targets and full Blender executable compiled on
+Windows, and the regression suite ran successfully in that binary. The Python state
 transition is **BLENDER-RUNTIME-VALIDATED**: with the experimental backend enabled,
 Combined OFF selects native-only when a local axis is active and preserves explicit
-reference-only when no local axis is active. The modified C++ has not yet been compiled
-into a Blender binary, so additive Strength, Feather, geometry displacement and performance
-are not validated.
+reference-only when no local axis is active. The current headless fixture does not drive an
+interactive sculpt dab, so additive Strength, Feather, geometry displacement and performance
+remain unconfirmed.
 
 ### #15 — topological seam seed
 
@@ -64,8 +66,18 @@ are not validated by this run.
 5. #12 state fixture on the 4 November portable build with
    `BLENDER_SCULPT_SYMMETRY_REFERENCE_V01=1`: **PASS**. This loads the candidate Python
    callback directly from the worktree; it does not execute the unbuilt C++ candidate.
+6. Windows CMake build at candidate commit `a43ea33e7158`: **PASS**.
+   - `bf_editor_sculpt_paint`: **PASS**; modified `sculpt.cc`, `sculpt_pose.cc` and
+     `sculpt_automasking.cc` compiled without errors.
+   - full `blender` target: **PASS**.
+7. Candidate binary startup/version check: **PASS**. Blender reported `5.2.3 LTS`, hash
+   `a43ea33e7158`, build timestamp `2026-11-08 17:04:41`.
+8. Full headless fixture on the candidate binary with
+   `BLENDER_SCULPT_SYMMETRY_REFERENCE_V01=1` and `--python-exit-code 1`: **PASS**.
+   This validates loading and smoke execution of the compiled candidate, but is not an
+   interactive stroke-strength measurement.
 
-Blender reported `5.2.3 LTS`, build timestamp `2026-11-01 15:09:11`; the binary printed
+The earlier baseline-package run reported build timestamp `2026-11-01 15:09:11` and
 `hash unknown`. No benchmark was executed.
 
 ## Decision
