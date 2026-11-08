@@ -77,7 +77,7 @@ def ensure_tool_session(context):
     session={'pointer':ob.as_pointer(),'before':snapshot(s),'native_before':native_reference_snapshot(ob),'tool':'builtin.select_box' if context.mode=='EDIT_MESH' else 'builtin.brush','pick':False}
     if not ob.sculpt_symmetry_reference_enabled:ob.sculpt_symmetry_reference_display_size=max(.1,max(ob.dimensions)*.75)
     ob.sculpt_symmetry_reference_enabled=True
-    if NATIVE_BACKEND and context.mode=='SCULPT':ob.sculpt_symmetry_reference_use_for_strokes=True
+    if NATIVE_BACKEND and context.mode=='SCULPT' and s.combine_local:ob.sculpt_symmetry_reference_use_for_strokes=True
     _session=session
     redraw();return True
 
@@ -312,7 +312,7 @@ class SCULPT_OT_symref_edit_preview(bpy.types.Operator):
         if not ob.sculpt_symmetry_reference_enabled:
             ob.sculpt_symmetry_reference_display_size=max(.1,max(ob.dimensions)*.75)
         ob.sculpt_symmetry_reference_enabled=True
-        if NATIVE_BACKEND and c.mode=='SCULPT':ob.sculpt_symmetry_reference_use_for_strokes=True
+        if NATIVE_BACKEND and c.mode=='SCULPT' and s.combine_local:ob.sculpt_symmetry_reference_use_for_strokes=True
         try: bpy.ops.wm.tool_set_by_id(name=EDIT_TOOL if c.mode=='EDIT_MESH' else TOOL)
         except Exception:
             _session=None
@@ -331,8 +331,8 @@ class SCULPT_OT_symref_finish_preview(bpy.types.Operator):
         if self.cancel:
             for key,value in data['before'].items(): setattr(ob.sculpt_symref_preview,key,value)
             restore_native_reference(ob,data['native_before'])
-        elif NATIVE_BACKEND and c.mode=='SCULPT':
-            ob.sculpt_symmetry_reference_use_for_strokes=True
+        # Confirming a gizmo edit must not silently re-enable custom symmetry.
+        # The explicit Use Reference / Combine toggles own stroke-symmetry state.
         _session=None
         try: bpy.ops.wm.tool_set_by_id(name=data['tool'])
         except RuntimeError: bpy.ops.wm.tool_set_by_id(name='builtin.select_box' if c.mode=='EDIT_MESH' else 'builtin.brush')
@@ -348,7 +348,7 @@ class SCULPT_OT_symref_cursor_preview(bpy.types.Operator):
         if s.anchored and anchor_position(c.object,c.evaluated_depsgraph_get()) is None:
             self.report({'WARNING'},'Aggancio non valido: sgancia il riferimento prima di spostarlo');return {'CANCELLED'}
         from_cursor(c);c.object.sculpt_symmetry_reference_enabled=True
-        if NATIVE_BACKEND and c.mode=='SCULPT':c.object.sculpt_symmetry_reference_use_for_strokes=True
+        # Moving the reference from the cursor does not change the brush symmetry mode.
         return {'FINISHED'}
 
 class SCULPT_OT_symref_anchor_preview(bpy.types.Operator):
