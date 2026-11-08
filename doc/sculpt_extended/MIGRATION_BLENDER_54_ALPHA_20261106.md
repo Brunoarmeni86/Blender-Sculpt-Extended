@@ -26,6 +26,14 @@ Valutare un porting completo, a checkpoint verificabili, delle nostre funzioni S
 4. Preparare una **nuova base 5.4** isolata (il branch attuale è soltanto la scaffolding 5.2.3 e non deve essere scambiato per il porting già eseguito).
 5. Non cambiare tag/release/artefatti stabili; non aprire PR su `main` finché non sono soddisfatti i criteri minimi.
 
+## Bug bloccanti e priorità emerse il 8 novembre 2026
+
+**P0 — [#12 Symmetry Combine OFF / additive Strength](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/12):** non promuovere M2/M3/M6 prima di aver verificato che la disattivazione della doppia simmetria non lasci attiva involontariamente una diversa interpretazione degli assi e non generi sovrapposizione delle impronte / incremento Strength. Il sorgente attuale mantiene `sculpt_symmetry_reference_use_for_strokes` anche dopo `combine_local=false`; le impronte non-combined usano ancora il frame personalizzato. Test Feather ON/OFF e flag nativi X/Y/Z, anche con Sculpt Layer Multires.
+
+**P1 — [#13 Gizmo shortcut/snap/anchor](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/13):** G/R/S devono selezionare il gizmo corrispondente, aggiornare immediatamente l'interfaccia e funzionare nel contesto manipolazione pertinente, senza sottrarre gli shortcut standard quando si scolpisce. Rendere coerenti backend nativo, vecchio operator Python, trasformazioni temporanee del 3D Cursor, snap e ancoraggio a vertice; validare Esc/Conferma, Snap On/Off, CTRL e modalità Edit/Sculpt.
+
+Questi sono **requisiti prioritari di parità/regressione**, non funzionalità future opzionali. Nessun bug è ancora stato riprodotto in build e nessuna patch è stata applicata. Portare i fix anche nella release 5.2.3 soltanto dopo test separati.
+
 ## Ordine di migrazione (checkpoint separati)
 **M0**: audit delle modifiche **tra tag release e `main`**, inventario delle ottimizzazioni attive e flag (vedere il Performance Preservation Contract), **baseline benchmark Windows del pacchetto release 4 novembre**, più compilazione base 5.4 ufficiale.  
 **M1**: aggiunta definizioni dati proprie (DNA, RNA, kernel, CMake, blend I/O) e compilazione iniziale; salvare/rileggere un file con metadati di layer.  
