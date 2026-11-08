@@ -5,6 +5,8 @@
 **Branch di pianificazione precedente:** `migration/blender-5.4-alpha`, derivato da `main`. **NON deve essere assunto come baseline funzionale**, perché `main` e il tag release divergono.
 **Confronto GitHub al 2026-11-06:** `main...v5.2.3-sculpt-extended-20261104`: **207 commit ahead / 40 behind** (due linee divergenti). Prima del porting, fare audit delle modifiche rilevanti uniche in entrambe le linee. Non sostituire la base release con `main` e non perdere fix della release 4 novembre.
 
+> **Indice unico aggiornato 8 novembre 2026:** [Master Roadmap Sculpt Extended / Codex](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/blob/feature/pre54-symmetry-remesh-fixes-v01/doc/sculpt_extended/MASTER_ROADMAP_CODEX_20261108.md). Il presente documento è una specifica tecnica di supporto: priorità, bug #12–#15, ottimizzazioni, funzionalità future e milestone sono consolidate nella master roadmap. I branch di migrazione restano sperimentali e non contengono ancora un porting compilato alla 5.4.
+
 ## Regola di migrazione
 Una feature può dirsi *portata* solo se:
 1) comportamento/scultura e dati sono corretti;
