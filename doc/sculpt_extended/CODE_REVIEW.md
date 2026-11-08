@@ -2,6 +2,8 @@
 
 Punto d'ingresso per le chat che lavorano su `Brunoarmeni86/Blender-Sculpt-Extended`.
 
+**Piano unico corrente (8 novembre 2026, branch di laboratorio):** [Master Roadmap + handoff Codex](MASTER_ROADMAP_CODEX_20261108.md). Contiene bug #12–#15, rischi Undo/Multires, ottimizzazioni preservate, nuove funzioni #6–#11, priorità, test e migrazione 5.4. Le vecchie note qui sotto sono audit storici; non dichiarano bug ancora presenti nella release 4 novembre.
+
 **Prestazioni:** [16 ottobre 2026 — ulteriori ottimizzazioni e prove sul kernel colore](audits/2026-10-16/PERFORMANCE-REVIEW.md).
 
 **Ultimo approfondimento sui difetti:** [16 ottobre 2026 — animazione, gruppi e identità dopo Edit](audits/2026-10-16/ANIMATION-TOPOLOGY-REVIEW.md).
