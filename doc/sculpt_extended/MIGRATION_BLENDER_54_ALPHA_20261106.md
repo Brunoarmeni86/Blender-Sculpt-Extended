@@ -9,6 +9,8 @@
 >
 > **VINCOLO PRESTAZIONALE:** mantenere i miglioramenti già raggiunti in Commit locale, sparse layers, Multires Smooth, Undo, adaptive stroke, PBVH/redraw, gestione cache/budget RAM, Polypaint HR e Pose/Transform. [Leggere il nuovo inventario e i benchmark di preservazione](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/blob/migration/blender-5.4-alpha-release-baseline/doc/sculpt_extended/MIGRATION_54_PERFORMANCE_PRESERVATION_20261106.md).
 
+> **Indice unico aggiornato 8 novembre 2026:** [Master Roadmap Sculpt Extended / Codex](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/blob/feature/pre54-symmetry-remesh-fixes-v01/doc/sculpt_extended/MASTER_ROADMAP_CODEX_20261108.md). Il presente documento è una specifica tecnica di supporto: priorità, bug #12–#15, ottimizzazioni, funzionalità future e milestone sono consolidate nella master roadmap. I branch di migrazione restano sperimentali e non contengono ancora un porting compilato alla 5.4.
+
 ## Scopo
 Valutare un porting completo, a checkpoint verificabili, delle nostre funzioni Sculpt Extended dalla base 5.2.3 a un **commit specifico** di Blender 5.4 Alpha, evitando due migrazioni complete consecutive (5.3 e poi 5.4). Se incompatibilità o instabilità bloccano la migrazione, considerare 5.3 stabile come fallback.
 
