@@ -5,12 +5,16 @@ from mathutils.kdtree import KDTree
 def reconstruct(bm, transform, direction, threshold, protect=True, selected=False):
     """Transactional caller-owned BMesh. A masked face and its boundary remain exact."""
     mask=bm.verts.layers.float.get('.sculpt_mask')
-    frozen_faces={f for f in bm.faces if f.hide or (selected and not f.select) or (protect and mask and any(v[mask]>1e-6 for v in f.verts))}
+    # A small mask value is a soft transfer weight, not permission to freeze an entire polygon.
+    # Preserve fully masked faces exactly and send partial masks through the weighted shape
+    # transfer path until the constrained topology-transition solver is validated.
+    frozen_faces={f for f in bm.faces if f.hide or (selected and not f.select) or (protect and mask and all(v[mask]>=1.0-1e-6 for v in f.verts))}
+    partially_masked=bool(protect and mask and any(v[mask]>1e-6 for v in bm.verts))
     frozen_vertices={v for f in frozen_faces for v in f.verts}
     positions={v:v.co.copy() for v in frozen_vertices}
     faces={f:tuple(f.verts) for f in frozen_faces}
     records=[[(v.co.copy(),v[mask] if mask else 0) for v in f.verts] for f in frozen_faces]
-    if frozen_faces:
+    if frozen_faces or partially_masked:
         # If both halves already have identical connectivity, copying positions is the
         # exact geometry-copy result without needlessly deleting and recreating faces.
         import importlib.util
@@ -22,14 +26,14 @@ def reconstruct(bm, transform, direction, threshold, protect=True, selected=Fals
         if mask:
             for v in frozen_vertices:v[mask]=1
         try:
-            module.transfer(bm,transform,axis,source_sign,max(threshold,.1),selected)
+            changed,_=module.transfer(bm,transform,axis,source_sign,max(threshold,.1),selected)
         except module.CorrespondenceError as ex:
             raise ValueError('La topologia dei due lati è diversa: raccordo della maschera non ancora supportato; nessuna modifica') from ex
         finally:
             for v,value in saved_mask.items():v[mask]=value
         if any(v.co!=co for v,co in positions.items()):
             raise ValueError('Verifica della zona protetta fallita; nessuna modifica')
-        return len(frozen_faces)
+        return changed, 'shape'
     old_boundary=sum(e.is_boundary for e in bm.edges)
     free=[f for f in bm.faces if f not in frozen_faces]
     if not free:raise ValueError('Tutta la superficie è protetta: nessuna modifica')
@@ -66,4 +70,4 @@ def reconstruct(bm, transform, direction, threshold, protect=True, selected=Fals
     if any(len(e.link_faces)>2 for e in bm.edges) or sum(e.is_boundary for e in bm.edges)>old_boundary:
         raise ValueError('Il raccordo con la maschera lascerebbe un bordo aperto; nessuna modifica')
     bm.normal_update()
-    return len(frozen_faces)
+    return len(frozen_faces), 'topology'
