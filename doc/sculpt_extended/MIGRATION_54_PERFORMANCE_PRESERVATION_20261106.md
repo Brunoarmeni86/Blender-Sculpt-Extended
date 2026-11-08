@@ -57,6 +57,10 @@ Tutti i numeri devono essere **rifatti sulla release 4 novembre**, con log, scen
 - **P1 [#13](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/13):** G/R/S e gizmo devono essere allineati e disponibili nel giusto contesto senza compromettere shortcut normali; snap interattivo, offset dell'anchor e rebind esplicito da provare senza costi di ricostruzione della mesh. Due operator Python parzialmente sovrapposti e timer sul cursore richiedono unificazione/rivalutazione.
 - Check di progetto: la **migrazione non deve trascinare questi problemi come comportamento accettato**; è ammissibile una patch sul fork stabile una volta riprodotta e collaudata, ma il confronto di prestazioni deve restare ancorato alla release 4 novembre.
 
+### Priorità P1 — Remesh con mask field continuo e performance (issue #14)
+
+[Issue #14](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/14) registra il requisito dell'8 novembre: m=1 ⇒ **nessuna mutazione** della parte interamente mascherata (geometria/topologia/attributi); m=0 ⇒ remesh a risoluzione piena impostata; 0<m<1 ⇒ transizione adattiva di densità, conservazione del bordo e movimento proporzionale all'influenza `1-m`. La V01 protegge una faccia se un singolo vertice ha mask>1e-6; nessuna transizione di densità e target uniforme. Non confondere il remesh locale BMesh con il voxel remesh volumetrico. Audit di scalabilità: BVH interamente globali e fino a 24 iterazioni sulla mesh; il codice V02 deve introdurre gestione di regioni sporche, controlli non-manifold/intersezioni **prima della pubblicazione** e A/B verificati. La protezione dei dati della maschera ha priorità sulla velocità. Nessun porting/patch ancora eseguito.
+
 ## Benchmark: blocchi obbligatori e priorità
 Registrare per ogni campione: SHA sorgente, build, CPU/GPU/driver, scena, livello Multires, modificatori, brush, layer, maschere, flags, RAM/VRAM, `PASS/FAIL`.
 
