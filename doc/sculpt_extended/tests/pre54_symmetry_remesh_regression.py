@@ -109,11 +109,18 @@ def test_symmetry_mode_transition_state():
         transition = load("symmetry_reference_preview_transition")
         settings = ob.sculpt_symref_preview
         mesh.use_mirror_x = True
+        # Reproduce the reported transition with the legacy channel still on:
+        # local symmetry + Combined ON -> Combined OFF. Both channels must be
+        # cleared so the following stroke cannot receive duplicate passes.
+        ob.sculpt_symmetry_reference_valid = False
+        settings.use_for_strokes = True
         ob.sculpt_symmetry_reference_use_for_strokes = True
         settings.combine_local = True
         settings.combine_local = False
         transition.update_combine_local(settings, bpy.context)
         assert not ob.sculpt_symmetry_reference_use_for_strokes
+        assert not settings.use_for_strokes
+        assert ob.sculpt_symmetry_reference_valid
 
         mesh.use_mirror_x = False
         ob.sculpt_symmetry_reference_use_for_strokes = True

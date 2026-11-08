@@ -263,11 +263,17 @@ def update_combine_local(settings, context):
     Stroke passes are frozen at stroke start by the native Sculpt path.
     """
     ob=sculpt_object(context)
-    if NATIVE_BACKEND and ob is not None and context.mode=='SCULPT':
+    if NATIVE_BACKEND and ob is not None:
         local_active=any(getattr(ob.data,'use_mirror_'+axis,False) for axis in 'xyz')
         if settings.combine_local:
+            # Keep the legacy and native channels coherent while an older file is
+            # being migrated. C++ may read either channel until `valid` is set.
+            settings.use_for_strokes=True
+            ensure_native_reference(ob)
             ob.sculpt_symmetry_reference_use_for_strokes=True
         elif local_active:
+            settings.use_for_strokes=False
+            ensure_native_reference(ob)
             ob.sculpt_symmetry_reference_use_for_strokes=False
     redraw()
 
