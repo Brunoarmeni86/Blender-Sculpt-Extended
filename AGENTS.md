@@ -2,6 +2,8 @@
 
 You are working on **an experimental development branch**, not on the stable release.
 
+**CANONICAL MASTER ROADMAP (8 Nov 2026):** [All priorities, prototypes, feature backlog, performance gates and Blender 5.4 migration](doc/sculpt_extended/MASTER_ROADMAP_CODEX_20261108.md). Start here; the individual audits remain technical appendices.
+
 **Read this first:** [Pre-5.4 handoff: remesh, gizmo-driven Symmetrize, symmetry/gizmo](doc/sculpt_extended/PRE54_SYMMETRY_REMESH_FIXES_V01_20261108.md).
 
 **Additional priority audit (8 Nov 2026):** [Undo/Polypaint, Multires data integrity, Strength, cache, Pose and test plan](doc/sculpt_extended/PRE54_ADDITIONAL_WEAK_POINTS_AUDIT_20261108.md). Read this alongside the first handoff. Distinguish old fixed bugs from current verified issues.
