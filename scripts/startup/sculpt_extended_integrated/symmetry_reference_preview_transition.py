@@ -586,16 +586,21 @@ class EditSymmetryReferenceTool(SculptSymmetryReferenceTool):
 class MESH_OT_symmetrize_reference_preview(bpy.types.Operator):
     bl_idname='mesh.symmetrize_reference_preview'
     bl_label='Symmetrize · maschera protetta'
-    bl_description='Copia la geometria del lato sorgente rispettando la zona mascherata'
+    bl_description='Ricostruisce la topologia dal lato sorgente quando possibile; con maschera usa transfer o raccordo protetto'
     bl_options={'REGISTER','UNDO'}
     space:EnumProperty(name='Assi',items=(('LOCAL','Locali','Assi e origine dell’oggetto'),('REFERENCE','Personalizzati','Piani del riferimento di simmetria')),default='LOCAL')
     respect_mask:BoolProperty(name='Proteggi maschera',default=True,description='Esclude dalla copia la sorgente mascherata e conserva la destinazione protetta')
     transition_width:FloatProperty(name='Ampiezza raccordo',default=.25,min=.02,max=.5,subtype='FACTOR',description='Ampiezza relativa della fascia libera che collega la maschera alla copia speculare')
     @classmethod
     def poll(cls,c):return c.mode in {'EDIT_MESH','SCULPT'} and c.object and c.object.type=='MESH'
-    def invoke(self,c,event):return c.window_manager.invoke_props_dialog(self)
+    def invoke(self,c,event):
+        # A visible symmetry gizmo is the intended frame by default.
+        ob=c.object
+        self.space='REFERENCE' if ob.sculpt_symmetry_reference_enabled and ensure_native_reference(ob) else 'LOCAL'
+        return c.window_manager.invoke_props_dialog(self)
     def draw(self,c):
-        self.layout.prop(self,'space');self.layout.prop(c.object.sculpt_symref_preview,'edit_direction',text='Sorgente');self.layout.prop(self,'respect_mask');self.layout.prop(self,'transition_width');self.layout.label(text='Copia solo la sorgente libera',icon='INFO')
+        self.layout.prop(self,'space');self.layout.prop(c.object.sculpt_symref_preview,'edit_direction',text='Sorgente');self.layout.prop(self,'respect_mask');self.layout.prop(self,'transition_width');self.layout.label(text='Piano del gizmo' if self.space=='REFERENCE' else 'Piano locale oggetto',icon='ORIENTATION_GIMBAL')
+        self.layout.label(text='Maschera parziale: copia forma · topologia diversa: prova raccordo',icon='INFO')
         self.layout.prop(c.object.sculpt_symref_preview,'edit_threshold')
         if c.mode=='EDIT_MESH':self.layout.prop(c.object.sculpt_symref_preview,'edit_selected_only')
     def execute(self,c):
@@ -615,19 +620,22 @@ class MESH_OT_symmetrize_reference_preview(bpy.types.Operator):
             if sculpt:bpy.ops.object.mode_set(mode='OBJECT');working=bmesh.new();working.from_mesh(ob.data)
             else:working=bmesh.from_edit_mesh(ob.data).copy()
             try:
-                count=module.reconstruct(working,frame.inverted()@ob.matrix_world,s.edit_direction,s.edit_threshold,self.respect_mask,s.edit_selected_only and not sculpt)
+                count,method=module.reconstruct(working,frame.inverted()@ob.matrix_world,s.edit_direction,s.edit_threshold,self.respect_mask,s.edit_selected_only and not sculpt)
             except ValueError as ex:
                 if not self.respect_mask or 'topologia dei due lati' not in str(ex):raise
                 if not sculpt and s.edit_selected_only and not all(f.select for f in working.faces):raise ValueError('Raccordo: seleziona tutta la mesh; la maschera protegge la zona da conservare')
                 transition_spec=importlib.util.spec_from_file_location('transition_build',Path(__file__).with_name('symmetry_transition_build.py'));transition=importlib.util.module_from_spec(transition_spec);transition_spec.loader.exec_module(transition)
                 replacement,details=transition.assemble(working,frame.inverted()@ob.matrix_world,'XYZ'.index(s.edit_direction[-1]),-1 if s.edit_direction.startswith('-') else 1,self.transition_width)
-                working.free();working=replacement;count=details['fixed_faces']
+                working.free();working=replacement;count=details['fixed_faces'];method='topology-band'
 
             if sculpt:working.to_mesh(ob.data);ob.data.update()
             else:
                 # Publish only after all checks; leave Edit Mode to replace topology safely.
                 bpy.ops.object.mode_set(mode='OBJECT');working.to_mesh(ob.data);ob.data.update();bpy.ops.object.mode_set(mode='EDIT')
-            self.report({'INFO'},f'Symmetrize completato · {count} facce protette');return {'FINISHED'}
+            description=('vertici trasferiti (topologia invariata)' if method=='shape' else
+                         'facce protette durante il raccordo' if method=='topology-band' else
+                         'facce protette durante la copia topologica')
+            self.report({'INFO'},f'Symmetrize · {count} {description}');return {'FINISHED'}
         except (ValueError,RuntimeError) as ex:
             self.report({'ERROR'},str(ex));return {'CANCELLED'}
         finally:
