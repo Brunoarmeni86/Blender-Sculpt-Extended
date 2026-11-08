@@ -254,6 +254,24 @@ def snapshot(s):
     return {p.identifier: (tuple(getattr(s,p.identifier)) if getattr(p,'is_array',False) else getattr(s,p.identifier))
             for p in s.bl_rna.properties if p.identifier not in {'rna_type', 'name'} and not p.is_readonly}
 
+def update_combine_local(settings, context):
+    """Leaving double symmetry returns to native local mirroring by default.
+
+    The separate 'Use reference for brushes' control remains available for an
+    explicit reference-only mode after disabling Combine. This prevents an
+    implicit reinterpretation of object-local X/Y/Z axes in the reference frame.
+    Stroke passes are frozen at stroke start by the native Sculpt path.
+    """
+    ob=sculpt_object(context)
+    if NATIVE_BACKEND and ob is not None and context.mode=='SCULPT':
+        local_active=any(getattr(ob.data,'use_mirror_'+axis,False) for axis in 'xyz')
+        if settings.combine_local:
+            ob.sculpt_symmetry_reference_use_for_strokes=True
+        elif local_active:
+            ob.sculpt_symmetry_reference_use_for_strokes=False
+    redraw()
+
+
 class SculptSymmetryReferencePreview(bpy.types.PropertyGroup):
     edit_direction: EnumProperty(name='Lato sorgente',items=[(v,label,'Copia questo lato nel lato opposto') for v,label in [('-X','−X → +X'),('X','+X → −X'),('-Y','−Y → +Y'),('Y','+Y → −Y'),('-Z','−Z → +Z'),('Z','+Z → −Z')]],default='-X',update=lambda s,c:redraw())
     edit_threshold: FloatProperty(name='Soglia fusione',default=.0001,min=0,max=1,subtype='DISTANCE')
@@ -263,7 +281,7 @@ class SculptSymmetryReferencePreview(bpy.types.PropertyGroup):
     transform_pivot_enabled: BoolProperty(name='Mostra pivot trasformazioni', description='Mostra un pivot spostabile per i pennelli Sposta, Ruota e Scala', default=False, update=lambda s,c:redraw())
     transform_pivot_linked: BoolProperty(name='Condividi con simmetria', description='Usa il riferimento di simmetria anche come pivot dei pennelli di trasformazione', default=True, update=lambda s,c:redraw())
     transform_pivot_location: FloatVectorProperty(name='Pivot trasformazioni', subtype='TRANSLATION', update=lambda s,c:redraw())
-    combine_local: BoolProperty(name='Combina simmetria locale', default=False, update=lambda s,c:redraw())
+    combine_local: BoolProperty(name='Combina simmetria locale', default=False, update=update_combine_local)
     reference_axes: bpy.props.BoolVectorProperty(name='Assi riferimento', size=3, default=(True,False,False), subtype='XYZ', update=lambda s,c:redraw())
     enabled: BoolProperty(name='Mostra piani', default=False, update=lambda s,c:redraw())
     location: FloatVectorProperty(name='Posizione', subtype='TRANSLATION', update=lambda s,c:redraw())
@@ -468,6 +486,8 @@ def draw_settings(layout,c):
     if NATIVE_BACKEND and c.mode=='SCULPT':
         ensure_native_reference(ob);box.prop(ob,'sculpt_symmetry_reference_use_for_strokes',text='Usa riferimento per i pennelli')
         box.prop(s,'combine_local')
+        if not s.combine_local and any(getattr(ob.data,'use_mirror_'+axis,False) for axis in 'xyz'):
+            box.label(text='Sola simmetria locale (riattiva Usa riferimento per cambiarla)',icon='INFO')
         if s.combine_local:
             box.prop(s,'reference_axes',toggle=True)
             row=box.row(align=True);row.label(text='Assi locali')
