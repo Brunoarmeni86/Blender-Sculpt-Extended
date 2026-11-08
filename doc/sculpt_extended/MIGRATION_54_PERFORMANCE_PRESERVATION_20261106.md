@@ -51,6 +51,12 @@ Fonte: `doc/sculpt_extended/LAYER_PERFORMANCE_OPTIMIZATION_TRACKER_20261102.md` 
 
 Tutti i numeri devono essere **rifatti sulla release 4 novembre**, con log, scene, versione Windows/driver, flag, cold/warm e quantili, prima di usarli come baseline di accettazione.
 
+## Bug prioritari da preservare/correggere in migrazione — 8 novembre 2026
+
+- **P0 [#12](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/12):** passando da Combine Native + Reference alla modalità non combinata si può verificare aumento di Strength riportato dall'utente. Da audit statico la modalità non combinata **non equivale automaticamente alla sola simmetria nativa**: se `Use Reference` resta attivo, gli assi locali vengono ancora interpretati nel frame custom. Audit matrice pass, unicità impronte e Feather ON/OFF; test su layer e Multires senza regressioni di stroke.
+- **P1 [#13](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/13):** G/R/S e gizmo devono essere allineati e disponibili nel giusto contesto senza compromettere shortcut normali; snap interattivo, offset dell'anchor e rebind esplicito da provare senza costi di ricostruzione della mesh. Due operator Python parzialmente sovrapposti e timer sul cursore richiedono unificazione/rivalutazione.
+- Check di progetto: la **migrazione non deve trascinare questi problemi come comportamento accettato**; è ammissibile una patch sul fork stabile una volta riprodotta e collaudata, ma il confronto di prestazioni deve restare ancorato alla release 4 novembre.
+
 ## Benchmark: blocchi obbligatori e priorità
 Registrare per ogni campione: SHA sorgente, build, CPU/GPU/driver, scena, livello Multires, modificatori, brush, layer, maschere, flags, RAM/VRAM, `PASS/FAIL`.
 
