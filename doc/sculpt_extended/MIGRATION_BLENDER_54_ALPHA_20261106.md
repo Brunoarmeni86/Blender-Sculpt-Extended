@@ -34,6 +34,10 @@ Valutare un porting completo, a checkpoint verificabili, delle nostre funzioni S
 
 Questi sono **requisiti prioritari di parità/regressione**, non funzionalità future opzionali. Nessun bug è ancora stato riprodotto in build e nessuna patch è stata applicata. Portare i fix anche nella release 5.2.3 soltanto dopo test separati.
 
+### Priorità P1 — Remesh adattivo vincolato dalla maschera (issue #14)
+
+[Issue #14: Mask-Adaptive Protected Remesh](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/14). **Nuovo requisito per il porting 5.4**: parte completamente mascherata (=1) preservata **esattamente** in coordinate e topologia; regione libera (=0) remesh alla massima densità richiesta; valori intermedi 0<m<1 modulano in modo continuo densità locale, falloff geometrico e larghezza del raccordo, senza spostare la regione protetta. Testare insieme a maschere, Face Sets, attributi e Undo. **L'attuale `masked_remesh.py` usa `any(mask>1e-6)` per congelare un'intera faccia**, ossia il contrario del gradiente richiesto. Inoltre usa un remesher **surface locale a split/collapse**, non la voxelizzazione di volumi; distinguere gli obiettivi prima di implementare. Performance e stabilità sono requisiti di accettazione; escludere regressioni di Undo e CCG. **Non implementato**.
+
 ## Ordine di migrazione (checkpoint separati)
 **M0**: audit delle modifiche **tra tag release e `main`**, inventario delle ottimizzazioni attive e flag (vedere il Performance Preservation Contract), **baseline benchmark Windows del pacchetto release 4 novembre**, più compilazione base 5.4 ufficiale.  
 **M1**: aggiunta definizioni dati proprie (DNA, RNA, kernel, CMake, blend I/O) e compilazione iniziale; salvare/rileggere un file con metadati di layer.  
