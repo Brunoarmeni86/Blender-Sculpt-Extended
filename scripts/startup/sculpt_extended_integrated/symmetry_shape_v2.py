@@ -120,6 +120,27 @@ def topology_pairs(bm, coordinates, tolerance):
         for loop,j in zip(face.loops,hits):assign(loop.vert.index,j)
         propagate();return True
 
+    # Topological seam seeds work even when one sculpted half has moved far
+    # beyond the geometric mirror tolerance. A manifold edge on the reference
+    # plane with faces on opposite sides is an unambiguous self-mirror anchor.
+    # Do not seed arbitrary near-plane vertices or unwelded double seams.
+    seam_edges=[]
+    for edge in bm.edges:
+        if not edge.is_manifold or len(edge.link_faces)!=2:continue
+        a,b=(v.index for v in edge.verts)
+        if abs(ordered[a].x)>strict or abs(ordered[b].x)>strict:continue
+        face_sides=[]
+        for face in edge.link_faces:
+            values=[ordered[v.index].x for v in face.verts if v.index not in (a,b)]
+            face_sides.append(sum(values)/len(values) if values else 0.)
+        if min(face_sides)<-strict and max(face_sides)>strict:
+            seam_edges.append((a,b))
+    for a,b in seam_edges:
+        assign(a,a)
+        assign(b,b)
+    if seam_edges:
+        propagate()
+
     for limit in (strict,tolerance):
         for face in faces:
             if face_map[face.index]<0:seed_face(face,limit)
