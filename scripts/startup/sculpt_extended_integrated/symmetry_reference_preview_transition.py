@@ -211,12 +211,18 @@ def set_modal_reference_preview(ob, matrix=None, size=None):
     current = (_modal_reference_preview if _modal_reference_preview and
                _modal_reference_preview['pointer'] == ob.as_pointer() else
                {'pointer': ob.as_pointer(), 'matrix': None, 'size': None})
+    changed=False
     if matrix is not None:
-        current['matrix'] = matrix.copy()
+        old=current['matrix']
+        changed=old is None or any(abs(old[i][j]-matrix[i][j])>1e-8 for i in range(4) for j in range(4))
+        if changed:current['matrix']=matrix.copy()
     if size is not None:
-        current['size'] = float(size)
-    _modal_reference_preview = current
-    redraw()
+        value=float(size)
+        if current['size'] is None or abs(current['size']-value)>1e-8:
+            current['size']=value;changed=True
+    if changed or _modal_reference_preview is None:
+        _modal_reference_preview = current
+        redraw()
 
 def clear_modal_reference_preview(ob=None):
     global _modal_reference_preview
