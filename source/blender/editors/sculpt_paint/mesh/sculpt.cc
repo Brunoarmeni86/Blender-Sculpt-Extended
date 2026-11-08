@@ -1604,6 +1604,18 @@ static bool reference_symmetry_read(const Depsgraph &depsgraph,
                                    RNA_boolean_get(&owner, "sculpt_symmetry_reference_use_for_strokes") :
                                    RNA_boolean_get(&settings, "use_for_strokes");
   if (!use_for_strokes) { return true; }
+  /* Combined OFF with local symmetry enabled is always native-only. Enforce this
+   * at stroke preparation as well as in the Python UI callback: files migrated
+   * from the preview prototype can temporarily retain a stale reference flag,
+   * which otherwise applies coincident local and reference passes and appears as
+   * multiplied brush strength. Reference-only remains available after disabling
+   * all local symmetry axes. */
+  PropertyRNA *combine_property = RNA_struct_find_property(&settings, "combine_local");
+  const bool combine_local = combine_property &&
+                             RNA_property_boolean_get(&settings, combine_property);
+  if (!combine_local && mesh_symmetry_xyz_get(object) != ePaintSymmetryFlags(0)) {
+    return true;
+  }
   requested = true;
   const auto reject = [&](const char *message) {
     if (reports) { BKE_report(reports, RPT_ERROR, message); }
