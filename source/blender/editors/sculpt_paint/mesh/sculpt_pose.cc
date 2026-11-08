@@ -2428,7 +2428,8 @@ void do_pose_brush(const Depsgraph &depsgraph,
   SculptSession &ss = *ob.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
-  const ePaintSymmetryFlags symm = ss.cache->reference_combined ? ePaintSymmetryFlags(0) : mesh_symmetry_xyz_get(ob);
+  const ePaintSymmetryFlags symm = ss.cache->reference_combined ? ePaintSymmetryFlags(0) :
+                                                                  stroke_symmetry_xyz_get(ob);
 
   if (!ss.cache->pose_ik_chain) {
     if (!pose_brush_init(depsgraph, ob, ss, brush)) {

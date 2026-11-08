@@ -7,6 +7,25 @@
 
 ## Findings and candidate corrections
 
+### #12 — Combined OFF and reference-axis ownership
+
+**Finding:** the non-combined C++ stroke loop obtained its pass flags from
+`mesh_symmetry_xyz_get()`, then `reference_symmetry_point()` interpreted those local flags
+inside the rotated reference frame. Reference-only with every local axis disabled produced
+no mirrored pass.
+
+**Candidate correction:** freeze `reference_axes` in `StrokeCache` at stroke start and use
+those flags for the non-combined dab loop, Pose loop and topology automasking setup. Local
+symmetry continues to use the mesh flags when the reference backend is inactive; Combined
+mode continues to use its bounded, deduplicated matrix list.
+
+**Evidence status:** **PROTOTYPE / STATIC-VALIDATED** for the C++ change. The Python state
+transition is **BLENDER-RUNTIME-VALIDATED**: with the experimental backend enabled,
+Combined OFF selects native-only when a local axis is active and preserves explicit
+reference-only when no local axis is active. The modified C++ has not yet been compiled
+into a Blender binary, so additive Strength, Feather, geometry displacement and performance
+are not validated.
+
 ### #15 — topological seam seed
 
 **Finding:** `symmetry_shape_v2.topology_pairs()` referenced `ordered`, a local variable of
@@ -42,6 +61,9 @@ are not validated by this run.
    - `PASS: topological seam on strongly deformed/posed halves`
    - `PASS: masked full-face protection with adaptive density`
 4. `git diff --check`: **PASS**.
+5. #12 state fixture on the 4 November portable build with
+   `BLENDER_SCULPT_SYMMETRY_REFERENCE_V01=1`: **PASS**. This loads the candidate Python
+   callback directly from the worktree; it does not execute the unbuilt C++ candidate.
 
 Blender reported `5.2.3 LTS`, build timestamp `2026-11-01 15:09:11`; the binary printed
 `hash unknown`. No benchmark was executed.

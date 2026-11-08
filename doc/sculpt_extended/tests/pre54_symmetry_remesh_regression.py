@@ -94,7 +94,43 @@ def test_mask_adaptive_protected_faces():
         bpy.data.meshes.remove(mesh)
 
 
+def test_symmetry_mode_transition_state():
+    mesh = bpy.data.meshes.new("__symmetry_mode_fixture")
+    mesh.from_pydata([(-1, -1, 0), (1, -1, 0), (0, 1, 0)], [], [(0, 1, 2)])
+    ob = bpy.data.objects.new("__symmetry_mode_fixture", mesh)
+    bpy.context.scene.collection.objects.link(ob)
+    bpy.context.view_layer.objects.active = ob
+    ob.select_set(True)
+    try:
+        bpy.ops.object.mode_set(mode="SCULPT")
+        if not hasattr(ob, "sculpt_symmetry_reference_use_for_strokes"):
+            print("SKIP: symmetry mode transition requires a build with the native reference backend")
+            return
+        transition = load("symmetry_reference_preview_transition")
+        settings = ob.sculpt_symref_preview
+        mesh.use_mirror_x = True
+        ob.sculpt_symmetry_reference_use_for_strokes = True
+        settings.combine_local = True
+        settings.combine_local = False
+        transition.update_combine_local(settings, bpy.context)
+        assert not ob.sculpt_symmetry_reference_use_for_strokes
+
+        mesh.use_mirror_x = False
+        ob.sculpt_symmetry_reference_use_for_strokes = True
+        settings.combine_local = True
+        settings.combine_local = False
+        transition.update_combine_local(settings, bpy.context)
+        assert ob.sculpt_symmetry_reference_use_for_strokes
+        print("PASS: Combined OFF selects native-only or explicit reference-only state")
+    finally:
+        if ob.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.data.objects.remove(ob, do_unlink=True)
+        bpy.data.meshes.remove(mesh)
+
+
 if __name__ == "__main__":
+    test_symmetry_mode_transition_state()
     test_topological_seam_while_posed()
     test_mask_adaptive_protected_faces()
     print("PASS: pre54 symmetry/remesh static-fixture regression")

@@ -367,6 +367,16 @@ ePaintSymmetryFlags mesh_symmetry_xyz_get(const Object &object)
   return ePaintSymmetryFlags(mesh->symmetry);
 }
 
+ePaintSymmetryFlags stroke_symmetry_xyz_get(const Object &object)
+{
+  const SculptSession *ss = object.runtime ? object.runtime->sculpt_session : nullptr;
+  const StrokeCache *cache = ss ? ss->cache : nullptr;
+  if (cache && cache->reference_symmetry && !cache->reference_combined) {
+    return cache->reference_symmetry_flags;
+  }
+  return mesh_symmetry_xyz_get(object);
+}
+
 /* Sculpt Face Sets and Visibility. */
 
 namespace face_set {
@@ -1742,6 +1752,19 @@ static bool reference_combined_passes(Object &object, const float4x4 &frame,
   return true;
 }
 
+static ePaintSymmetryFlags reference_symmetry_axes_get(Object &object)
+{
+  PointerRNA owner = RNA_id_pointer_create(&object.id);
+  PropertyRNA *property = RNA_struct_find_property(&owner, "sculpt_symref_preview");
+  if (!property) {
+    return ePaintSymmetryFlags(0);
+  }
+  PointerRNA settings = RNA_property_pointer_get(&owner, property);
+  bool axes[3] = {false, false, false};
+  RNA_boolean_get_array(&settings, "reference_axes", axes);
+  return ePaintSymmetryFlags(int(axes[0]) | (int(axes[1]) << 1) | (int(axes[2]) << 2));
+}
+
 static bool reference_symmetry_prepare(const Depsgraph &depsgraph,
                                        Object &object,
                                        const Sculpt &sd,
@@ -1752,11 +1775,13 @@ static bool reference_symmetry_prepare(const Depsgraph &depsgraph,
   bool requested = false;
   cache.reference_symmetry = false;
   cache.reference_combined = false;
+  cache.reference_symmetry_flags = ePaintSymmetryFlags(0);
   cache.reference_passes.clear();
   if (!reference_symmetry_read(depsgraph, object, sd, brush, requested,
                                cache.reference_to_object, reports)) { return false; }
   if (requested) {
     cache.object_to_reference = math::invert(cache.reference_to_object);
+    cache.reference_symmetry_flags = reference_symmetry_axes_get(object);
     if (!reference_combined_passes(object, cache.reference_to_object, sd, brush,
                                    cache.reference_combined, cache.reference_passes, reports)) {
       return false;
@@ -5897,7 +5922,7 @@ static void do_symmetrical_brush_actions(const Depsgraph &depsgraph,
   const Mesh &mesh = *id_cast<Mesh *>(ob.data);
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
-  const ePaintSymmetryFlags symm = mesh_symmetry_xyz_get(ob);
+  const ePaintSymmetryFlags symm = stroke_symmetry_xyz_get(ob);
 
   if (cache.reference_combined) {
     float feather = 1.0f;

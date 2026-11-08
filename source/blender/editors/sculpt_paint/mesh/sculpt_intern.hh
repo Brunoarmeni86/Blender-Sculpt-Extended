@@ -333,6 +333,8 @@ struct StrokeCache {
   /* Opt-in custom frame; ordinary symmetry has identical arithmetic when disabled. */
   bool reference_symmetry = false;
   bool reference_combined = false;
+  /* Frozen once at stroke start. Never reinterpret the mesh-local axes in the reference frame. */
+  ePaintSymmetryFlags reference_symmetry_flags = ePaintSymmetryFlags(0);
   Vector<float4x4> reference_passes;
   float4x4 reference_pass_matrix = float4x4::identity();
   float4x4 reference_pass_inverse = float4x4::identity();
@@ -606,6 +608,7 @@ float raycast_init(ViewContext *vc,
                    bool original);
 /* Symmetry */
 ePaintSymmetryFlags mesh_symmetry_xyz_get(const Object &object);
+ePaintSymmetryFlags stroke_symmetry_xyz_get(const Object &object);
 
 /**
  * Returns true when the step belongs to the stroke that is directly performed by the brush and
