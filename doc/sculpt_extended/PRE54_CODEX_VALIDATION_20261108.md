@@ -162,9 +162,69 @@ container semantics.
 The earlier baseline-package run reported build timestamp `2026-11-01 15:09:11` and
 `hash unknown`. No benchmark was executed.
 
+## Sculpt Layer organization performance and destructive folder delete (2026-11-09)
+
+The user reported that folder and general layer operations had become noticeably slow. A
+source audit found three avoidable global paths in otherwise organizational operations:
+
+- folder create/add/remove/dissolve could destroy the PBVH/Subdiv CCG even when effective
+  layer visibility did not change;
+- metadata-only operations sent `ND_MODIFIER`, scheduling complete Multires evaluation;
+- editing a Sculpt Layer name reused `rna_Modifier_name_update`, which also rebuilt
+  dependency-graph relations.
+
+The experimental candidate now commits only when live CCG coordinates are genuinely
+pending, sends metadata synchronization plus UI redraw for geometry-neutral changes, and
+uses the geometry rebuild fallback only when effective visibility/composition changes.
+Layer-name updates no longer rebuild modifier relations. The optimized paths cover layer
+and whole-folder reorder, create, rename, collapse/expand, membership changes, and folder
+dissolve. No per-dab Sculpt path was changed.
+
+Two distinct folder removal actions are now exposed:
+
+- **Dissolve Group** (`X`): remove folder metadata and keep all contained layers/payloads;
+- **Delete Group and Sculpt Layers** (trash): remove the folder and every contained layer,
+  after an explicit warning/confirmation dialog.
+
+The destructive backend selects the nearest surviving row and discards the live CCG only
+when a deleted layer contributed to the visible surface. Hidden-only content deletion uses
+the metadata path.
+
+**Actually executed validation:**
+
+1. Visual Studio 2022 full executable build: **PASS**, no new compiler errors. Candidate
+   executable SHA-256: `F2E667923CFA30C28348E2087AB4D1B6FD2445BEA80481764B8EEA4F8C53702D`.
+2. Python `py_compile` for the sidebar, group probe and translated Sculpt Extended modules:
+   **PASS**.
+3. Functional four-layer runtime probe with Undo isolated: **PASS** for create, rename,
+   whole-group move, moving a layer out/in, hidden-folder dissolve with individual
+   visibility restoration, and delete-folder-with-contents. The destructive alternative
+   retained only the two layers outside the deleted folder.
+4. Small-fixture operator timings (not a dense production benchmark): create **0.293 ms**,
+   rename **0.165 ms**, whole-group move **0.171 ms**, hidden-group dissolve **1.677 ms**.
+5. Full pre-5.4 headless symmetry/remesh fixture on the candidate executable: **PASS**.
+6. Folder Undo/Redo extension: **FAIL / OPEN**. `Undo` returned to the previous global
+   checkpoint and removed the test Multires modifier instead of restoring the folder state.
+   Reacquiring the modifier by type confirmed this was not a stale Python RNA reference.
+   Therefore organizational behavior and small-fixture latency are runtime-validated, but
+   the candidate is not Undo-validated and must remain experimental. A dedicated lightweight
+   layer-stack Undo transaction is preferable to reintroducing a full Multires/memfile
+   checkpoint on every organizational click.
+
+## English UI translation resumed (2026-11-09)
+
+User-visible Italian labels, tooltips, status messages and guarded error reports in the
+Multires sidebar and the current symmetry reference, snap/pivot, protected remesh,
+Multires-detail and topology-stitching modules were translated to English. Internal enum
+identifiers and persisted property names were not changed. The topology-fallback string
+match was updated together with its translated exception to preserve behavior. Static
+Python compilation and the complete headless regression passed after these edits.
+
 ## Decision
 
 **keep as experimental candidate.** The fixes are small, auditable, and covered by the
-existing headless fixtures, but they are not `STABLE-CANDIDATE`. Next work should expand
-mask fractions, closed meshes, multiple contours, attributes and failure rollback before
-testing gizmo interaction and the broader #12/#13 matrix.
+existing headless fixtures, but they are not `STABLE-CANDIDATE`. In particular, folder
+Undo/Redo remains open and must not be described as fixed. Next work should implement and
+validate lightweight layer-stack Undo, run dense 10/100/500-layer timing, then expand mask
+fractions, closed meshes, multiple contours, attributes and failure rollback before testing
+gizmo interaction and the broader #12/#13 matrix.

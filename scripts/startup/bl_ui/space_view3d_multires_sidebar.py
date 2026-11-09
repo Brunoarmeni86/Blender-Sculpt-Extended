@@ -55,7 +55,7 @@ class SCULPT_OT_multires_layer_strength_deferred(bpy.types.Operator):
     def draw(self, context):
         column = self.layout.column()
         column.prop(self, 'strength', slider=True)
-        column.label(text="La superficie viene aggiornata solo con OK", icon='INFO')
+        column.label(text="The surface is updated only after you confirm", icon='INFO')
 
     def execute(self, context):
         layer = self._layer(context)
@@ -85,7 +85,7 @@ class VIEW3D_PT_sculpt_multires_sidebar(bpy.types.Panel):
         layout.operator_context = 'INVOKE_DEFAULT'
         modifiers = multires_modifiers(context)
         if not modifiers:
-            layout.label(text="Aggiungi un modificatore Multires", icon='INFO')
+            layout.label(text="Add a Multires Modifier", icon='INFO')
             return
         for modifier in modifiers:
             column = layout.column(align=True)
@@ -130,11 +130,11 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
         # Native Sculpt operators target the SculptSession's modifier. RNA has
         # no public selector for that pointer; do not guess in ambiguous stacks.
         if len(modifiers) != 1:
-            layout.label(text="Più Multires: usa il pannello Modificatori", icon='INFO')
+            layout.label(text="Multiple Multires modifiers: use the Modifiers panel", icon='INFO')
             return
         modifier = modifiers[0]
         if not hasattr(modifier, "sculpt_layers"):
-            layout.label(text="Questa build non espone Sculpt Layers", icon='INFO')
+            layout.label(text="This build does not expose Sculpt Layers", icon='INFO')
             return
         layout.context_pointer_set("modifier", modifier)
         layout.enabled = context.object.mode != 'EDIT'
@@ -172,6 +172,9 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
                 op.group_id = group_id
                 op = group.operator('sculpt.multires_layer_group_dissolve', text='',
                                     icon='X', emboss=False)
+                op.group_id = group_id
+                op = group.operator('sculpt.multires_layer_group_delete', text='',
+                                    icon='TRASH', emboss=False)
                 op.group_id = group_id
             last_group = group_id
             if group_id and layer.group_collapsed:
@@ -227,7 +230,7 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
         merge.enabled = context.object.mode == 'OBJECT'
         native_operator(merge, "sculpt.multires_merge_visible_to_base", "Merge Visible into Base")
         if context.object.mode != 'OBJECT':
-            layout.label(text="Merge Visible: passa a Object Mode", icon='INFO')
+            layout.label(text="Merge Visible: switch to Object Mode", icon='INFO')
 
 
 class MULTIRES_OT_polypaint_manage(bpy.types.Operator):

@@ -186,6 +186,7 @@ bool group_add_active(MultiresModifierData &mmd, int group_id);
 bool group_rename(MultiresModifierData &mmd, int group_id, const char *name);
 bool group_move(MultiresModifierData &mmd, int group_id, int direction);
 bool group_dissolve(MultiresModifierData &mmd, int group_id);
+bool group_delete(MultiresModifierData &mmd, int group_id);
 bool group_merge(MultiresModifierData &mmd, int group_id);
 bool group_remove_active(MultiresModifierData &mmd);
 bool group_toggle_visibility(MultiresModifierData &mmd, int group_id);

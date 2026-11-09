@@ -908,6 +908,68 @@ static bool sculpt_multires_layer_commit(Object &ob,
   return true;
 }
 
+static bool sculpt_multires_layer_commit_if_pending(Object &ob, wmOperator &op)
+{
+  const SculptSession *ss = ob.runtime ? ob.runtime->sculpt_session : nullptr;
+  const bool pending_positions = ss && ss->subdiv_ccg && ss->subdiv_ccg->dirty.coords;
+  if (!pending_positions) {
+    const char *trace = BLI_getenv("BLENDER_LAYER_RESP_TRACE");
+    if (trace && trace[0] && trace[0] != '0') {
+      std::printf("[LAYER_COMMIT_SKIP] op=%s reason=NO_PENDING_COORDS\n", op.type->idname);
+    }
+    return true;
+  }
+  return sculpt_multires_layer_commit(ob, op);
+}
+
+struct SculptLayerVisibilityState {
+  MultiresSculptLayer *layer;
+  bool visible;
+};
+
+static std::vector<SculptLayerVisibilityState> sculpt_layer_visibility_snapshot(
+    MultiresModifierData &mmd)
+{
+  std::vector<SculptLayerVisibilityState> state;
+  state.reserve(mmd.sculpt_layers.count());
+  for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    state.push_back({&layer, (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0});
+  }
+  return state;
+}
+
+static bool sculpt_layer_visibility_changed(const std::vector<SculptLayerVisibilityState> &before)
+{
+  for (const SculptLayerVisibilityState &state : before) {
+    if (((state.layer->flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0) != state.visible) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void sculpt_layer_metadata_notify(bContext *C, Object &ob)
+{
+  /* Synchronize only the small modifier metadata. ND_MODIFIER requests a full
+   * Multires evaluation, so use explicit UI redraw notifiers for this path. */
+  DEG_id_tag_update(&ob.id, ID_RECALC_SYNC_TO_EVAL);
+  WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &ob);
+  WM_event_add_notifier(C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+}
+
+static void sculpt_layer_group_finish(bContext *C,
+                                      Object &ob,
+                                      const std::vector<SculptLayerVisibilityState> &before)
+{
+  if (!sculpt_layer_visibility_changed(before)) {
+    sculpt_layer_metadata_notify(C, ob);
+    return;
+  }
+  multires_force_sculpt_rebuild(&ob);
+  DEG_id_tag_update(&ob.id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, &ob);
+}
+
 static wmOperatorStatus sculpt_multires_layer_commit_exec(bContext *C, wmOperator *op)
 {
   Object *ob = CTX_data_active_object(C);
@@ -1008,7 +1070,9 @@ static wmOperatorStatus sculpt_multires_layer_snapshot_exec(bContext *C, wmOpera
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (!mmd) return OPERATOR_CANCELLED;
   MultiresSculptLayer *source = bke::multires_layers::active(*mmd);
-  if (!source || !sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (!source || !sculpt_multires_layer_commit_if_pending(*ob, *op)) {
+    return OPERATOR_CANCELLED;
+  }
   const int original_index = mmd->sculpt_layer_active;
   MultiresSculptLayer *snapshot = bke::multires_layers::duplicate(*mmd, *source);
   BLI_snprintf(snapshot->name, sizeof(snapshot->name), "%.48s - copy", source->name);
@@ -1195,7 +1259,7 @@ static wmOperatorStatus sculpt_multires_layer_add_exec(bContext *C, wmOperator *
   }
 
   double stage_start = trace ? BLI_time_now_seconds() : 0.0;
-  const bool commit_ok = sculpt_multires_layer_commit(*ob, *op);
+  const bool commit_ok = sculpt_multires_layer_commit_if_pending(*ob, *op);
   if (trace) {
     commit_ms = (BLI_time_now_seconds() - stage_start) * 1000.0;
   }
@@ -1288,8 +1352,15 @@ static wmOperatorStatus sculpt_multires_layer_add_exec(bContext *C, wmOperator *
     depsgraph_ms = (BLI_time_now_seconds() - stage_start) * 1000.0;
   }
 
-  /* Layer-list/active-layer UI changed even though geometry did not. */
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  /* Layer-list/active-layer UI changed even though geometry did not. Avoid the
+   * ND_MODIFIER notifier, which schedules a complete Multires evaluation. */
+  if (force_rebuild) {
+    WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  }
+  else {
+    WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, ob);
+    WM_event_add_notifier(C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+  }
 
   if (trace) {
     const double total_ms = (BLI_time_now_seconds() - total_start) * 1000.0;
@@ -1501,7 +1572,7 @@ static wmOperatorStatus sculpt_multires_layer_delete_exec(bContext *C, wmOperato
   }
 
   double t = trace ? BLI_time_now_seconds() : 0.0;
-  if (!sculpt_multires_layer_commit(*ob, *op)) {
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) {
     return OPERATOR_CANCELLED;
   }
   const double commit_ms = trace ? (BLI_time_now_seconds() - t) * 1000.0 : 0.0;
@@ -1639,7 +1710,7 @@ static wmOperatorStatus sculpt_multires_detail_symmetrize_exec(bContext *C, wmOp
     ED_undosys_stack_memfile_id_changed_tag(stack, &ob->id);
     ED_undosys_stack_memfile_id_changed_tag(stack, ob->data);
   }
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
   float3 origin, normal;
   RNA_float_get_array(op->ptr, "plane_origin", origin);
   RNA_float_get_array(op->ptr, "plane_normal", normal);
@@ -1683,7 +1754,7 @@ static wmOperatorStatus sculpt_multires_layer_duplicate_exec(bContext *C, wmOper
   if (mmd == nullptr) return OPERATOR_CANCELLED;
   MultiresSculptLayer *layer = bke::multires_layers::active(*mmd);
   if (layer == nullptr) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
   bke::multires_layers::duplicate(*mmd, *layer);
   multires_force_sculpt_rebuild(ob);
   DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
@@ -1792,8 +1863,9 @@ static wmOperatorStatus sculpt_multires_layer_move_exec(bContext *C, wmOperator 
     return OPERATOR_CANCELLED;
   }
 
-  /* Commit pending edits against the old order before moving the list item. */
-  if (!sculpt_multires_layer_commit(*ob, *op)) {
+  /* Reordering is additive and geometry-neutral. Only a genuinely pending
+   * stroke must be published before modifier metadata changes. */
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) {
     return OPERATOR_CANCELLED;
   }
   if (!bke::multires_layers::move(*mmd, from_index, to_index)) {
@@ -1805,7 +1877,7 @@ static wmOperatorStatus sculpt_multires_layer_move_exec(bContext *C, wmOperator 
   /* Current stack composition is additive, so reorder is geometry-neutral.
    * Avoid an unnecessary PBVH/SubdivCCG rebuild. The new order immediately
    * controls UI ordering and the neighbour consumed by Merge Down. */
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  sculpt_layer_metadata_notify(C, *ob);
   return OPERATOR_FINISHED;
 }
 
@@ -1834,14 +1906,16 @@ static wmOperatorStatus sculpt_multires_layer_group_create_exec(bContext *C, wmO
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
+  const std::vector<SculptLayerVisibilityState> visibility_before =
+      sculpt_layer_visibility_snapshot(*mmd);
 
   if (!bke::multires_layers::group_create_from_active(*mmd)) {
     BKE_report(op->reports, RPT_ERROR, "Select a Sculpt Layer first");
     return OPERATOR_CANCELLED;
   }
 
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  sculpt_layer_group_finish(C, *ob, visibility_before);
   return OPERATOR_FINISHED;
 }
 
@@ -1861,7 +1935,9 @@ static wmOperatorStatus sculpt_multires_layer_group_add_active_exec(bContext *C,
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
+  const std::vector<SculptLayerVisibilityState> visibility_before =
+      sculpt_layer_visibility_snapshot(*mmd);
 
   const int group_id = RNA_int_get(op->ptr, "group_id");
   if (!bke::multires_layers::group_add_active(*mmd, group_id)) {
@@ -1869,9 +1945,9 @@ static wmOperatorStatus sculpt_multires_layer_group_add_active_exec(bContext *C,
     return OPERATOR_CANCELLED;
   }
 
-  multires_force_sculpt_rebuild(ob);
-  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  /* Moving into a visible folder only changes organization. A hidden target
+   * changes effective visibility and therefore uses the geometry fallback. */
+  sculpt_layer_group_finish(C, *ob, visibility_before);
   return OPERATOR_FINISHED;
 }
 
@@ -1892,6 +1968,7 @@ static wmOperatorStatus sculpt_multires_layer_group_rename_exec(bContext *C, wmO
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
   const int group_id = RNA_int_get(op->ptr, "group_id");
   char name[64];
   RNA_string_get(op->ptr, "name", name);
@@ -1899,7 +1976,7 @@ static wmOperatorStatus sculpt_multires_layer_group_rename_exec(bContext *C, wmO
     BKE_report(op->reports, RPT_ERROR, "Enter a non-empty name for an existing group");
     return OPERATOR_CANCELLED;
   }
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  sculpt_layer_metadata_notify(C, *ob);
   return OPERATOR_FINISHED;
 }
 
@@ -1929,7 +2006,7 @@ static wmOperatorStatus sculpt_multires_layer_group_move_exec(bContext *C, wmOpe
   Object *ob = CTX_data_active_object(C);
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
-  if (mmd == nullptr || !sculpt_multires_layer_commit(*ob, *op)) {
+  if (mmd == nullptr || !sculpt_multires_layer_commit_if_pending(*ob, *op)) {
     return OPERATOR_CANCELLED;
   }
   const int group_id = RNA_int_get(op->ptr, "group_id");
@@ -1938,7 +2015,7 @@ static wmOperatorStatus sculpt_multires_layer_group_move_exec(bContext *C, wmOpe
     return OPERATOR_CANCELLED;
   }
   /* Folder order is organizational; additive layer composition is unchanged. */
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  sculpt_layer_metadata_notify(C, *ob);
   return OPERATOR_FINISHED;
 }
 
@@ -1964,17 +2041,18 @@ static wmOperatorStatus sculpt_multires_layer_group_dissolve_exec(bContext *C, w
   Object *ob = CTX_data_active_object(C);
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
-  if (mmd == nullptr || !sculpt_multires_layer_commit(*ob, *op)) {
+  if (mmd == nullptr || !sculpt_multires_layer_commit_if_pending(*ob, *op)) {
     return OPERATOR_CANCELLED;
   }
+  const std::vector<SculptLayerVisibilityState> visibility_before =
+      sculpt_layer_visibility_snapshot(*mmd);
   const int group_id = RNA_int_get(op->ptr, "group_id");
   if (!bke::multires_layers::group_dissolve(*mmd, group_id)) {
     return OPERATOR_CANCELLED;
   }
-  /* Dissolving a hidden group restores each layer's saved visibility. */
-  multires_force_sculpt_rebuild(ob);
-  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  /* A visible folder is metadata-only. Dissolving a hidden folder restores
+   * saved member visibility and therefore takes the geometry fallback. */
+  sculpt_layer_group_finish(C, *ob, visibility_before);
   return OPERATOR_FINISHED;
 }
 
@@ -1989,13 +2067,70 @@ static void SCULPT_OT_multires_layer_group_dissolve(wmOperatorType *ot)
   RNA_def_int(ot->srna, "group_id", 0, 0, INT_MAX, "Group", "Group identifier", 0, INT_MAX);
 }
 
+static wmOperatorStatus sculpt_multires_layer_group_delete_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr) return OPERATOR_CANCELLED;
+  MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
+  if (mmd == nullptr || !sculpt_multires_layer_commit_if_pending(*ob, *op)) {
+    return OPERATOR_CANCELLED;
+  }
+  const int group_id = RNA_int_get(op->ptr, "group_id");
+  bool visible_contribution = false;
+  for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    if (layer.group_id == group_id) {
+      visible_contribution |= bke::multires_layers::is_effective(layer);
+    }
+  }
+  if (!bke::multires_layers::group_delete(*mmd, group_id)) {
+    return OPERATOR_CANCELLED;
+  }
+  if (!visible_contribution) {
+    sculpt_layer_metadata_notify(C, *ob);
+    return OPERATOR_FINISHED;
+  }
+  /* The live CCG still contains deleted contributions. Discard it without
+   * flushing, then rebuild from native base plus the retained layer stack. */
+  if (ob->runtime && ob->runtime->sculpt_session) {
+    BKE_sculptsession_free_pbvh(*ob);
+  }
+  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus sculpt_multires_layer_group_delete_invoke(bContext *C,
+                                                                  wmOperator *op,
+                                                                  const wmEvent * /*event*/)
+{
+  return WM_operator_confirm_ex(C,
+                                op,
+                                IFACE_("Delete Group and Sculpt Layers"),
+                                IFACE_("Delete the group and every Sculpt Layer inside it?"),
+                                IFACE_("Delete"),
+                                ui::AlertIcon::Warning,
+                                false);
+}
+
+static void SCULPT_OT_multires_layer_group_delete(wmOperatorType *ot)
+{
+  ot->name = "Delete Sculpt Layer Group and Contents";
+  ot->idname = "SCULPT_OT_multires_layer_group_delete";
+  ot->description = "Delete this folder and every Sculpt Layer contained in it";
+  ot->invoke = sculpt_multires_layer_group_delete_invoke;
+  ot->exec = sculpt_multires_layer_group_delete_exec;
+  ot->poll = sculpt_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  RNA_def_int(ot->srna, "group_id", 0, 0, INT_MAX, "Group", "Group identifier", 0, INT_MAX);
+}
+
 static wmOperatorStatus sculpt_multires_layer_group_merge_exec(bContext *C, wmOperator *op)
 {
   Object *ob = CTX_data_active_object(C);
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
 
   const int group_id = RNA_int_get(op->ptr, "group_id");
   if (!bke::multires_layers::group_merge(*mmd, group_id)) {
@@ -2028,14 +2163,14 @@ static wmOperatorStatus sculpt_multires_layer_group_with_below_exec(bContext *C,
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
+  const std::vector<SculptLayerVisibilityState> visibility_before =
+      sculpt_layer_visibility_snapshot(*mmd);
   if (!bke::multires_layers::group_with_below(*mmd)) {
     BKE_report(op->reports, RPT_ERROR, "Select a layer with another layer below it");
     return OPERATOR_CANCELLED;
   }
-  multires_force_sculpt_rebuild(ob);
-  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  sculpt_layer_group_finish(C, *ob, visibility_before);
   return OPERATOR_FINISHED;
 }
 
@@ -2055,7 +2190,9 @@ static wmOperatorStatus sculpt_multires_layer_group_remove_exec(bContext *C, wmO
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
+  const std::vector<SculptLayerVisibilityState> visibility_before =
+      sculpt_layer_visibility_snapshot(*mmd);
   const int index = RNA_int_get(op->ptr, "index");
   if (index >= 0) {
     bke::multires_layers::set_active(*mmd, index);
@@ -2064,9 +2201,7 @@ static wmOperatorStatus sculpt_multires_layer_group_remove_exec(bContext *C, wmO
     BKE_report(op->reports, RPT_ERROR, "Active layer is not in a group");
     return OPERATOR_CANCELLED;
   }
-  multires_force_sculpt_rebuild(ob);
-  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  sculpt_layer_group_finish(C, *ob, visibility_before);
   return OPERATOR_FINISHED;
 }
 
@@ -2087,7 +2222,7 @@ static wmOperatorStatus sculpt_multires_layer_group_visibility_exec(bContext *C,
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
-  if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
   const int group_id = RNA_int_get(op->ptr, "group_id");
   if (!bke::multires_layers::group_toggle_visibility(*mmd, group_id)) {
     return OPERATOR_CANCELLED;
@@ -2115,11 +2250,12 @@ static wmOperatorStatus sculpt_multires_layer_group_collapse_exec(bContext *C, w
   if (ob == nullptr) return OPERATOR_CANCELLED;
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
+  if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
   const int group_id = RNA_int_get(op->ptr, "group_id");
   if (!bke::multires_layers::group_toggle_collapsed(*mmd, group_id)) {
     return OPERATOR_CANCELLED;
   }
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  sculpt_layer_metadata_notify(C, *ob);
   return OPERATOR_FINISHED;
 }
 
@@ -3922,6 +4058,7 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_multires_layer_group_rename);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_move);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_dissolve);
+  WM_operatortype_append(SCULPT_OT_multires_layer_group_delete);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_merge);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_with_below);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_remove);

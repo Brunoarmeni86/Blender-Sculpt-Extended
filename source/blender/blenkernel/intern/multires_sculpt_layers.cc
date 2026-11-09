@@ -3272,7 +3272,6 @@ bool move(MultiresModifierData &mmd, const int from_index, const int to_index)
     return false;
   }
 
-  mmd.sculpt_layer_recording = 0;
   if (active_layer != nullptr) {
     const int active_index = BLI_findindex(&mmd.sculpt_layers, active_layer);
     mmd.sculpt_layer_active = active_index >= 0 ? active_index : 0;
@@ -3367,7 +3366,11 @@ bool group_with_below(MultiresModifierData &mmd)
   if (below_old == 0) {
     group_assign(*below, target_id, target_name, target_flag);
   }
-  mmd.sculpt_layer_recording = 0;
+  if (MultiresSculptLayer *active_layer = active(mmd);
+      active_layer && !(active_layer->flag & MULTIRES_SCULPT_LAYER_VISIBLE))
+  {
+    mmd.sculpt_layer_recording = 0;
+  }
   return true;
 }
 
@@ -3382,7 +3385,6 @@ bool group_create_from_active(MultiresModifierData &mmd)
   char name[64];
   BLI_snprintf(name, sizeof(name), "Group %d", group_id);
   group_assign(*layer, group_id, name, 0);
-  mmd.sculpt_layer_recording = 0;
   return true;
 }
 
@@ -3415,7 +3417,9 @@ bool group_add_active(MultiresModifierData &mmd, const int group_id)
   BLI_insertlinkafter(&mmd.sculpt_layers, target_last, layer);
   group_assign(*layer, group_id, target_name, target_flag);
   mmd.sculpt_layer_active = BLI_findindex(&mmd.sculpt_layers, layer);
-  mmd.sculpt_layer_recording = 0;
+  if (!(layer->flag & MULTIRES_SCULPT_LAYER_VISIBLE)) {
+    mmd.sculpt_layer_recording = 0;
+  }
   return true;
 }
 
@@ -3494,7 +3498,6 @@ bool group_move(MultiresModifierData &mmd, const int group_id, const int directi
   }
 
   mmd.sculpt_layer_active = active_layer ? BLI_findindex(&mmd.sculpt_layers, active_layer) : 0;
-  mmd.sculpt_layer_recording = 0;
   return true;
 }
 
@@ -3512,10 +3515,44 @@ bool group_dissolve(MultiresModifierData &mmd, const int group_id)
       found = true;
     }
   }
-  if (found) {
-    mmd.sculpt_layer_recording = 0;
-  }
   return found;
+}
+
+bool group_delete(MultiresModifierData &mmd, const int group_id)
+{
+  if (group_id <= 0) {
+    return false;
+  }
+  std::vector<MultiresSculptLayer *> members;
+  MultiresSculptLayer *active_layer = active(mmd);
+  int first_index = -1;
+  int index = 0;
+  for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (layer.group_id == group_id) {
+      if (first_index < 0) {
+        first_index = index;
+      }
+      members.push_back(&layer);
+    }
+    index++;
+  }
+  if (members.empty()) {
+    return false;
+  }
+  const bool active_removed = std::find(members.begin(), members.end(), active_layer) !=
+                              members.end();
+  for (MultiresSculptLayer *layer : members) {
+    remove(mmd, *layer);
+  }
+  if (!active_removed && active_layer != nullptr) {
+    const int active_index = BLI_findindex(&mmd.sculpt_layers, active_layer);
+    mmd.sculpt_layer_active = active_index >= 0 ? active_index : 0;
+  }
+  else if (!mmd.sculpt_layers.is_empty()) {
+    mmd.sculpt_layer_active = std::clamp(first_index, 0, mmd.sculpt_layers.count() - 1);
+  }
+  mmd.sculpt_layer_recording = 0;
+  return true;
 }
 
 bool group_merge(MultiresModifierData &mmd, const int group_id)
@@ -3556,7 +3593,6 @@ bool group_remove_active(MultiresModifierData &mmd)
   }
   /* Remove the row at the folder border, preserving the remaining block. */
   group_assign(*layer, 0, "", 0);
-  mmd.sculpt_layer_recording = 0;
   return true;
 }
 

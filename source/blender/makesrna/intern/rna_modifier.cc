@@ -1447,6 +1447,16 @@ static void rna_MultiresSculptLayer_name_set(PointerRNA *ptr, const char *value)
   }
 }
 
+static void rna_MultiresSculptLayer_name_update(
+    Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
+{
+  /* A layer label does not change modifier relations or evaluated geometry.
+   * Rebuilding the dependency graph here made ordinary renaming scale with the
+   * complete scene and Multires stack. Redraw only the layer UIs. */
+  WM_main_add_notifier(NC_OBJECT | ND_DRAW, ptr->owner_id);
+  WM_main_add_notifier(NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
+}
+
 /* LAYER_WEIGHT_PROFILE_V2_3_FIX */
 static bool rna_multires_visible_fast_refresh(Object &ob,
                                                const MultiresSculptLayer &layer,
@@ -3826,7 +3836,8 @@ static void rna_def_modifier_multires_sculpt_layer(BlenderRNA *brna)
   RNA_def_property_string_funcs(prop, nullptr, nullptr, "rna_MultiresSculptLayer_name_set");
   RNA_def_struct_name_property(srna, prop);
   RNA_def_property_ui_text(prop, "Name", "Layer name");
-  RNA_def_property_update(prop, NC_OBJECT | ND_MODIFIER | NA_RENAME, "rna_Modifier_name_update");
+  RNA_def_property_update(
+      prop, NC_OBJECT | ND_DRAW | NA_RENAME, "rna_MultiresSculptLayer_name_update");
 
   prop = RNA_def_property(srna, "strength", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "strength");

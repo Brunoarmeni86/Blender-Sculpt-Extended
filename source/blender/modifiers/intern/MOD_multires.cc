@@ -996,6 +996,9 @@ static void panel_draw(const bContext *C, Panel *panel)
         PointerRNA dissolve_group_ptr = group_row.op(
             "SCULPT_OT_multires_layer_group_dissolve", "", ICON_X);
         RNA_int_set(&dissolve_group_ptr, "group_id", layer->group_id);
+        PointerRNA delete_group_ptr = group_row.op(
+            "SCULPT_OT_multires_layer_group_delete", "", ICON_TRASH);
+        RNA_int_set(&delete_group_ptr, "group_id", layer->group_id);
       }
 
       last_sculpt_group_id = layer->group_id;
