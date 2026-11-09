@@ -37,6 +37,31 @@ This guard is **COMPILE-VALIDATED** with Visual Studio 2022 (MSVC 19.44) and the
 headless regression suite passes, but the exact interactive Multires Sculpt Layer sequence
 still requires user validation.
 
+**Root cause isolated after the repeated user reproduction:** changing the Object-owned
+Combined setting schedules dependency-graph evaluation while the last Multires stroke is
+still present only in the live CCG. Blender's legacy pre-evaluation cleanup in
+`object_update_from_subsurf_ccg()` calls `multiresModifier_reshapeFromCCG()` directly. That
+path writes the already composed live surface into native `CD_MDISPS`; it does not use the
+Sculpt-Layer-aware commit path. Visible layer contributions can therefore be incorporated
+in the native base and then evaluated again, which presents as multiplied Strength. This is
+separate from the number and ownership of symmetry passes.
+
+**Scoped candidate correction:** the experimental Combined toggle now calls
+`SCULPT_OT_multires_layer_commit` before changing Object metadata when a Multires Sculpt
+Layer stack exists. If the pending surface cannot be published safely to the active layer,
+the symmetry change is cancelled. Plain meshes and Multires objects without Sculpt Layers
+keep the metadata-only path. This avoids changing Blender's global dependency-graph cleanup
+until its evaluated/original modifier synchronization can be redesigned and tested broadly.
+
+**Evidence status:** **BLENDER-RUNTIME-VALIDATED on the automated transition fixture;
+USER-MODEL-VALIDATION PENDING**. The fixture executes a real Draw stroke with local X plus
+reference Y symmetry, leaves coordinates pending, disables Combined through the same UI
+operator and fingerprints the three storage domains. Before the correction the toggle
+cleared `pending_coords`, changed `native_hash`, left the layer hash unchanged and preserved
+the live surface only because that same surface had been baked into the base. After the
+correction the native hash stays unchanged, the active-layer hash changes, and the live
+surface hash is identical before and after both the toggle and dependency-graph update.
+
 ### #15 — topological seam seed
 
 **Finding:** `symmetry_shape_v2.topology_pairs()` referenced `ordered`, a local variable of
@@ -88,6 +113,17 @@ are not validated by this run.
 9. Follow-up native guard build with Visual Studio 2022 Build Tools 17.14 / MSVC 19.44:
    **PASS**. The full executable and Sculpt target compiled; the same headless fixture passed
    on hash `4f7067ca02d8` plus the uncommitted native guard. No release package was modified.
+10. Targeted real-stroke transition probe before the scoped commit: **REPRODUCED**.
+    - pending live CCG position hash changed after the stroke;
+    - disabling Combined cleared the pending flag;
+    - native Multires hash changed from `8cbaae51cee4c25a` to `58aadf44fa3c755f`;
+    - active Sculpt Layer grid hash remained `c84586b9c4ccf7ba`.
+11. The same probe after committing before the Object-property transition: **PASS**.
+    - native Multires hash remained `8cbaae51cee4c25a`;
+    - active layer grid hash changed from `c84586b9c4ccf7ba` to `c5c1679a85cf90d2`;
+    - live surface position hash remained `17819917386554150618` across immediate toggle,
+      dependency-graph update and explicit follow-up Commit.
+    The fixture is `doc/sculpt_extended/tests/symmetry_strength_transition_probe.py`.
 
 The earlier baseline-package run reported build timestamp `2026-11-01 15:09:11` and
 `hash unknown`. No benchmark was executed.
