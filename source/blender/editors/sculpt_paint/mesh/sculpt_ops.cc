@@ -1886,6 +1886,109 @@ static void SCULPT_OT_multires_layer_group_add_active(wmOperatorType *ot)
   RNA_def_int(ot->srna, "group_id", 0, 0, INT_MAX, "Group", "Group identifier", 0, INT_MAX);
 }
 
+static wmOperatorStatus sculpt_multires_layer_group_rename_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr) return OPERATOR_CANCELLED;
+  MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
+  if (mmd == nullptr) return OPERATOR_CANCELLED;
+  const int group_id = RNA_int_get(op->ptr, "group_id");
+  char name[64];
+  RNA_string_get(op->ptr, "name", name);
+  if (!bke::multires_layers::group_rename(*mmd, group_id, name)) {
+    BKE_report(op->reports, RPT_ERROR, "Enter a non-empty name for an existing group");
+    return OPERATOR_CANCELLED;
+  }
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  return OPERATOR_FINISHED;
+}
+
+static wmOperatorStatus sculpt_multires_layer_group_rename_invoke(bContext *C,
+                                                                  wmOperator *op,
+                                                                  const wmEvent * /*event*/)
+{
+  return WM_operator_props_dialog_popup(
+      C, op, 260, IFACE_("Rename Sculpt Layer Group"), IFACE_("Rename"));
+}
+
+static void SCULPT_OT_multires_layer_group_rename(wmOperatorType *ot)
+{
+  ot->name = "Rename Sculpt Layer Group";
+  ot->idname = "SCULPT_OT_multires_layer_group_rename";
+  ot->description = "Rename this organizational Sculpt Layer folder";
+  ot->invoke = sculpt_multires_layer_group_rename_invoke;
+  ot->exec = sculpt_multires_layer_group_rename_exec;
+  ot->poll = sculpt_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  RNA_def_int(ot->srna, "group_id", 0, 0, INT_MAX, "Group", "Group identifier", 0, INT_MAX);
+  RNA_def_string(ot->srna, "name", nullptr, 64, "Name", "New group name");
+}
+
+static wmOperatorStatus sculpt_multires_layer_group_move_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr) return OPERATOR_CANCELLED;
+  MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
+  if (mmd == nullptr || !sculpt_multires_layer_commit(*ob, *op)) {
+    return OPERATOR_CANCELLED;
+  }
+  const int group_id = RNA_int_get(op->ptr, "group_id");
+  const int direction = RNA_enum_get(op->ptr, "direction");
+  if (!bke::multires_layers::group_move(*mmd, group_id, direction)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* Folder order is organizational; additive layer composition is unchanged. */
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_OT_multires_layer_group_move(wmOperatorType *ot)
+{
+  static const EnumPropertyItem direction_items[] = {
+      {-1, "UP", ICON_TRIA_UP, "Up", "Move the complete group up"},
+      {1, "DOWN", ICON_TRIA_DOWN, "Down", "Move the complete group down"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  ot->name = "Move Sculpt Layer Group";
+  ot->idname = "SCULPT_OT_multires_layer_group_move";
+  ot->description = "Move this folder and all its layers as one block";
+  ot->exec = sculpt_multires_layer_group_move_exec;
+  ot->poll = sculpt_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  RNA_def_int(ot->srna, "group_id", 0, 0, INT_MAX, "Group", "Group identifier", 0, INT_MAX);
+  RNA_def_enum(ot->srna, "direction", direction_items, -1, "Direction", "Move direction");
+}
+
+static wmOperatorStatus sculpt_multires_layer_group_dissolve_exec(bContext *C, wmOperator *op)
+{
+  Object *ob = CTX_data_active_object(C);
+  if (ob == nullptr) return OPERATOR_CANCELLED;
+  MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
+  if (mmd == nullptr || !sculpt_multires_layer_commit(*ob, *op)) {
+    return OPERATOR_CANCELLED;
+  }
+  const int group_id = RNA_int_get(op->ptr, "group_id");
+  if (!bke::multires_layers::group_dissolve(*mmd, group_id)) {
+    return OPERATOR_CANCELLED;
+  }
+  /* Dissolving a hidden group restores each layer's saved visibility. */
+  multires_force_sculpt_rebuild(ob);
+  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+  return OPERATOR_FINISHED;
+}
+
+static void SCULPT_OT_multires_layer_group_dissolve(wmOperatorType *ot)
+{
+  ot->name = "Dissolve Sculpt Layer Group";
+  ot->idname = "SCULPT_OT_multires_layer_group_dissolve";
+  ot->description = "Delete only this folder and keep every contained Sculpt Layer";
+  ot->exec = sculpt_multires_layer_group_dissolve_exec;
+  ot->poll = sculpt_mode_poll;
+  ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  RNA_def_int(ot->srna, "group_id", 0, 0, INT_MAX, "Group", "Group identifier", 0, INT_MAX);
+}
+
 static wmOperatorStatus sculpt_multires_layer_group_merge_exec(bContext *C, wmOperator *op)
 {
   Object *ob = CTX_data_active_object(C);
@@ -1953,6 +2056,10 @@ static wmOperatorStatus sculpt_multires_layer_group_remove_exec(bContext *C, wmO
   MultiresModifierData *mmd = sculpt_multires_layer_modifier(*ob);
   if (mmd == nullptr) return OPERATOR_CANCELLED;
   if (!sculpt_multires_layer_commit(*ob, *op)) return OPERATOR_CANCELLED;
+  const int index = RNA_int_get(op->ptr, "index");
+  if (index >= 0) {
+    bke::multires_layers::set_active(*mmd, index);
+  }
   if (!bke::multires_layers::group_remove_active(*mmd)) {
     BKE_report(op->reports, RPT_ERROR, "Active layer is not in a group");
     return OPERATOR_CANCELLED;
@@ -1971,6 +2078,7 @@ static void SCULPT_OT_multires_layer_group_remove(wmOperatorType *ot)
   ot->exec = sculpt_multires_layer_group_remove_exec;
   ot->poll = sculpt_mode_poll;
   ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+  RNA_def_int(ot->srna, "index", -1, -1, INT_MAX, "Layer", "Layer index, or active layer", -1, 1000);
 }
 
 static wmOperatorStatus sculpt_multires_layer_group_visibility_exec(bContext *C, wmOperator *op)
@@ -3811,6 +3919,9 @@ void operatortypes_sculpt()
   WM_operatortype_append(SCULPT_OT_multires_layer_set_active);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_create);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_add_active);
+  WM_operatortype_append(SCULPT_OT_multires_layer_group_rename);
+  WM_operatortype_append(SCULPT_OT_multires_layer_group_move);
+  WM_operatortype_append(SCULPT_OT_multires_layer_group_dissolve);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_merge);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_with_below);
   WM_operatortype_append(SCULPT_OT_multires_layer_group_remove);

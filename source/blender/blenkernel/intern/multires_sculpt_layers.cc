@@ -3419,6 +3419,105 @@ bool group_add_active(MultiresModifierData &mmd, const int group_id)
   return true;
 }
 
+bool group_rename(MultiresModifierData &mmd, const int group_id, const char *name)
+{
+  if (group_id <= 0 || name == nullptr || name[0] == '\0') {
+    return false;
+  }
+  bool found = false;
+  for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (layer.group_id == group_id) {
+      BLI_strncpy(layer.group_name, name, sizeof(layer.group_name));
+      found = true;
+    }
+  }
+  return found;
+}
+
+bool group_move(MultiresModifierData &mmd, const int group_id, const int direction)
+{
+  if (group_id <= 0 || !ELEM(direction, -1, 1) ||
+      !group_order_contiguous(group_stack_order(mmd)))
+  {
+    return false;
+  }
+
+  std::vector<MultiresSculptLayer *> members;
+  MultiresSculptLayer *first = nullptr;
+  MultiresSculptLayer *last = nullptr;
+  for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (layer.group_id == group_id) {
+      if (first == nullptr) {
+        first = &layer;
+      }
+      last = &layer;
+      members.push_back(&layer);
+    }
+  }
+  if (members.empty()) {
+    return false;
+  }
+
+  MultiresSculptLayer *active_layer = active(mmd);
+  if (direction < 0) {
+    MultiresSculptLayer *anchor = first->prev;
+    if (anchor == nullptr) {
+      return false;
+    }
+    if (anchor->group_id != 0) {
+      const int adjacent_group = anchor->group_id;
+      while (anchor->prev && anchor->prev->group_id == adjacent_group) {
+        anchor = anchor->prev;
+      }
+    }
+    for (MultiresSculptLayer *member : members) {
+      BLI_remlink(&mmd.sculpt_layers, member);
+      BLI_insertlinkbefore(&mmd.sculpt_layers, anchor, member);
+    }
+  }
+  else {
+    MultiresSculptLayer *anchor = last->next;
+    if (anchor == nullptr) {
+      return false;
+    }
+    if (anchor->group_id != 0) {
+      const int adjacent_group = anchor->group_id;
+      while (anchor->next && anchor->next->group_id == adjacent_group) {
+        anchor = anchor->next;
+      }
+    }
+    for (MultiresSculptLayer *member : members) {
+      BLI_remlink(&mmd.sculpt_layers, member);
+      BLI_insertlinkafter(&mmd.sculpt_layers, anchor, member);
+      anchor = member;
+    }
+  }
+
+  mmd.sculpt_layer_active = active_layer ? BLI_findindex(&mmd.sculpt_layers, active_layer) : 0;
+  mmd.sculpt_layer_recording = 0;
+  return true;
+}
+
+bool group_dissolve(MultiresModifierData &mmd, const int group_id)
+{
+  if (group_id <= 0) {
+    return false;
+  }
+  bool found = false;
+  for (MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (layer.group_id == group_id) {
+      /* Restore each member's individual visibility if the folder was hidden,
+       * then remove organizational metadata only. Payloads and layer rows stay. */
+      group_assign(layer, 0, "", 0);
+      found = true;
+    }
+  }
+  if (found) {
+    mmd.sculpt_layer_recording = 0;
+  }
+  return found;
+}
+
 bool group_merge(MultiresModifierData &mmd, const int group_id)
 {
   if (group_id <= 0 || !group_order_contiguous(group_stack_order(mmd))) {

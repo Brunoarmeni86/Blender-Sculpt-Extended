@@ -150,7 +150,19 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
                     'sculpt.multires_layer_group_collapse', text='', emboss=False,
                     icon='TRIA_RIGHT' if layer.group_collapsed else 'TRIA_DOWN')
                 op.group_id = group_id
-                group.label(text=layer.group_name or 'Group', icon='FILE_FOLDER')
+                op = group.operator(
+                    'sculpt.multires_layer_group_rename',
+                    text=layer.group_name or 'Group', icon='FILE_FOLDER')
+                op.group_id = group_id
+                op.name = layer.group_name or 'Group'
+                op = group.operator('sculpt.multires_layer_group_move', text='',
+                                    icon='TRIA_UP', emboss=False)
+                op.group_id = group_id
+                op.direction = 'UP'
+                op = group.operator('sculpt.multires_layer_group_move', text='',
+                                    icon='TRIA_DOWN', emboss=False)
+                op.group_id = group_id
+                op.direction = 'DOWN'
                 op = group.operator(
                     'sculpt.multires_layer_group_visibility', text='', emboss=False,
                     icon='HIDE_ON' if layer.group_hidden else 'HIDE_OFF')
@@ -158,8 +170,8 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
                 op = group.operator('sculpt.multires_layer_group_add_active', text='',
                                     icon='ADD', emboss=False)
                 op.group_id = group_id
-                op = group.operator('sculpt.multires_layer_group_merge', text='',
-                                    icon='AUTOMERGE_ON', emboss=False)
+                op = group.operator('sculpt.multires_layer_group_dissolve', text='',
+                                    icon='X', emboss=False)
                 op.group_id = group_id
             last_group = group_id
             if group_id and layer.group_collapsed:
@@ -183,6 +195,10 @@ class VIEW3D_PT_sculpt_multires_layers_sidebar(bpy.types.Panel):
             deferred.layer_index = index
             item.prop(layer, 'visible', text='', emboss=False,
                       icon='HIDE_OFF' if layer.visible else 'HIDE_ON')
+            if group_id:
+                op = item.operator('sculpt.multires_layer_group_remove', text='',
+                                   icon='X', emboss=False)
+                op.index = index
         if not modifier.sculpt_layers:
             layer_list.label(text='No Sculpt Layers', icon='INFO')
         side = row.column(align=True)

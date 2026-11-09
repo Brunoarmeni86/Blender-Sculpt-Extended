@@ -8,6 +8,7 @@ import bpy
 import json
 import math
 import os
+import time
 from pathlib import Path
 import traceback
 from bpy_extras import view3d_utils
@@ -135,9 +136,12 @@ def run():
     real_stroke()
     after_stroke = snapshot("01_after_stroke_pending")
 
-    # Use the same UI operator as the experimental panel.
+    # Assign the same RNA Boolean drawn by the UI checkbox. Its update callback
+    # must publish pending CCG coordinates before dependency-graph evaluation.
     with view_context():
-        assert bpy.ops.sculpt.symref_toggle_combine() == {"FINISHED"}
+        start = time.perf_counter()
+        settings.combine_local = False
+        disable_ms = (time.perf_counter() - start) * 1000.0
     immediate = snapshot("02_toggle_immediate")
     bpy.context.view_layer.update()
     yield 0.5
@@ -156,6 +160,12 @@ def run():
 
     with view_context():
         commit_result = bpy.ops.sculpt.multires_layer_commit()
+        start = time.perf_counter()
+        settings.combine_local = True
+        enable_clean_ms = (time.perf_counter() - start) * 1000.0
+        start = time.perf_counter()
+        settings.combine_local = False
+        disable_clean_ms = (time.perf_counter() - start) * 1000.0
     yield 0.3
     after_commit = snapshot("04_explicit_commit")
 
@@ -163,6 +173,11 @@ def run():
         "combine_after": bool(settings.combine_local),
         "reference_strokes_after": bool(obj.sculpt_symmetry_reference_use_for_strokes),
         "commit_result": sorted(commit_result),
+        "checkbox_timing_ms": {
+            "disable_with_pending_stroke": disable_ms,
+            "enable_clean": enable_clean_ms,
+            "disable_clean": disable_clean_ms,
+        },
         "hashes": {
             label: {
                 "positions": data["positions_hash"],

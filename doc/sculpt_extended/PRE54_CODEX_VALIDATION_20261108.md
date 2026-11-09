@@ -124,6 +124,40 @@ are not validated by this run.
     - live surface position hash remained `17819917386554150618` across immediate toggle,
       dependency-graph update and explicit follow-up Commit.
     The fixture is `doc/sculpt_extended/tests/symmetry_strength_transition_probe.py`.
+12. Checkbox transition follow-up on the Visual Studio 2022 candidate: **PASS**.
+    The custom push-button was removed and `combine_local` is again drawn as a normal RNA
+    Boolean checkbox. Its update callback performs the same guarded pre-commit before
+    dependency-graph evaluation. On the real-stroke fixture, disabling with pending
+    coordinates took **8.48 ms**, clean enabling **0.10 ms**, and clean disabling
+    **8.58 ms**. These are small-fixture timings, not production-scale benchmarks.
+13. Sculpt Layer group behavior probe: **PASS for create, rename, whole-group move,
+    layer move out/in, hidden-state restoration and non-destructive dissolve**. Four layers
+    remained present with the same names, strengths and individual visibility states after
+    the folder was dissolved. The first Undo/Redo extension required reacquiring the RNA
+    modifier after Blender restored the datablock; the corrected Undo/Redo extension was
+    not rerun because manual testing was handed to the user.
+14. Visual Studio 2022 full candidate build after the checkbox/group changes: **PASS**.
+    Candidate executable SHA-256:
+    `AF0F3F9828D1131D3880A9EA2E181AFF49DFDC3C6A755652FDDD3BDA4874530A`.
+    The full pre-5.4 symmetry/remesh headless fixture also passed on this binary.
+
+## Sculpt Layer group candidate (2026-11-09)
+
+Groups remain lightweight organizational metadata on existing Sculpt Layer rows; no DNA
+layout or `.blend` format migration was introduced. The candidate adds:
+
+- rename propagated to every layer in the group;
+- whole-folder up/down movement without splitting its contiguous layer block;
+- direct movement of a layer into a group or out of it;
+- folder dissolve that removes only group metadata and retains every layer/payload;
+- restoration of each member's saved visibility when a hidden folder is dissolved;
+- matching controls in the Multires modifier and Sculpt Layers sidebar.
+
+The previous destructive **Merge Group** backend remains available to code, but its header
+icon was replaced by the non-destructive dissolve action to avoid confusing folder deletion
+with payload merging. Literal Outliner drag-and-drop is not implemented in this compact
+panel candidate; membership and ordering use explicit controls with the same non-destructive
+container semantics.
 
 The earlier baseline-package run reported build timestamp `2026-11-01 15:09:11` and
 `hash unknown`. No benchmark was executed.

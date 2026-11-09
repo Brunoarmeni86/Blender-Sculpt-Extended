@@ -254,6 +254,9 @@ def snapshot(s):
     return {p.identifier: (tuple(getattr(s,p.identifier)) if getattr(p,'is_array',False) else getattr(s,p.identifier))
             for p in s.bl_rna.properties if p.identifier not in {'rna_type', 'name'} and not p.is_readonly}
 
+_combine_update_guard = False
+
+
 def update_combine_local(settings, context):
     """Leaving double symmetry returns to native local mirroring by default.
 
@@ -262,7 +265,31 @@ def update_combine_local(settings, context):
     implicit reinterpretation of object-local X/Y/Z axes in the reference frame.
     Stroke passes are frozen at stroke start by the native Sculpt path.
     """
+    global _combine_update_guard
+    if _combine_update_guard:
+        redraw()
+        return
+
     ob=sculpt_object(context)
+    # A normal RNA checkbox writes the new value before entering its update
+    # callback, but dependency-graph evaluation is still deferred. Commit the
+    # live CCG through the Sculpt-Layer-aware path in this window, before the
+    # Object metadata change can be evaluated by object_update_from_subsurf_ccg.
+    # The commit is a no-op fast path when no stroke coordinates are pending.
+    if ob is not None and context.mode=='SCULPT':
+        multires=next((m for m in ob.modifiers if m.type=='MULTIRES'),None)
+        if multires and len(multires.sculpt_layers):
+            result=bpy.ops.sculpt.multires_layer_commit()
+            if result!={'FINISHED'}:
+                # RNA update callbacks cannot report/cancel. Restore the old
+                # Boolean without re-entering this transaction instead.
+                _combine_update_guard=True
+                try:
+                    settings.combine_local=not settings.combine_local
+                finally:
+                    _combine_update_guard=False
+                redraw()
+                return
     if NATIVE_BACKEND and ob is not None:
         local_active=any(getattr(ob.data,'use_mirror_'+axis,False) for axis in 'xyz')
         if settings.combine_local:
@@ -484,33 +511,6 @@ class SCULPT_OT_symref_reset_preview(bpy.types.Operator):
         if self.what in {'ROTATION','ALL'}:set_reference_rotation(c.object,(0,0,0))
         c.object.sculpt_symmetry_reference_enabled=True;redraw();return {'FINISHED'}
 
-class SCULPT_OT_symref_toggle_combine(bpy.types.Operator):
-    bl_idname='sculpt.symref_toggle_combine'
-    bl_label='Combina simmetria locale'
-    bl_description='Registra le pennellate Multires pendenti, poi cambia i passaggi di simmetria'
-
-    @classmethod
-    def poll(cls,c):return bool(sculpt_object(c))
-
-    def execute(self,c):
-        settings=c.object.sculpt_symref_preview
-        # An Object-property change schedules dependency-graph evaluation. The
-        # legacy pre-evaluation CCG flush writes directly to native MDisps and
-        # bypasses Sculpt Layers. Publish pending coordinates through the
-        # layer-aware path *before* changing Object metadata, while COW still
-        # receives the newly committed layer payload from the original object.
-        if c.mode=='SCULPT':
-            multires=next((m for m in c.object.modifiers if m.type=='MULTIRES'),None)
-            if multires and len(multires.sculpt_layers):
-                result=bpy.ops.sculpt.multires_layer_commit()
-                if result!={'FINISHED'}:
-                    self.report({'ERROR'},'Impossibile registrare la pennellata nel layer attivo; cambio simmetria annullato')
-                    return {'CANCELLED'}
-        settings.combine_local=not settings.combine_local
-        redraw()
-        return {'FINISHED'}
-
-
 def draw_settings(layout,c):
     ob=sculpt_object(c)
     if not ob:return
@@ -518,7 +518,7 @@ def draw_settings(layout,c):
     box=layout.box();box.label(text='Riferimento simmetria · Anteprima')
     if NATIVE_BACKEND and c.mode=='SCULPT':
         ensure_native_reference(ob);box.prop(ob,'sculpt_symmetry_reference_use_for_strokes',text='Usa riferimento per i pennelli')
-        box.operator('sculpt.symref_toggle_combine',depress=s.combine_local)
+        box.prop(s,'combine_local')
         if not s.combine_local and any(getattr(ob.data,'use_mirror_'+axis,False) for axis in 'xyz'):
             box.label(text='Sola simmetria locale (riattiva Usa riferimento per cambiarla)',icon='INFO')
         if s.combine_local:
@@ -711,7 +711,7 @@ class VIEW3D_PT_edit_symmetry_reference_preview(bpy.types.Panel):
 classes=(MESH_OT_symmetrize_reference_preview,VIEW3D_PT_edit_symmetry_reference_preview,SculptSymmetryReferencePreview,SCULPT_OT_symref_edit_preview,SCULPT_OT_symref_finish_preview,SCULPT_OT_symref_cursor_preview,SCULPT_OT_symref_anchor_preview,SCULPT_OT_symref_detach_preview,SCULPT_OT_symref_place_preview,SCULPT_OT_symref_reset_preview,VIEW3D_GGT_sculpt_symref_preview)
 def register():
     global _handle
-    for cls in (*classes,SCULPT_OT_symref_toggle_combine):bpy.utils.register_class(cls)
+    for cls in classes:bpy.utils.register_class(cls)
     bpy.types.Object.sculpt_symref_preview=PointerProperty(type=SculptSymmetryReferencePreview)
     import importlib.util,sys
     from pathlib import Path
@@ -766,7 +766,7 @@ def unregister():
     bpy.utils.unregister_class(_hotkey_class)
     bpy.utils.unregister_class(_shape_class)
     del bpy.types.Object.sculpt_symref_preview
-    for cls in reversed((*classes,SCULPT_OT_symref_toggle_combine)):bpy.utils.unregister_class(cls)
+    for cls in reversed(classes):bpy.utils.unregister_class(cls)
     _session=None
     _last_anchor.clear()
 

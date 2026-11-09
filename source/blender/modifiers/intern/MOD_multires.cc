@@ -963,8 +963,23 @@ static void panel_draw(const bContext *C, Panel *panel)
             group_collapsed ? ICON_TRIA_RIGHT : ICON_TRIA_DOWN);
         RNA_int_set(&collapse_ptr, "group_id", layer->group_id);
 
-        group_row.label(layer->group_name[0] ? layer->group_name : IFACE_("Group"),
-                        ICON_FILE_FOLDER);
+        PointerRNA rename_ptr = group_row.op(
+            "SCULPT_OT_multires_layer_group_rename",
+            layer->group_name[0] ? layer->group_name : IFACE_("Group"),
+            ICON_FILE_FOLDER);
+        RNA_int_set(&rename_ptr, "group_id", layer->group_id);
+        RNA_string_set(&rename_ptr,
+                       "name",
+                       layer->group_name[0] ? layer->group_name : IFACE_("Group"));
+
+        PointerRNA group_up_ptr = group_row.op(
+            "SCULPT_OT_multires_layer_group_move", "", ICON_TRIA_UP);
+        RNA_int_set(&group_up_ptr, "group_id", layer->group_id);
+        RNA_enum_set(&group_up_ptr, "direction", -1);
+        PointerRNA group_down_ptr = group_row.op(
+            "SCULPT_OT_multires_layer_group_move", "", ICON_TRIA_DOWN);
+        RNA_int_set(&group_down_ptr, "group_id", layer->group_id);
+        RNA_enum_set(&group_down_ptr, "direction", 1);
 
         PointerRNA visibility_ptr = group_row.op(
             "SCULPT_OT_multires_layer_group_visibility",
@@ -978,11 +993,9 @@ static void panel_draw(const bContext *C, Panel *panel)
             ICON_ADD);
         RNA_int_set(&add_active_ptr, "group_id", layer->group_id);
 
-        PointerRNA merge_group_ptr = group_row.op(
-            "SCULPT_OT_multires_layer_group_merge",
-            "",
-            ICON_AUTOMERGE_ON);
-        RNA_int_set(&merge_group_ptr, "group_id", layer->group_id);
+        PointerRNA dissolve_group_ptr = group_row.op(
+            "SCULPT_OT_multires_layer_group_dissolve", "", ICON_X);
+        RNA_int_set(&dissolve_group_ptr, "group_id", layer->group_id);
       }
 
       last_sculpt_group_id = layer->group_id;
@@ -1005,6 +1018,11 @@ static void panel_draw(const bContext *C, Panel *panel)
       row.prop(&layer_ptr, "visible", UI_ITEM_NONE, std::nullopt, ICON_NONE);
       row.prop(&layer_ptr, "name", UI_ITEM_NONE, std::nullopt, ICON_NONE);
       row.prop(&layer_ptr, "strength", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+      if (layer->group_id != 0) {
+        PointerRNA remove_group_ptr = row.op(
+            "SCULPT_OT_multires_layer_group_remove", "", ICON_X);
+        RNA_int_set(&remove_group_ptr, "index", i);
+      }
       PointerRNA solo_ptr = row.op("SCULPT_OT_multires_layer_solo",
                                    "",
                                    ICON_RESTRICT_VIEW_OFF);
