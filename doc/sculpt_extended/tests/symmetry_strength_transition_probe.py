@@ -32,7 +32,7 @@ def snapshot(label):
     path = OUT / f"{label}.json"
     with view_context():
         result = bpy.ops.sculpt.polypaint_blur_probe_v01(
-            action="SUMMARY", filepath=str(path))
+            action="EXPORT", filepath=str(path))
         assert result == {"FINISHED"}, (label, result)
         result = bpy.ops.sculpt.multires_base_fingerprint(
             label=label, include_layer_payloads=True, include_surface=True)
@@ -42,6 +42,20 @@ def snapshot(label):
           "positions=" + data["positions_hash"],
           "layers=" + data["layer_hash"], flush=True)
     return data
+
+
+def position_error(left, right):
+    assert len(left["positions"]) == len(right["positions"])
+    max_component = 0.0
+    sum_squared = 0.0
+    components = 0
+    for a, b in zip(left["positions"], right["positions"]):
+        for x, y in zip(a, b):
+            delta = abs(x - y)
+            max_component = max(max_component, delta)
+            sum_squared += delta * delta
+            components += 1
+    return max_component, math.sqrt(sum_squared / max(1, components))
 
 
 def activate_draw_brush():
@@ -106,6 +120,7 @@ def setup():
         for vertex in obj.data.vertices:
             direction = vertex.co.normalized()
             vertex.co = direction * (1.0 + 0.025 * math.sin(direction.x * 9.0))
+        obj.data.color_attributes.new(name="Color", type="FLOAT_COLOR", domain="CORNER")
         obj.modifiers.new("Multires", "MULTIRES")
         bpy.ops.object.mode_set(mode="SCULPT")
         bpy.ops.view3d.view_axis(type="TOP", align_active=False)
@@ -124,8 +139,9 @@ def setup():
         obj.sculpt_symmetry_reference_location = (0.0, 0.0, 0.0)
         obj.sculpt_symmetry_reference_rotation = (0.0, 0.0, 0.0)
         obj.sculpt_symmetry_reference_valid = True
-        settings.combine_local = True
-        obj.sculpt_symmetry_reference_use_for_strokes = True
+        obj.sculpt_symmetry_reference_axes = (False, True, False)
+        obj.sculpt_symmetry_routing_valid = True
+        obj.sculpt_symmetry_combine_local = True
         return obj, settings
 
 
@@ -136,11 +152,11 @@ def run():
     real_stroke()
     after_stroke = snapshot("01_after_stroke_pending")
 
-    # Assign the same RNA Boolean drawn by the UI checkbox. Its update callback
-    # must publish pending CCG coordinates before dependency-graph evaluation.
+    # Assign the native RNA Boolean drawn by the UI checkbox. Its setter must
+    # publish pending CCG coordinates before changing future stroke routing.
     with view_context():
         start = time.perf_counter()
-        settings.combine_local = False
+        obj.sculpt_symmetry_combine_local = False
         disable_ms = (time.perf_counter() - start) * 1000.0
     immediate = snapshot("02_toggle_immediate")
     bpy.context.view_layer.update()
@@ -161,22 +177,74 @@ def run():
     with view_context():
         commit_result = bpy.ops.sculpt.multires_layer_commit()
         start = time.perf_counter()
-        settings.combine_local = True
+        obj.sculpt_symmetry_combine_local = True
         enable_clean_ms = (time.perf_counter() - start) * 1000.0
         start = time.perf_counter()
-        settings.combine_local = False
+        obj.sculpt_symmetry_combine_local = False
         disable_clean_ms = (time.perf_counter() - start) * 1000.0
+        start = time.perf_counter()
+        obj.sculpt_symmetry_reference_axes = (False, False, True)
+        axes_clean_ms = (time.perf_counter() - start) * 1000.0
     yield 0.3
     after_commit = snapshot("04_explicit_commit")
 
+    # A generic Multires setting also schedules geometry evaluation. Pending
+    # Sculpt Layer coordinates must be published before that evaluation can
+    # reach object_update_from_subsurf_ccg and reshape the native base.
+    real_stroke()
+    before_modifier_update = snapshot("05_before_modifier_update_pending")
+    modifier = obj.modifiers["Multires"]
+    start = time.perf_counter()
+    modifier.quality = 2 if modifier.quality != 2 else 3
+    modifier_update_ms = (time.perf_counter() - start) * 1000.0
+    bpy.context.view_layer.update()
+    yield 0.3
+    after_modifier_update = snapshot("06_after_modifier_update")
+    modifier_max_error, modifier_rms_error = position_error(
+        before_modifier_update, after_modifier_update)
+
+    assert after_modifier_update["layer_hash"] != before_modifier_update["layer_hash"], \
+        "A generic Multires update did not publish pending Sculpt Layer coordinates"
+
+    # The geometry update rebuilds the CCG, so a byte-exact live-surface hash is
+    # not a valid equivalence test for the packed layer round-trip. The native
+    # base fingerprint printed for snapshots 05/06 must remain identical. A
+    # clean strength round-trip, however, stays on the local CCG/PBVH path and
+    # must restore the evaluated surface within floating-point tolerance.
+    layer = modifier.sculpt_layers[0]
+    start = time.perf_counter()
+    layer.strength = 0.5
+    strength_half_ms = (time.perf_counter() - start) * 1000.0
+    strength_half = snapshot("07_strength_half")
+    start = time.perf_counter()
+    layer.strength = 1.0
+    strength_restore_ms = (time.perf_counter() - start) * 1000.0
+    strength_restored = snapshot("08_strength_restored")
+    strength_restore_max_error, strength_restore_rms_error = position_error(
+        after_modifier_update, strength_restored)
+    assert strength_half["positions_hash"] != after_modifier_update["positions_hash"], \
+        "Changing Sculpt Layer strength did not change the live surface"
+    assert strength_restore_max_error < 1.0e-5, \
+        "A clean Sculpt Layer strength round-trip accumulated visible surface error"
+
     summary = {
-        "combine_after": bool(settings.combine_local),
+        "combine_after": bool(obj.sculpt_symmetry_combine_local),
         "reference_strokes_after": bool(obj.sculpt_symmetry_reference_use_for_strokes),
         "commit_result": sorted(commit_result),
         "checkbox_timing_ms": {
             "disable_with_pending_stroke": disable_ms,
             "enable_clean": enable_clean_ms,
             "disable_clean": disable_clean_ms,
+            "change_reference_axes_clean": axes_clean_ms,
+            "modifier_update_with_pending_stroke": modifier_update_ms,
+            "strength_to_half_clean": strength_half_ms,
+            "strength_restore_clean": strength_restore_ms,
+        },
+        "surface_error": {
+            "modifier_rebuild_max_component": modifier_max_error,
+            "modifier_rebuild_rms": modifier_rms_error,
+            "strength_roundtrip_max_component": strength_restore_max_error,
+            "strength_roundtrip_rms": strength_restore_rms_error,
         },
         "hashes": {
             label: {
@@ -189,6 +257,10 @@ def run():
                 ("toggle_immediate", immediate),
                 ("toggle_after_update", after_update),
                 ("after_commit", after_commit),
+                ("before_modifier_update", before_modifier_update),
+                ("after_modifier_update", after_modifier_update),
+                ("strength_half", strength_half),
+                ("strength_restored", strength_restored),
             )
         },
     }

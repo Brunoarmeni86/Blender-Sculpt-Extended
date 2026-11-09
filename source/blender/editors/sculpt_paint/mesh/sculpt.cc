@@ -1599,7 +1599,8 @@ static bool reference_symmetry_read(const Depsgraph &depsgraph,
   if (!property) { return true; }
   PointerRNA settings = RNA_property_pointer_get(&owner, property);
   if (!settings.data) { return true; }
-  const bool native_settings = RNA_boolean_get(&owner, "sculpt_symmetry_reference_valid");
+  const bool native_settings = RNA_boolean_get(&owner, "sculpt_symmetry_reference_valid") &&
+                               RNA_boolean_get(&owner, "sculpt_symmetry_routing_valid");
   const bool use_for_strokes = native_settings ?
                                    RNA_boolean_get(&owner, "sculpt_symmetry_reference_use_for_strokes") :
                                    RNA_boolean_get(&settings, "use_for_strokes");
@@ -1611,8 +1612,10 @@ static bool reference_symmetry_read(const Depsgraph &depsgraph,
    * multiplied brush strength. Reference-only remains available after disabling
    * all local symmetry axes. */
   PropertyRNA *combine_property = RNA_struct_find_property(&settings, "combine_local");
-  const bool combine_local = combine_property &&
-                             RNA_property_boolean_get(&settings, combine_property);
+  const bool combine_local = native_settings ?
+                                 RNA_boolean_get(&owner, "sculpt_symmetry_combine_local") :
+                                 (combine_property &&
+                                  RNA_property_boolean_get(&settings, combine_property));
   if (!combine_local && mesh_symmetry_xyz_get(object) != ePaintSymmetryFlags(0)) {
     return true;
   }
@@ -1713,14 +1716,25 @@ static bool reference_combined_passes(Object &object, const float4x4 &frame,
   PropertyRNA *property = RNA_struct_find_property(&owner, "sculpt_symref_preview");
   if (!property) { return true; }
   PointerRNA settings = RNA_property_pointer_get(&owner, property);
+  const bool native_settings = RNA_boolean_get(&owner, "sculpt_symmetry_reference_valid") &&
+                               RNA_boolean_get(&owner, "sculpt_symmetry_routing_valid");
   PropertyRNA *option = RNA_struct_find_property(&settings, "combine_local");
-  if (!option || !RNA_property_boolean_get(&settings, option)) { return true; }
+  const bool combine_local = native_settings ?
+                                 RNA_boolean_get(&owner, "sculpt_symmetry_combine_local") :
+                                 (option && RNA_property_boolean_get(&settings, option));
+  if (!combine_local) { return true; }
   combined = true;
   const auto reject = [&](const char *message) {
     if (reports) { BKE_report(reports, RPT_ERROR, message); }
     return false;
   };
-  bool axes[3]; RNA_boolean_get_array(&settings, "reference_axes", axes);
+  bool axes[3];
+  if (native_settings) {
+    RNA_boolean_get_array(&owner, "sculpt_symmetry_reference_axes", axes);
+  }
+  else {
+    RNA_boolean_get_array(&settings, "reference_axes", axes);
+  }
   const int reference = int(axes[0]) | (int(axes[1]) << 1) | (int(axes[2]) << 2);
   const int local = int(mesh_symmetry_xyz_get(object));
   if ((reference & (reference - 1)) || (local & (local - 1))) {
@@ -1773,7 +1787,14 @@ static ePaintSymmetryFlags reference_symmetry_axes_get(Object &object)
   }
   PointerRNA settings = RNA_property_pointer_get(&owner, property);
   bool axes[3] = {false, false, false};
-  RNA_boolean_get_array(&settings, "reference_axes", axes);
+  if (RNA_boolean_get(&owner, "sculpt_symmetry_reference_valid") &&
+      RNA_boolean_get(&owner, "sculpt_symmetry_routing_valid"))
+  {
+    RNA_boolean_get_array(&owner, "sculpt_symmetry_reference_axes", axes);
+  }
+  else {
+    RNA_boolean_get_array(&settings, "reference_axes", axes);
+  }
   return ePaintSymmetryFlags(int(axes[0]) | (int(axes[1]) << 1) | (int(axes[2]) << 2));
 }
 

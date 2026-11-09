@@ -686,7 +686,9 @@ struct Object {
   char sculpt_transform_pivot_enabled = 0;
   char sculpt_transform_pivot_linked = 1;
   char sculpt_symmetry_reference_locked = 0;
-  char _pad_sculpt_transform_pivot[5] = {};
+  char sculpt_symmetry_combine_local = 0;
+  char sculpt_symmetry_reference_axes[3] = {1, 0, 0};
+  char sculpt_symmetry_routing_valid = 0;
 
   bke::ObjectRuntime *runtime = nullptr;
 

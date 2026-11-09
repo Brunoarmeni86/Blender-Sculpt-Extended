@@ -77,7 +77,7 @@ def ensure_tool_session(context):
     session={'pointer':ob.as_pointer(),'before':snapshot(s),'native_before':native_reference_snapshot(ob),'tool':'builtin.select_box' if context.mode=='EDIT_MESH' else 'builtin.brush','pick':False}
     if not ob.sculpt_symmetry_reference_enabled:ob.sculpt_symmetry_reference_display_size=max(.1,max(ob.dimensions)*.75)
     ob.sculpt_symmetry_reference_enabled=True
-    if NATIVE_BACKEND and context.mode=='SCULPT' and s.combine_local:ob.sculpt_symmetry_reference_use_for_strokes=True
+    if NATIVE_BACKEND and context.mode=='SCULPT' and ob.sculpt_symmetry_combine_local:ob.sculpt_symmetry_reference_use_for_strokes=True
     _session=session
     redraw();return True
 
@@ -113,21 +113,26 @@ def invalidate_anchor_cache(scene, depsgraph):
 
 def ensure_native_reference(ob):
     """Migrate the legacy Python settings once, without tagging object geometry."""
-    if ob.sculpt_symmetry_reference_valid:return True
+    if ob.sculpt_symmetry_reference_valid and ob.sculpt_symmetry_routing_valid:return True
     def migrate(target):
         s = target.sculpt_symref_preview
-        target.sculpt_symmetry_reference_location = s.location
-        target.sculpt_symmetry_reference_rotation = s.rotation
-        target.sculpt_symmetry_reference_display_size = max(.01, s.display_size)
-        target.sculpt_symmetry_reference_mode = s.mode
-        target.sculpt_symmetry_reference_enabled = s.enabled
-        target.sculpt_symmetry_reference_use_for_strokes = s.use_for_strokes
-        target.sculpt_transform_pivot_location = s.transform_pivot_location
-        target.sculpt_transform_pivot_enabled = s.transform_pivot_enabled
-        target.sculpt_transform_pivot_linked = s.transform_pivot_linked
-        target.sculpt_symmetry_reference_locked = s.locked
-        target.sculpt_symmetry_anchor_offset = s.anchor_offset
-        target.sculpt_symmetry_reference_valid = True
+        if not target.sculpt_symmetry_reference_valid:
+            target.sculpt_symmetry_reference_location = s.location
+            target.sculpt_symmetry_reference_rotation = s.rotation
+            target.sculpt_symmetry_reference_display_size = max(.01, s.display_size)
+            target.sculpt_symmetry_reference_mode = s.mode
+            target.sculpt_symmetry_reference_enabled = s.enabled
+            target.sculpt_symmetry_reference_use_for_strokes = s.use_for_strokes
+            target.sculpt_transform_pivot_location = s.transform_pivot_location
+            target.sculpt_transform_pivot_enabled = s.transform_pivot_enabled
+            target.sculpt_transform_pivot_linked = s.transform_pivot_linked
+            target.sculpt_symmetry_reference_locked = s.locked
+            target.sculpt_symmetry_anchor_offset = s.anchor_offset
+            target.sculpt_symmetry_reference_valid = True
+        if not target.sculpt_symmetry_routing_valid:
+            target.sculpt_symmetry_combine_local = s.combine_local
+            target.sculpt_symmetry_reference_axes = s.reference_axes
+            target.sculpt_symmetry_routing_valid = True
     try:
         migrate(ob);return True
     except AttributeError as ex:
@@ -138,7 +143,7 @@ def ensure_native_reference(ob):
             def deferred():
                 try:
                     target=next((item for item in bpy.data.objects if item.as_pointer()==pointer),None)
-                    if target and not target.sculpt_symmetry_reference_valid:migrate(target)
+                    if target and not (target.sculpt_symmetry_reference_valid and target.sculpt_symmetry_routing_valid):migrate(target)
                 finally:_native_migration_pending.discard(pointer)
                 redraw();return None
             bpy.app.timers.register(deferred,first_interval=0.0)
@@ -307,20 +312,20 @@ def update_combine_local(settings, context):
 
 class SculptSymmetryReferencePreview(bpy.types.PropertyGroup):
     edit_direction: EnumProperty(name='Source Side',items=[(v,label,'Copy this side to the opposite side') for v,label in [('-X','−X → +X'),('X','+X → −X'),('-Y','−Y → +Y'),('Y','+Y → −Y'),('-Z','−Z → +Z'),('Z','+Z → −Z')]],default='-X',update=lambda s,c:redraw())
-    edit_threshold: FloatProperty(name='Soglia fusione',default=.0001,min=0,max=1,subtype='DISTANCE')
-    edit_selected_only: BoolProperty(name='Solo selezione',default=True)
+    edit_threshold: FloatProperty(name='Merge Threshold',default=.0001,min=0,max=1,subtype='DISTANCE')
+    edit_selected_only: BoolProperty(name='Selected Only',default=True)
     locked: BoolProperty(name='Lock Reference',description='Protect settings; an active attachment continues to follow its vertex',default=False,update=lambda s,c:redraw())
     use_for_strokes: BoolProperty(name='Use Reference for Brushes', default=False, update=lambda s,c:redraw())
     transform_pivot_enabled: BoolProperty(name='Show Transform Pivot', description='Show a movable pivot for the Move, Rotate and Scale brushes', default=False, update=lambda s,c:redraw())
     transform_pivot_linked: BoolProperty(name='Share with Symmetry', description='Also use the symmetry reference as the transform brush pivot', default=True, update=lambda s,c:redraw())
-    transform_pivot_location: FloatVectorProperty(name='Pivot trasformazioni', subtype='TRANSLATION', update=lambda s,c:redraw())
+    transform_pivot_location: FloatVectorProperty(name='Transform Pivot', subtype='TRANSLATION', update=lambda s,c:redraw())
     combine_local: BoolProperty(name='Combine Local Symmetry', default=False, update=update_combine_local)
     reference_axes: bpy.props.BoolVectorProperty(name='Reference Axes', size=3, default=(True,False,False), subtype='XYZ', update=lambda s,c:redraw())
     enabled: BoolProperty(name='Show Planes', default=False, update=lambda s,c:redraw())
     location: FloatVectorProperty(name='Position', subtype='TRANSLATION', update=lambda s,c:redraw())
     rotation: FloatVectorProperty(name='Rotation', subtype='EULER', update=lambda s,c:redraw())
     display_size: FloatProperty(name='Plane Size', default=2., min=.01, max=100000., subtype='DISTANCE', update=lambda s,c:redraw())
-    opacity: FloatProperty(name='Opacità', default=.12, min=.01, max=.5, update=lambda s,c:redraw())
+    opacity: FloatProperty(name='Opacity', default=.12, min=.01, max=.5, update=lambda s,c:redraw())
     mode: EnumProperty(name='Gizmo', items=[('MOVE','Move',''),('ROTATE','Rotate',''),('SIZE','Size','Plane display only')], default='MOVE', update=lambda s,c:redraw())
     anchored: BoolProperty(default=False)
     vertex: IntProperty(default=-1)
@@ -345,7 +350,7 @@ class SCULPT_OT_symref_edit_preview(bpy.types.Operator):
         if not ob.sculpt_symmetry_reference_enabled:
             ob.sculpt_symmetry_reference_display_size=max(.1,max(ob.dimensions)*.75)
         ob.sculpt_symmetry_reference_enabled=True
-        if NATIVE_BACKEND and c.mode=='SCULPT' and s.combine_local:ob.sculpt_symmetry_reference_use_for_strokes=True
+        if NATIVE_BACKEND and c.mode=='SCULPT' and ob.sculpt_symmetry_combine_local:ob.sculpt_symmetry_reference_use_for_strokes=True
         try: bpy.ops.wm.tool_set_by_id(name=EDIT_TOOL if c.mode=='EDIT_MESH' else TOOL)
         except Exception:
             _session=None
@@ -518,15 +523,15 @@ def draw_settings(layout,c):
     box=layout.box();box.label(text='Symmetry Reference · Preview')
     if NATIVE_BACKEND and c.mode=='SCULPT':
         ensure_native_reference(ob);box.prop(ob,'sculpt_symmetry_reference_use_for_strokes',text='Use Reference for Brushes')
-        box.prop(s,'combine_local')
-        if not s.combine_local and any(getattr(ob.data,'use_mirror_'+axis,False) for axis in 'xyz'):
+        box.prop(ob,'sculpt_symmetry_combine_local')
+        if not ob.sculpt_symmetry_combine_local and any(getattr(ob.data,'use_mirror_'+axis,False) for axis in 'xyz'):
             box.label(text='Local symmetry only (enable Use Reference to change it)',icon='INFO')
-        if s.combine_local:
-            box.prop(s,'reference_axes',toggle=True)
-            row=box.row(align=True);row.label(text='Assi locali')
+        if ob.sculpt_symmetry_combine_local:
+            box.prop(ob,'sculpt_symmetry_reference_axes',toggle=True)
+            row=box.row(align=True);row.label(text='Local Axes')
             for axis in 'xyz':row.prop(ob.data,'use_mirror_'+axis,text=axis.upper(),toggle=True)
             box.label(text='One axis per reference · up to 4 brush impressions')
-        box.label(text='Pennelli · Mesh / Multires / Dyntopo',icon='INFO')
+        box.label(text='Brushes · Mesh / Multires / Dyntopo',icon='INFO')
     elif c.mode=='EDIT_MESH':
         box.prop(s,'edit_direction')
         box.prop(s,'edit_threshold')
@@ -617,7 +622,7 @@ def draw_planes():
     old_blend=gpu.state.blend_get();old_depth=gpu.state.depth_test_get();old_mask=gpu.state.depth_mask_get()
     gpu.state.blend_set('ALPHA');gpu.state.depth_test_set('LESS_EQUAL');gpu.state.depth_mask_set(False)
     try:
-        axes=tuple(a==s.edit_direction[-1] for a in 'XYZ') if c.mode=='EDIT_MESH' else (s.reference_axes if s.combine_local else (ob.data.use_mirror_x,ob.data.use_mirror_y,ob.data.use_mirror_z))
+        axes=tuple(a==s.edit_direction[-1] for a in 'XYZ') if c.mode=='EDIT_MESH' else (ob.sculpt_symmetry_reference_axes if ob.sculpt_symmetry_combine_local else (ob.data.use_mirror_x,ob.data.use_mirror_y,ob.data.use_mirror_z))
         for axis,enabled in enumerate(axes):
             if not enabled:continue
             u=matrix.to_3x3().col[(axis+1)%3]*display_size*.5

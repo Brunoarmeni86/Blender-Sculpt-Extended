@@ -12,13 +12,16 @@
 #include "DNA_action_types.h"
 #include "DNA_layer_types.h"
 #include "DNA_lightprobe_types.h"
+#include "DNA_mesh_types.h"
 #include "DNA_meta_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_object_types.h"
 
 #include "BLI_math_rotation.h"
 
 #include "BLT_translation.hh"
 
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_paint.hh"
 
 #include "RNA_define.hh"
@@ -173,6 +176,46 @@ static const EnumPropertyItem instance_items[] = {
     {0, nullptr, 0, nullptr, nullptr},
 };
 #ifdef RNA_RUNTIME
+
+static void rna_Object_sculpt_symmetry_combine_local_set(PointerRNA *ptr, const bool value)
+{
+  Object *object = static_cast<Object *>(ptr->data);
+  if (object == nullptr || bool(object->sculpt_symmetry_combine_local) == value) {
+    return;
+  }
+
+  /* This setting changes future stroke routing only. Publish a pending layer
+   * stroke before changing its routing metadata, but keep the common clean
+   * toggle independent of dependency-graph and Multires evaluation. */
+  if (object->mode & OB_MODE_SCULPT) {
+    for (const ModifierData &md : object->modifiers) {
+      if (md.type != eModifierType_Multires) {
+        continue;
+      }
+      const auto &mmd = reinterpret_cast<const MultiresModifierData &>(md);
+      if (mmd.sculpt_layers.is_empty()) {
+        continue;
+      }
+      if (!bke::multires_layers::commit(*object)) {
+        return;
+      }
+      break;
+    }
+  }
+
+  object->sculpt_symmetry_combine_local = value;
+  object->sculpt_symmetry_routing_valid = true;
+  const Mesh *mesh = object->type == OB_MESH ? reinterpret_cast<const Mesh *>(object->data) :
+                                              nullptr;
+  const bool local_active = mesh &&
+                            (mesh->symmetry & (ME_SYMMETRY_X | ME_SYMMETRY_Y | ME_SYMMETRY_Z));
+  if (value) {
+    object->sculpt_symmetry_reference_use_for_strokes = true;
+  }
+  else if (local_active) {
+    object->sculpt_symmetry_reference_use_for_strokes = false;
+  }
+}
 static EnumPropertyItem instance_items_nogroup[] = {
     INSTANCE_ITEMS_SHARED,
     {0, nullptr, 0, nullptr, nullptr},
@@ -3845,6 +3888,31 @@ static void rna_def_object(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_symmetry_reference_use_for_strokes", 1);
   RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
   RNA_def_property_ui_text(prop, "Use Sculpt Symmetry Reference", "Use the custom frame for sculpt stroke symmetry");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_symmetry_combine_local", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_symmetry_combine_local", 1);
+  RNA_def_property_boolean_funcs(
+      prop, nullptr, "rna_Object_sculpt_symmetry_combine_local_set");
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(
+      prop, "Combine Local Symmetry", "Combine object-local and custom reference symmetry passes");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_symmetry_reference_axes", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_symmetry_reference_axes", 1);
+  RNA_def_property_array(prop, 3);
+  RNA_def_property_flag(prop, PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(
+      prop, "Reference Axes", "Axes mirrored in the custom symmetry reference frame");
+  RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
+
+  prop = RNA_def_property(srna, "sculpt_symmetry_routing_valid", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "sculpt_symmetry_routing_valid", 1);
+  RNA_def_property_flag(prop, PROP_HIDDEN | PROP_NO_DEG_UPDATE);
+  RNA_def_property_ui_text(prop,
+                           "Sculpt Symmetry Routing Valid",
+                           "Native Combined and reference-axis metadata was initialized");
   RNA_def_property_update(prop, NC_OBJECT | ND_DRAW, nullptr);
 
   prop = RNA_def_property(srna, "sculpt_transform_pivot_location", PROP_FLOAT, PROP_TRANSLATION);

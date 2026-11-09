@@ -220,6 +220,63 @@ identifiers and persisted property names were not changed. The topology-fallback
 match was updated together with its translated exception to preserve behavior. Static
 Python compilation and the complete headless regression passed after these edits.
 
+## Strength multiplication and transition latency audit (2026-11-09)
+
+The real-stroke fixture exposed two independent dependency-graph hazards behind the
+reported Strength multiplication:
+
+1. `combine_local` and `reference_axes` were still Python `PropertyGroup` values. Even a
+   clean checkbox transition dirtied Object state and caused a complete Multires
+   evaluation (about 8–12 ms on the small fixture).
+2. Any ordinary Multires RNA update could reach `object_update_from_subsurf_ccg()` while a
+   stroke was still pending. A runtime reproduction using the Multires `quality` property
+   changed native `CD_MDISPS` from `8cbaae51cee4c25a` to `29cee931277e0410`, left the
+   Sculpt Layer payload unchanged and changed the composed surface. This is a second,
+   confirmed route for baking an already composed layer into the base and applying it
+   again during evaluation.
+
+The experimental candidate moves Combined and reference-axis routing into native Object
+DNA/RNA metadata with `PROP_NO_DEG_UPDATE`. The native Combined setter commits only when
+the live CCG actually has pending coordinates; clean toggles and axis selection are
+metadata-only. A separate routing-valid marker migrates existing experimental `.blend`
+files from their legacy Python settings instead of interpreting newly repurposed padding as
+configured axes. The common Multires RNA geometry-update callback now performs the same
+pending-coordinate guard before scheduling dependency-graph evaluation. A failed commit
+cancels the evaluation and reports an error instead of reshaping the native base.
+
+**Actually executed validation:**
+
+1. Full Visual Studio 2022 executable build: **PASS**. Candidate executable SHA-256:
+   `2AC94ADD05B3B28587601554FCF1819446665DA5B72C3A2BCE6B88F4D03DC38F`.
+2. Real Draw stroke, local X plus reference Y, Combined ON → OFF: **PASS**. The live
+   surface remained byte-identical, the active layer payload changed, the native base
+   stayed unchanged and no subsequent dependency-graph evaluation altered the result.
+3. Generic Multires `quality` update with a second pending stroke: **PASS after the common
+   guard**. The layer payload changed, pending coordinates cleared and native base hash
+   remained `8cbaae51cee4c25a`. The CCG rebuild differed from the pre-rebuild surface by at
+   most `2.39e-7` per coordinate (`1.24e-8` RMS), consistent with packed
+   encode/evaluate rounding rather than doubled displacement.
+4. Clean Strength `1.0 → 0.5 → 1.0`: **PASS**. The half-strength surface changed and the
+   restored surface differed by at most `6.0e-8` per coordinate (`9.72e-10` RMS).
+5. Small-fixture setter timings (not dense production benchmarks): Combined OFF with a
+   pending stroke **0.158 ms**; clean Combined ON **0.006 ms**; clean Combined OFF
+   **0.002 ms**; clean reference-axis change **0.004 ms**; guarded generic Multires update
+   assignment including the local pending commit **0.115 ms**; clean Strength to half
+   **0.282 ms** and restore **0.153 ms**. The deliberately requested Multires rebuild
+   itself remained about **4.75 ms** and is not included in the assignment timing.
+6. Complete pre-5.4 symmetry/remesh headless fixture on the new binary: **PASS**.
+
+The fixture now exports exact CCG coordinates, layer hashes and native-base fingerprints;
+it distinguishes byte-hash changes caused by floating-point reconstruction from visible
+Strength multiplication.
+
+**Open risk, not claimed fixed:** animation synchronization intentionally bypasses the
+interactive Strength setter transaction while Blender is copying evaluated animation back
+to the original datablock. A frame change with a pending Sculpt stroke has not yet been
+runtime-validated. Likewise, non-RNA callers that schedule Multires evaluation without the
+common modifier update callback still require targeted coverage. These are audit findings,
+not confirmed regressions in this candidate.
+
 ## Decision
 
 **keep as experimental candidate.** The fixes are small, auditable, and covered by the

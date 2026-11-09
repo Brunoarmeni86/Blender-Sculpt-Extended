@@ -115,18 +115,16 @@ def test_symmetry_mode_transition_state():
         ob.sculpt_symmetry_reference_valid = False
         settings.use_for_strokes = True
         ob.sculpt_symmetry_reference_use_for_strokes = True
-        settings.combine_local = True
-        settings.combine_local = False
-        transition.update_combine_local(settings, bpy.context)
+        transition.ensure_native_reference(ob)
+        ob.sculpt_symmetry_combine_local = True
+        ob.sculpt_symmetry_combine_local = False
         assert not ob.sculpt_symmetry_reference_use_for_strokes
-        assert not settings.use_for_strokes
         assert ob.sculpt_symmetry_reference_valid
 
         mesh.use_mirror_x = False
         ob.sculpt_symmetry_reference_use_for_strokes = True
-        settings.combine_local = True
-        settings.combine_local = False
-        transition.update_combine_local(settings, bpy.context)
+        ob.sculpt_symmetry_combine_local = True
+        ob.sculpt_symmetry_combine_local = False
         assert ob.sculpt_symmetry_reference_use_for_strokes
         print("PASS: Combined OFF selects native-only or explicit reference-only state")
     finally:

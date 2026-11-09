@@ -961,8 +961,42 @@ static std::optional<std::string> rna_Modifier_path(const PointerRNA *ptr)
   return fmt::format("modifiers[\"{}\"]", name_esc);
 }
 
+static bool rna_MultiresModifier_commit_pending_update(PointerRNA *ptr)
+{
+  if (DEG_is_evaluated_id(ptr->owner_id) || BKE_animsys_is_copying_to_original()) {
+    return true;
+  }
+  auto *md = static_cast<ModifierData *>(ptr->data);
+  Object *object = id_cast<Object *>(ptr->owner_id);
+  if (md == nullptr || md->type != eModifierType_Multires || object == nullptr ||
+      (object->mode & OB_MODE_SCULPT) == 0)
+  {
+    return true;
+  }
+  const auto *mmd = reinterpret_cast<const MultiresModifierData *>(md);
+  const SculptSession *ss = object->runtime ? object->runtime->sculpt_session : nullptr;
+  const bool pending_positions = ss && ss->subdiv_ccg && ss->subdiv_ccg->dirty.coords;
+  if (mmd->sculpt_layers.is_empty() || !pending_positions) {
+    return true;
+  }
+
+  /* A generic modifier property update schedules dependency-graph geometry
+   * evaluation. Publish the live CCG first, otherwise
+   * object_update_from_subsurf_ccg() can reshape the native Multires base and
+   * the visible Sculpt Layer is then evaluated a second time. */
+  if (!bke::multires_layers::commit(*object)) {
+    BKE_modifier_set_error(
+        object, md, "Commit pending Sculpt Layer before updating Multires");
+    return false;
+  }
+  return true;
+}
+
 static void rna_Modifier_update(Main * /*bmain*/, Scene * /*scene*/, PointerRNA *ptr)
 {
+  if (!rna_MultiresModifier_commit_pending_update(ptr)) {
+    return;
+  }
   DEG_id_tag_update(ptr->owner_id, ID_RECALC_GEOMETRY);
   WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, ptr->owner_id);
 }
