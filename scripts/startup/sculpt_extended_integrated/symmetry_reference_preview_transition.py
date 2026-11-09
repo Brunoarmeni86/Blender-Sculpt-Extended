@@ -306,22 +306,22 @@ def update_combine_local(settings, context):
 
 
 class SculptSymmetryReferencePreview(bpy.types.PropertyGroup):
-    edit_direction: EnumProperty(name='Lato sorgente',items=[(v,label,'Copia questo lato nel lato opposto') for v,label in [('-X','−X → +X'),('X','+X → −X'),('-Y','−Y → +Y'),('Y','+Y → −Y'),('-Z','−Z → +Z'),('Z','+Z → −Z')]],default='-X',update=lambda s,c:redraw())
+    edit_direction: EnumProperty(name='Source Side',items=[(v,label,'Copy this side to the opposite side') for v,label in [('-X','−X → +X'),('X','+X → −X'),('-Y','−Y → +Y'),('Y','+Y → −Y'),('-Z','−Z → +Z'),('Z','+Z → −Z')]],default='-X',update=lambda s,c:redraw())
     edit_threshold: FloatProperty(name='Soglia fusione',default=.0001,min=0,max=1,subtype='DISTANCE')
     edit_selected_only: BoolProperty(name='Solo selezione',default=True)
-    locked: BoolProperty(name='Blocca riferimento',description='Protegge le regolazioni; un ancoraggio attivo continua a seguire il vertice',default=False,update=lambda s,c:redraw())
-    use_for_strokes: BoolProperty(name='Usa riferimento per i pennelli', default=False, update=lambda s,c:redraw())
-    transform_pivot_enabled: BoolProperty(name='Mostra pivot trasformazioni', description='Mostra un pivot spostabile per i pennelli Sposta, Ruota e Scala', default=False, update=lambda s,c:redraw())
-    transform_pivot_linked: BoolProperty(name='Condividi con simmetria', description='Usa il riferimento di simmetria anche come pivot dei pennelli di trasformazione', default=True, update=lambda s,c:redraw())
+    locked: BoolProperty(name='Lock Reference',description='Protect settings; an active attachment continues to follow its vertex',default=False,update=lambda s,c:redraw())
+    use_for_strokes: BoolProperty(name='Use Reference for Brushes', default=False, update=lambda s,c:redraw())
+    transform_pivot_enabled: BoolProperty(name='Show Transform Pivot', description='Show a movable pivot for the Move, Rotate and Scale brushes', default=False, update=lambda s,c:redraw())
+    transform_pivot_linked: BoolProperty(name='Share with Symmetry', description='Also use the symmetry reference as the transform brush pivot', default=True, update=lambda s,c:redraw())
     transform_pivot_location: FloatVectorProperty(name='Pivot trasformazioni', subtype='TRANSLATION', update=lambda s,c:redraw())
-    combine_local: BoolProperty(name='Combina simmetria locale', default=False, update=update_combine_local)
-    reference_axes: bpy.props.BoolVectorProperty(name='Assi riferimento', size=3, default=(True,False,False), subtype='XYZ', update=lambda s,c:redraw())
-    enabled: BoolProperty(name='Mostra piani', default=False, update=lambda s,c:redraw())
-    location: FloatVectorProperty(name='Posizione', subtype='TRANSLATION', update=lambda s,c:redraw())
-    rotation: FloatVectorProperty(name='Rotazione', subtype='EULER', update=lambda s,c:redraw())
-    display_size: FloatProperty(name='Dimensione piani', default=2., min=.01, max=100000., subtype='DISTANCE', update=lambda s,c:redraw())
+    combine_local: BoolProperty(name='Combine Local Symmetry', default=False, update=update_combine_local)
+    reference_axes: bpy.props.BoolVectorProperty(name='Reference Axes', size=3, default=(True,False,False), subtype='XYZ', update=lambda s,c:redraw())
+    enabled: BoolProperty(name='Show Planes', default=False, update=lambda s,c:redraw())
+    location: FloatVectorProperty(name='Position', subtype='TRANSLATION', update=lambda s,c:redraw())
+    rotation: FloatVectorProperty(name='Rotation', subtype='EULER', update=lambda s,c:redraw())
+    display_size: FloatProperty(name='Plane Size', default=2., min=.01, max=100000., subtype='DISTANCE', update=lambda s,c:redraw())
     opacity: FloatProperty(name='Opacità', default=.12, min=.01, max=.5, update=lambda s,c:redraw())
-    mode: EnumProperty(name='Gizmo', items=[('MOVE','Sposta',''),('ROTATE','Ruota',''),('SIZE','Dimensione','Solo visualizzazione dei piani')], default='MOVE', update=lambda s,c:redraw())
+    mode: EnumProperty(name='Gizmo', items=[('MOVE','Move',''),('ROTATE','Rotate',''),('SIZE','Size','Plane display only')], default='MOVE', update=lambda s,c:redraw())
     anchored: BoolProperty(default=False)
     vertex: IntProperty(default=-1)
     face: IntProperty(default=-1)
@@ -332,8 +332,8 @@ class SculptSymmetryReferencePreview(bpy.types.PropertyGroup):
 
 class SCULPT_OT_symref_edit_preview(bpy.types.Operator):
     bl_idname='sculpt.symref_edit_preview'
-    bl_label='Modifica riferimento'
-    bl_description='Imposta posizione e rotazione del riferimento per la simmetria Sculpt'
+    bl_label='Edit Reference'
+    bl_description='Set the position and rotation of the Sculpt symmetry reference'
     bl_options={'REGISTER','UNDO'}
     @classmethod
     def poll(cls,c): return bool(sculpt_object(c)) and not editing(c) and not c.object.sculpt_symmetry_reference_locked
@@ -353,7 +353,7 @@ class SCULPT_OT_symref_edit_preview(bpy.types.Operator):
         redraw();return {'FINISHED'}
 
 class SCULPT_OT_symref_finish_preview(bpy.types.Operator):
-    bl_idname='sculpt.symref_finish_preview';bl_label='Conferma riferimento'
+    bl_idname='sculpt.symref_finish_preview';bl_label='Confirm Reference'
     bl_options={'REGISTER','UNDO'}
     cancel: BoolProperty(default=False)
     @classmethod
@@ -379,18 +379,18 @@ class SCULPT_OT_symref_cursor_preview(bpy.types.Operator):
     def execute(self,c):
         s=c.object.sculpt_symref_preview
         if s.anchored and anchor_position(c.object,c.evaluated_depsgraph_get()) is None:
-            self.report({'WARNING'},'Aggancio non valido: sgancia il riferimento prima di spostarlo');return {'CANCELLED'}
+            self.report({'WARNING'},'Invalid attachment: detach the reference before moving it');return {'CANCELLED'}
         from_cursor(c);c.object.sculpt_symmetry_reference_enabled=True
         # Moving the reference from the cursor does not change the brush symmetry mode.
         return {'FINISHED'}
 
 class SCULPT_OT_symref_anchor_preview(bpy.types.Operator):
-    bl_idname='sculpt.symref_anchor_preview';bl_label='Scegli vertice di ancoraggio'
+    bl_idname='sculpt.symref_anchor_preview';bl_label='Choose Anchor Vertex'
     @classmethod
     def poll(cls,c): return editing(c) and anchor_supported(c.object) and not c.object.sculpt_symmetry_reference_locked
     def execute(self,c):
         _session['pick']=True
-        self.report({'INFO'},'Clicca sulla mesh per scegliere il vertice vicino alla superficie');return {'FINISHED'}
+        self.report({'INFO'},'Click the mesh to choose a vertex near the surface');return {'FINISHED'}
 
 class SCULPT_OT_symref_detach_preview(bpy.types.Operator):
     bl_idname='sculpt.symref_detach_preview';bl_label='Sgancia'
@@ -411,13 +411,13 @@ def bind_anchor(ob,vertex,face,context):
     s.anchored=True
     point=anchor_position(ob,context.evaluated_depsgraph_get())
     if point is None:
-        s.anchored=False;raise RuntimeError('Corrispondenza del vertice non valida')
+        s.anchored=False;raise RuntimeError('Invalid vertex correspondence')
     ob.sculpt_symmetry_anchor_offset=ob.matrix_world.inverted_safe()@matrix.translation-point
     ensure_native_reference(ob)
     ob.sculpt_symmetry_reference_location=ob.matrix_world.inverted_safe()@matrix.translation
 
 class SCULPT_OT_symref_place_preview(bpy.types.Operator):
-    bl_idname='sculpt.symref_place_preview';bl_label='Posiziona riferimento'
+    bl_idname='sculpt.symref_place_preview';bl_label='Position Reference'
     @classmethod
     def poll(cls,c): return editing(c) and not c.object.sculpt_symmetry_reference_locked
     def invoke(self,c,event):
@@ -442,7 +442,7 @@ class SCULPT_OT_symref_place_preview(bpy.types.Operator):
         return {'FINISHED'}
 
 class VIEW3D_GGT_sculpt_symref_preview(bpy.types.GizmoGroup):
-    bl_idname='VIEW3D_GGT_sculpt_symref_preview';bl_label='Riferimento simmetria'
+    bl_idname='VIEW3D_GGT_sculpt_symref_preview';bl_label='Symmetry Reference'
     bl_space_type='VIEW_3D';bl_region_type='WINDOW';bl_options={'3D','PERSISTENT','TOOL_FALLBACK_KEYMAP'}
     @classmethod
     def poll(cls,c):return tool_selected(c) and not c.object.sculpt_symmetry_reference_locked
@@ -498,9 +498,9 @@ class VIEW3D_GGT_sculpt_symref_preview(bpy.types.GizmoGroup):
             basis.translation=matrix.translation;gz.matrix_basis=basis
 
 class SCULPT_OT_symref_reset_preview(bpy.types.Operator):
-    bl_idname='sculpt.symref_reset_preview';bl_label='Ripristina riferimento'
+    bl_idname='sculpt.symref_reset_preview';bl_label='Reset Reference'
     bl_options={'REGISTER','UNDO'}
-    what: EnumProperty(items=[('POSITION','Posizione','Torna all\'origine dell\'oggetto e sgancia'),('ROTATION','Rotazione','Allinea agli assi locali dell\'oggetto'),('ALL','Tutto','Ripristina posizione e rotazione, sganciando il riferimento')],default='ALL')
+    what: EnumProperty(items=[('POSITION','Position','Return to the object origin and detach'),('ROTATION','Rotation','Align to the object local axes'),('ALL','All','Reset position and rotation and detach the reference')],default='ALL')
     @classmethod
     def poll(cls,c):return bool(sculpt_object(c)) and not c.object.sculpt_symmetry_reference_locked
     def execute(self,c):
@@ -515,66 +515,66 @@ def draw_settings(layout,c):
     ob=sculpt_object(c)
     if not ob:return
     s=ob.sculpt_symref_preview
-    box=layout.box();box.label(text='Riferimento simmetria · Anteprima')
+    box=layout.box();box.label(text='Symmetry Reference · Preview')
     if NATIVE_BACKEND and c.mode=='SCULPT':
-        ensure_native_reference(ob);box.prop(ob,'sculpt_symmetry_reference_use_for_strokes',text='Usa riferimento per i pennelli')
+        ensure_native_reference(ob);box.prop(ob,'sculpt_symmetry_reference_use_for_strokes',text='Use Reference for Brushes')
         box.prop(s,'combine_local')
         if not s.combine_local and any(getattr(ob.data,'use_mirror_'+axis,False) for axis in 'xyz'):
-            box.label(text='Sola simmetria locale (riattiva Usa riferimento per cambiarla)',icon='INFO')
+            box.label(text='Local symmetry only (enable Use Reference to change it)',icon='INFO')
         if s.combine_local:
             box.prop(s,'reference_axes',toggle=True)
             row=box.row(align=True);row.label(text='Assi locali')
             for axis in 'xyz':row.prop(ob.data,'use_mirror_'+axis,text=axis.upper(),toggle=True)
-            box.label(text='Un asse per riferimento · massimo 4 impronte')
+            box.label(text='One axis per reference · up to 4 brush impressions')
         box.label(text='Pennelli · Mesh / Multires / Dyntopo',icon='INFO')
     elif c.mode=='EDIT_MESH':
         box.prop(s,'edit_direction')
         box.prop(s,'edit_threshold')
         box.prop(s,'edit_selected_only')
-        box.operator('mesh.symmetrize_reference_preview',text='Symmetrize · maschera',icon='MOD_MIRROR')
+        box.operator('mesh.symmetrize_reference_preview',text='Symmetrize · Mask',icon='MOD_MIRROR')
         box.operator('mesh.symmetrize_reference_shape_preview')
-        box.label(text='Ricostruisce la topologia sul lato destinazione',icon='INFO')
-    ensure_native_reference(ob);box.prop(ob,'sculpt_symmetry_reference_enabled',text='Mostra piani')
+        box.label(text='Rebuilds topology on the destination side',icon='INFO')
+    ensure_native_reference(ob);box.prop(ob,'sculpt_symmetry_reference_enabled',text='Show Planes')
     if c.mode=='SCULPT':
-        box.prop(s,'edit_direction',text='Symmetrize: sorgente')
+        box.prop(s,'edit_direction',text='Symmetrize: Source')
         if any(m.type=='MULTIRES' for m in ob.modifiers):
             multires=next(m for m in ob.modifiers if m.type=='MULTIRES')
             controls=box.column(align=True)
             controls.enabled=multires.total_levels>0 and multires.sculpt_levels==multires.total_levels and not multires.use_sculpt_base_mesh
-            controls.operator('sculpt.symmetrize_reference_multires_detail',text='Symmetrize · dettaglio layer').base_surface=False
+            controls.operator('sculpt.symmetrize_reference_multires_detail',text='Symmetrize · Layer Detail').base_surface=False
             controls.operator('sculpt.symmetrize_reference_multires_detail',text='Symmetrize · base Multires').base_surface=True
-            if not controls.enabled:box.label(text='Usa il livello Sculpt massimo · disattiva Sculpt Base Mesh',icon='INFO')
+            if not controls.enabled:box.label(text='Use the highest Sculpt level · disable Sculpt Base Mesh',icon='INFO')
         else:
-            box.operator('mesh.symmetrize_reference_preview',text='Symmetrize · maschera',icon='MOD_MIRROR')
+            box.operator('mesh.symmetrize_reference_preview',text='Symmetrize · Mask',icon='MOD_MIRROR')
             box.operator('mesh.symmetrize_reference_shape_preview')
-    box.prop(ob,'sculpt_symmetry_reference_locked',text='Blocca riferimento',icon='LOCKED' if ob.sculpt_symmetry_reference_locked else 'UNLOCKED',toggle=True)
+    box.prop(ob,'sculpt_symmetry_reference_locked',text='Lock Reference',icon='LOCKED' if ob.sculpt_symmetry_reference_locked else 'UNLOCKED',toggle=True)
     if editing(c):
         ensure_native_reference(ob);row=box.row(align=True);row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_mode',expand=True)
         row=box.row(align=True);row.enabled=not ob.sculpt_symmetry_reference_locked
-        row.operator('sculpt.reference_native_transform_preview',text='Sposta · G').mode='G'
+        row.operator('sculpt.reference_native_transform_preview',text='Move · G').mode='G'
         row.operator('sculpt.reference_native_transform_preview',text='Ruota · R').mode='R'
         row.operator('sculpt.reference_native_transform_preview',text='Scala · S').mode='S'
         row=box.row(align=True);row.prop(c.scene.tool_settings,'use_snap',text='Snap',icon='SNAP_ON');row.prop(c.scene.tool_settings,'snap_elements',text='')
-        box.label(text='X/Y/Z · numeri · Ctrl: snap · Esc: annulla')
-        row=box.row(align=True);row.operator('sculpt.symref_finish_preview',text='Conferma',icon='CHECKMARK');row.operator('sculpt.symref_finish_preview',text='Annulla',icon='X').cancel=True
-        if _session['pick']:box.label(text='Clicca sulla mesh: scegli un vertice',icon='RESTRICT_SELECT_OFF')
+        box.label(text='X/Y/Z · type a number · Ctrl: snap · Esc: cancel')
+        row=box.row(align=True);row.operator('sculpt.symref_finish_preview',text='Confirm',icon='CHECKMARK');row.operator('sculpt.symref_finish_preview',text='Cancel',icon='X').cancel=True
+        if _session['pick']:box.label(text='Click the mesh to choose a vertex',icon='RESTRICT_SELECT_OFF')
     else:box.operator('sculpt.symref_edit_preview',icon='ORIENTATION_GIMBAL')
     box.operator('sculpt.symref_cursor_preview',icon='PIVOT_CURSOR')
     ensure_native_reference(ob)
     if ob.sculpt_symmetry_reference_enabled:
-        row=box.column();row.enabled=not s.anchored and not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_location',text='Posizione')
+        row=box.column();row.enabled=not s.anchored and not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_location',text='Position')
         if s.anchored:
             row=box.row();row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_anchor_offset',text='Offset ancoraggio')
-        row=box.row();row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_rotation',text='Rotazione')
+        row=box.row();row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_rotation',text='Rotation')
         row=box.row(align=True);row.enabled=not ob.sculpt_symmetry_reference_locked
         row.operator('sculpt.symref_reset_preview',text='Reset pos.').what='POSITION'
         row.operator('sculpt.symref_reset_preview',text='Reset rot.').what='ROTATION'
         row.operator('sculpt.symref_reset_preview',text='Reset tutto').what='ALL'
         ensure_native_reference(ob)
-        box.prop(ob,'sculpt_symmetry_reference_display_size',text='Dimensione piani');box.prop(s,'opacity')
+        box.prop(ob,'sculpt_symmetry_reference_display_size',text='Plane Size');box.prop(s,'opacity')
         if s.anchored:
             _,valid=reference_matrix(ob,c.evaluated_depsgraph_get())
-            box.label(text=('Vertice '+str(s.vertex)) if valid else 'Aggancio sospeso: geometria cambiata',icon='LINKED' if valid else 'ERROR')
+            box.label(text=('Vertex '+str(s.vertex)) if valid else 'Attachment suspended: geometry changed',icon='LINKED' if valid else 'ERROR')
             box.operator('sculpt.symref_detach_preview',icon='UNLINKED')
         elif editing(c):
             row=box.row();row.enabled=anchor_supported(ob);row.operator('sculpt.symref_anchor_preview',icon='VERTEXSEL')
@@ -582,7 +582,7 @@ def draw_settings(layout,c):
 
 class SculptSymmetryReferenceTool(bpy.types.WorkSpaceTool):
     bl_space_type='VIEW_3D';bl_context_mode='SCULPT';bl_idname=TOOL
-    bl_label='Riferimento simmetria';bl_description='Imposta piani e gizmo senza modificare la mesh'
+    bl_label='Symmetry Reference';bl_description='Set planes and gizmos without modifying the mesh'
     bl_icon='ops.transform.transform';bl_widget='VIEW3D_GGT_sculpt_symref_preview'
     bl_keymap=(('sculpt.reference_native_transform_preview',{'type':'G','value':'PRESS'},{'properties':[('mode','G')]}),
                ('sculpt.reference_native_transform_preview',{'type':'R','value':'PRESS'},{'properties':[('mode','R')]}),
@@ -598,7 +598,7 @@ class SculptSymmetryReferenceTool(bpy.types.WorkSpaceTool):
             ensure_native_reference(c.object);row=layout.row(align=True);row.enabled=not c.object.sculpt_symmetry_reference_locked;row.prop(c.object,'sculpt_symmetry_reference_mode',expand=True)
         row=layout.row(align=True)
         row.operator('sculpt.symref_cursor_preview',text='',icon='PIVOT_CURSOR')
-        row.operator('sculpt.symref_finish_preview',text='Conferma',icon='CHECKMARK')
+        row.operator('sculpt.symref_finish_preview',text='Confirm',icon='CHECKMARK')
         row.operator('sculpt.symref_finish_preview',text='',icon='X').cancel=True
         row.popover(panel='VIEW3D_PT_edit_symmetry_reference_preview' if c.mode=='EDIT_MESH' else 'VIEW3D_PT_sculpt_symmetry_for_topbar',text='',icon='PREFERENCES')
 
@@ -644,12 +644,12 @@ class EditSymmetryReferenceTool(SculptSymmetryReferenceTool):
 
 class MESH_OT_symmetrize_reference_preview(bpy.types.Operator):
     bl_idname='mesh.symmetrize_reference_preview'
-    bl_label='Symmetrize · maschera protetta'
-    bl_description='Ricostruisce la topologia dal lato sorgente quando possibile; con maschera usa transfer o raccordo protetto'
+    bl_label='Symmetrize · Protected Mask'
+    bl_description='Rebuild topology from the source side when possible; with a mask, use transfer or protected stitching'
     bl_options={'REGISTER','UNDO'}
-    space:EnumProperty(name='Assi',items=(('LOCAL','Locali','Assi e origine dell’oggetto'),('REFERENCE','Personalizzati','Piani del riferimento di simmetria')),default='LOCAL')
-    respect_mask:BoolProperty(name='Proteggi maschera',default=True,description='Esclude dalla copia la sorgente mascherata e conserva la destinazione protetta')
-    transition_width:FloatProperty(name='Ampiezza raccordo',default=.25,min=.02,max=.5,subtype='FACTOR',description='Ampiezza relativa della fascia libera che collega la maschera alla copia speculare')
+    space:EnumProperty(name='Axes',items=(('LOCAL','Local','Object axes and origin'),('REFERENCE','Custom','Symmetry reference planes')),default='LOCAL')
+    respect_mask:BoolProperty(name='Protect Mask',default=True,description='Exclude the masked source from copying and preserve the protected destination')
+    transition_width:FloatProperty(name='Stitch Width',default=.25,min=.02,max=.5,subtype='FACTOR',description='Relative width of the editable band connecting the mask to the mirrored copy')
     @classmethod
     def poll(cls,c):return c.mode in {'EDIT_MESH','SCULPT'} and c.object and c.object.type=='MESH'
     def invoke(self,c,event):
@@ -658,8 +658,8 @@ class MESH_OT_symmetrize_reference_preview(bpy.types.Operator):
         self.space='REFERENCE' if ob.sculpt_symmetry_reference_enabled and ensure_native_reference(ob) else 'LOCAL'
         return c.window_manager.invoke_props_dialog(self)
     def draw(self,c):
-        self.layout.prop(self,'space');self.layout.prop(c.object.sculpt_symref_preview,'edit_direction',text='Sorgente');self.layout.prop(self,'respect_mask');self.layout.prop(self,'transition_width');self.layout.label(text='Piano del gizmo' if self.space=='REFERENCE' else 'Piano locale oggetto',icon='ORIENTATION_GIMBAL')
-        self.layout.label(text='Maschera parziale: copia forma · topologia diversa: prova raccordo',icon='INFO')
+        self.layout.prop(self,'space');self.layout.prop(c.object.sculpt_symref_preview,'edit_direction',text='Source');self.layout.prop(self,'respect_mask');self.layout.prop(self,'transition_width');self.layout.label(text='Gizmo Plane' if self.space=='REFERENCE' else 'Object Local Plane',icon='ORIENTATION_GIMBAL')
+        self.layout.label(text='Partial mask: copy shape · different topology: try stitching',icon='INFO')
         self.layout.prop(c.object.sculpt_symref_preview,'edit_threshold')
         if c.mode=='EDIT_MESH':self.layout.prop(c.object.sculpt_symref_preview,'edit_selected_only')
     def execute(self,c):
@@ -670,9 +670,9 @@ class MESH_OT_symmetrize_reference_preview(bpy.types.Operator):
             self.report({'ERROR'},'Ricostruzione: usa una mesh non condivisa senza Multires, shape key o Dyntopo');return {'CANCELLED'}
         frame,valid=(ob.matrix_world,True) if self.space=='LOCAL' else reference_matrix(ob,c.evaluated_depsgraph_get())
         if not valid or abs(ob.matrix_world.determinant())<1e-12:
-            self.report({'ERROR'},'Riferimento non valido');return {'CANCELLED'}
+            self.report({'ERROR'},'Invalid reference');return {'CANCELLED'}
         if s.anchored:
-            self.report({'ERROR'},'Sgancia il riferimento prima di ricostruire la topologia');return {'CANCELLED'}
+            self.report({'ERROR'},'Detach the reference before rebuilding topology');return {'CANCELLED'}
         spec=importlib.util.spec_from_file_location('symmetry_topology_mask',Path(__file__).with_name('symmetry_topology_mask.py'));module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         working=None
         try:
@@ -681,8 +681,8 @@ class MESH_OT_symmetrize_reference_preview(bpy.types.Operator):
             try:
                 count,method=module.reconstruct(working,frame.inverted()@ob.matrix_world,s.edit_direction,s.edit_threshold,self.respect_mask,s.edit_selected_only and not sculpt)
             except ValueError as ex:
-                if not self.respect_mask or 'topologia dei due lati' not in str(ex):raise
-                if not sculpt and s.edit_selected_only and not all(f.select for f in working.faces):raise ValueError('Raccordo: seleziona tutta la mesh; la maschera protegge la zona da conservare')
+                if not self.respect_mask or 'different topology' not in str(ex):raise
+                if not sculpt and s.edit_selected_only and not all(f.select for f in working.faces):raise ValueError('Stitching: select the entire mesh; the mask protects the region to preserve')
                 transition_spec=importlib.util.spec_from_file_location('transition_build',Path(__file__).with_name('symmetry_transition_build.py'));transition=importlib.util.module_from_spec(transition_spec);transition_spec.loader.exec_module(transition)
                 replacement,details=transition.assemble(working,frame.inverted()@ob.matrix_world,'XYZ'.index(s.edit_direction[-1]),-1 if s.edit_direction.startswith('-') else 1,self.transition_width)
                 working.free();working=replacement;count=details['fixed_faces'];method='topology-band'
@@ -691,9 +691,9 @@ class MESH_OT_symmetrize_reference_preview(bpy.types.Operator):
             else:
                 # Publish only after all checks; leave Edit Mode to replace topology safely.
                 bpy.ops.object.mode_set(mode='OBJECT');working.to_mesh(ob.data);ob.data.update();bpy.ops.object.mode_set(mode='EDIT')
-            description=('vertici trasferiti (topologia invariata)' if method=='shape' else
-                         'facce protette durante il raccordo' if method=='topology-band' else
-                         'facce protette durante la copia topologica')
+            description=('transferred vertices (topology unchanged)' if method=='shape' else
+                         'protected faces during stitching' if method=='topology-band' else
+                         'protected faces during topology copying')
             self.report({'INFO'},f'Symmetrize · {count} {description}');return {'FINISHED'}
         except (ValueError,RuntimeError) as ex:
             self.report({'ERROR'},str(ex));return {'CANCELLED'}
@@ -702,7 +702,7 @@ class MESH_OT_symmetrize_reference_preview(bpy.types.Operator):
             if sculpt and ob.mode!='SCULPT':bpy.ops.object.mode_set(mode='SCULPT')
 
 class VIEW3D_PT_edit_symmetry_reference_preview(bpy.types.Panel):
-    bl_label='Riferimento simmetria'
+    bl_label='Symmetry Reference'
     bl_space_type='VIEW_3D';bl_region_type='UI';bl_category='Tool'
     @classmethod
     def poll(cls,c):return c.mode=='EDIT_MESH' and c.object and c.object.type=='MESH'

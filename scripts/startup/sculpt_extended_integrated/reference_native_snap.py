@@ -9,12 +9,12 @@ def same_matrix(a,b):
 def install(ref):
  class NativeReferenceTransform(bpy.types.Operator):
   bl_idname='sculpt.reference_native_transform_preview'
-  bl_label='Posiziona con snap'
+  bl_label='Position with Snap'
   # Reference placement is a tool setting, cancelled with Esc/the tool session.
   # The pivot target records its own native metadata-only Undo transaction.
   bl_options={'REGISTER','BLOCKING'}
-  mode:EnumProperty(items=(('G','Sposta',''),('R','Ruota',''),('S','Dimensione piani','')),default='G')
-  target:EnumProperty(items=(('REFERENCE','Riferimento','Posiziona i piani di simmetria'),('PIVOT','Pivot Sculpt','Posiziona il pivot per Sposta, Ruota e Scala')),default='REFERENCE')
+  mode:EnumProperty(items=(('G','Move',''),('R','Rotate',''),('S','Plane Size','')),default='G')
+  target:EnumProperty(items=(('REFERENCE','Reference','Position the symmetry planes'),('PIVOT','Sculpt Pivot','Position the pivot for Move, Rotate and Scale')),default='REFERENCE')
   result_location:FloatVectorProperty(size=3,options={'HIDDEN'})
   result_rotation:FloatVectorProperty(size=3,subtype='EULER',options={'HIDDEN'})
   result_scale:FloatProperty(default=1.0,options={'HIDDEN'})
@@ -28,7 +28,7 @@ def install(ref):
    self.persistent_changed=True
    if self.mode=='G':
     if not ref.set_world_location(self.ob,c.scene.cursor.location):
-     raise RuntimeError('Ancoraggio non valido; sgancia il riferimento prima di spostarlo')
+     raise RuntimeError('Invalid anchor; detach the reference before moving it')
    else:ref.set_reference_rotation(self.ob,(self.ob.matrix_world.to_quaternion().inverted()@c.scene.cursor.matrix.to_quaternion()).to_euler('XYZ'))
    ref.redraw()
   def apply_scale(self,c,factor,preview=False):
@@ -83,7 +83,7 @@ def install(ref):
     if self.target!='REFERENCE':return {'CANCELLED'}
     self.start_mouse_x=event.mouse_region_x;self.numeric=''
     c.window_manager.modal_handler_add(self)
-    c.area.header_text_set('Dimensione piani: numeri · Ctrl scatto 0,1 · Invio conferma · Esc annulla')
+    c.area.header_text_set('Plane Size: type a number · Ctrl snaps to 0.1 · Enter confirms · Esc cancels')
     return {'RUNNING_MODAL'}
    self.cursor_before=c.scene.cursor.matrix.copy();self.cursor_mode=c.scene.cursor.rotation_mode
    if self.target=='REFERENCE':
@@ -143,7 +143,7 @@ def install(ref):
     if changed and self.target=='PIVOT':
      c.object.sculpt_transform_pivot_location=c.object.matrix_world.inverted_safe()@c.scene.cursor.location
      if bpy.ops.sculpt.set_pivot_position('EXEC_REGION_WIN',False,mode='CURSOR',metadata_only=True)!={'FINISHED'}:
-      raise RuntimeError('Impossibile posizionare il pivot Sculpt')
+      raise RuntimeError('Unable to position the Sculpt Pivot')
     self.cleanup(c,not changed)
     return {'FINISHED'} if changed else {'CANCELLED'}
    except Exception as ex:
@@ -153,7 +153,7 @@ def install(ref):
 
  class SculptPivotFromCursor(bpy.types.Operator):
   bl_idname='sculpt.snap_pivot_from_cursor_preview'
-  bl_label='Pivot al cursore 3D'
+  bl_label='Pivot to 3D Cursor'
   bl_options={'REGISTER','UNDO'}
   @classmethod
   def poll(cls,c):return c.mode=='SCULPT' and c.object and c.area and c.area.type=='VIEW_3D'
@@ -161,7 +161,7 @@ def install(ref):
 
  class SculptPivotUseReference(bpy.types.Operator):
   bl_idname='sculpt.pivot_use_reference_preview'
-  bl_label='Usa riferimento come pivot'
+  bl_label='Use Reference as Pivot'
   bl_options={'REGISTER'}
   @classmethod
   def poll(cls,c):return c.mode=='SCULPT' and c.object and hasattr(c.object,'sculpt_symref_preview')
@@ -178,7 +178,7 @@ def install(ref):
 
  class VIEW3D_GGT_sculpt_transform_pivot_preview(bpy.types.GizmoGroup):
   bl_idname='VIEW3D_GGT_sculpt_transform_pivot_preview'
-  bl_label='Pivot pennelli trasformazione'
+  bl_label='Transform Brush Pivot'
   bl_space_type='VIEW_3D';bl_region_type='WINDOW';bl_options={'3D','PERSISTENT'}
   @classmethod
   def poll(cls,c):
@@ -201,7 +201,7 @@ def install(ref):
     gz.matrix_basis=basis
 
  class SculptSnapPanel(bpy.types.Panel):
-  bl_label='Snap e pivot Sculpt'
+  bl_label='Sculpt Snap and Pivot'
   bl_idname='VIEW3D_PT_sculpt_snap_pivot_preview'
   bl_space_type='VIEW_3D';bl_region_type='UI';bl_category='Tool'
   @classmethod
@@ -209,16 +209,16 @@ def install(ref):
   def draw(self,c):
    layout=self.layout;ts=c.scene.tool_settings
    row=layout.row(align=True);row.prop(ts,'use_snap',text='Snap',icon='SNAP_ON');row.prop(ts,'snap_elements',text='')
-   if 'VOLUME' in ts.snap_elements:layout.prop(ts,'use_snap_peel_object',text='Oggetti separati')
+   if 'VOLUME' in ts.snap_elements:layout.prop(ts,'use_snap_peel_object',text='Separate Objects')
    s=c.object.sculpt_symref_preview
-   layout.prop(c.object,'sculpt_transform_pivot_enabled',text='Mostra pivot trasformazioni',toggle=True,icon='ORIENTATION_GIMBAL')
-   layout.prop(c.object,'sculpt_transform_pivot_linked',text='Condividi con simmetria')
+   layout.prop(c.object,'sculpt_transform_pivot_enabled',text='Show Transform Pivot',toggle=True,icon='ORIENTATION_GIMBAL')
+   layout.prop(c.object,'sculpt_transform_pivot_linked',text='Share with Symmetry')
    layout.operator_context='INVOKE_REGION_WIN'
-   op=layout.operator('sculpt.reference_native_transform_preview',text='Posiziona pivot con snap',icon='PIVOT_CURSOR');op.target='PIVOT';op.mode='G'
+   op=layout.operator('sculpt.reference_native_transform_preview',text='Position Pivot with Snap',icon='PIVOT_CURSOR');op.target='PIVOT';op.mode='G'
    if c.object.sculpt_transform_pivot_linked:layout.operator('sculpt.pivot_use_reference_preview',icon='LINKED')
    layout.operator('sculpt.snap_pivot_from_cursor_preview',icon='PIVOT_CURSOR')
-   layout.label(text='G sposta il pivot · Ruota e Scala usano il pivot')
-   layout.label(text='X/Y/Z · Ctrl snap · Esc annulla')
+   layout.label(text='G moves the pivot · Rotate and Scale use the pivot')
+   layout.label(text='X/Y/Z · Ctrl snaps · Esc cancels')
 
  classes=(NativeReferenceTransform,SculptPivotFromCursor,SculptPivotUseReference,VIEW3D_GGT_sculpt_transform_pivot_preview,SculptSnapPanel)
  for cls in classes:bpy.utils.register_class(cls)

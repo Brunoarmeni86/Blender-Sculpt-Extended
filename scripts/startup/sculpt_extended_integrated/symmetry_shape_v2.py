@@ -27,7 +27,7 @@ def topology_pairs(bm, coordinates, tolerance):
     vertices=list(bm.verts);faces=list(bm.faces)
     if not vertices:return []
     if not all(all(math.isfinite(c) for c in p) for p in coordinates):
-        raise CorrespondenceError('Coordinate non valide: nessuna modifica applicata')
+        raise CorrespondenceError('Invalid coordinates; no changes were applied')
     tree=KDTree(len(vertices))
     for i,p in enumerate(coordinates):tree.insert(p,i)
     tree.balance()
@@ -57,7 +57,7 @@ def topology_pairs(bm, coordinates, tolerance):
 
     def assign(i,j):
         if mirror[i] not in (-1,j) or mirror[j] not in (-1,i):
-            raise CorrespondenceError('Corrispondenza topologica ambigua: nessuna modifica applicata')
+            raise CorrespondenceError('Ambiguous topology correspondence; no changes were applied')
         if mirror[i]==j:return
         mirror[i]=j;mirror[j]=i;enqueue(vertices[i]);enqueue(vertices[j])
 
@@ -70,7 +70,7 @@ def topology_pairs(bm, coordinates, tolerance):
                 if a<0 or b<0:continue
                 edge=bm.edges.get((vertices[a],vertices[b]))
                 if edge is None:
-                    raise CorrespondenceError('La topologia non ha una corrispondenza speculare completa')
+                    raise CorrespondenceError('The topology does not have complete mirrored correspondence')
                 possibilities=[]
                 for target in edge.link_loops:
                     if target.vert.index!=b or target.link_loop_next.vert.index!=a:continue
@@ -86,7 +86,7 @@ def topology_pairs(bm, coordinates, tolerance):
                         source_loop=source_loop.link_loop_next;target_loop=target_loop.link_loop_prev
                     if valid:possibilities.append((other,proposal))
                 if not possibilities:
-                    raise CorrespondenceError('Corrispondenza incompatibile fra le facce: nessuna modifica applicata')
+                    raise CorrespondenceError('Incompatible face correspondence; no changes were applied')
                 if len(possibilities)!=1:continue
                 other,proposal=possibilities[0]
                 face_map[face.index]=other.index;face_map[other.index]=face.index
@@ -149,10 +149,10 @@ def topology_pairs(bm, coordinates, tolerance):
         if mirror[i]<0 and mirror[j]<0 and not vertices[i].link_faces and not vertices[j].link_faces:
             assign(i,j)
     if any(i<0 for i in mirror) or any(i<0 for i in face_map):
-        raise CorrespondenceError('Impossibile ricostruire tutte le coppie dalla topologia; nessuna modifica applicata')
+        raise CorrespondenceError('Unable to reconstruct every pair from topology; no changes were applied')
     for edge in bm.edges:
         if bm.edges.get((vertices[mirror[edge.verts[0].index]],vertices[mirror[edge.verts[1].index]])) is None:
-            raise CorrespondenceError('Corrispondenza degli spigoli incompatibile: nessuna modifica applicata')
+            raise CorrespondenceError('Incompatible edge correspondence; no changes were applied')
     votes=[mirror[i]==j for i,j,distance in candidates if distance<=strict]
     if votes and sum(votes)<len(votes)/2:
         raise CorrespondenceError('La corrispondenza topologica non è coerente con il piano scelto')
@@ -177,10 +177,10 @@ def topology_sides(bm, mirror, coordinates, axis):
         if sides[group[0]]:continue
         other=component[mirror[group[0]]]
         if other<0 or other==k or any(component[mirror[i]]!=other for i in group):
-            raise CorrespondenceError('La topologia non permette di distinguere due metà speculari')
+            raise CorrespondenceError('The topology does not define two distinct mirrored halves')
         a=median(coordinates[i][axis] for i in group)
         b=median(coordinates[i][axis] for i in groups[other])
-        if abs(a-b)<1e-8:raise CorrespondenceError('Lato sorgente ambiguo rispetto al piano scelto')
+        if abs(a-b)<1e-8:raise CorrespondenceError('Source side is ambiguous relative to the selected plane')
         sign=1 if a>b else -1
         for i in group:sides[i]=sign
         for i in groups[other]:sides[i]=-sign
@@ -206,7 +206,7 @@ def transfer(bm, transform, axis, source_sign, tolerance, selected_only):
         weight=1-max(0,min(1,max(v[mask],vertices[j][mask]))) if mask else 1
         if weight==0:continue
         if j!=i and vertices[j].hide:
-            raise CorrespondenceError('Sorgente nascosta: nessuna modifica applicata')
+            raise CorrespondenceError('Source is hidden; no changes were applied')
         point=coordinates[j].copy();point[axis]=0 if j==i else -point[axis]
         target=inverse@point
         value=v.co.lerp(target,weight)
@@ -222,16 +222,16 @@ def transfer_checked(bm, transform, axis, source_sign, tolerance, selected_only,
     working=bm.copy()
     try:
         for original,copy in zip(before,working.verts):
-            if original!=copy.co:raise CorrespondenceError('Ordine dei vertici non coerente')
-        chosen='topologia'
+            if original!=copy.co:raise CorrespondenceError('Inconsistent vertex order')
+        chosen='topology'
         try:
-            if method=='SURFACE':raise CorrespondenceError('Metodo superficie richiesto')
+            if method=='SURFACE':raise CorrespondenceError('Surface method requested')
             count,skipped=transfer(working,transform,axis,source_sign,tolerance,selected_only)
         except CorrespondenceError:
             if method=='TOPOLOGY':raise
-            chosen='superficie adattata'
+            chosen='fitted surface'
             if any(face.hide for face in working.faces):
-                raise CorrespondenceError('Mostra tutta la mesh prima del trasferimento di superficie')
+                raise CorrespondenceError('Show the entire mesh before surface transfer')
             for v,p in zip(working.verts,before):v.co=transform@p
             if selected_only:
                 selection_mask=working.verts.layers.float.get('.sculpt_mask') or working.verts.layers.float.new('.sculpt_mask')
@@ -275,7 +275,7 @@ def transfer_checked(bm, transform, axis, source_sign, tolerance, selected_only,
         frozen=set();blend=[1.]*len(before);adapted=0
         for iteration in range(24):
             trial=[a.copy() if a==b or weight==0 else a.lerp(b,weight) for a,b,weight in zip(before,candidate,blend)]
-            if not all(all(math.isfinite(x) for x in p) for p in trial):raise CorrespondenceError('Coordinate non finite: nessuna modifica applicata')
+            if not all(all(math.isfinite(x) for x in p) for p in trial):raise CorrespondenceError('Non-finite coordinates; no changes were applied')
             for v,p in zip(working.verts,trial):v.co=p
             working.normal_update()
             loop_triangles=working.calc_loop_triangles()
@@ -308,7 +308,7 @@ def transfer_checked(bm, transform, axis, source_sign, tolerance, selected_only,
                 t=min(1.,d/collar)
                 blend[i]=t*t*t*(t*(6*t-15)+10)
         if accepted is None:
-            raise CorrespondenceError('Il trasferimento creerebbe pieghe o intersezioni: nessuna modifica applicata')
+            raise CorrespondenceError('The transfer would create folds or intersections; no changes were applied')
         changed=0
         for v,p,original in zip(vertices,accepted,before):
             if p!=original:v.co=p;changed+=1
@@ -319,23 +319,23 @@ def transfer_checked(bm, transform, axis, source_sign, tolerance, selected_only,
 def install(reference_module):
     class MESH_OT_reference_shape(bpy.types.Operator):
         bl_idname='mesh.symmetrize_reference_shape_preview'
-        bl_label='Solo forma — maschera protetta'
+        bl_label='Shape Only — Protected Mask'
         bl_options={'REGISTER','UNDO'}
         distance:FloatProperty(name='Distanza iniziale corrispondenze',default=.1,min=.000001,subtype='DISTANCE',description='Usata per inizializzare le coppie; il trasferimento richiede una corrispondenza topologica completa')
-        transition_width:FloatProperty(name='Fascia raccordo',default=.15,min=.01,max=1.,subtype='FACTOR',description='Ampiezza del raccordo vicino alla zona protetta; fuori dalla fascia conserva la forma speculare')
-        method:EnumProperty(name='Metodo',items=(('AUTO','Automatico','Usa le coppie topologiche quando disponibili; altrimenti adatta la superficie e il bordo mascherato'),('TOPOLOGY','Topologia','Trasferimento per coppie verificate, senza adattamento della superficie'),('SURFACE','Superficie continua','Adatta la forma anche dopo remesh; conserva la topologia di destinazione')),default='AUTO')
-        space:EnumProperty(name='Piano',items=(('LOCAL','Assi locali','Usa gli assi locali e l’origine dell’oggetto'),('REFERENCE','Riferimento personalizzato','Usa posizione e rotazione dei piani del gizmo')),default='LOCAL')
+        transition_width:FloatProperty(name='Stitch Band',default=.15,min=.01,max=1.,subtype='FACTOR',description='Width of the transition near the protected region; outside the band, preserve the mirrored shape')
+        method:EnumProperty(name='Method',items=(('AUTO','Automatic','Use topology pairs when available; otherwise fit the surface and masked boundary'),('TOPOLOGY','Topology','Transfer using verified pairs without surface fitting'),('SURFACE','Continuous Surface','Fit the shape even after remeshing while preserving destination topology')),default='AUTO')
+        space:EnumProperty(name='Plane',items=(('LOCAL','Local Axes','Use the object local axes and origin'),('REFERENCE','Custom Reference','Use the position and rotation of the gizmo planes')),default='LOCAL')
         @classmethod
         def poll(cls,c):return c.mode in {'EDIT_MESH','SCULPT'} and c.object and c.object.type=='MESH'
         def invoke(self,c,event):
             self.space='REFERENCE' if c.object.sculpt_symmetry_reference_enabled and (c.mode=='EDIT_MESH' or c.object.sculpt_symmetry_reference_use_for_strokes) else 'LOCAL'
             return c.window_manager.invoke_props_dialog(self)
         def draw(self,c):
-            self.layout.prop(self,'method');self.layout.prop(self,'space');self.layout.prop(c.object.sculpt_symref_preview,'edit_direction',text='Lato sorgente')
+            self.layout.prop(self,'method');self.layout.prop(self,'space');self.layout.prop(c.object.sculpt_symref_preview,'edit_direction',text='Source Side')
             if self.method!='SURFACE':self.layout.prop(self,'distance')
             if self.method!='TOPOLOGY':self.layout.prop(self,'transition_width')
-            self.layout.label(text='Maschera preservata · geometria controllata',icon='INFO')
-            if self.method!='TOPOLOGY':self.layout.label(text='Il bordo mascherato può limitare l’adattamento')
+            self.layout.label(text='Mask preserved · geometry validated',icon='INFO')
+            if self.method!='TOPOLOGY':self.layout.label(text='The masked boundary may limit fitting')
         def execute(self,c):
             ob=c.object;s=ob.sculpt_symref_preview
             sculpt=c.mode=='SCULPT'
@@ -343,7 +343,7 @@ def install(reference_module):
                 self.report({'ERROR'},'Usa una mesh non condivisa senza shape key o Multires');return {'CANCELLED'}
             frame,valid=(ob.matrix_world,True) if self.space=='LOCAL' else reference_module.reference_matrix(ob,c.evaluated_depsgraph_get())
             if not valid or abs(ob.matrix_world.determinant())<1e-12:
-                self.report({'ERROR'},'Riferimento non valido');return {'CANCELLED'}
+                self.report({'ERROR'},'Invalid reference');return {'CANCELLED'}
             if sculpt:
                 bpy.ops.object.mode_set(mode='OBJECT')
                 bm=bmesh.new();bm.from_mesh(ob.data)
@@ -359,8 +359,8 @@ def install(reference_module):
             finally:
                 if sculpt:bm.free();bpy.ops.object.mode_set(mode='SCULPT')
             adapted=details.get('adapted_vertices',0)
-            message=f"{count} vertici · {details['method']}"
-            if adapted:message+=f" · raccordo locale: {adapted} vertici adattati"
+            message=f"{count} vertices · {details['method']}"
+            if adapted:message+=f" · local stitching: {adapted} fitted vertices"
             self.report({'INFO'},message)
             return {'FINISHED'} if count else {'CANCELLED'}
     bpy.utils.register_class(MESH_OT_reference_shape)

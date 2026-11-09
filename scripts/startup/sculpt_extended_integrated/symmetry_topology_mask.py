@@ -28,15 +28,15 @@ def reconstruct(bm, transform, direction, threshold, protect=True, selected=Fals
         try:
             changed,_=module.transfer(bm,transform,axis,source_sign,max(threshold,.1),selected)
         except module.CorrespondenceError as ex:
-            raise ValueError('La topologia dei due lati è diversa: raccordo della maschera non ancora supportato; nessuna modifica') from ex
+            raise ValueError('The two sides have different topology; mask stitching is not yet supported and no changes were made') from ex
         finally:
             for v,value in saved_mask.items():v[mask]=value
         if any(v.co!=co for v,co in positions.items()):
-            raise ValueError('Verifica della zona protetta fallita; nessuna modifica')
+            raise ValueError('Protected region validation failed; no changes were made')
         return changed, 'shape'
     old_boundary=sum(e.is_boundary for e in bm.edges)
     free=[f for f in bm.faces if f not in frozen_faces]
-    if not free:raise ValueError('Tutta la superficie è protetta: nessuna modifica')
+    if not free:raise ValueError('The entire surface is protected; no changes were made')
     geom=set(free)
     for f in free:geom.update(f.edges);geom.update(f.verts)
     inv=transform.inverted()
@@ -64,10 +64,10 @@ def reconstruct(bm, transform, direction, threshold, protect=True, selected=Fals
                 created[key]=v
             loop.append(v)
         try:bm.faces.new(loop)
-        except ValueError:raise ValueError('Raccordo maschera ambiguo; nessuna modifica')
+        except ValueError:raise ValueError('Ambiguous mask stitching; no changes were made')
     for v in list(bm.verts):
         if not v.link_edges:bm.verts.remove(v)
     if any(len(e.link_faces)>2 for e in bm.edges) or sum(e.is_boundary for e in bm.edges)>old_boundary:
-        raise ValueError('Il raccordo con la maschera lascerebbe un bordo aperto; nessuna modifica')
+        raise ValueError('Mask stitching would leave an open boundary; no changes were made')
     bm.normal_update()
     return len(frozen_faces), 'topology'

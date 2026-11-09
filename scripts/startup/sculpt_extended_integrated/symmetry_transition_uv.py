@@ -13,14 +13,14 @@ def load_surface():
 def transition(bm,transform,axis,sign,width):
  surface=load_surface();bm.verts.index_update();bm.faces.index_update()
  vs=list(bm.verts);co=[transform@v.co for v in vs];mask=bm.verts.layers.float.get('.sculpt_mask')
- if not mask:raise ValueError('Nessuna maschera')
+ if not mask:raise ValueError('No mask')
  for p in co:
   if abs(p[axis])<1e-6:p[axis]=0
  # Keep a complete strip of original faces crossing the plane. Its target-side
  # fragments constrain the solver, but the assembler restores the whole polygons.
  crossing={f.index for f in bm.faces if min(co[v.index][axis]*sign for v in f.verts)<-1e-8 and max(co[v.index][axis]*sign for v in f.verts)>1e-8}
  protected=[f for f in bm.faces if (any(v[mask]>1e-6 for v in f.verts) or f.index in crossing or any(abs(co[v.index][axis])<1e-8 for v in f.verts)) and any(co[v.index][axis]*sign<0 for v in f.verts)]
- if not protected:raise ValueError('Nessuna faccia mascherata nella destinazione da raccordare')
+ if not protected:raise ValueError('No masked faces in the destination region to stitch')
  triangles=[[l.vert.index for l in t] for t in bm.calc_loop_triangles()]
  src=surface.clipped_half(co,triangles,axis,sign);dst=surface.clipped_half(co,triangles,axis,-sign)
  order=src['boundary'];lengths=[(src['points'][order[(k+1)%len(order)]]-src['points'][v]).length for k,v in enumerate(order)];total=sum(lengths);walk=0;uvboundary={}
@@ -49,7 +49,7 @@ def transition(bm,transform,axis,sign,width):
  source_uv_tree=BVHTree.FromPolygons(su,src['faces'],all_triangles=True)
  def source_mask_at(p):
   q,n,j,d=source_uv_tree.find_nearest(p)
-  if q is None or d>1e-5:raise ValueError('Corrispondenza maschera fuori dominio')
+  if q is None or d>1e-5:raise ValueError('Mask correspondence lies outside the domain')
   a,b,c=src['faces'][j];pa,pb,pc=su[a],su[b],su[c]
   den=(pb.x-pa.x)*(pc.y-pa.y)-(pb.y-pa.y)*(pc.x-pa.x)
   wb=((q.x-pa.x)*(pc.y-pa.y)-(q.y-pa.y)*(pc.x-pa.x))/den;wc=((pb.x-pa.x)*(q.y-pa.y)-(pb.y-pa.y)*(q.x-pa.x))/den
@@ -76,7 +76,7 @@ def transition(bm,transform,axis,sign,width):
   possible=None
   for i in original_ids:
    linked={f.index for f in vs[i].link_faces};possible=linked if possible is None else possible.intersection(linked)
-  if not possible:raise ValueError('Frammento del piano senza faccia originale')
+  if not possible:raise ValueError('Plane fragment has no original face')
   owner=next(iter(possible));target_triangle_owners.append(owner);triangles_by_owner.setdefault(owner,[]).append(face)
  for f in protected:
   if f.index not in crossing:
@@ -89,7 +89,7 @@ def transition(bm,transform,axis,sign,width):
  for face in src['faces']:
   probes=[su[i] for i in face]+[sum((su[i] for i in face),Vector())/3]
   if all(patch.find_nearest(p)[3]>width for p in probes):retained.append(face)
- if not retained:raise ValueError('Fascia troppo ampia: nessuna superficie speculare rimasta')
+ if not retained:raise ValueError('Transition band is too wide; no mirrored surface remains')
  # All domain vertices have explicit 3D origins; new CDT vertices are checked later.
  points=[];world=[];lookup={};kinds=[]
  def add(p,position,kind):

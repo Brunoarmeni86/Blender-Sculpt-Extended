@@ -6,9 +6,9 @@ from bpy.props import EnumProperty
 def install(ref):
  class ReferenceTransform(bpy.types.Operator):
   bl_idname='sculpt.reference_transform_preview'
-  bl_label='Trasforma riferimento'
+  bl_label='Transform Reference'
   bl_options={'REGISTER','UNDO','BLOCKING'}
-  mode:EnumProperty(items=[('G','Sposta',''),('R','Ruota',''),('S','Dimensione piani','')])
+  mode:EnumProperty(items=[('G','Move',''),('R','Rotate',''),('S','Plane Size','')])
   @classmethod
   def poll(cls,c):return ref.tool_selected(c) and not c.object.sculpt_symref_preview.locked
   def invoke(self,c,event):
@@ -18,7 +18,7 @@ def install(ref):
    self.start=Vector((event.mouse_region_x,event.mouse_region_y));self.axis=None;self.numeric=''
    c.object.sculpt_symref_preview.mode={'G':'MOVE','R':'ROTATE','S':'SIZE'}[self.mode]
    c.window_manager.modal_handler_add(self)
-   c.area.header_text_set('Riferimento: X/Y/Z vincolo · numeri · Invio conferma · Esc annulla')
+   c.area.header_text_set('Reference: X/Y/Z constrains · type a number · Enter confirms · Esc cancels')
    return {'RUNNING_MODAL'}
   def finish(self,c,cancel=False):
    if cancel:

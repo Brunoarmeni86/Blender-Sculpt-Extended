@@ -46,15 +46,15 @@ def clipped_half(co,triangles,axis,sign):
     boundary={}
     for (a,b),n in edges.items():
         if n==1:boundary.setdefault(a,[]).append(b);boundary.setdefault(b,[]).append(a)
-    if not boundary or any(len(neighbours)!=2 for neighbours in boundary.values()):raise SurfaceError('Bordo del taglio non chiuso')
+    if not boundary or any(len(neighbours)!=2 for neighbours in boundary.values()):raise SurfaceError('Cut boundary is not closed')
     if len(points)-len(edges)+len(faces)!=1:raise SurfaceError('La metà non è un disco topologico')
     start=min(boundary,key=lambda i:keys[i]);order=[start];previous=-1;current=start
     while True:
         next_vertex=next(v for v in boundary[current] if v!=previous)
         if next_vertex==start:break
-        if next_vertex in order[-2:]:raise SurfaceError('Bordo ambiguo')
+        if next_vertex in order[-2:]:raise SurfaceError('Ambiguous boundary')
         order.append(next_vertex);previous,current=current,next_vertex
-        if len(order)>len(boundary):raise SurfaceError('Bordo non semplice')
+        if len(order)>len(boundary):raise SurfaceError('Boundary is not simple')
     if len(order)!=len(boundary):raise SurfaceError('Servirebbe gestire più contorni separati')
     if any(abs(points[i][axis])>1e-7 for i in boundary):raise SurfaceError('Bordi aperti lontani dal piano')
     return dict(points=points,keys=keys,lookup=lookup,original=original,faces=faces,edges=list(edges),boundary=order)
@@ -96,7 +96,7 @@ def candidate(bm,axis=0,sign=1,correct_boundary=True,transition_width=.15):
     tree=BVHTree.FromPolygons(source_uv,source['faces'],all_triangles=True)
     def sample(p):
         q,normal,index,distance=tree.find_nearest(p)
-        if q is None or distance>1e-5:raise SurfaceError('Punto fuori dalla superficie parametrizzata')
+        if q is None or distance>1e-5:raise SurfaceError('Point lies outside the parameterized surface')
         a,b,c=source['faces'][index];pa,pb,pc=source_uv[a],source_uv[b],source_uv[c]
         den=(pb.x-pa.x)*(pc.y-pa.y)-(pb.y-pa.y)*(pc.x-pa.x)
         wb=((q.x-pa.x)*(pc.y-pa.y)-(q.y-pa.y)*(pc.x-pa.x))/den
@@ -126,7 +126,7 @@ def candidate(bm,axis=0,sign=1,correct_boundary=True,transition_width=.15):
         try:
             mesh.from_pydata(values,target['edges'],[])
             attr=mesh.attributes.new('.symref_pin','BOOLEAN','POINT');attr.data.foreach_set('value',pins)
-            if bpy.ops.sculpt.reference_harmonic_solve_preview(mesh=mesh.name,vector_field=True)!={'FINISHED'}:raise SurfaceError('Adattamento alla maschera non riuscito')
+            if bpy.ops.sculpt.reference_harmonic_solve_preview(mesh=mesh.name,vector_field=True)!={'FINISHED'}:raise SurfaceError('Mask fitting failed')
             values=array('f',[0])*(len(target['points'])*3);mesh.vertices.foreach_get('co',values)
             # Fade only the correction imposed by the protected patch. The reflected
             # source stays exact away from the collar, rather than inheriting a
@@ -158,7 +158,7 @@ def candidate(bm,axis=0,sign=1,correct_boundary=True,transition_width=.15):
         source_weight=sample(target_uv[target['original'][i]])[2]
         weight=1-max(0,min(1,max(vertices[i][mask] if mask else 0,source_weight)))
         if weight==0:continue
-        if i not in target['original']:raise SurfaceError('Vertice destinazione senza coordinate')
+        if i not in target['original']:raise SurfaceError('Destination vertex has no coordinates')
         if corrected is None:desired=sample(target_uv[target['original'][i]])[0]
         else:desired=corrected[target['original'][i]]
         result[i]=p.lerp(desired,weight);weights[i]=weight

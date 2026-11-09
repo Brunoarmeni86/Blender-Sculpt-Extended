@@ -83,7 +83,7 @@ def _core(bm,voxel,iterations=24,coarsening=3.0,falloff=1.0):
     final_boundary_edges=sum(e.is_boundary for e in bm.edges)
     final_overfull_edges=sum(len(e.link_faces)>2 for e in bm.edges)
     if final_boundary_edges>original_boundary_edges or final_overfull_edges>original_overfull_edges:
-        raise RuntimeError('Il remesh introdurrebbe bordi aperti o spigoli non-manifold; nessuna modifica applicata')
+        raise RuntimeError('Remeshing would introduce open boundaries or non-manifold edges; no changes were applied')
     info=dict(protected_vertices=len(saved),protected_faces=len(saved_faces),final_vertices=len(bm.verts),final_faces=len(bm.faces),iterations=rows,new_intersections=len(pairs-old_pairs),nonmanifold_edges=sum(not e.is_manifold for e in bm.edges),boundary_edges=final_boundary_edges,overfull_edges=final_overfull_edges,inconsistent_edges=sum(len(e.link_loops)==2 and e.link_loops[0].vert==e.link_loops[1].vert for e in bm.edges),protected_coordinates_exact=True,protected_topology_exact=True)
     # Report geometric diagnostics without rejecting the user's voxel size.
     return bm,info
@@ -91,7 +91,7 @@ def _core(bm,voxel,iterations=24,coarsening=3.0,falloff=1.0):
 
 def local_remesh(mesh,voxel,coarsening=3.0,falloff=1.0):
     if any(a.name in {'.local_protected','.local_face_id','.local_vertex_id'} for a in mesh.attributes):
-        raise ValueError('Attributi temporanei già presenti; nessuna modifica applicata')
+        raise ValueError('Temporary attributes already exist; no changes were applied')
     bm=bmesh.new()
     try:
         bm.from_mesh(mesh)
@@ -101,21 +101,21 @@ def local_remesh(mesh,voxel,coarsening=3.0,falloff=1.0):
 
 class OBJECT_OT_voxel_remesh_protected_preview(bpy.types.Operator):
     bl_idname='object.voxel_remesh_protected_preview'
-    bl_label='Remesh locale protetto dalla maschera'
+    bl_label='Local Mask-Protected Remesh'
     bl_options={'REGISTER','UNDO'}
     @classmethod
     def poll(cls,c):return c.object and c.object.type=='MESH' and c.mode in {'SCULPT','OBJECT'}
     def execute(self,c):
         ob=c.object;source=ob.data
         if source.users!=1 or source.library or source.shape_keys or any(m.type=='MULTIRES' for m in ob.modifiers) or (ob.mode=='SCULPT' and ob.use_dynamic_topology_sculpting):
-            self.report({'ERROR'},'Usa una mesh non condivisa senza shape key, Multires o Dyntopo');return {'CANCELLED'}
+            self.report({'ERROR'},'Use a single-user mesh without shape keys, Multires or Dyntopo');return {'CANCELLED'}
         if source.remesh_voxel_size<=0:
-            self.report({'ERROR'},'Dimensione voxel non valida');return {'CANCELLED'}
+            self.report({'ERROR'},'Invalid voxel size');return {'CANCELLED'}
         mask=source.attributes.get('.sculpt_mask')
         if mask is None:
-            self.report({'INFO'},'Nessuna maschera da proteggere');return {'CANCELLED'}
+            self.report({'INFO'},'No mask to protect');return {'CANCELLED'}
         if all(all(mask.data[i].value>=1.0-1e-6 for i in face.vertices) for face in source.polygons):
-            self.report({'INFO'},'La maschera protegge tutta la superficie: nessuna modifica');return {'CANCELLED'}
+            self.report({'INFO'},'The mask protects the entire surface; no changes were made');return {'CANCELLED'}
         sculpt=ob.mode=='SCULPT';bm=None;stage=None;backup=None;committed=False
         try:
             if sculpt:bpy.ops.object.mode_set(mode='OBJECT')
@@ -137,7 +137,7 @@ class OBJECT_OT_voxel_remesh_protected_preview(bpy.types.Operator):
             finally:publication.free()
             committed=True;source.update();ob.update_tag(refresh={'DATA'})
             if sculpt:bpy.ops.object.mode_set(mode='SCULPT')
-            self.report({'INFO'},f"Remesh locale: {info['protected_vertices']} vertici protetti, zona libera aggiornata")
+            self.report({'INFO'},f"Local remesh: {info['protected_vertices']} protected vertices, editable region updated")
             return {'FINISHED'}
         except (ValueError,RuntimeError,AssertionError) as ex:
             if committed and backup:
@@ -156,16 +156,16 @@ class OBJECT_OT_voxel_remesh_protected_preview(bpy.types.Operator):
 def draw_protection(self,c):
     if c.object and c.object.type=='MESH':
         self.layout.separator()
-        self.layout.prop(c.object.data,'sculpt_remesh_protect_mask_preview',text='Proteggi zona mascherata')
+        self.layout.prop(c.object.data,'sculpt_remesh_protect_mask_preview',text='Protect Masked Region')
         if c.object.data.sculpt_remesh_protect_mask_preview:
             col=self.layout.column(align=True)
-            col.prop(c.object.data,'sculpt_remesh_mask_coarsening',text='Scala densità transizione')
-            col.prop(c.object.data,'sculpt_remesh_mask_falloff',text='Curva influenza maschera')
+            col.prop(c.object.data,'sculpt_remesh_mask_coarsening',text='Transition Density Scale')
+            col.prop(c.object.data,'sculpt_remesh_mask_falloff',text='Mask Influence Curve')
 
 def install():
-    bpy.types.Mesh.sculpt_remesh_mask_coarsening=FloatProperty(name='Scala densità transizione',description='Dimensione relativa dei bordi nella fascia mascherata modificabile; 1 significa densità uniforme',min=1.0,max=6.0,default=3.0)
-    bpy.types.Mesh.sculpt_remesh_mask_falloff=FloatProperty(name='Curva influenza maschera',description='Controlla il passaggio tra remesh pieno e zona protetta',min=.25,max=4.0,default=1.0)
-    bpy.types.Mesh.sculpt_remesh_protect_mask_preview=BoolProperty(name='Proteggi zona mascherata',get=lambda mesh: bool(mesh.get('sculpt_remesh_protect_mask_preview',False)),set=lambda mesh,value: mesh.__setitem__('sculpt_remesh_protect_mask_preview',bool(value)),description='Remesh locale solo della zona senza maschera: conserva coordinate e facce della zona mascherata, anche parziale. Non fonde volumi separati. La maschera viene mantenuta indipendentemente dagli altri attributi')
+    bpy.types.Mesh.sculpt_remesh_mask_coarsening=FloatProperty(name='Transition Density Scale',description='Relative edge size in the editable masked transition; 1 means uniform density',min=1.0,max=6.0,default=3.0)
+    bpy.types.Mesh.sculpt_remesh_mask_falloff=FloatProperty(name='Mask Influence Curve',description='Controls the transition between full remeshing and the protected region',min=.25,max=4.0,default=1.0)
+    bpy.types.Mesh.sculpt_remesh_protect_mask_preview=BoolProperty(name='Protect Masked Region',get=lambda mesh: bool(mesh.get('sculpt_remesh_protect_mask_preview',False)),set=lambda mesh,value: mesh.__setitem__('sculpt_remesh_protect_mask_preview',bool(value)),description='Locally remesh only the unmasked region while preserving coordinates and faces in fully or partially masked areas. Does not fuse separate volumes. The mask is retained independently of other attributes')
     bpy.utils.register_class(OBJECT_OT_voxel_remesh_protected_preview)
     from bl_ui import space_view3d_toolbar
     space_view3d_toolbar.VIEW3D_PT_sculpt_voxel_remesh.append(draw_protection)
