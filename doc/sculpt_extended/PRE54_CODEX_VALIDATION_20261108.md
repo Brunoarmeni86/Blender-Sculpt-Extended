@@ -277,6 +277,21 @@ runtime-validated. Likewise, non-RNA callers that schedule Multires evaluation w
 common modifier update callback still require targeted coverage. These are audit findings,
 not confirmed regressions in this candidate.
 
+### User-model validation and frozen checkpoint (2026-11-10)
+
+The user repeated the reported production sequence on a large real model and confirmed
+that Combined symmetry, normal symmetry and Sculpt Layer Strength now appear to work
+correctly. Performance on the large mesh was reported as acceptable, although potentially
+improvable. This upgrades the primary #12 transition from automated-fixture-only evidence
+to **USER-MODEL-VALIDATED** for the reported workflow; it is not a general performance
+certification.
+
+The validated source and binary are frozen as the experimental checkpoint
+`checkpoint/pre54-strength-validated-20261110`. Binary SHA-256:
+`2AC94ADD05B3B28587601554FCF1819446665DA5B72C3A2BCE6B88F4D03DC38F`.
+Future performance work must compare against this checkpoint and preserve its base/layer/
+surface fingerprint tests. No stable tag, release package or `main` branch was changed.
+
 ## Decision
 
 **keep as experimental candidate.** The fixes are small, auditable, and covered by the
