@@ -248,12 +248,52 @@ struct SculptLayerUndoMetadata {
   std::string name;
   float strength;
   bool visible;
+  int group_id;
+  int group_flag;
+  std::string group_name;
+};
+
+struct SculptLayerUndoDeletedItem {
+  int index = -1;
+  std::string name;
+  MultiresSculptLayer *layer = nullptr;
+
+  SculptLayerUndoDeletedItem() = default;
+  SculptLayerUndoDeletedItem(const int index, MultiresSculptLayer *layer)
+      : index(index), name(layer ? layer->name : ""), layer(layer)
+  {}
+  SculptLayerUndoDeletedItem(const SculptLayerUndoDeletedItem &) = delete;
+  SculptLayerUndoDeletedItem &operator=(const SculptLayerUndoDeletedItem &) = delete;
+  SculptLayerUndoDeletedItem(SculptLayerUndoDeletedItem &&other) noexcept
+      : index(other.index), name(std::move(other.name)), layer(other.layer)
+  {
+    other.layer = nullptr;
+  }
+  SculptLayerUndoDeletedItem &operator=(SculptLayerUndoDeletedItem &&other) noexcept
+  {
+    if (this != &other) {
+      if (layer) {
+        bke::multires_layers::destroy_detached(*layer);
+      }
+      index = other.index;
+      name = std::move(other.name);
+      layer = other.layer;
+      other.layer = nullptr;
+    }
+    return *this;
+  }
+  ~SculptLayerUndoDeletedItem()
+  {
+    if (layer) {
+      bke::multires_layers::destroy_detached(*layer);
+    }
+  }
 };
 
 static bool sculpt_layer_undo_metadata_enabled()
 {
   const char *value = std::getenv("BLENDER_SCULPT_LAYER_UNDO_METADATA");
-  return value && value[0] == '1';
+  return value == nullptr || value[0] == '\0' || value[0] != '0';
 }
 
 
@@ -339,7 +379,13 @@ struct StepData {
   /* The stroke edits native base MDisps while every stored layer is hidden. */
   bool native_multires_base_undo = false;
   std::string layer_metadata_modifier;
+  std::string layer_metadata_active_name;
   Vector<SculptLayerUndoMetadata> layer_metadata;
+  Vector<SculptLayerUndoDeletedItem> layer_deleted_group;
+  std::string layer_deleted_active_name;
+  Vector<SculptLayerUndoDeletedItem> layer_merged_group;
+  Vector<std::string> layer_merge_live_names;
+  std::string layer_merge_active_name;
 
 
   /* TODO: Combine the three structs into a variant, since they specify data that is only valid
@@ -698,8 +744,25 @@ static size_t sculpt_metadata_memory_size(const StepData &data)
   }
   size = undo_memory_add(size, data.layer_metadata.size() * sizeof(SculptLayerUndoMetadata));
   size = undo_memory_add(size, data.layer_metadata_modifier.size());
+  size = undo_memory_add(size, data.layer_metadata_active_name.size());
   for (const SculptLayerUndoMetadata &saved : data.layer_metadata) {
     size = undo_memory_add(size, saved.name.size());
+    size = undo_memory_add(size, saved.group_name.size());
+  }
+  size = undo_memory_add(size,
+                         data.layer_deleted_group.size() * sizeof(SculptLayerUndoDeletedItem));
+  for (const SculptLayerUndoDeletedItem &item : data.layer_deleted_group) {
+    size = undo_memory_add(size, item.name.size());
+    if (!item.layer) {
+      continue;
+    }
+    size = undo_memory_add(size, sizeof(MultiresSculptLayer));
+    size = undo_memory_add(size, item.layer->base_verts_num * sizeof(float[3]));
+    for (int grid = 0; grid < item.layer->grids_num; grid++) {
+      if (item.layer->disps && item.layer->disps[grid].disps) {
+        size = undo_memory_add(size, item.layer->disps[grid].totdisp * sizeof(float[3]));
+      }
+    }
   }
   if (data.color_master_v04) { size=undo_memory_add(size,data.color_master_v04->memory_bytes()); }
   if (data.facesets_l0_master) { size=undo_memory_add(size,data.facesets_l0_master->memory_bytes()); }
@@ -718,6 +781,24 @@ size_t step_memory_size_get(UndoStep *step)
   if (data.position_step_storage) {
     size = undo_memory_add(size, data.position_step_storage->memory_size_get());
   }
+  size = undo_memory_add(size,
+                         data.layer_merged_group.size() * sizeof(SculptLayerUndoDeletedItem));
+  for (const SculptLayerUndoDeletedItem &item : data.layer_merged_group) {
+    size = undo_memory_add(size, item.name.size());
+    if (item.layer) {
+      size = undo_memory_add(size, sizeof(MultiresSculptLayer));
+      size = undo_memory_add(size, item.layer->base_verts_num * sizeof(float[3]));
+      for (int grid = 0; grid < item.layer->grids_num; grid++) {
+        if (item.layer->disps && item.layer->disps[grid].disps) {
+          size = undo_memory_add(size, item.layer->disps[grid].totdisp * sizeof(float[3]));
+        }
+      }
+    }
+  }
+  for (const std::string &name : data.layer_merge_live_names) {
+    size = undo_memory_add(size, name.size());
+  }
+  size = undo_memory_add(size, data.layer_merge_active_name.size());
   return size;
 }
 
@@ -1551,10 +1632,190 @@ static void refine_subdiv(Depsgraph *depsgraph,
   bke::subdiv::eval_refine_from_mesh(subdiv, id_cast<const Mesh *>(object.data), deformed_verts);
 }
 
+static void sculpt_layer_undo_deleted_group_restore(bContext *C,
+                                                    Object &object,
+                                                    StepData &step_data)
+{
+  if (step_data.layer_deleted_group.is_empty()) {
+    return;
+  }
+  MultiresModifierData *mmd = nullptr;
+  for (ModifierData &md : object.modifiers) {
+    if (md.type == eModifierType_Multires && md.name == step_data.layer_metadata_modifier) {
+      mmd = reinterpret_cast<MultiresModifierData *>(&md);
+      break;
+    }
+  }
+  if (!mmd || !bke::multires_layers::commit(object)) {
+    return;
+  }
+
+  const bool snapshot_owns_layers = step_data.layer_deleted_group.first().layer != nullptr;
+  std::string current_active_name;
+  if (const MultiresSculptLayer *active = bke::multires_layers::active(*mmd)) {
+    current_active_name = active->name;
+  }
+  const std::string wanted_active_name = step_data.layer_deleted_active_name;
+
+  if (snapshot_owns_layers) {
+    for (SculptLayerUndoDeletedItem &item : step_data.layer_deleted_group) {
+      MultiresSculptLayer *before = static_cast<MultiresSculptLayer *>(
+          BLI_findlink(&mmd->sculpt_layers, item.index));
+      if (before) {
+        BLI_insertlinkbefore(&mmd->sculpt_layers, before, item.layer);
+      }
+      else {
+        BLI_addtail(&mmd->sculpt_layers, item.layer);
+      }
+      item.layer = nullptr;
+    }
+  }
+  else {
+    for (SculptLayerUndoDeletedItem &item : step_data.layer_deleted_group) {
+      MultiresSculptLayer *found = nullptr;
+      for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
+        if (layer.name == item.name) {
+          found = &layer;
+          break;
+        }
+      }
+      if (!found) {
+        return;
+      }
+      bke::multires_layers::detach(*mmd, *found);
+      item.layer = found;
+    }
+  }
+
+  step_data.layer_deleted_active_name = current_active_name;
+  mmd->sculpt_layer_active = 0;
+  if (!wanted_active_name.empty()) {
+    int index = 0;
+    for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+      if (layer.name == wanted_active_name) {
+        mmd->sculpt_layer_active = index;
+        break;
+      }
+      index++;
+    }
+  }
+  mmd->sculpt_layer_recording = 0;
+  bke::multires_layers::weight_hot_delta_cache_invalidate();
+  if (object.runtime && object.runtime->sculpt_session) {
+    BKE_sculptsession_free_pbvh(object);
+  }
+  DEG_id_tag_update(&object.id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, &object);
+  std::printf("[LAYER_UNDO_DELETE_GROUP] mode=%s layers=%d\n",
+              snapshot_owns_layers ? "RESTORE" : "REMOVE",
+              int(step_data.layer_deleted_group.size()));
+}
+
+static bool sculpt_layer_undo_merged_group_restore(bContext *C,
+                                                   Object &object,
+                                                   StepData &step_data)
+{
+  if (step_data.layer_merged_group.is_empty() ||
+      step_data.layer_merge_live_names.is_empty())
+  {
+    return false;
+  }
+  MultiresModifierData *mmd = nullptr;
+  for (ModifierData &md : object.modifiers) {
+    if (md.type == eModifierType_Multires && md.name == step_data.layer_metadata_modifier) {
+      mmd = reinterpret_cast<MultiresModifierData *>(&md);
+      break;
+    }
+  }
+  if (!mmd) {
+    return false;
+  }
+
+  Vector<MultiresSculptLayer *> live_layers;
+  for (const std::string &name : step_data.layer_merge_live_names) {
+    MultiresSculptLayer *found = nullptr;
+    for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
+      if (name == layer.name) {
+        found = &layer;
+        break;
+      }
+    }
+    if (!found || live_layers.contains(found)) {
+      std::printf("[LAYER_UNDO_MERGE_GROUP] mode=SKIP reason=LIVE_SET_MISMATCH\n");
+      return false;
+    }
+    live_layers.append(found);
+  }
+  for (const SculptLayerUndoDeletedItem &item : step_data.layer_merged_group) {
+    if (!item.layer) {
+      std::printf("[LAYER_UNDO_MERGE_GROUP] mode=SKIP reason=SNAPSHOT_NOT_OWNED\n");
+      return false;
+    }
+  }
+  if (!bke::multires_layers::commit(object)) {
+    std::printf("[LAYER_UNDO_MERGE_GROUP] mode=SKIP reason=COMMIT_FAILED\n");
+    return false;
+  }
+
+  std::string current_active_name;
+  if (const MultiresSculptLayer *active = bke::multires_layers::active(*mmd)) {
+    current_active_name = active->name;
+  }
+  const std::string wanted_active_name = step_data.layer_merge_active_name;
+  Vector<SculptLayerUndoDeletedItem> current_state;
+  current_state.reserve(live_layers.size());
+  for (MultiresSculptLayer *layer : live_layers) {
+    const int index = BLI_findindex(&mmd->sculpt_layers, layer);
+    bke::multires_layers::detach(*mmd, *layer);
+    current_state.append({index, layer});
+  }
+
+  Vector<std::string> inserted_names;
+  inserted_names.reserve(step_data.layer_merged_group.size());
+  for (SculptLayerUndoDeletedItem &item : step_data.layer_merged_group) {
+    MultiresSculptLayer *before = static_cast<MultiresSculptLayer *>(
+        BLI_findlink(&mmd->sculpt_layers, item.index));
+    if (before) {
+      BLI_insertlinkbefore(&mmd->sculpt_layers, before, item.layer);
+    }
+    else {
+      BLI_addtail(&mmd->sculpt_layers, item.layer);
+    }
+    inserted_names.append(item.layer->name);
+    item.layer = nullptr;
+  }
+  step_data.layer_merged_group = std::move(current_state);
+  step_data.layer_merge_live_names = std::move(inserted_names);
+  step_data.layer_merge_active_name = current_active_name;
+
+  mmd->sculpt_layer_active = 0;
+  if (!wanted_active_name.empty()) {
+    int index = 0;
+    for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+      if (wanted_active_name == layer.name) {
+        mmd->sculpt_layer_active = index;
+        break;
+      }
+      index++;
+    }
+  }
+  mmd->sculpt_layer_recording = 0;
+  bke::multires_layers::weight_hot_delta_cache_invalidate();
+  if (object.runtime && object.runtime->sculpt_session) {
+    BKE_sculptsession_free_pbvh(object);
+  }
+  DEG_id_tag_update(&object.id, ID_RECALC_GEOMETRY);
+  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, &object);
+  std::printf("[LAYER_UNDO_MERGE_GROUP] mode=EXCHANGE inserted=%d removed=%d\n",
+              int(step_data.layer_merge_live_names.size()),
+              int(step_data.layer_merged_group.size()));
+  return true;
+}
+
 static void sculpt_layer_undo_metadata_restore(bContext *C,
                                                Depsgraph *depsgraph,
                                                Object &object,
-                                               const StepData &step_data)
+                                               StepData &step_data)
 {
   if (!sculpt_layer_undo_metadata_enabled() || step_data.layer_metadata.is_empty()) {
     return;
@@ -1570,16 +1831,35 @@ static void sculpt_layer_undo_metadata_restore(bContext *C,
     std::printf("[LAYER_UNDO_METADATA] mode=SKIP reason=STACK_MISMATCH\n");
     return;
   }
-  int index = 0;
+  const Vector<SculptLayerUndoMetadata> saved_metadata = step_data.layer_metadata;
+  const std::string saved_active_name = step_data.layer_metadata_active_name;
+  Vector<MultiresSculptLayer *> ordered_layers;
+  ordered_layers.reserve(saved_metadata.size());
   bool changed = false;
-  for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
-    const SculptLayerUndoMetadata &saved = step_data.layer_metadata[index++];
-    if (saved.name != layer.name) {
-      std::printf("[LAYER_UNDO_METADATA] mode=SKIP reason=LAYER_MISMATCH\n");
+  int current_index = 0;
+  for (const SculptLayerUndoMetadata &saved : saved_metadata) {
+    MultiresSculptLayer *layer = nullptr;
+    int found_index = 0;
+    for (MultiresSculptLayer &candidate : mmd->sculpt_layers) {
+      if (candidate.name == saved.name) {
+        layer = &candidate;
+        break;
+      }
+      found_index++;
+    }
+    bool duplicate = false;
+    for (const MultiresSculptLayer *ordered : ordered_layers) {
+      duplicate |= ordered == layer;
+    }
+    if (!layer || duplicate) {
+      std::printf("[LAYER_UNDO_METADATA] mode=SKIP reason=LAYER_SET_MISMATCH\n");
       return;
     }
-    changed |= layer.strength != saved.strength ||
-               ((layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0) != saved.visible;
+    ordered_layers.append(layer);
+    changed |= found_index != current_index++ || layer->strength != saved.strength ||
+               ((layer->flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0) != saved.visible ||
+               layer->group_id != saved.group_id || layer->group_flag != saved.group_flag ||
+               saved.group_name != layer->group_name;
   }
   if (!changed) {
     return;
@@ -1589,15 +1869,44 @@ static void sculpt_layer_undo_metadata_restore(bContext *C,
     std::printf("[LAYER_UNDO_METADATA] mode=SKIP reason=COMMIT_FAILED\n");
     return;
   }
-  index = 0;
-  for (MultiresSculptLayer &layer : mmd->sculpt_layers) {
-    const SculptLayerUndoMetadata &saved = step_data.layer_metadata[index++];
+  step_data.layer_metadata.clear();
+  step_data.layer_metadata.reserve(mmd->sculpt_layers.count());
+  if (const MultiresSculptLayer *active = bke::multires_layers::active(*mmd)) {
+    step_data.layer_metadata_active_name = active->name;
+  }
+  for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+    step_data.layer_metadata.append({layer.name,
+                                     layer.strength,
+                                     (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0,
+                                     layer.group_id,
+                                     layer.group_flag,
+                                     layer.group_name});
+  }
+  for (const int index : ordered_layers.index_range()) {
+    MultiresSculptLayer &layer = *ordered_layers[index];
+    const SculptLayerUndoMetadata &saved = saved_metadata[index];
+    BLI_remlink(&mmd->sculpt_layers, &layer);
+    BLI_addtail(&mmd->sculpt_layers, &layer);
     layer.strength = saved.strength;
     if (saved.visible) {
       layer.flag |= MULTIRES_SCULPT_LAYER_VISIBLE;
     }
     else {
       layer.flag &= ~MULTIRES_SCULPT_LAYER_VISIBLE;
+    }
+    layer.group_id = saved.group_id;
+    layer.group_flag = saved.group_flag;
+    STRNCPY_UTF8(layer.group_name, saved.group_name.c_str());
+  }
+  mmd->sculpt_layer_active = 0;
+  if (!saved_active_name.empty()) {
+    int index = 0;
+    for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
+      if (layer.name == saved_active_name) {
+        mmd->sculpt_layer_active = index;
+        break;
+      }
+      index++;
     }
   }
   bke::multires_layers::weight_hot_delta_cache_invalidate();
@@ -2312,9 +2621,13 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
   /* V3 owns Position undo whenever persistent layer deltas were exchanged. Do not restore
    * Strength/Visibility metadata from the stroke step: those are independent user properties. */
   if (!layer_position_swap) {
+    if (sculpt_layer_undo_merged_group_restore(C, object, step_data)) {
+      return;
+    }
     if (sculpt_layer_undo_frame_restore(C, depsgraph, object, step_data)) {
       return;
     }
+    sculpt_layer_undo_deleted_group_restore(C, object, step_data);
     sculpt_layer_undo_metadata_restore(C, depsgraph, object, step_data);
   }
   SculptSession &ss = *object.runtime->sculpt_session;
@@ -3629,9 +3942,15 @@ static void save_common_data(Object &ob, SculptUndoStep *us)
         continue;
       }
       us->data.layer_metadata_modifier = md.name;
+      if (const MultiresSculptLayer *active = bke::multires_layers::active(mmd)) {
+        us->data.layer_metadata_active_name = active->name;
+      }
       for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
         us->data.layer_metadata.append({layer.name, layer.strength,
-                                     (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0});
+                                        (layer.flag & MULTIRES_SCULPT_LAYER_VISIBLE) != 0,
+                                        layer.group_id,
+                                        layer.group_flag,
+                                        layer.group_name});
       }
       break;
     }
@@ -3942,6 +4261,74 @@ void push_pivot_begin(Object &ob, const wmOperator *op)
 void push_begin(const Scene &scene, Object &ob, const wmOperator *op)
 {
   push_begin_ex(scene, ob, op->type->name);
+}
+
+bool capture_deleted_layer_group(MultiresModifierData &mmd, const int group_id)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data || group_id <= 0 || !step_data->layer_deleted_group.is_empty()) {
+    return false;
+  }
+  int index = 0;
+  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (layer.group_id == group_id) {
+      step_data->layer_deleted_group.append(
+          {index, bke::multires_layers::clone_detached(layer)});
+    }
+    index++;
+  }
+  if (step_data->layer_deleted_group.is_empty()) {
+    return false;
+  }
+  if (const MultiresSculptLayer *active = bke::multires_layers::active(mmd)) {
+    step_data->layer_deleted_active_name = active->name;
+  }
+  return true;
+}
+
+bool capture_layer_group_merge(MultiresModifierData &mmd, const int group_id)
+{
+  StepData *step_data = get_step_data();
+  if (!step_data || group_id <= 0 || !step_data->layer_merged_group.is_empty()) {
+    return false;
+  }
+  int index = 0;
+  for (const MultiresSculptLayer &layer : mmd.sculpt_layers) {
+    if (layer.group_id == group_id) {
+      step_data->layer_merged_group.append(
+          {index, bke::multires_layers::clone_detached(layer)});
+    }
+    index++;
+  }
+  if (step_data->layer_merged_group.size() < 2) {
+    step_data->layer_merged_group.clear();
+    return false;
+  }
+  if (const MultiresSculptLayer *active = bke::multires_layers::active(mmd)) {
+    step_data->layer_merge_active_name = active->name;
+  }
+  return true;
+}
+
+bool finalize_layer_group_merge(MultiresModifierData &mmd)
+{
+  StepData *step_data = get_step_data();
+  const MultiresSculptLayer *merged = bke::multires_layers::active(mmd);
+  if (!step_data || step_data->layer_merged_group.is_empty() || !merged) {
+    return false;
+  }
+  step_data->layer_merge_live_names.clear();
+  step_data->layer_merge_live_names.append(merged->name);
+  return true;
+}
+
+void cancel_layer_group_merge_capture()
+{
+  if (StepData *step_data = get_step_data()) {
+    step_data->layer_merged_group.clear();
+    step_data->layer_merge_live_names.clear();
+    step_data->layer_merge_active_name.clear();
+  }
 }
 
 void push_enter_sculpt_mode(const Scene & /*scene*/, Object &ob, const wmOperator *op)

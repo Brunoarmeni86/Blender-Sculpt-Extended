@@ -74,6 +74,9 @@ def install(ref):
    if self.target=='REFERENCE':
     if c.object.sculpt_symmetry_reference_locked:return {'CANCELLED'}
     if not ref.ensure_tool_session(c):return {'CANCELLED'}
+    if c.object.sculpt_symref_preview.anchored and ref.anchor_position(c.object,c.evaluated_depsgraph_get()) is None:
+     self.report({'WARNING'},'Invalid attachment: rebind or detach the reference before transforming it')
+     return {'CANCELLED'}
    elif c.mode!='SCULPT':return {'CANCELLED'}
    self.ob=c.object;self.saved=ref.snapshot(self.ob.sculpt_symref_preview);self.saved_native=ref.native_reference_snapshot(self.ob);self.persistent_changed=False
    if self.target=='REFERENCE':
@@ -111,6 +114,12 @@ def install(ref):
    if c.object.sculpt_symmetry_reference_locked and (self.target=='REFERENCE' or c.object.sculpt_transform_pivot_linked):return {'CANCELLED'}
    if self.target=='REFERENCE' and c.object.sculpt_symmetry_reference_locked:return {'CANCELLED'}
    self.ob=c.object
+   if self.target=='REFERENCE':
+    if self.ob.sculpt_symref_preview.anchored and ref.anchor_position(self.ob,c.evaluated_depsgraph_get()) is None:
+     self.report({'WARNING'},'Invalid attachment: rebind or detach the reference before transforming it')
+     return {'CANCELLED'}
+    requested_mode={'G':'MOVE','R':'ROTATE','S':'SIZE'}[self.mode]
+    if self.ob.sculpt_symmetry_reference_mode!=requested_mode:self.ob.sculpt_symmetry_reference_mode=requested_mode
    if self.mode=='S':
     if self.target!='REFERENCE':return {'CANCELLED'}
     self.saved=ref.snapshot(self.ob.sculpt_symref_preview);self.saved_native=ref.native_reference_snapshot(self.ob)

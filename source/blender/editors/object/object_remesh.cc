@@ -9,7 +9,6 @@
 #include <cctype>
 #include <cfloat>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 
 #include "MEM_guardedalloc.h"
@@ -118,14 +117,13 @@ static wmOperatorStatus voxel_remesh_exec(bContext *C, wmOperator *op)
   Mesh *mesh = id_cast<Mesh *>(ob->data);
 
   /* Preview-only local remesh dispatch; independent of attribute reprojection. */
-  const char *mask_preview = std::getenv("BLENDER_SCULPT_MASK_REMESH_V01");
   const IDProperty *properties = IDP_GetProperties(&mesh->id);
   const IDProperty *protect = properties ? IDP_GetPropertyFromGroup(properties, "sculpt_remesh_protect_mask_preview") : nullptr;
   const bool protect_mask = protect &&
       ((protect->type == IDP_BOOLEAN && IDP_bool_get(protect)) ||
        (protect->type == IDP_INT && IDP_int_get(protect) != 0));
   bool has_mask = false;
-  if (mask_preview && mask_preview[0] == '1' && mask_preview[1] == '\0' && protect_mask) {
+  if (protect_mask) {
     const auto mask = mesh->attributes().lookup<float>(".sculpt_mask", bke::AttrDomain::Point);
     if (mask) {
       for (const int i : mesh->vert_positions().index_range()) {
@@ -138,6 +136,10 @@ static wmOperatorStatus voxel_remesh_exec(bContext *C, wmOperator *op)
     }
   }
   if (has_mask) {
+    if (!WM_operatortype_find("OBJECT_OT_voxel_remesh_protected_preview", true)) {
+      BKE_report(op->reports, RPT_ERROR, "Protected remesh preview is not registered; mesh unchanged");
+      return OPERATOR_CANCELLED;
+    }
     if (ob->mode == OB_MODE_SCULPT) {
       if (UndoStack *stack = ED_undo_stack_get()) {
         BKE_undosys_sculpt_step_pair_memfile(stack, C);
@@ -145,12 +147,8 @@ static wmOperatorStatus voxel_remesh_exec(bContext *C, wmOperator *op)
         ED_undosys_stack_memfile_id_changed_tag(stack, &mesh->id);
       }
     }
-    if (!WM_operatortype_find("OBJECT_OT_voxel_remesh_protected_preview", true)) {
-      BKE_report(op->reports, RPT_ERROR, "Protected remesh preview is not registered; mesh unchanged");
-      return OPERATOR_CANCELLED;
-    }
     return WM_operator_name_call(C, "OBJECT_OT_voxel_remesh_protected_preview",
-                                  wm::OpCallContext::ExecDefault, nullptr, nullptr);
+                                 wm::OpCallContext::ExecDefault, nullptr, nullptr);
   }
 
   if (mesh->remesh_voxel_size <= 0.0f) {

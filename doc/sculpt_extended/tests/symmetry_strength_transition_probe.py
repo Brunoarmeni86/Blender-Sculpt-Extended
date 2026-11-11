@@ -64,6 +64,8 @@ def activate_draw_brush():
             asset_library_type="ESSENTIALS",
             relative_asset_identifier=(
                 "brushes/essentials_brushes-mesh_sculpt.blend/Brush/Draw"))
+        if result == {"CANCELLED"}:
+            return None
         assert result == {"FINISHED"}, result
         brush = bpy.context.tool_settings.sculpt.brush
         brush.use_locked_size = "SCENE"
@@ -80,7 +82,7 @@ def activate_draw_brush():
         return brush
 
 
-def real_stroke():
+def real_stroke(x_shift=0):
     with view_context():
         region = bpy.context.region
         rv3d = bpy.context.space_data.region_3d
@@ -88,7 +90,7 @@ def real_stroke():
         # Deliberately off both symmetry planes so the four intended passes do not
         # overlap at the center merely because of the fixture.
         for i, offset in enumerate((-18, -9, 0, 9, 18)):
-            mouse = (region.width * 0.5 + 62 + offset, region.height * 0.5 + 37)
+            mouse = (region.width * 0.5 + 62 + offset + x_shift, region.height * 0.5 + 37)
             origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, mouse)
             direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, mouse)
             hit, location, *_ = bpy.context.scene.ray_cast(
@@ -125,7 +127,6 @@ def setup():
         bpy.ops.object.mode_set(mode="SCULPT")
         bpy.ops.view3d.view_axis(type="TOP", align_active=False)
         bpy.context.space_data.region_3d.view_distance = 3.6
-        activate_draw_brush()
         assert bpy.ops.sculpt.multires_layer_add() == {"FINISHED"}
         modifier = obj.modifiers["Multires"]
         for _ in range(2):
@@ -147,9 +148,17 @@ def setup():
 
 def run():
     obj, settings = setup()
+    # Essentials load asynchronously on a factory-startup run. Retrying here
+    # distinguishes an unavailable asset from the normal startup interval and
+    # keeps the Strength diagnostic deterministic on clean profiles.
+    brush_deadline = time.perf_counter() + 20.0
+    while activate_draw_brush() is None:
+        if time.perf_counter() >= brush_deadline:
+            raise RuntimeError("Draw brush asset did not finish loading within 20 seconds")
+        yield 0.25
     yield 0.5
     before = snapshot("00_before_stroke")
-    real_stroke()
+    real_stroke(x_shift=34)
     after_stroke = snapshot("01_after_stroke_pending")
 
     # Assign the native RNA Boolean drawn by the UI checkbox. Its setter must
@@ -188,18 +197,38 @@ def run():
     yield 0.3
     after_commit = snapshot("04_explicit_commit")
 
+    # A Mesh datablock update bypasses the Multires RNA callback entirely and
+    # can evict the evaluated CCG. The cache-release boundary itself must route
+    # pending coordinates through the layer-aware publisher instead of baking
+    # the composed surface into the native base.
+    real_stroke(x_shift=-34)
+    before_cache_evict = snapshot("05_cache_evict_pending")
+    obj.data.update()
+    bpy.context.view_layer.update()
+    # Cache release publishes the layer during that evaluation and schedules a
+    # clean follow-up evaluation from the updated persistent payload.
+    bpy.context.view_layer.update()
+    yield 0.3
+    after_cache_evict = snapshot("06_cache_evict_rebuilt")
+    cache_evict_max_error, cache_evict_rms_error = position_error(
+        before_cache_evict, after_cache_evict)
+    assert after_cache_evict["layer_hash"] != before_cache_evict["layer_hash"], \
+        "Evaluated CCG eviction did not publish pending Sculpt Layer coordinates"
+    assert cache_evict_max_error < 1.0e-5, \
+        "Evaluated CCG eviction changed the composed Sculpt Layer surface"
+
     # A generic Multires setting also schedules geometry evaluation. Pending
     # Sculpt Layer coordinates must be published before that evaluation can
     # reach object_update_from_subsurf_ccg and reshape the native base.
     real_stroke()
-    before_modifier_update = snapshot("05_before_modifier_update_pending")
+    before_modifier_update = snapshot("07_before_modifier_update_pending")
     modifier = obj.modifiers["Multires"]
     start = time.perf_counter()
     modifier.quality = 2 if modifier.quality != 2 else 3
     modifier_update_ms = (time.perf_counter() - start) * 1000.0
     bpy.context.view_layer.update()
     yield 0.3
-    after_modifier_update = snapshot("06_after_modifier_update")
+    after_modifier_update = snapshot("08_after_modifier_update")
     modifier_max_error, modifier_rms_error = position_error(
         before_modifier_update, after_modifier_update)
 
@@ -215,11 +244,11 @@ def run():
     start = time.perf_counter()
     layer.strength = 0.5
     strength_half_ms = (time.perf_counter() - start) * 1000.0
-    strength_half = snapshot("07_strength_half")
+    strength_half = snapshot("09_strength_half")
     start = time.perf_counter()
     layer.strength = 1.0
     strength_restore_ms = (time.perf_counter() - start) * 1000.0
-    strength_restored = snapshot("08_strength_restored")
+    strength_restored = snapshot("10_strength_restored")
     strength_restore_max_error, strength_restore_rms_error = position_error(
         after_modifier_update, strength_restored)
     assert strength_half["positions_hash"] != after_modifier_update["positions_hash"], \
@@ -241,6 +270,8 @@ def run():
             "strength_restore_clean": strength_restore_ms,
         },
         "surface_error": {
+            "cache_evict_max_component": cache_evict_max_error,
+            "cache_evict_rms": cache_evict_rms_error,
             "modifier_rebuild_max_component": modifier_max_error,
             "modifier_rebuild_rms": modifier_rms_error,
             "strength_roundtrip_max_component": strength_restore_max_error,
@@ -257,6 +288,8 @@ def run():
                 ("toggle_immediate", immediate),
                 ("toggle_after_update", after_update),
                 ("after_commit", after_commit),
+                ("before_cache_evict", before_cache_evict),
+                ("after_cache_evict", after_cache_evict),
                 ("before_modifier_update", before_modifier_update),
                 ("after_modifier_update", after_modifier_update),
                 ("strength_half", strength_half),

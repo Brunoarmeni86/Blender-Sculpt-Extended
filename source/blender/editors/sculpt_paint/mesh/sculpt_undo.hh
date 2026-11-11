@@ -74,6 +74,14 @@ void push_nodes(const Depsgraph &depsgraph,
  */
 void push_begin(const Scene &scene, Object &ob, const wmOperator *op);
 
+/** Capture only payloads that a destructive group delete is about to remove. */
+bool capture_deleted_layer_group(MultiresModifierData &mmd, int group_id);
+
+/** Capture/exchange only the layer payloads replaced by a destructive group merge. */
+bool capture_layer_group_merge(MultiresModifierData &mmd, int group_id);
+bool finalize_layer_group_merge(MultiresModifierData &mmd);
+void cancel_layer_group_merge_capture();
+
 /** Runtime pivot only: no mesh, mask, or layer payload capture. */
 void push_pivot_begin(Object &ob, const wmOperator *op);
 

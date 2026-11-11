@@ -402,7 +402,7 @@ static wmOperatorStatus sculpt_multires_base_fingerprint_exec(bContext *C, wmOpe
       CustomData_get_layer(&mesh.corner_data, CD_MDISPS));
   /* No grids before the first subdivision is a valid base. */
   const MultiresAuditHash native = multires_audit_disps(base, base ? mesh.corners_num : 0);
-  MultiresAuditHash cage, evaluated, metadata;
+  MultiresAuditHash cage, evaluated, metadata, mask_base, mask_master, mask_live;
   cage.word(uint32_t(mesh.verts_num));
   for (const float3 &point : mesh.vert_positions()) {
     for (int axis = 0; axis < 3; axis++) {
@@ -417,6 +417,35 @@ static wmOperatorStatus sculpt_multires_base_fingerprint_exec(bContext *C, wmOpe
       for (int axis = 0; axis < 3; axis++) {
         evaluated.scalar(point[axis]);
       }
+    }
+  }
+  const VArraySpan<float> base_masks = *mesh.attributes().lookup_or_default<float>(
+      ".sculpt_mask", bke::AttrDomain::Point, 0.0f);
+  mask_base.word(uint32_t(base_masks.size()));
+  for (const float value : base_masks) {
+    mask_base.scalar(value);
+  }
+  const GridPaintMask *stored_masks = static_cast<const GridPaintMask *>(
+      CustomData_get_layer(&mesh.corner_data, CD_GRID_PAINT_MASK));
+  mask_master.word(uint32_t(mesh.corners_num));
+  mask_master.word(stored_masks != nullptr);
+  for (int corner = 0; stored_masks && corner < mesh.corners_num; corner++) {
+    const GridPaintMask &grid = stored_masks[corner];
+    mask_master.word(uint32_t(grid.level));
+    mask_master.word(grid.data != nullptr);
+    if (grid.level < 1 || grid.level > 13) {
+      mask_master.invalid++;
+      continue;
+    }
+    const int side = bke::subdiv::grid_size_from_level(grid.level);
+    for (int sample = 0; grid.data && sample < side * side; sample++) {
+      mask_master.scalar(grid.data[sample]);
+    }
+  }
+  mask_live.word(uint32_t(ccg ? ccg->masks.size() : 0));
+  if (ccg) {
+    for (const float value : ccg->masks) {
+      mask_live.scalar(value);
     }
   }
   metadata.word(uint32_t(mmd->sculpt_layer_active));
@@ -493,7 +522,9 @@ static wmOperatorStatus sculpt_multires_base_fingerprint_exec(bContext *C, wmOpe
       "\"active\":%d,\"recording\":%d,"
       "\"layers\":%d,\"visible\":%d,\"pending_coords\":%d,"
       "\"native_hash\":\"%016llx\",\"native_words\":%llu,"
-      "\"cage_hash\":\"%016llx\",\"metadata_hash\":\"%016llx\","
+      "\"cage_hash\":\"%016llx\",\"metadata_hash\":\"%016llx\"," 
+      "\"mask_base_hash\":\"%016llx\",\"mask_master_hash\":\"%016llx\"," 
+      "\"mask_live_hash\":\"%016llx\",\"mask_dirty\":%d," 
       "\"surface_read\":%d,\"surface_hash\":\"%016llx\",\"invalid\":%llu,"
       "\"milliseconds\":%.3f}\n",
       mmd->sculptlvl, mmd->totlvl, mesh.verts_num, mesh.corners_num, int(base != nullptr),
@@ -503,10 +534,15 @@ static wmOperatorStatus sculpt_multires_base_fingerprint_exec(bContext *C, wmOpe
       static_cast<unsigned long long>(native.value),
       static_cast<unsigned long long>(native.words),
       static_cast<unsigned long long>(cage.value),
-      static_cast<unsigned long long>(metadata.value), int(surface && ccg),
+      static_cast<unsigned long long>(metadata.value),
+      static_cast<unsigned long long>(mask_base.value),
+      static_cast<unsigned long long>(mask_master.value),
+      static_cast<unsigned long long>(mask_live.value),
+      ccg ? int(ccg->dirty.masks) : 0, int(surface && ccg),
       static_cast<unsigned long long>(evaluated.value),
       static_cast<unsigned long long>(native.invalid + cage.invalid + metadata.invalid +
-                                      evaluated.invalid + layer_invalid),
+                                      evaluated.invalid + mask_base.invalid + mask_master.invalid +
+                                      mask_live.invalid + layer_invalid),
       (BLI_time_now_seconds() - start) * 1000.0);
   std::fflush(stdout);
   BKE_report(op->reports, RPT_INFO, "Read-only Multires fingerprints written to the launch log");
@@ -950,12 +986,30 @@ static bool sculpt_layer_visibility_changed(const std::vector<SculptLayerVisibil
 
 static void sculpt_layer_metadata_notify(bContext *C, Object &ob)
 {
-  /* Synchronize only the small modifier metadata. ND_MODIFIER requests a full
-   * Multires evaluation, so use explicit UI redraw notifiers for this path. */
-  DEG_id_tag_update(&ob.id, ID_RECALC_SYNC_TO_EVAL);
+  /* Pure organization is consumed from the original modifier by the layer
+   * panel and operators. Additive order, names, group membership and collapsed
+   * state do not change evaluated geometry. Avoid copying every stored layer
+   * to the evaluated ID; visibility-changing callers take the geometry path in
+   * sculpt_layer_group_finish() instead. */
   WM_event_add_notifier(C, NC_OBJECT | ND_DRAW, &ob);
   WM_event_add_notifier(C, NC_SPACE | ND_SPACE_PROPERTIES, nullptr);
 }
+
+class SculptLayerMetadataUndoScope {
+ private:
+  Object &ob_;
+
+ public:
+  SculptLayerMetadataUndoScope(bContext *C, Object &ob, wmOperator *op) : ob_(ob)
+  {
+    undo::push_begin(*CTX_data_scene(C), ob_, op);
+  }
+
+  ~SculptLayerMetadataUndoScope()
+  {
+    undo::push_end_ex(ob_, true);
+  }
+};
 
 static void sculpt_layer_group_finish(bContext *C,
                                       Object &ob,
@@ -1868,6 +1922,7 @@ static wmOperatorStatus sculpt_multires_layer_move_exec(bContext *C, wmOperator 
   if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) {
     return OPERATOR_CANCELLED;
   }
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
   if (!bke::multires_layers::move(*mmd, from_index, to_index)) {
     BKE_report(op->reports, RPT_ERROR,
                "Cannot move this row through a group; remove it from the group first");
@@ -1910,6 +1965,7 @@ static wmOperatorStatus sculpt_multires_layer_group_create_exec(bContext *C, wmO
   const std::vector<SculptLayerVisibilityState> visibility_before =
       sculpt_layer_visibility_snapshot(*mmd);
 
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
   if (!bke::multires_layers::group_create_from_active(*mmd)) {
     BKE_report(op->reports, RPT_ERROR, "Select a Sculpt Layer first");
     return OPERATOR_CANCELLED;
@@ -1940,6 +1996,7 @@ static wmOperatorStatus sculpt_multires_layer_group_add_active_exec(bContext *C,
       sculpt_layer_visibility_snapshot(*mmd);
 
   const int group_id = RNA_int_get(op->ptr, "group_id");
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
   if (!bke::multires_layers::group_add_active(*mmd, group_id)) {
     BKE_report(op->reports, RPT_ERROR, "Could not add active layer to this group");
     return OPERATOR_CANCELLED;
@@ -1972,6 +2029,7 @@ static wmOperatorStatus sculpt_multires_layer_group_rename_exec(bContext *C, wmO
   const int group_id = RNA_int_get(op->ptr, "group_id");
   char name[64];
   RNA_string_get(op->ptr, "name", name);
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
   if (!bke::multires_layers::group_rename(*mmd, group_id, name)) {
     BKE_report(op->reports, RPT_ERROR, "Enter a non-empty name for an existing group");
     return OPERATOR_CANCELLED;
@@ -2011,6 +2069,7 @@ static wmOperatorStatus sculpt_multires_layer_group_move_exec(bContext *C, wmOpe
   }
   const int group_id = RNA_int_get(op->ptr, "group_id");
   const int direction = RNA_enum_get(op->ptr, "direction");
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
   if (!bke::multires_layers::group_move(*mmd, group_id, direction)) {
     return OPERATOR_CANCELLED;
   }
@@ -2047,6 +2106,7 @@ static wmOperatorStatus sculpt_multires_layer_group_dissolve_exec(bContext *C, w
   const std::vector<SculptLayerVisibilityState> visibility_before =
       sculpt_layer_visibility_snapshot(*mmd);
   const int group_id = RNA_int_get(op->ptr, "group_id");
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
   if (!bke::multires_layers::group_dissolve(*mmd, group_id)) {
     return OPERATOR_CANCELLED;
   }
@@ -2076,6 +2136,10 @@ static wmOperatorStatus sculpt_multires_layer_group_delete_exec(bContext *C, wmO
     return OPERATOR_CANCELLED;
   }
   const int group_id = RNA_int_get(op->ptr, "group_id");
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
+  if (!undo::capture_deleted_layer_group(*mmd, group_id)) {
+    return OPERATOR_CANCELLED;
+  }
   bool visible_contribution = false;
   for (const MultiresSculptLayer &layer : mmd->sculpt_layers) {
     if (layer.group_id == group_id) {
@@ -2133,10 +2197,20 @@ static wmOperatorStatus sculpt_multires_layer_group_merge_exec(bContext *C, wmOp
   if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
 
   const int group_id = RNA_int_get(op->ptr, "group_id");
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
+  if (!undo::capture_layer_group_merge(*mmd, group_id)) {
+    BKE_report(op->reports, RPT_ERROR, "Merge Group requires at least two layers");
+    return OPERATOR_CANCELLED;
+  }
   if (!bke::multires_layers::group_merge(*mmd, group_id)) {
+    undo::cancel_layer_group_merge_capture();
     BKE_report(op->reports,
                RPT_ERROR,
                "Merge Group requires contiguous visible compatible layers with finite results; original layers retained");
+    return OPERATOR_CANCELLED;
+  }
+  if (!undo::finalize_layer_group_merge(*mmd)) {
+    BKE_report(op->reports, RPT_ERROR, "Could not finalize Merge Group Undo state");
     return OPERATOR_CANCELLED;
   }
 
@@ -2166,6 +2240,7 @@ static wmOperatorStatus sculpt_multires_layer_group_with_below_exec(bContext *C,
   if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
   const std::vector<SculptLayerVisibilityState> visibility_before =
       sculpt_layer_visibility_snapshot(*mmd);
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
   if (!bke::multires_layers::group_with_below(*mmd)) {
     BKE_report(op->reports, RPT_ERROR, "Select a layer with another layer below it");
     return OPERATOR_CANCELLED;
@@ -2194,6 +2269,7 @@ static wmOperatorStatus sculpt_multires_layer_group_remove_exec(bContext *C, wmO
   const std::vector<SculptLayerVisibilityState> visibility_before =
       sculpt_layer_visibility_snapshot(*mmd);
   const int index = RNA_int_get(op->ptr, "index");
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
   if (index >= 0) {
     bke::multires_layers::set_active(*mmd, index);
   }
@@ -2224,6 +2300,7 @@ static wmOperatorStatus sculpt_multires_layer_group_visibility_exec(bContext *C,
   if (mmd == nullptr) return OPERATOR_CANCELLED;
   if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
   const int group_id = RNA_int_get(op->ptr, "group_id");
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
   if (!bke::multires_layers::group_toggle_visibility(*mmd, group_id)) {
     return OPERATOR_CANCELLED;
   }
@@ -2252,6 +2329,7 @@ static wmOperatorStatus sculpt_multires_layer_group_collapse_exec(bContext *C, w
   if (mmd == nullptr) return OPERATOR_CANCELLED;
   if (!sculpt_multires_layer_commit_if_pending(*ob, *op)) return OPERATOR_CANCELLED;
   const int group_id = RNA_int_get(op->ptr, "group_id");
+  SculptLayerMetadataUndoScope undo_scope(C, *ob, op);
   if (!bke::multires_layers::group_toggle_collapsed(*mmd, group_id)) {
     return OPERATOR_CANCELLED;
   }

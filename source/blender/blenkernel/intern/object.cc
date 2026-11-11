@@ -112,6 +112,7 @@
 #include "BKE_mesh_wrapper.hh"
 #include "BKE_modifier.hh"
 #include "BKE_multires.hh"
+#include "BKE_multires_sculpt_layers.hh"
 #include "BKE_multires_undo_cache_guard.hh"
 #include "BKE_node.hh"
 #include "BKE_object.hh"
@@ -1739,6 +1740,41 @@ static void object_update_from_subsurf_ccg(Object *object)
   }
   Object *object_orig = DEG_get_original(object);
   Mesh *mesh_orig = id_cast<Mesh *>(object_orig->data);
+  /* Never reshape a native Multires base from a CCG that already contains
+   * additive Sculpt Layers. Cache eviction is not an explicit layer operator,
+   * so publish the pending transaction through the layer-aware path here. */
+  if (subdiv_ccg->dirty.coords || subdiv_ccg->dirty.hidden) {
+    for (ModifierData &md : object_orig->modifiers) {
+      if (md.type != eModifierType_Multires) {
+        continue;
+      }
+      auto &mmd = reinterpret_cast<MultiresModifierData &>(md);
+      if (mmd.sculpt_layers.is_empty()) {
+        continue;
+      }
+      SculptSession *ss = object_orig->runtime ? object_orig->runtime->sculpt_session : nullptr;
+      if (ss && ss->subdiv_ccg == subdiv_ccg && multires_flush_sculpt_updates(object_orig)) {
+        /* This evaluated object was copied before publication. Refresh only
+         * the owned Sculpt Layer payload so the imminent Multires evaluation
+         * sees the committed transaction. Scalar modifier settings already
+         * belong to this evaluation and must not be overwritten here. */
+        for (ModifierData &md_eval : object->modifiers) {
+          if (md_eval.type != eModifierType_Multires || !STREQ(md_eval.name, md.name)) {
+            continue;
+          }
+          auto &mmd_eval = reinterpret_cast<MultiresModifierData &>(md_eval);
+          bke::multires_layers::clear(mmd_eval);
+          bke::multires_layers::copy(mmd_eval, mmd);
+          break;
+        }
+        return;
+      }
+      BKE_modifier_set_error(object_orig,
+                             &md,
+                             "Sculpt Layer commit failed while releasing evaluated Multires cache");
+      return;
+    }
+  }
   if (subdiv_ccg->dirty.masks && !subdiv_ccg->dirty.coords && !subdiv_ccg->dirty.hidden) {
     if (multires_flush_mask_updates(*subdiv_ccg, *mesh_orig, tot_level)) {
       Mesh *mesh_cow = id_cast<Mesh *>(object->runtime->data_orig);

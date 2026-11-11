@@ -94,6 +94,127 @@ def test_mask_adaptive_protected_faces():
         bpy.data.meshes.remove(mesh)
 
 
+def test_mask_extremes_and_multiple_islands():
+    mod = load("masked_remesh")
+
+    def grid(name, size, mask_value):
+        coords = [(float(x), float(y), 0.0) for y in range(size) for x in range(size)]
+        faces = [(y * size + x, y * size + x + 1,
+                  (y + 1) * size + x + 1, (y + 1) * size + x)
+                 for y in range(size - 1) for x in range(size - 1)]
+        mesh = bpy.data.meshes.new(name)
+        mesh.from_pydata(coords, [], faces)
+        attr = mesh.attributes.new(".sculpt_mask", "FLOAT", "POINT")
+        for i, co in enumerate(coords):
+            attr.data[i].value = mask_value(co)
+        return mesh, coords, faces
+
+    # mask=0 is a fully editable surface; mask=1 is bit-for-bit frozen.
+    for value in (0.0, 1.0):
+        mesh, coords, faces = grid(f"__masked_extreme_{value}", 7,
+                                   lambda _co, value=value: value)
+        bm = None
+        try:
+            bm, result = mod.local_remesh(mesh, .65, coarsening=3.0, falloff=1.0)
+            if value == 0.0:
+                assert result["protected_faces"] == 0, result
+                assert len(bm.faces) != len(faces), result
+            else:
+                assert result["protected_faces"] == len(faces), result
+                assert len(bm.verts) == len(coords) and len(bm.faces) == len(faces), result
+                assert [tuple(v.co) for v in bm.verts] == coords
+            assert result["boundary_edges"] == 24 and result["overfull_edges"] == 0, result
+        finally:
+            if bm is not None:
+                bm.free()
+            bpy.data.meshes.remove(mesh)
+
+    # Two separated fully protected islands with a continuous half-mask collar.
+    centers = ((3.0, 5.0), (7.0, 5.0))
+    def island_mask(co):
+        distance = min(max(abs(co[0] - x), abs(co[1] - y)) for x, y in centers)
+        return 1.0 if distance <= 1.0 else (0.5 if distance <= 2.0 else 0.0)
+
+    mesh, _coords, _faces = grid("__masked_two_islands", 11, island_mask)
+    bm = None
+    try:
+        bm, result = mod.local_remesh(mesh, .55, coarsening=3.0, falloff=1.25)
+        assert result["protected_faces"] >= 8, result
+        assert result["protected_topology_exact"] and result["protected_coordinates_exact"], result
+        assert result["boundary_edges"] == 40 and result["overfull_edges"] == 0, result
+        mask = bm.verts.layers.float[".sculpt_mask"]
+        bands = {"low": [], "mid": [], "high": []}
+        for edge in bm.edges:
+            mean_mask = sum(vertex[mask] for vertex in edge.verts) * 0.5
+            key = "low" if mean_mask < .2 else ("mid" if mean_mask < .8 else "high")
+            bands[key].append(edge.calc_length())
+        means = {key: sum(values) / len(values) for key, values in bands.items() if values}
+        assert set(means) == set(bands), means
+        assert means["high"] >= means["low"] * .9, means
+        print("PASS: mask extremes, continuous collar and multiple protected islands", means)
+    finally:
+        if bm is not None:
+            bm.free()
+        bpy.data.meshes.remove(mesh)
+
+
+def test_mask_closed_manifold():
+    mesh = bpy.data.meshes.new("__masked_closed_fixture")
+    seed = bmesh.new()
+    bm = None
+    try:
+        bmesh.ops.create_icosphere(seed, subdivisions=3, radius=2.0)
+        seed.to_mesh(mesh)
+        attr = mesh.attributes.new(".sculpt_mask", "FLOAT", "POINT")
+        for vertex in mesh.vertices:
+            attr.data[vertex.index].value = 1.0 if vertex.co.z > .8 else (
+                .5 if vertex.co.z > -.2 else 0.0)
+        mod = load("masked_remesh")
+        bm, result = mod.local_remesh(mesh, .42, coarsening=2.5, falloff=1.0)
+        assert result["boundary_edges"] == 0, result
+        assert result["overfull_edges"] == 0, result
+        assert result["protected_faces"] > 0, result
+        assert result["protected_topology_exact"] and result["protected_coordinates_exact"], result
+        print("PASS: mask-adaptive remesh preserves a closed manifold")
+    finally:
+        seed.free()
+        if bm is not None:
+            bm.free()
+        bpy.data.meshes.remove(mesh)
+
+
+def test_existing_nonmanifold_region_is_quarantined():
+    size = 9
+    coords = [(float(x), float(y), 0.0) for y in range(size) for x in range(size)]
+    faces = [(y * size + x, y * size + x + 1,
+              (y + 1) * size + x + 1, (y + 1) * size + x)
+             for y in range(size - 1) for x in range(size - 1)]
+    # A third face on this existing grid edge creates one deliberate overfull
+    # region. The remesher must leave its incident vertices untouched while
+    # remaining free to update remote manifold geometry.
+    a = 4 * size + 4
+    b = a + 1
+    faces.append((a, b, a + size))
+    mesh = bpy.data.meshes.new("__masked_existing_nonmanifold_fixture")
+    mesh.from_pydata(coords, [], faces)
+    attr = mesh.attributes.new(".sculpt_mask", "FLOAT", "POINT")
+    for item in attr.data:
+        item.value = 0.0
+    bm = None
+    try:
+        mod = load("masked_remesh")
+        bm, result = mod.local_remesh(mesh, .4, coarsening=2.5, falloff=1.0)
+        assert result["overfull_edges"] == 2, result
+        assert result["boundary_edges"] == 33, result
+        assert result["quarantined_faces"] > 0, result
+        assert len(bm.faces) != len(faces), result
+        print("PASS: existing non-manifold region is quarantined")
+    finally:
+        if bm is not None:
+            bm.free()
+        bpy.data.meshes.remove(mesh)
+
+
 def test_symmetry_mode_transition_state():
     mesh = bpy.data.meshes.new("__symmetry_mode_fixture")
     mesh.from_pydata([(-1, -1, 0), (1, -1, 0), (0, 1, 0)], [], [(0, 1, 2)])
@@ -138,4 +259,7 @@ if __name__ == "__main__":
     test_symmetry_mode_transition_state()
     test_topological_seam_while_posed()
     test_mask_adaptive_protected_faces()
+    test_mask_extremes_and_multiple_islands()
+    test_mask_closed_manifold()
+    test_existing_nonmanifold_region_is_quarantined()
     print("PASS: pre54 symmetry/remesh static-fixture regression")

@@ -3777,6 +3777,25 @@ static void copy_layer(MultiresSculptLayer &dst, const MultiresSculptLayer &src)
   }
 }
 
+MultiresSculptLayer *clone_detached(const MultiresSculptLayer &source)
+{
+  auto *layer = MEM_new<MultiresSculptLayer>("multires sculpt layer undo clone");
+  copy_layer(*layer, source);
+  return layer;
+}
+
+void destroy_detached(MultiresSculptLayer &layer)
+{
+  free_layer(layer);
+  MEM_delete(&layer);
+}
+
+void detach(MultiresModifierData &mmd, MultiresSculptLayer &layer)
+{
+  BLI_remlink(&mmd.sculpt_layers, &layer);
+  mmd.sculpt_layer_recording = 0;
+}
+
 MultiresSculptLayer *duplicate(MultiresModifierData &mmd, const MultiresSculptLayer &source)
 {
   mmd.sculpt_layer_recording = 0;

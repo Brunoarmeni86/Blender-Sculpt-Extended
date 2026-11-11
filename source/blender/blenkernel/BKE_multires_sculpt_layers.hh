@@ -193,6 +193,12 @@ bool group_toggle_visibility(MultiresModifierData &mmd, int group_id);
 bool group_toggle_collapsed(MultiresModifierData &mmd, int group_id);
 
 MultiresSculptLayer *duplicate(MultiresModifierData &mmd, const MultiresSculptLayer &source);
+/** Detached deep copy used by focused editor Undo snapshots. */
+MultiresSculptLayer *clone_detached(const MultiresSculptLayer &source);
+/** Free a detached layer created by #clone_detached or removed with #detach. */
+void destroy_detached(MultiresSculptLayer &layer);
+/** Transfer a live layer out of the modifier without freeing its payload. */
+void detach(MultiresModifierData &mmd, MultiresSculptLayer &layer);
 MultiresSculptLayer *previous(MultiresModifierData &mmd, const MultiresSculptLayer &layer);
 bool merge_down(MultiresModifierData &mmd);
 /** Merge visible layer contributions into the first layer; reject invalid input

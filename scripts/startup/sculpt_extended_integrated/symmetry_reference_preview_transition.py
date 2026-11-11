@@ -557,8 +557,8 @@ def draw_settings(layout,c):
         ensure_native_reference(ob);row=box.row(align=True);row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_mode',expand=True)
         row=box.row(align=True);row.enabled=not ob.sculpt_symmetry_reference_locked
         row.operator('sculpt.reference_native_transform_preview',text='Move · G').mode='G'
-        row.operator('sculpt.reference_native_transform_preview',text='Ruota · R').mode='R'
-        row.operator('sculpt.reference_native_transform_preview',text='Scala · S').mode='S'
+        row.operator('sculpt.reference_native_transform_preview',text='Rotate · R').mode='R'
+        row.operator('sculpt.reference_native_transform_preview',text='Scale · S').mode='S'
         row=box.row(align=True);row.prop(c.scene.tool_settings,'use_snap',text='Snap',icon='SNAP_ON');row.prop(c.scene.tool_settings,'snap_elements',text='')
         box.label(text='X/Y/Z · type a number · Ctrl: snap · Esc: cancel')
         row=box.row(align=True);row.operator('sculpt.symref_finish_preview',text='Confirm',icon='CHECKMARK');row.operator('sculpt.symref_finish_preview',text='Cancel',icon='X').cancel=True
@@ -569,21 +569,24 @@ def draw_settings(layout,c):
     if ob.sculpt_symmetry_reference_enabled:
         row=box.column();row.enabled=not s.anchored and not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_location',text='Position')
         if s.anchored:
-            row=box.row();row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_anchor_offset',text='Offset ancoraggio')
+            row=box.row();row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_anchor_offset',text='Anchor Offset')
         row=box.row();row.enabled=not ob.sculpt_symmetry_reference_locked;row.prop(ob,'sculpt_symmetry_reference_rotation',text='Rotation')
         row=box.row(align=True);row.enabled=not ob.sculpt_symmetry_reference_locked
-        row.operator('sculpt.symref_reset_preview',text='Reset pos.').what='POSITION'
-        row.operator('sculpt.symref_reset_preview',text='Reset rot.').what='ROTATION'
-        row.operator('sculpt.symref_reset_preview',text='Reset tutto').what='ALL'
+        row.operator('sculpt.symref_reset_preview',text='Reset Position').what='POSITION'
+        row.operator('sculpt.symref_reset_preview',text='Reset Rotation').what='ROTATION'
+        row.operator('sculpt.symref_reset_preview',text='Reset All').what='ALL'
         ensure_native_reference(ob)
         box.prop(ob,'sculpt_symmetry_reference_display_size',text='Plane Size');box.prop(s,'opacity')
         if s.anchored:
             _,valid=reference_matrix(ob,c.evaluated_depsgraph_get())
             box.label(text=('Vertex '+str(s.vertex)) if valid else 'Attachment suspended: geometry changed',icon='LINKED' if valid else 'ERROR')
+            if not valid and editing(c):
+                row=box.row();row.enabled=anchor_supported(ob) and not ob.sculpt_symmetry_reference_locked
+                row.operator('sculpt.symref_anchor_preview',text='Rebind Anchor',icon='RESTRICT_SELECT_OFF')
             box.operator('sculpt.symref_detach_preview',icon='UNLINKED')
         elif editing(c):
             row=box.row();row.enabled=anchor_supported(ob);row.operator('sculpt.symref_anchor_preview',icon='VERTEXSEL')
-            if not row.enabled:box.label(text='Ancoraggio iniziale: mesh senza suddivisioni',icon='INFO')
+            if not row.enabled:box.label(text='Initial anchoring: unsubdivided mesh only',icon='INFO')
 
 class SculptSymmetryReferenceTool(bpy.types.WorkSpaceTool):
     bl_space_type='VIEW_3D';bl_context_mode='SCULPT';bl_idname=TOOL
@@ -672,7 +675,7 @@ class MESH_OT_symmetrize_reference_preview(bpy.types.Operator):
         import importlib.util
         ob=c.object;s=ob.sculpt_symref_preview;sculpt=c.mode=='SCULPT'
         if ob.data.users!=1 or ob.data.library or ob.data.shape_keys or any(m.type=='MULTIRES' for m in ob.modifiers) or (sculpt and ob.use_dynamic_topology_sculpting):
-            self.report({'ERROR'},'Ricostruzione: usa una mesh non condivisa senza Multires, shape key o Dyntopo');return {'CANCELLED'}
+            self.report({'ERROR'},'Rebuild requires a single-user mesh without Multires, shape keys or Dyntopo');return {'CANCELLED'}
         frame,valid=(ob.matrix_world,True) if self.space=='LOCAL' else reference_matrix(ob,c.evaluated_depsgraph_get())
         if not valid or abs(ob.matrix_world.determinant())<1e-12:
             self.report({'ERROR'},'Invalid reference');return {'CANCELLED'}
@@ -724,10 +727,6 @@ def register():
     module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
     global _shape_class
     _shape_class=module.install(sys.modules[__name__])
-    spec=importlib.util.spec_from_file_location('reference_hotkeys_v2',Path(__file__).with_name('reference_hotkeys_v2.py'))
-    module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
-    global _hotkey_class
-    _hotkey_class=module.install(sys.modules[__name__])
     spec=importlib.util.spec_from_file_location('reference_native_snap',Path(__file__).with_name('reference_native_snap.py'))
     module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
     global _snap_classes
@@ -768,7 +767,6 @@ def unregister():
     _masked_remesh_module.uninstall()
     bpy.utils.unregister_class(_multires_class)
     for cls in reversed(_snap_classes):bpy.utils.unregister_class(cls)
-    bpy.utils.unregister_class(_hotkey_class)
     bpy.utils.unregister_class(_shape_class)
     del bpy.types.Object.sculpt_symref_preview
     for cls in reversed(classes):bpy.utils.unregister_class(cls)

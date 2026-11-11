@@ -9,6 +9,7 @@ You are working on **an experimental development branch**, not on the stable rel
 **Additional priority audit (8 Nov 2026):** [Undo/Polypaint, Multires data integrity, Strength, cache, Pose and test plan](doc/sculpt_extended/PRE54_ADDITIONAL_WEAK_POINTS_AUDIT_20261108.md). Read this alongside the first handoff. Distinguish old fixed bugs from current verified issues.
 
 ## Intent and constraints
+- **Windows toolchain:** always configure and compile this project with Visual Studio 2022 / MSVC v143. Do not use Visual Studio 2026; CUDA 12.8 rejects its host compiler. Keep subsequent builds incremental from the VS2022 build directory.
 - The user wants **proposals, candidate rewrites and well-documented experiments available on GitHub** so that Codex can resume work later. **There is no requirement to solve all issues immediately.**
 - The branch originates from **tag `v5.2.3-sculpt-extended-20261104`** and deliberately differs from divergent `main`. Keep stable release and `main` unchanged unless explicitly instructed.
 - All initial Python patches in this branch are **WIP, untested in Blender**. Do not describe them as fixed or validated. Prefer revising a flawed prototype over building more unverified code on top.

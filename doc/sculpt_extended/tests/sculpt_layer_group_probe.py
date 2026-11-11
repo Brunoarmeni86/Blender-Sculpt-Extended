@@ -150,11 +150,28 @@ def run():
     yield 0.3
     after_delete_contents = rows(active_multires())
     assert [row["name"] for row in after_delete_contents] == ["A", "B"]
+
+    # Destructive delete owns only the removed member payloads. Undo restores
+    # their exact rows/order; Redo removes the same identities again.
+    with view_context():
+        assert bpy.ops.ed.undo() == {"FINISHED"}
+    yield 0.3
+    modifier = active_multires()
+    after_delete_undo = rows(modifier)
+    assert [row["name"] for row in after_delete_undo] == ["A", "C", "D", "B"]
+    assert sum(row["group_id"] == delete_group_id for row in after_delete_undo) == 2
+    with view_context():
+        assert bpy.ops.ed.redo() == {"FINISHED"}
+    yield 0.3
+    after_delete_redo = rows(active_multires())
+    assert after_delete_redo == after_delete_contents
     (OUT / "summary.json").write_text(json.dumps({
         "after_dissolve": final,
         "after_undo": after_undo,
         "after_redo": after_redo,
         "after_delete_contents": after_delete_contents,
+        "after_delete_undo": after_delete_undo,
+        "after_delete_redo": after_delete_redo,
         "timings_ms": timings,
     }, indent=2))
     (OUT / "PASS.txt").write_text("PASS\n")
