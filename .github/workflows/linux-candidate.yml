@@ -34,7 +34,7 @@ jobs:
           fi
 
       - name: Install Blender build dependencies
-        run: sudo ./build_files/build_environment/install_linux_packages.py --all
+        run: sudo ./build_files/build_environment/install_linux_packages.py
 
       - name: Build Blender release
         run: make release
