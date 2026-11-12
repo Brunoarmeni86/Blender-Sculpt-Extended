@@ -25,13 +25,11 @@ jobs:
           lfs: false
           fetch-depth: 1
 
-      - name: Materialize Blender Git-LFS assets
+      - name: Update Blender data and materialize Git-LFS assets
         run: |
-          git lfs install --local
-          git config lfs.url https://github.com/blender/blender.git/info/lfs
-          git lfs pull
+          make update
           if grep -RIl --fixed-strings "version https://git-lfs.github.com/spec/v1" release scripts; then
-            echo "Unresolved Git-LFS pointers remain after the upstream pull" >&2
+            echo "Unresolved Git-LFS pointers remain after make update" >&2
             exit 1
           fi
 
