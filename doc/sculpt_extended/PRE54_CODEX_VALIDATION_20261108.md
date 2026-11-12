@@ -590,8 +590,13 @@ validated on this NVIDIA-only workstation.
 
 **Actually executed validation:** complete Release compilation and clean CMake install
 **PASS**; installed executable startup **PASS**; Cycles build option **PASS**; CUDA device
-enumeration **PASS**; OptiX device enumeration **PASS**. Installed executable SHA-256:
-`6D50236970DD0D5FA33010A6C7957C345FBF54112A511B4A7170DEC98FD743EF`.
+enumeration **PASS**; OptiX device enumeration **PASS**. A second distribution build was
+configured from empty build/install directories under the short `C:\BlenderDev` root after
+materializing every Git-LFS asset. This avoided MSVC path-length failures seen in the long
+Codex workspace and capped compiler parallelism to prevent `D8040` process-creation errors.
+The installed tree contains no unresolved Git-LFS pointers; the restored splash source is a
+valid PNG. Clean installed executable SHA-256:
+`ED993382673FDA59136FAF4CB02A560B3702B0BF0E8D7DA9B2DB23CD327635E5`.
 
 **Known issue:** the mask-protected remesher still does not provide a confirmed atomic
 single-step Undo. A valid interactive probe showed that the first Undo can retain an
