@@ -1,0 +1,56 @@
+name: Linux Sculpt Extended candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - checkpoint/pre54-sculpt-gpu-20261111
+    paths:
+      - ".github/workflows/linux-candidate.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      BUILD_DIR: ${{ github.workspace }}/../build_linux
+      PACKAGE_NAME: Blender-Sculpt-Extended-5.2.3-Candidate-Linux-x64-${{ github.run_number }}
+    steps:
+      - name: Check out checkpoint
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 1
+
+      - name: Materialize Git-LFS assets
+        run: git lfs pull
+
+      - name: Install Blender build dependencies
+        run: sudo ./build_files/build_environment/install_linux_packages.py --all
+
+      - name: Build Blender release
+        run: make release
+
+      - name: Verify installed executable
+        run: |
+          "${BUILD_DIR}/bin/blender" --background --factory-startup --python-expr \
+            "import bpy; assert bpy.app.version_string.startswith('5.2.3'); assert bpy.app.build_options.cycles; assert bpy.app.build_options.openvdb; print('LINUX_BUILD_PASS')"
+
+      - name: Package Linux candidate
+        run: |
+          tar --exclude='*.pdb' --exclude='*.lib' --exclude='*.a' \
+            -C "${BUILD_DIR}/bin" -cJf "${PACKAGE_NAME}.tar.xz" .
+          sha256sum "${PACKAGE_NAME}.tar.xz" > "${PACKAGE_NAME}.tar.xz.sha256"
+
+      - name: Upload Linux candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: |
+            ${{ env.PACKAGE_NAME }}.tar.xz
+            ${{ env.PACKAGE_NAME }}.tar.xz.sha256
+          if-no-files-found: error
+          retention-days: 14
