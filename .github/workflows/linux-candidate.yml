@@ -18,6 +18,8 @@ jobs:
     env:
       BUILD_DIR: ${{ github.workspace }}/../build_linux
       PACKAGE_NAME: Blender-Sculpt-Extended-5.2.3-Candidate-Linux-x64-${{ github.run_number }}
+      CC: gcc-14
+      CXX: g++-14
     steps:
       - name: Check out checkpoint
         uses: actions/checkout@v4
@@ -32,6 +34,11 @@ jobs:
             echo "Unresolved Git-LFS pointers remain after make update" >&2
             exit 1
           fi
+
+      - name: Install supported GCC toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-14 g++-14
 
       - name: Install Blender build dependencies
         run: sudo ./build_files/build_environment/install_linux_packages.py
