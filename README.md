@@ -2,6 +2,8 @@
 
 **Blender Sculpt Extended 5.2.3 LTS** is an experimental custom Blender build for high-resolution Multires sculpting, editable Sculpt Layers, Polypaint HR, symmetry, and detail-aware deformation. It is **not an official Blender release**.
 
+**New to Sculpt Extended?** Start with the **[simple step-by-step user guide](doc/sculpt_extended/USER_GUIDE_5_2_3.md)** — installation, Sculpt Layers, low-level Multires sculpting, Pose/Transform Blend, Polypaint, Face Sets, symmetry and troubleshooting. The guide covers the 4 November stable build and distinguishes experimental candidates.
+
 ## Download — latest Windows release (4 November 2026)
 
 **[Blender Sculpt Extended 5.2.3 — release and downloads](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/tag/v5.2.3-sculpt-extended-20261104)**
