@@ -161,11 +161,17 @@ inline bool can_reuse_pending_reference(const State &s,
          s.stored_grid_size == bke::subdiv::grid_size_from_level(layer->level) &&
          s.sample_stride == (s.stored_grid_size - 1) / (ccg->grid_size - 1);
 }
-inline bool isolation_requested(const Brush &brush)
+inline bool isolation_requested(const Object &object, const Brush &brush)
 {
+  PointerRNA object_ptr = RNA_id_pointer_create(const_cast<ID *>(&object.id));
+  PropertyRNA *object_prop = RNA_struct_find_property(&object_ptr, "sculpt_preserve_other_layers");
+  if (object_prop != nullptr) {
+    return RNA_property_boolean_get(&object_ptr, object_prop);
+  }
   PointerRNA ptr = RNA_id_pointer_create(const_cast<ID *>(&brush.id));
   PropertyRNA *prop = RNA_struct_find_property(&ptr, "sculpt_preserve_other_layers");
-  /* Preserve the established Delta Smooth policy if startup RNA is unavailable. */
+  /* Compatibility fallback for startup scripts and files predating the
+   * object-wide policy. Preserve the established default if RNA is unavailable. */
   return prop == nullptr || RNA_property_boolean_get(&ptr, prop);
 }
 inline bool uses_native_smooth(const Object &object)
@@ -232,7 +238,7 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports, const
   }
   /* Disabling isolation must bypass both its preflight and its brush dispatcher.
    * L0 layer data remains untouched and is handled by ordinary Multires Commit. */
-  if (!isolation_requested(brush)) {
+  if (!isolation_requested(object, brush)) {
     reset();
     state().native_object = &object;
     return true;
