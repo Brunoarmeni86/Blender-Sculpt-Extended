@@ -35,14 +35,9 @@ inline bool supported(const Brush &brush)
               SCULPT_BRUSH_TYPE_CLAY_STRIPS, SCULPT_BRUSH_TYPE_CLAY_THUMB, SCULPT_BRUSH_TYPE_INFLATE,
               SCULPT_BRUSH_TYPE_PLANE);
 }
-inline bool requested(const Object &object, const Brush &brush)
+inline bool requested(const Brush &brush)
 {
   if (!supported(brush)) { return false; }
-  PointerRNA object_ptr = RNA_id_pointer_create(const_cast<ID *>(&object.id));
-  PropertyRNA *object_prop = RNA_struct_find_property(&object_ptr, "sculpt_preserve_other_layers");
-  if (object_prop != nullptr) {
-    return RNA_property_boolean_get(&object_ptr, object_prop);
-  }
   PointerRNA ptr = RNA_id_pointer_create(const_cast<ID *>(&brush.id));
   PropertyRNA *prop = RNA_struct_find_property(&ptr, "sculpt_preserve_other_layers");
   return prop && RNA_property_boolean_get(&ptr, prop);
@@ -51,7 +46,7 @@ inline bool begin(Object &object, const Brush &brush, ReportList *reports,
                   const bool force_smooth = false)
 {
   reset();
-  if (force_smooth || !requested(object, brush)) { return true; }
+  if (force_smooth || !requested(brush)) { return true; }
   SculptSession *ss = object.runtime->sculpt_session;
   const MultiresModifierData *mmd = ss ? ss->multires_modifier : nullptr;
   if (ss && !ss->subdiv_ccg) {
