@@ -6,7 +6,7 @@ Welcome! This guide is for artists who want to try the new sculpting tools witho
 
 **[Download the stable build](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/tag/v5.2.3-sculpt-extended-20261104)** · **[Report a problem](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues)** · **[Full feature overview](../../README.md)**
 
-> **Please read first:** Sculpt Extended is an **experimental, unofficial Blender build**. Work on a **copy** of important projects, especially before remeshing, baking layers, or changing topology. The steps below describe the **4 November stable checkpoint**, not every experimental feature in the source code. Some tool labels in this build are still Italian; the original button text is included where helpful.
+> **Please read first:** Sculpt Extended is an **experimental, unofficial Blender build**. Work on a **copy** of important projects, especially before remeshing, baking layers, or changing topology. This guide covers the **4 November stable checkpoint**, not every experimental feature in the source. All explanations are in English; when a button still has an Italian name in this release, its exact on-screen label is shown in `code` next to the English meaning.
 
 ## 1. Install and find the tools
 
@@ -64,30 +64,69 @@ The new Pose/Multires corrections help avoid the **spikes** that could appear wh
 
 **Preserve Other Layers:** for supported brushes, see **N → Multires → Brush Options**. Use this option when you want to reduce unwanted changes to other layer contributions. It is not a universal guarantee of identical visible detail after a very large deformation.
 
-## 4. Pose, Transform Blend and the shared pivot
+## 4. Pose, Transform Blend and the symmetry reference/pivot
 
-The latest stable build improves smooth transitions when moving, rotating or scaling parts of a sculpt.
+The latest stable build improves transitions when posing or transforming a sculpt. It also provides a **movable symmetry reference** and an optional **shared transform pivot**. These are related tools, but they have different purposes.
 
-### Pose Segment Blend
+### First, understand the difference
+
+| Control | What it does | When it is useful |
+| --- | --- | --- |
+| **Symmetry Reference** | Sets the **location and orientation of the symmetry planes** used by supported Sculpt Extended tools. | Your model is offset from the object origin, or its anatomical symmetry plane is tilted. |
+| **Sculpt Transform Pivot** | Sets the **center for supported Move / Rotate / Scale transforms** in Sculpt Mode. | You want to transform a jaw, shoulder or other region around a particular point. |
+| **Share with Symmetry** | Links the sculpt transform pivot to the symmetry reference. | You want the transform pivot and the symmetry reference to remain aligned. |
+
+**Important:** placing the symmetry reference does **not** automatically activate symmetry for every Blender brush. Enable the required symmetry axis in the relevant tool and verify that the operation supports the custom reference.
+
+### A. Place and orient the symmetry reference
+
+1. Enter **Sculpt Mode** (or **Edit Mode** where the reference tool is available).
+2. Select the **Symmetry Reference** workspace tool. In the 4 November build its on-screen name may be `Riferimento simmetria`.
+3. Press **G** to move the reference to the **centerline of the part you want to mirror** — for example, between the eyes or at the center of the chest.
+4. Press **X**, **Y** or **Z** to constrain movement. Hold **Ctrl** for snapping when appropriate; numeric entry is also supported.
+5. Use **R** to rotate the reference if the intended symmetry plane is not aligned with the model's object axes. This changes the reference **orientation**, not the shape of the mesh.
+6. Use **S** to make the **displayed reference planes** larger or smaller. **S changes only the gizmo/plane display size — it does not scale the sculpt or extend the mirror's influence.**
+7. Confirm the transform, or press **Esc** to cancel. Moving the reference itself does not deform the mesh.
+
+If the reference is locked or attached to a target, unlock or detach it before repositioning it.
+
+**Example — an off-center creature head:** suppose the head is not centered on the object's origin. Move the symmetry reference to the center of the face instead of moving the entire object. If the head is tilted, rotate the reference to match its anatomical midline. Then test a **supported** mirror operation and its selected axis on a small, reversible edit.
+
+### B. Link the Sculpt pivot to the symmetry reference
+
+Use this when the **symmetry center** and **transform center** should coincide.
+
+1. Position the **Symmetry Reference** as described above.
+2. Enter **Sculpt Mode** and open **N → Tool → Snap and Sculpt Pivot**. In this release the panel may be called `Snap e pivot Sculpt`.
+3. Enable **Show Transform Pivot** (`Mostra pivot trasformazioni`) to display its gizmo.
+4. Enable **Share with Symmetry** (`Condividi con simmetria`).
+5. If needed, use **Use Reference as Pivot** (`Usa riferimento come pivot`) to place the pivot at the reference.
+6. To move the linked point, choose **Place Pivot with Snap** (`Posiziona pivot con snap`) or drag one of the pivot's axis handles. Use **X/Y/Z**, **Ctrl** snapping and **Esc** to cancel.
+7. Select a supported Sculpt **Move**, **Rotate** or **Scale** tool. These use the transform pivot; **Transform Blend** and the brush falloff determine how surrounding geometry is affected.
+
+**Key behavior:** when **Share with Symmetry** is enabled, relocating the shared pivot **can also relocate the symmetry reference**. That is intentional. If you want the symmetry plane to stay fixed, **unlink the pivot first**.
+
+Linking the pivot does not mean that every Move/Rotate/Scale stroke automatically mirrors to the other side. Mirroring depends on the selected symmetry mode and its support in the particular tool.
+
+### C. Keep symmetry fixed while using a different transform pivot
+
+For joint or facial work, independent control may be preferable:
+
+1. Set the **Symmetry Reference** at the model's anatomical centerline.
+2. Open **N → Tool → Snap and Sculpt Pivot** and **disable Share with Symmetry**.
+3. Move only the **Sculpt Transform Pivot** with **Place Pivot with Snap**, or use **Pivot at 3D Cursor** (`Pivot al cursore 3D`).
+4. Transform your chosen sculpt region around its new pivot. The symmetry reference stays in place.
+
+**Example — creature jaw:** leave the symmetry reference between the eyes, but move the independent transform pivot to the jaw hinge. The jaw can now be rotated about its hinge without shifting the face's symmetry plane.
+
+### D. Pose Segment Blend
 
 1. Choose the **Pose** brush in Sculpt Mode.
-2. Work at a lower Multires Sculpt level for larger adjustments.
-3. Find **Segment Blend** in the Pose brush settings and adjust it to smooth the transition between segments.
-4. Return to your highest Sculpt level to check the detail.
+2. When appropriate, work at a lower Multires Sculpt level for broad adjustments.
+3. Find **Segment Blend** in the Pose brush settings and adjust it to soften the transition between pose segments.
+4. Return to the highest Sculpt level and check the preserved details.
 
-### Shared transform pivot
-
-Some pivot controls in the stable build use Italian labels:
-
-1. Press **N → Tool → Snap e pivot Sculpt**.
-2. Enable **Mostra pivot trasformazioni** (*Show Transform Pivot*).
-3. Keep **Condividi con simmetria** enabled to share the symmetry reference; disable it if you need a separate transform pivot.
-4. Choose **Posiziona pivot con snap** (*Place Pivot with Snap*) to reposition it. **G** moves, **X/Y/Z** constrains the axis, **Ctrl** snaps, and **Esc** cancels.
-5. Use sculpt **Move / Rotate / Scale** with the pivot. Adjust **Transform Blend** / falloff in the relevant tool settings for smoother transitions.
-
-You can also use **Usa riferimento come pivot** (*Use Reference as Pivot*) or **Pivot al cursore 3D** (*Pivot at 3D Cursor*).
-
-**Note:** continuous symmetry while sculpting an *asymmetrically posed* character is still under development. The current reference/pivot controls do not make every stroke pose-symmetric.
+**Current limit:** the symmetry reference and shared pivot are **not yet a complete pose-aware symmetry system**. Continuous mirroring of every stroke across differently posed limbs is still under development.
 
 ## 5. Paint color directly on Multires (Polypaint HR)
 
@@ -107,28 +146,34 @@ The V01 UV bake handles **one UV tile at a time**; it is **not** an automatic mu
 Face Sets HR helps select, isolate or mask details on a compatible Multires mesh.
 
 1. Enter **Sculpt Mode** and open **N → Multires → Face Sets HR**.
-2. Choose **Attiva pennello Face Sets HR** (*Activate Face Sets HR Brush*) or use the **Box / Lasso / Line** tools.
+2. Choose **Activate Face Sets HR Brush** (shown as `Attiva pennello Face Sets HR` in this release), or use the **Box / Lasso / Line** tools.
 3. Select a **Face Set ID** to hide, isolate, show, grow/shrink or convert to a mask.
 
 These tools have specific restrictions. The panel currently expects **a single Multires modifier with no other modifiers** and can reject very large or incompatible meshes. **Extract Face Set HR** is experimental, needs Sculpt level **L1 or higher**, and may require an opt-in setting.
 
 For ordinary mask-protected shaping, paint a mask over the area you want protected **before** executing the shaping operation.
 
-## 7. Symmetry reference and mask-protected operations
+## 7. Mask-protected symmetry and remesh operations
 
-1. In Sculpt or Edit Mode, choose the **Riferimento simmetria** (*Symmetry Reference*) tool when available.
-2. Position it with **G / R / S**, optional **X/Y/Z**, **Ctrl** to snap and **Esc** to cancel.
-3. For symmetry operations that should preserve a masked part, use **Solo forma — maschera protetta** (*Shape Only — Protected Mask*) and select **Auto**, **Topology** or **Surface** as appropriate.
-4. If using the supported masked **Voxel Remesh** workflow, look for **Proteggi zona mascherata** (*Protect Masked Region*). Inspect its border and the result carefully.
+Before running a symmetry operation, position the **Symmetry Reference** and choose whether the transform pivot should share it. See [Section 4](#4-pose-transform-blend-and-the-symmetry-referencepivot) for a practical walkthrough.
 
-**Important:** remeshing changes topology and can be expensive. Do not expect arbitrary topology changes to preserve all Multires layer identities automatically. Save a copy before remeshing.
+To protect a specific region of the mesh:
+
+1. Paint a **Mask** over the region you want to preserve.
+2. Choose **Shape Only — Protected Mask** (shown as `Solo forma — maschera protetta` in the 4 November build).
+3. Select **Auto**, **Topology** or **Surface**, according to the supported matching method.
+4. Run the operation and inspect the boundary, fine details and affected side.
+
+For the supported masked **Voxel Remesh** workflow, enable **Protect Masked Region** (`Proteggi zona mascherata`) and inspect the result carefully.
+
+**Remember:** moving the symmetry reference or pivot is a non-destructive **tool-placement** operation. Shape Only and Remesh can actually modify geometry or topology. Very fine remesh settings may use substantial memory, and arbitrary topology changes do not guarantee that editable Multires layers remain transferable. Save a separate project copy first.
 
 ## 8. Other tools worth trying
 
 | Tool | Where / how | When it helps |
 | --- | --- | --- |
 | **Draw Transport** | **N → Multires → Brush Options → Activate Draw Transport** | Work with supported anchored Draw detail; **R** rotates, **S** scales, **SS** adjusts strength in that interaction |
-| **Detail Transport Copy V01** *(experimental)* | Open **Detail Transport Copy V01**; choose source/target → **Crea anteprima separata** → inspect → **Conferma in nuovo layer** | Transfer/projection experiments between aligned meshes |
+| **Detail Transport Copy V01** *(experimental)* | Choose source/target → **Create Separate Preview** (`Crea anteprima separata`) → inspect → **Confirm in New Layer** (`Conferma in nuovo layer`) | Transfer/projection experiments between aligned meshes |
 | **Displacement → active layer** | Use the displacement bake-to-active-layer operation with a valid Multires layer selected | Make a supported displacement result editable as a Sculpt Layer |
 | **Shrinkwrap → active layer** | Use the corresponding bake-to-active-layer operation | Record a supported shrinkwrap result on a layer |
 
