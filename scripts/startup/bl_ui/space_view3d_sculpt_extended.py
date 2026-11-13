@@ -233,7 +233,7 @@ class VIEW3D_PT_multires_brush_experiments(bpy.types.Panel):
         layout = self.layout
         layout.use_property_decorate = False
         if brush.sculpt_brush_type in {'DRAW', 'CLAY', 'CLAY_STRIPS', 'CLAY_THUMB', 'INFLATE', 'PLANE', 'SMOOTH'}:
-            layout.prop(brush, 'sculpt_preserve_other_layers', text='Preserve Other Layers')
+            layout.prop(context.object, 'sculpt_preserve_other_layers', text='Preserve Other Layers')
         if brush.sculpt_brush_type == 'DRAW':
             layout.prop(brush, 'sculpt_draw_transport_v01', text='Draw Transport')
         else:
@@ -252,6 +252,11 @@ _owns_transport_property = False
 
 def register_props():
     global _owns_transport_property
+    bpy.types.Object.sculpt_preserve_other_layers = bpy.props.BoolProperty(
+        name='Preserve Other Layers', default=True,
+        description='Use one layer-isolation policy for supported brushes, Smooth, Shift Smooth and Auto Smooth')
+    # Kept as a compatibility fallback for files and scripts written before the
+    # object-wide policy. New strokes and UI use the object property above.
     bpy.types.Brush.sculpt_preserve_other_layers = bpy.props.BoolProperty(
         name='Preserve Other Layers', default=True,
         description='Preserve other layer details when sculpting; Smooth uses active-layer isolation. Disable to use normal smoothing')
@@ -267,6 +272,8 @@ def register_props():
 
 def unregister_props():
     global _owns_transport_property
+    if hasattr(bpy.types.Object, 'sculpt_preserve_other_layers'):
+        del bpy.types.Object.sculpt_preserve_other_layers
     for name in ('sculpt_preserve_other_layers', 'sculpt_pose_gentle_multires'):
         if hasattr(bpy.types.Brush, name):
             delattr(bpy.types.Brush, name)
