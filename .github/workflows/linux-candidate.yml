@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
-      BUILD_DIR: ${{ github.workspace }}/../build_linux
+      BUILD_DIR: ${{ github.workspace }}/../build_linux_release
       PACKAGE_NAME: Blender-Sculpt-Extended-5.2.3-Candidate-Linux-x64-${{ github.run_number }}
       CC: gcc-14
       CXX: g++-14
