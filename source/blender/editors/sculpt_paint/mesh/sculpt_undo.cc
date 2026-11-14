@@ -3013,7 +3013,7 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
          * name leaves the painted VBO unchanged even after the master is restored. */
         const Mesh &mesh = *id_cast<const Mesh *>(object.data);
         const char *redraw_env = std::getenv("BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3");
-        const bool local_redraw = redraw_env && redraw_env[0] == '1' && redraw_env[1] == '\0';
+        const bool local_redraw = !redraw_env || redraw_env[0] != '0';
         int64_t redraw_nodes = node_mask.size();
         if (mesh.active_color_attribute && mesh.active_color_attribute[0]) {
           if (local_redraw) {
@@ -3562,7 +3562,7 @@ static void fill_node_data_grids(const Object &object,
       const int master_area = unode.grid_color_side * unode.grid_color_side;
       unode.col.reinitialize(unode.grids.size() * master_area);
       const char *fast_env = std::getenv("BLENDER_SCULPT_POLYPAINT_UNDO_COPY_V3");
-      const bool fast_copy = fast_env && fast_env[0] == '1' && fast_env[1] == '\0';
+      const bool fast_copy = !fast_env || fast_env[0] != '0';
       /* Absent slots are never read: restore fills them before Redo can read
        * them, and original-color lookup rejects any missing presence bit.
        * Dense slots are overwritten in full. Avoid touching every page twice. */

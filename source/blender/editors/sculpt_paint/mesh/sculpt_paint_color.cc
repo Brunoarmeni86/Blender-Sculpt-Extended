@@ -733,13 +733,13 @@ static void do_paint_brush_grids_cpu(const Depsgraph &depsgraph,
                                      Object &object,
                                      const IndexMask &node_mask)
 {
-  const auto flag_enabled = [](const char *name) {
+  const auto flag_enabled_by_default = [](const char *name) {
     const char *value = std::getenv(name);
-    return value && value[0] == '1' && value[1] == '\0';
+    return !value || value[0] != '0';
   };
-  if (!flag_enabled("BLENDER_SCULPT_POLYPAINT_PARALLEL_V3") &&
-      !flag_enabled("BLENDER_SCULPT_POLYPAINT_UNDO_COPY_V3") &&
-      !flag_enabled("BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3"))
+  if (!flag_enabled_by_default("BLENDER_SCULPT_POLYPAINT_PARALLEL_V3") &&
+      !flag_enabled_by_default("BLENDER_SCULPT_POLYPAINT_UNDO_COPY_V3") &&
+      !flag_enabled_by_default("BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3"))
   {
     do_paint_brush_grids_cpu_prepared_v02(depsgraph, sd, object, node_mask);
     return;
@@ -784,9 +784,9 @@ static void do_paint_brush_grids_cpu(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Span<bke::pbvh::GridsNode> nodes = pbvh.nodes<bke::pbvh::GridsNode>();
   const char *parallel_env = std::getenv("BLENDER_SCULPT_POLYPAINT_PARALLEL_V3");
-  const bool parallel_requested = parallel_env && parallel_env[0] == '1' && parallel_env[1] == '\0';
+  const bool parallel_requested = !parallel_env || parallel_env[0] != '0';
   const char *local_env = std::getenv("BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3");
-  const bool local_redraw = local_env && local_env[0] == '1' && local_env[1] == '\0';
+  const bool local_redraw = !local_env || local_env[0] != '0';
   const char *prepared_env = std::getenv("BLENDER_SCULPT_POLYPAINT_PREPARED_V2");
   const bool prepared_enabled = !prepared_env || prepared_env[0] != '0';
   bool parallel_ok = parallel_requested && node_mask.size() > 1 &&
