@@ -100,6 +100,31 @@ Non è necessario completare sequenzialmente tutte le fasi prima di esplorare up
 
 **Non utilizzare i due script WIP come garanzia di sicurezza;** devono essere prima eseguiti e, se necessario, corretti. Una prova che fallisce ha priorità rispetto al design speculativo.
 
+## 6.1 Nuove richieste Multires da studiare (14 novembre 2026)
+
+### Delete Lower / Set Current Level as New Base
+
+**Stato: PROPOSTA, non implementata.** Un Multires Blender conserva sempre la mesh base come
+livello 0; quindi non è possibile rimuovere semplicemente i livelli inferiori mantenendo lo stesso
+modificatore. L'operazione fattibile è **Set Current Level as New Base**: creare in staging una nuova
+mesh base dalla risoluzione corrente, rinumerare i livelli superiori e migrare Sculpt Layers,
+Polypaint HR, Face Sets, mask, hidden data e attributi. Pubblicare soltanto dopo validazione completa,
+con rollback e un singolo Undo. Non eseguire in-place. Test obbligatori: seam, griglie sparse,
+layer/group hidden, strength negative/zero/positive, cambio livello, save/reopen e confronto della
+superficie prima/dopo. Shape Keys o modifier incompatibili devono produrre un blocco esplicito finché
+non esiste una migrazione verificata.
+
+### Export Multires Sculpt Layer stack to Shape Keys
+
+**Stato: FATTIBILE CON LIMITI / PROPOSTA.** Le Shape Keys richiedono tutte la stessa topologia e lo
+stesso numero di vertici. La via sicura è un export su **oggetto duplicato** a un livello Multires
+scelto e fissato: applicare/evaluare quella topologia, creare Basis e una Shape Key per ogni Sculpt
+Layer, preservando nome e strength iniziale. Normal/Add dei delta geometrici può essere rappresentato;
+gruppi, visibility, blend non lineari, Polypaint, Face Sets e master HR non diventano Shape Keys e
+devono restare metadata o essere esportati separatamente. Il costo è denso (`vertici x layer x
+float3`) e può essere molto elevato; prevedere stima RAM, selezione visible/all, cancellazione e
+rollback. Non sostituire né distruggere lo stack sorgente per impostazione predefinita.
+
 ## 7. Commit, report e scelta
 Per ogni task Codex annotare: **issue**, file/funzioni, criterio di accettazione, stato evidenza, SHA candidato, test eseguiti realmente, checksum/diff geometria, benchmark e decisione **keep/revise/rollback**. Se una patch degrada la scultura o rompe dati: rollback selettivo e documentazione; non eliminare ottimizzazioni funzionanti per uniformità col codice nuovo.
 
