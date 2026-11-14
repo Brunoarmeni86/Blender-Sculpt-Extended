@@ -625,7 +625,10 @@ static void do_paint_brush_grids_cpu_prepared_v02(const Depsgraph &depsgraph,
   bool changed = false;
   int64_t touched_samples = 0;
   const char *prepared_env = std::getenv("BLENDER_SCULPT_POLYPAINT_PREPARED_V2");
-  const bool prepared_enabled = prepared_env && prepared_env[0] == '1' && prepared_env[1] == '\0';
+  /* Prepared V2 has numerical A/B coverage for same-level and coarse painting and keeps the
+   * legacy writer for the first affected sample of every grid. Make the validated hot path the
+   * normal behavior; an explicit zero remains available for diagnostics and A/B comparisons. */
+  const bool prepared_enabled = !prepared_env || prepared_env[0] != '0';
   bke::multires_polypaint_cpu::PreparedPaintPlan prepared_plan;
   int64_t prepared_samples = 0, prepared_grids = 0;
   double gather_ms = 0.0, factors_ms = 0.0, write_ms = 0.0, prepare_ms = 0.0;
@@ -785,7 +788,7 @@ static void do_paint_brush_grids_cpu(const Depsgraph &depsgraph,
   const char *local_env = std::getenv("BLENDER_SCULPT_POLYPAINT_LOCAL_REDRAW_V3");
   const bool local_redraw = local_env && local_env[0] == '1' && local_env[1] == '\0';
   const char *prepared_env = std::getenv("BLENDER_SCULPT_POLYPAINT_PREPARED_V2");
-  const bool prepared_enabled = prepared_env && prepared_env[0] == '1' && prepared_env[1] == '\0';
+  const bool prepared_enabled = !prepared_env || prepared_env[0] != '0';
   bool parallel_ok = parallel_requested && node_mask.size() > 1 &&
       mmd.sculpt_color_grids && mmd.sculpt_color_grids_num == ccg.grids_num &&
       mmd.sculpt_color_level >= mmd.sculptlvl && mmd.sculpt_color_level <= 13 &&
