@@ -947,11 +947,14 @@ static bool sculpt_multires_layer_commit(Object &ob,
 static bool sculpt_multires_layer_commit_if_pending(Object &ob, wmOperator &op)
 {
   const SculptSession *ss = ob.runtime ? ob.runtime->sculpt_session : nullptr;
-  const bool pending_positions = ss && ss->subdiv_ccg && ss->subdiv_ccg->dirty.coords;
-  if (!pending_positions) {
+  const SubdivCCG *ccg = ss ? ss->subdiv_ccg : nullptr;
+  const bool pending_sculpt_data = ccg &&
+                                   (ccg->dirty.coords || ccg->dirty.masks || ccg->dirty.hidden);
+  if (!pending_sculpt_data) {
     const char *trace = BLI_getenv("BLENDER_LAYER_RESP_TRACE");
     if (trace && trace[0] && trace[0] != '0') {
-      std::printf("[LAYER_COMMIT_SKIP] op=%s reason=NO_PENDING_COORDS\n", op.type->idname);
+      std::printf("[LAYER_COMMIT_SKIP] op=%s reason=NO_PENDING_SCULPT_DATA\n",
+                  op.type->idname);
     }
     return true;
   }
