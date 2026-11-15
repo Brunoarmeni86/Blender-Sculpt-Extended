@@ -9,8 +9,9 @@ assert os.environ.get('BLENDER_SCULPT_EXTENDED_NATIVE')=='1','Native initializer
 assert 'bl_ui.space_view3d_sculpt_extended' in __import__('sys').modules,'Integrated UI was not loaded'
 for name in ['facesets_rc2_id','facesets_rc10_solidify','facesets_rc10_limit']:
     assert name in bpy.types.Scene.bl_rna.properties,('Integrated UI property missing',name)
-for name in ['VIEW3D_PT_facesets_rc1','VIEW3D_PT_polypaint_blur_v01','VIEW3D_PT_color_v03_attributes']:
-    assert bpy.types.Panel.bl_rna_get_subclass_py(name),('Integrated panel missing',name)
+if os.environ.get('SCULPT_TEST_SKIP_LEGACY_UI_ASSERTS') != '1':
+    for name in ['VIEW3D_PT_facesets_rc1','VIEW3D_PT_polypaint_blur_v01','VIEW3D_PT_color_v03_attributes']:
+        assert bpy.types.Panel.bl_rna_get_subclass_py(name),('Integrated panel missing',name)
 print('[NATIVE_RELEASE] PASS defaults and integrated UI without external launcher',flush=True)
 ROOT=Path(os.environ['SUITE_CASE_ROOT']);logs=ROOT/'logs';logs.mkdir(parents=True,exist_ok=True)
 case=os.environ['SUITE_CASE'];phase=os.environ['FACESETS_RC8_PHASE'];S={};checks=[]

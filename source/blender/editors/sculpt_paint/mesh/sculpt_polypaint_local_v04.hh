@@ -4,6 +4,7 @@
 #include <array>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <limits>
 #include <functional>
@@ -15,6 +16,70 @@ struct Result {
   std::map<int,RGBA> writes;
   size_t groups=0;
 };
+
+/* Paint does not need neighbor rings. Fuse duplicate closure, source sampling
+ * and transformation into one pass instead of constructing the generic
+ * group/owner/candidate graph used by Blur and Smear. Shared CCG samples keep
+ * the same conservative minimum influence and averaged source color. */
+template<class Sample,class Duplicates,class Hidden>
+bool calculate_paint(const std::unordered_map<int,float> &influence,
+                     Sample sample,
+                     Duplicates duplicates,
+                     Hidden hidden,
+                     Result &result,
+                     size_t max_source,
+                     const std::function<bool(int,const RGBA&,float,RGBA&)> &transform)
+{
+  result=Result{};
+  if(!transform||influence.size()>max_source)return false;
+  const size_t reserve_hint=std::min(max_source,influence.size()+influence.size()/8+8);
+  result.source.reserve(reserve_hint);
+  std::unordered_set<int> visited;
+  visited.reserve(reserve_hint);
+  std::vector<int> active;
+  active.reserve(influence.size());
+  for(const auto &entry:influence)if(entry.second>0)active.push_back(entry.first);
+  std::sort(active.begin(),active.end());
+  std::vector<int> members;
+  members.reserve(8);
+  for(const int root:active){
+    if(visited.find(root)!=visited.end())continue;
+    members.clear();members.push_back(root);
+    for(size_t k=0;k<members.size();k++){
+      for(const int copy:duplicates(members[k])){
+        if(std::find(members.begin(),members.end(),copy)==members.end())members.push_back(copy);
+      }
+    }
+    std::sort(members.begin(),members.end());
+    RGBA mean{};
+    float factor=1.0f;
+    bool protected_sample=false;
+    for(const int i:members){
+      if(!visited.insert(i).second)return false;
+      if(result.source.size()>=max_source)return false;
+      RGBA rgba;
+      if(!sample(i,rgba))return false;
+      for(int c=0;c<4;c++){
+        if(!std::isfinite(rgba[c]))return false;
+        mean[c]+=rgba[c];
+      }
+      result.source.emplace(i,rgba);
+      const auto found=influence.find(i);
+      factor=std::min(factor,found==influence.end()?0.0f:found->second);
+      protected_sample|=hidden(i);
+    }
+    result.groups++;
+    if(factor<=0||protected_sample)continue;
+    for(float &value:mean)value/=float(members.size());
+    RGBA out;
+    if(!transform(members.front(),mean,factor,out))return false;
+    for(const float value:out)if(!std::isfinite(value))return false;
+    for(const int i:members){
+      if(out!=result.source.at(i))result.writes.emplace(i,out);
+    }
+  }
+  return true;
+}
 /* Physical indices are stable CCG indices. Duplicate closure includes copies
  * outside the captured PBVH nodes, whose missing influence is exactly zero.
  * Source colors are immutable until the caller publishes all staged grids. */
@@ -27,6 +92,8 @@ bool calculate(const std::unordered_map<int,float> &influence,Sample sample,
 {
   result=Result{};
   if (influence.size()>max_source) { return false; }
+  const size_t reserve_hint=std::min(max_source,influence.size()+influence.size()/2+8);
+  result.source.reserve(reserve_hint);
   struct Group {
     std::vector<int> members;
     RGBA mean{};
@@ -35,6 +102,8 @@ bool calculate(const std::unordered_map<int,float> &influence,Sample sample,
   };
   std::vector<Group> groups;
   std::unordered_map<int,int> owner;
+  groups.reserve(influence.size());
+  owner.reserve(reserve_hint);
   auto get_group=[&](const int first)->int {
     auto found=owner.find(first);
     if (found!=owner.end()) { return found->second; }
@@ -69,9 +138,11 @@ bool calculate(const std::unordered_map<int,float> &influence,Sample sample,
     groups.push_back(std::move(group));return id;
   };
   std::vector<int> active;
+  active.reserve(influence.size());
   for (const auto &entry:influence) { if (entry.second>0) { active.push_back(entry.first); } }
   std::sort(active.begin(),active.end());
   std::vector<int> candidates;
+  candidates.reserve(active.size());
   for (const int i:active) {
     const int id=get_group(i);if (id<0) { return false; }
     if (groups[id].members.front()==i && groups[id].factor>0 && !groups[id].protected_sample) {

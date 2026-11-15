@@ -236,11 +236,13 @@ struct LayerPayloadIndex {
   }
 };
 
-static LayerPayloadIndex &payload_index()
+static Vector<LayerPayloadIndex> &payload_indices()
 {
-  static LayerPayloadIndex cache;
-  return cache;
+  static Vector<LayerPayloadIndex> caches;
+  return caches;
 }
+
+static constexpr int payload_index_capacity = 4;
 
 static std::mutex &payload_index_mutex()
 {
@@ -265,9 +267,12 @@ legacy_zero_grid_scans()
 void payload_index_invalidate(const MultiresSculptLayer *layer)
 {
   std::lock_guard<std::mutex> lock(payload_index_mutex());
-  LayerPayloadIndex &cache = payload_index();
-  if (layer == nullptr || cache.layer == layer) {
-    cache.clear();
+  Vector<LayerPayloadIndex> &caches = payload_indices();
+  if (layer == nullptr) {
+    caches.clear();
+  }
+  else {
+    caches.remove_if([&](const LayerPayloadIndex &cache) { return cache.layer == layer; });
   }
   if (layer == nullptr) {
     legacy_zero_grid_scans().clear();
@@ -316,10 +321,9 @@ int64_t compact_legacy_zero_grid(MultiresSculptLayer &layer, const int grid_inde
   }
 
   MEM_SAFE_DELETE(grid.disps);
-  LayerPayloadIndex &payload_cache = payload_index();
-  if (payload_cache.layer == &layer) {
-    payload_cache.clear();
-  }
+  Vector<LayerPayloadIndex> &payload_caches = payload_indices();
+  payload_caches.remove_if(
+      [&](const LayerPayloadIndex &cache) { return cache.layer == &layer; });
   return int64_t(area) * int64_t(sizeof(float[3]));
 }
 
@@ -393,30 +397,42 @@ bool payload_grids(const MultiresSculptLayer &layer,
   }
   const int side = subdiv::grid_size_from_level(layer.level);
   const int area = side * side;
-  /* The index stores one int per occupied grid for the current hot layer and is
+  /* The index stores one int per occupied grid for a small set of hot layers and is
    * invalidated by every payload allocation/mutation path. Keep it enabled by
-   * default: repeated Strength updates should not rescan every grid descriptor.
+   * default: repeated Strength updates and A/B layer switching should not rescan
+   * every grid descriptor. The fixed capacity bounds persistent memory.
    * Set BLENDER_SCULPT_LAYER_SUPPORT_CACHE=0 for diagnostics/A-B comparison. */
   const char *value = BLI_getenv("BLENDER_SCULPT_LAYER_SUPPORT_CACHE");
   const bool enabled = value == nullptr || value[0] == '\0' || value[0] != '0';
   std::lock_guard<std::mutex> lock(payload_index_mutex());
-  LayerPayloadIndex &cache = payload_index();
-  const bool hit = enabled && cache.layer == &layer && cache.descriptors == layer.disps &&
-                   cache.grids_num == expected_grids && cache.level == layer.level;
+  Vector<LayerPayloadIndex> &caches = payload_indices();
+  int cache_index = -1;
+  if (enabled) {
+    for (const int i : caches.index_range()) {
+      const LayerPayloadIndex &candidate = caches[i];
+      if (candidate.layer == &layer && candidate.descriptors == layer.disps &&
+          candidate.grids_num == expected_grids && candidate.level == layer.level)
+      {
+        cache_index = i;
+        break;
+      }
+    }
+  }
+  const bool hit = cache_index >= 0;
   if (hit) {
     /* Validate occupied descriptors; zero-payload allocation changes invalidate
      * the index via grid_ensure before the next property transaction. */
+    LayerPayloadIndex &cache = caches[cache_index];
     for (const int grid : cache.grids) {
       const MDisps &data = layer.disps[grid];
       if (data.disps == nullptr || data.level != layer.level || data.totdisp != area) {
-        cache.clear();
+        caches.remove(cache_index);
         return false;
       }
     }
     r_grids.extend(cache.grids.as_span());
   }
   else {
-    cache.clear();
     for (int grid = 0; grid < expected_grids; grid++) {
       const MDisps &data = layer.disps[grid];
       if (data.disps == nullptr) {
@@ -428,6 +444,11 @@ bool payload_grids(const MultiresSculptLayer &layer,
       r_grids.append(grid);
     }
     if (enabled) {
+      if (caches.size() >= payload_index_capacity) {
+        caches.remove(0);
+      }
+      caches.append(LayerPayloadIndex{});
+      LayerPayloadIndex &cache = caches.last();
       cache.layer = &layer;
       cache.descriptors = layer.disps;
       cache.grids_num = expected_grids;
@@ -1512,6 +1533,40 @@ bool polypaint_sample_with_base(const MultiresModifierData &mmd,
     return false;
   }
   multires_polypaint_cpu::sample_patch(patch, u, v, r_rgba);
+  return true;
+}
+
+bool polypaint_fill_grid_from_base(const Mesh &base_mesh,
+                                   const char *attribute_name,
+                                   const int corner,
+                                   const int level,
+                                   float (*r_colors)[4])
+{
+  if (!r_colors || level < 1 || level > 13) {
+    return false;
+  }
+  float patch[4][4];
+  if (!polypaint_base_patch(base_mesh, attribute_name, corner, patch)) {
+    return false;
+  }
+  const int side = subdiv::grid_size_from_level(level);
+  const float inv_side = 1.0f / float(side - 1);
+  threading::parallel_for(IndexRange(side), 16, [&](const IndexRange rows) {
+    for (const int y : rows) {
+      const float v = float(y) * inv_side;
+      float row_start[4], row_end[4];
+      for (int c = 0; c < 4; c++) {
+        row_start[c] = patch[0][c] * (1.0f - v) + patch[2][c] * v;
+        row_end[c] = patch[1][c] * (1.0f - v) + patch[3][c] * v;
+      }
+      for (int x = 0; x < side; x++) {
+        const float u = float(x) * inv_side;
+        for (int c = 0; c < 4; c++) {
+          r_colors[y * side + x][c] = row_start[c] * (1.0f - u) + row_end[c] * u;
+        }
+      }
+    }
+  });
   return true;
 }
 

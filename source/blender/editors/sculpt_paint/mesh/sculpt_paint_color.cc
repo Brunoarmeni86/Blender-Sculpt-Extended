@@ -50,6 +50,7 @@
 #include <cstdio>
 
 #include "sculpt_polypaint_blur_v01.hh"
+/* Polypaint V04 keeps its bounded staging cache warm across independent strokes. */
 
 namespace blender::ed::sculpt_paint::color {
 

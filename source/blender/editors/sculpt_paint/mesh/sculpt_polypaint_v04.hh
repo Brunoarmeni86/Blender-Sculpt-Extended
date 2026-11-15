@@ -6,7 +6,9 @@
 #include "sculpt_polypaint_smear_v03_math.hh"
 #include "BLI_bitmap.h"
 #include "BKE_customdata.hh"
+#include "BLI_time.h"
 #include "DNA_meshdata_types.h"
+#include <atomic>
 #include <set>
 #include "sculpt_polypaint_v04_wet.hh"
 #include "sculpt_polypaint_v04_project.hh"
@@ -20,14 +22,43 @@ inline MultiresModifierData *color_v04_modifier(Object &ob){
 }
 static void color_v04_abort(const char *reason){color_v04_aborts++;std::printf("[POLYPAINT_V04] abort=%s published=0\n",reason);std::fflush(stdout);}
 using V04RGBA=color_local_v04::RGBA;
+struct ColorV04ScratchPool {
+ struct Block { float (*colors)[4]=nullptr;size_t capacity=0; };
+ std::vector<Block> blocks;
+ size_t retained_bytes=0;
+ static constexpr size_t max_retained_bytes=32ull*1024*1024;
+ ~ColorV04ScratchPool(){clear();}
+ void clear(){for(Block &block:blocks)MEM_SAFE_DELETE(block.colors);blocks.clear();retained_bytes=0;}
+ float (*acquire(const size_t pixels))[4]{
+  size_t best=blocks.size();
+  for(size_t i=0;i<blocks.size();i++)if(blocks[i].capacity==pixels){best=i;break;}
+  if(best==blocks.size())return MEM_new_array_uninitialized<float[4]>(pixels,"Polypaint V04 staged master");
+  Block block=blocks[best];retained_bytes-=block.capacity*sizeof(float[4]);
+  blocks.erase(blocks.begin()+best);return block.colors;
+ }
+ void release(float (*colors)[4],const size_t capacity){
+  if(!colors)return;
+  const size_t bytes=capacity*sizeof(float[4]);
+  if(bytes>max_retained_bytes||retained_bytes+bytes>max_retained_bytes){MEM_SAFE_DELETE(colors);return;}
+  blocks.push_back({colors,capacity});retained_bytes+=bytes;
+ }
+};
+static thread_local ColorV04ScratchPool color_v04_scratch;
 struct ColorV04GridStage {
- int index=0,side=0;
+ int index=0,side=0,x0=0,y0=0,width=0,height=0;
+ bool full_grid=false,reusable=false;
+ size_t capacity=0;
  float (*colors)[4]=nullptr;
- ~ColorV04GridStage(){MEM_SAFE_DELETE(colors);}
+ ~ColorV04GridStage(){if(reusable)color_v04_scratch.release(colors,capacity);else MEM_SAFE_DELETE(colors);}
 };
 static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Object &ob,const IndexMask &node_mask){
  auto &ss=*ob.runtime->sculpt_session;auto *mmd=color_v04_modifier(ob);
  if(!polypaint_v04_enabled()||!ss.cache||ss.filter_cache||!mmd)return;
+ const bool diagnostics=polypaint_v04_diagnostics_enabled();
+ const double profile_start=diagnostics?BLI_time_now_seconds():0.0;
+ /* Keep the bounded scratch pool across strokes. Clearing it on every first
+  * dab defeated reuse exactly where large Multires color masters need it most.
+  * The pool already has a strict 32 MiB cap and releases oversized blocks. */
  auto &mesh=*id_cast<Mesh*>(ob.data);auto &tree=*bke::object::pbvh_get(ob);
  const bool cage=tree.type()==bke::pbvh::Type::Mesh&&mmd->sculptlvl==0;
  if(!cage&&tree.type()!=bke::pbvh::Type::Grids)return;
@@ -51,14 +82,15 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
  if(!std::isfinite(strength)||strength<=0)return;
  if(paint&&(!std::isfinite(ss.cache->paint_brush.flow)||ss.cache->paint_brush.flow<=0||BKE_brush_alpha_get(&sd.paint,&brush)<=0))return;
  if(!cage&&(ccg->grids_num!=mesh.corners_num||ccg->positions.size()!=int64_t(ccg->grids_num)*low_area||ccg->normals.size()!=ccg->positions.size()))return;
- for(int g=0;g<mesh.corners_num;g++){const auto &v=mmd->sculpt_color_grids[g];if(v.colors&&(v.level!=master_level||v.totcolor!=high_area)){color_v04_abort("invalid_grid");return;}}
  std::unordered_map<int,float> factors_by_index;
  Vector<float3> co_buffer;Vector<float> factors,distances;
  bool refused=false;
  const Span<float3> mesh_positions=cage?bke::pbvh::vert_positions_eval(depsgraph,ob):Span<float3>{};
  const Span<float3> mesh_normals=cage?bke::pbvh::vert_normals_eval(depsgraph,ob):Span<float3>{};
- const auto faces=mesh.faces();const auto corner_verts=mesh.corner_verts();const auto vert_faces=mesh.vert_to_face_map();
- const MeshAttributeData mesh_attributes(mesh);
+ const auto faces=mesh.faces();const auto corner_verts=mesh.corner_verts();
+ const GroupedSpan<int> vert_faces=cage?mesh.vert_to_face_map():GroupedSpan<int>{};
+ std::unique_ptr<MeshAttributeData> mesh_attributes;
+ if(cage)mesh_attributes=std::make_unique<MeshAttributeData>(mesh);
  const auto *hidden_grids=static_cast<const MDisps*>(CustomData_get_layer(&mesh.corner_data,CD_MDISPS));
  const auto *mask_grids=static_cast<const GridPaintMask*>(CustomData_get_layer(&mesh.corner_data,CD_GRID_PAINT_MASK));
 
@@ -81,7 +113,7 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
      high_hidden|=bool(BLI_BITMAP_TEST(hidden_grids[c].hidden,side*side-1));
     }
    }
-   const float base_mask=mesh_attributes.mask.is_empty()?0.f:mesh_attributes.mask[i];
+   const float base_mask=mesh_attributes->mask.is_empty()?0.f:mesh_attributes->mask[i];
    f=wet_v04c::cage_factor(f,base_mask,high_mask,high_hidden);
   }
   if(paint){
@@ -95,14 +127,18 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
  };
  if(cage){
   const auto nodes=tree.nodes<bke::pbvh::MeshNode>();
+  size_t reserve_hint=0;node_mask.foreach_index([&](int n){reserve_hint+=nodes[n].verts().size();});
+  factors_by_index.reserve(std::min(limit,reserve_hint));
   node_mask.foreach_index([&](int n){
    if(refused)return;
-   calc_factors_common_mesh_indexed(depsgraph,brush,ob,mesh_attributes,mesh_positions,mesh_normals,nodes[n],factors,distances);
+   calc_factors_common_mesh_indexed(depsgraph,brush,ob,*mesh_attributes,mesh_positions,mesh_normals,nodes[n],factors,distances);
    const auto verts=nodes[n].verts();for(int j=0;j<verts.size();j++)collect(verts[j],factors[j]);
   });
 
  }else{
   const auto nodes=tree.nodes<bke::pbvh::GridsNode>();
+  size_t reserve_hint=0;node_mask.foreach_index([&](int n){reserve_hint+=size_t(nodes[n].grids().size())*low_area;});
+  factors_by_index.reserve(std::min(limit,reserve_hint));
   node_mask.foreach_index([&](int n){
    if(refused)return;const auto grids=nodes[n].grids();
    if(uint64_t(grids.size())*low_area>budget/64){refused=true;return;}
@@ -113,8 +149,9 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
  }
  if(refused){color_v04_abort("local_budget");return;}
  if(factors_by_index.empty())return;
+ const double collect_end=diagnostics?BLI_time_now_seconds():0.0;
  const CCGKey key=cage?CCGKey{}:BKE_subdiv_ccg_key_top_level(*ccg);
- auto hidden=[&](int i){return cage?(!mesh_attributes.hide_vert.is_empty()&&mesh_attributes.hide_vert[i]):(!ccg->grid_hidden.is_empty()&&ccg->grid_hidden[i/low_area][i%low_area]);};
+ auto hidden=[&](int i){return cage?(!mesh_attributes->hide_vert.is_empty()&&mesh_attributes->hide_vert[i]):(!ccg->grid_hidden.is_empty()&&ccg->grid_hidden[i/low_area][i%low_area]);};
  auto sample=[&](int i,V04RGBA &rgba){
   if(!cage){auto c=SubdivCCGCoord::from_index(key,i);return bke::multires_layers::polypaint_sample_with_base(*mmd,mesh,name,c.grid_index,float(c.x)/(low_side-1),float(c.y)/(low_side-1),rgba.data());}
   rgba={0,0,0,0};int count=0;
@@ -123,7 +160,7 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
  };
  auto duplicates=[&](int i){std::vector<int> out;if(cage)return out;const auto c=SubdivCCGCoord::from_index(key,i);
   if(c.x==0||c.y==0||c.x==low_side-1||c.y==low_side-1){SubdivCCGNeighbors adj;BKE_subdiv_ccg_neighbor_coords_get(*ccg,c,true,adj);for(const auto &v:adj.duplicates())out.push_back(v.to_index(key));}return out;};
- auto neighbors=[&](int i){std::vector<int> out;if(cage){Vector<int> ns;for(int v:vert_neighbors_get_mesh(faces,corner_verts,vert_faces,mesh_attributes.hide_poly,i,ns))out.push_back(v);}else{SubdivCCGNeighbors adj;BKE_subdiv_ccg_neighbor_coords_get(*ccg,SubdivCCGCoord::from_index(key,i),true,adj);for(const auto &v:adj.unique())out.push_back(v.to_index(key));}return out;};
+ auto neighbors=[&](int i){std::vector<int> out;if(cage){Vector<int> ns;for(int v:vert_neighbors_get_mesh(faces,corner_verts,vert_faces,mesh_attributes->hide_poly,i,ns))out.push_back(v);}else{SubdivCCGNeighbors adj;BKE_subdiv_ccg_neighbor_coords_get(*ccg,SubdivCCGCoord::from_index(key,i),true,adj);for(const auto &v:adj.unique())out.push_back(v.to_index(key));}return out;};
  const float3 drag=brush.stroke_method==BRUSH_STROKE_ANCHORED?ss.cache->grab_delta_symm:ss.cache->location_symm-ss.cache->last_location_symm;
  auto weight=[&](int i,int j){if(!smear)return 1.;float3 motion=drag;
   if(brush.smear_deform_type==BRUSH_SMEAR_DEFORM_PINCH)motion=ss.cache->location_symm-position(i);
@@ -151,9 +188,11 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
    color_v04_wet_samples+=wet_sample.count;
    color_v04_wet_fallbacks+=wet_sample.nearest_fallback;
    color_v04_wet_reuses+=!ss.cache->first_time&&previous[3]!=0&&persistence>0;
-   std::printf("[POLYPAINT_V04_WET] samples=%llu fallback=%d persistence=%.6g history=%d radius=%.6g\n",
-     (unsigned long long)wet_sample.count,int(wet_sample.nearest_fallback),double(persistence),
-     int(!ss.cache->first_time&&previous[3]!=0),radius);std::fflush(stdout);
+   if(polypaint_v04_diagnostics_enabled()){
+    std::printf("[POLYPAINT_V04_WET] samples=%llu fallback=%d persistence=%.6g history=%d radius=%.6g\n",
+      (unsigned long long)wet_sample.count,int(wet_sample.nearest_fallback),double(persistence),
+      int(!ss.cache->first_time&&previous[3]!=0),radius);std::fflush(stdout);
+   }
   }
  }
 
@@ -166,8 +205,14 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
   return true;
  };
  color_local_v04::Result result;
- if(!color_local_v04::calculate(factors_by_index,sample,duplicates,neighbors,hidden,result,weight,smear,limit,transform)){color_v04_abort("source_or_budget");return;}
+ const bool calculated=paint?
+   color_local_v04::calculate_paint(
+     factors_by_index,sample,duplicates,hidden,result,limit,transform):
+   color_local_v04::calculate(
+     factors_by_index,sample,duplicates,neighbors,hidden,result,weight,smear,limit,transform);
+ if(!calculated){color_v04_abort("source_or_budget");return;}
  if(result.writes.empty())return;
+ const double calculate_end=diagnostics?BLI_time_now_seconds():0.0;
  std::map<int,std::map<int,V04RGBA>> delta;
  if(!cage){
   for(const auto &entry:result.writes){V04RGBA d;const auto &before=result.source.at(entry.first);for(int c=0;c<4;c++)d[c]=entry.second[c]-before[c];delta[entry.first/low_area][entry.first%low_area]=d;}
@@ -179,24 +224,46 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
   }
  }
  std::map<int,std::unique_ptr<ColorV04GridStage>> staged;
+ size_t staged_pixel_total=0;
+ size_t full_grid_count=0,patch_grid_count=0;
+ double stage_init_seconds=0.0,project_seconds=0.0;
  for(const auto &entry:delta){
+  const double stage_init_start=diagnostics?BLI_time_now_seconds():0.0;
   const int g=entry.first;
-  if(uint64_t(result.source.size())*640+uint64_t(staged.size()+1)*high_area*sizeof(float[4])>budget){color_v04_abort("stage_budget");return;}
-  auto stage=std::make_unique<ColorV04GridStage>();stage->index=g;stage->side=high_side;
-  stage->colors=MEM_new_array_uninitialized<float[4]>(high_area,"Polypaint V04 staged master");
-  const auto &original=mmd->sculpt_color_grids[g];
-  /* Preserve atomic publication and full source validation. Dense grids need
-   * only one contiguous copy; project deltas only inside their support. */
-  if(original.colors)std::memcpy(stage->colors,original.colors,size_t(high_area)*sizeof(float[4]));
-  else for(int y=0;y<high_side;y++)for(int x=0;x<high_side;x++){
-   if(!bke::multires_layers::polypaint_sample_with_base(*mmd,mesh,name,g,
-        float(x)/(high_side-1),float(y)/(high_side-1),stage->colors[y*high_side+x]))return;
-  }
-  for(int i=0;i<high_area;i++)for(float value:stage->colors[i])if(!std::isfinite(value))return;
   color_project_v04::Bounds bounds;
   if(!color_project_v04::affected_bounds(high_side,low_side,entry.second,bounds))return;
+  const auto &original=mmd->sculpt_color_grids[g];
+  if(original.colors&&(original.level!=master_level||original.totcolor!=high_area)){
+   color_v04_abort("invalid_grid");return;
+  }
+  const int patch_width=bounds.x1-bounds.x0+1,patch_height=bounds.y1-bounds.y0+1;
+  const bool full_grid=!original.colors;
+  full_grid_count+=size_t(full_grid);patch_grid_count+=size_t(!full_grid);
+  const size_t staged_pixels=full_grid?size_t(high_area):size_t(patch_width)*patch_height;
+  if(uint64_t(result.source.size())*640+(staged_pixel_total+staged_pixels)*sizeof(float[4])>budget){color_v04_abort("stage_budget");return;}
+  staged_pixel_total+=staged_pixels;
+  auto stage=std::make_unique<ColorV04GridStage>();stage->index=g;stage->side=high_side;
+  stage->x0=bounds.x0;stage->y0=bounds.y0;stage->width=patch_width;stage->height=patch_height;
+  stage->full_grid=full_grid;stage->reusable=!full_grid;stage->capacity=staged_pixels;
+  stage->colors=full_grid?MEM_new_array_uninitialized<float[4]>(staged_pixels,"Polypaint V04 staged master"):
+                          color_v04_scratch.acquire(staged_pixels);
+  /* Preserve atomic publication and source validation. Dense grids need
+   * only a copy of the affected rectangle. A grid without a color master is
+   * initialized densely once, because publication must still be atomic. */
+  if(original.colors)for(int y=bounds.y0;y<=bounds.y1;y++){
+   std::memcpy(stage->colors+size_t(y-bounds.y0)*patch_width,
+               original.colors+size_t(y)*high_side+bounds.x0,
+               size_t(patch_width)*sizeof(float[4]));
+  }
+  else if(!bke::multires_layers::polypaint_fill_grid_from_base(
+              mesh,name,g,master_level,stage->colors))return;
+  for(size_t i=0;i<staged_pixels;i++)for(float value:stage->colors[i])if(!std::isfinite(value))return;
+  if(diagnostics)stage_init_seconds+=BLI_time_now_seconds()-stage_init_start;
+  const double project_start=diagnostics?BLI_time_now_seconds():0.0;
   auto project_pixel=[&](int x,int y,const V04RGBA *direct)->bool{
-   const int i=y*high_side+x;const float u=float(x)/(high_side-1),v=float(y)/(high_side-1);
+   const size_t i=full_grid?size_t(y)*high_side+x:
+      size_t(y-bounds.y0)*patch_width+(x-bounds.x0);
+   const float u=float(x)/(high_side-1),v=float(y)/(high_side-1);
    float before[4];
    std::memcpy(before,stage->colors[i],sizeof(before));
    double protection=0;
@@ -213,8 +280,18 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
    /* At the master level, interpolation is exactly an indexed delta write. */
    for(const auto &point:entry.second)if(!project_pixel(point.first%low_side,point.first/low_side,&point.second))return;
   }else{
-   for(int y=bounds.y0;y<=bounds.y1;y++)for(int x=bounds.x0;x<=bounds.x1;x++)if(!project_pixel(x,y,nullptr))return;
+   std::atomic_bool projection_failed=false;
+   threading::parallel_for(IndexRange(bounds.y0,patch_height),8,[&](const IndexRange rows){
+    for(const int y:rows){
+     if(projection_failed.load(std::memory_order_relaxed))return;
+     for(int x=bounds.x0;x<=bounds.x1;x++)if(!project_pixel(x,y,nullptr)){
+      projection_failed.store(true,std::memory_order_relaxed);return;
+     }
+    }
+   });
+   if(projection_failed.load(std::memory_order_relaxed))return;
   }
+  if(diagnostics)project_seconds+=BLI_time_now_seconds()-project_start;
   staged.emplace(g,std::move(stage));
  }
  if(cage){
@@ -231,17 +308,71 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
    return false;
   },exec_mode::grain_size(1));
   undo::push_nodes(depsgraph,ob,support_nodes,undo::Type::Color);
-  std::vector<int> grids;for(const auto &entry:staged)grids.push_back(entry.first);
-  if(!undo::capture_color_master_v04(ob,grids.data(),int(grids.size()))){color_v04_abort("L0_undo_capture");return;}
+  for(const auto &entry:staged){const auto &stage=*entry.second;
+   if(!undo::capture_color_master_region_v04(
+          ob,entry.first,stage.x0,stage.y0,stage.width,stage.height)){
+    color_v04_abort("L0_undo_capture");return;
+   }
+  }
   auto attribute=active_color_attribute_for_write(mesh);if(!attribute)return;
   for(const auto &entry:result.writes){const auto &v=entry.second;color_vert_set(faces,corner_verts,vert_faces,attribute.domain,entry.first,float4(v[0],v[1],v[2],v[3]),attribute.span);}
   attribute.finish();
   tree.tag_attribute_changed(support_nodes,name);
  }
- for(auto &entry:staged){auto &live=mmd->sculpt_color_grids[entry.first];MEM_SAFE_DELETE(live.colors);live.colors=entry.second->colors;entry.second->colors=nullptr;live.level=master_level;live.totcolor=high_area;}
+ const double publish_start=diagnostics?BLI_time_now_seconds():0.0;
+ for(auto &entry:staged){
+  auto &live=mmd->sculpt_color_grids[entry.first];auto &stage=*entry.second;
+  if(stage.full_grid){MEM_SAFE_DELETE(live.colors);live.colors=stage.colors;stage.colors=nullptr;live.level=master_level;live.totcolor=high_area;}
+  else for(int y=0;y<stage.height;y++){
+   std::memcpy(live.colors+size_t(stage.y0+y)*high_side+stage.x0,
+               stage.colors+size_t(y)*stage.width,size_t(stage.width)*sizeof(float[4]));
+  }
+ }
+ const double publish_end=diagnostics?BLI_time_now_seconds():0.0;
  if(paint&&wet_mix>0)ss.cache->paint_brush.wet_mix_prev_color=wet_next;
- tree.tag_attribute_changed(node_mask,name);
- std::printf("[POLYPAINT_V04] level=%d master=%d brush=%d grids=%llu changed=%llu\n",int(mmd->sculptlvl),master_level,int(brush.sculpt_brush_type),(unsigned long long)staged.size(),(unsigned long long)result.writes.size());std::fflush(stdout);
+ const double redraw_start=diagnostics?BLI_time_now_seconds():0.0;
+ if(!cage){
+  /* Delta projection can publish duplicate edge samples into grids owned by a
+   * PBVH node just outside the brush mask. Tag every owner of a staged grid,
+   * otherwise the persistent master is correct while the draw cache can show
+   * rectangular node/grid boundaries until a later global refresh. Avoid the
+   * all-node lookup for the common case where the brush mask owns every grid. */
+  std::unordered_set<int> external_grids;
+  external_grids.reserve(staged.size());
+  for(const auto &entry:staged)external_grids.insert(entry.first);
+  const auto grid_nodes=tree.nodes<bke::pbvh::GridsNode>();
+  node_mask.foreach_index([&](const int n){
+   for(const int grid:grid_nodes[n].grids())external_grids.erase(grid);
+  });
+  if(external_grids.empty())tree.tag_attribute_changed(node_mask,name);
+  else{
+   IndexMaskMemory redraw_memory;
+   const IndexMask all_nodes=bke::pbvh::all_leaf_nodes(tree,redraw_memory);
+   const IndexMask redraw=IndexMask::from_predicate(all_nodes,redraw_memory,[&](const int n){
+    for(const int grid:grid_nodes[n].grids())if(staged.contains(grid))return true;
+    return false;
+   },exec_mode::grain_size(1));
+   tree.tag_attribute_changed(redraw,name);
+   if(polypaint_v04_diagnostics_enabled()){
+    std::printf("[POLYPAINT_V04_REDRAW] mode=BOUNDARY nodes=%lld external_grids=%llu\n",
+      (long long)redraw.size(),(unsigned long long)external_grids.size());std::fflush(stdout);
+   }
+  }
+ }
+ else tree.tag_attribute_changed(node_mask,name);
+ const double redraw_end=diagnostics?BLI_time_now_seconds():0.0;
+ if(polypaint_v04_diagnostics_enabled()){
+  std::printf("[POLYPAINT_V04] level=%d master=%d brush=%d grids=%llu changed=%llu\n",int(mmd->sculptlvl),master_level,int(brush.sculpt_brush_type),(unsigned long long)staged.size(),(unsigned long long)result.writes.size());std::fflush(stdout);
+  std::printf("[POLYPAINT_V04_PROFILE] collect=%.3fms calculate=%.3fms "
+              "stage_init=%.3fms project=%.3fms publish=%.3fms redraw=%.3fms "
+              "total=%.3fms full_grids=%llu patch_grids=%llu staged_pixels=%llu\n",
+    (collect_end-profile_start)*1000.0,(calculate_end-collect_end)*1000.0,
+    stage_init_seconds*1000.0,project_seconds*1000.0,
+    (publish_end-publish_start)*1000.0,(redraw_end-redraw_start)*1000.0,
+    (redraw_end-profile_start)*1000.0,(unsigned long long)full_grid_count,
+    (unsigned long long)patch_grid_count,(unsigned long long)staged_pixel_total);
+  std::fflush(stdout);
+ }
 }
 }
 

@@ -262,6 +262,13 @@ bool polypaint_sample_with_base(const MultiresModifierData &mmd,
                                 float u,
                                 float v,
                                 float r_rgba[4]);
+/** Initialize a complete dense master grid from the base color attribute.
+ * The base corner patch is resolved once and rows are sampled in parallel. */
+bool polypaint_fill_grid_from_base(const Mesh &base_mesh,
+                                   const char *attribute_name,
+                                   int corner,
+                                   int level,
+                                   float (*r_colors)[4]);
 /** Materialize a CCG grid only when painting first touches it. Initializes the
  * grid from the mesh attribute; never creates a silently-white source. */
 float (*polypaint_grid_ensure_from_base(MultiresModifierData &mmd,

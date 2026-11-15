@@ -1299,15 +1299,16 @@ bool capture_facesets_visibility(Mesh &mesh,const MultiresModifierData &mmd)
   return true;
 }
 
-bool capture_color_master_v04(Object &object,const int *grids,int count)
+bool capture_color_master_region_v04(
+    Object &object,const int grid,const int x,const int y,const int width,const int height)
 {
   StepData *data=get_step_data();
-  if(!data || data->type!=Type::Color || count<0)return false;
+  if(!data || data->type!=Type::Color)return false;
   auto *md=BKE_modifiers_findby_type(&object,eModifierType_Multires);
   if(!md)return false;
   auto &mmd=*reinterpret_cast<MultiresModifierData*>(md);
   if(!data->color_master_v04)data->color_master_v04=std::make_unique<ColorMasterSnapshotV04>();
-  return data->color_master_v04->capture(mmd,grids,count);
+  return data->color_master_v04->capture_region(mmd,grid,x,y,width,height);
 }
 void attach_facesets_l0_master(std::unique_ptr<FaceSetsL0MasterSnapshot> snapshot)
 {
