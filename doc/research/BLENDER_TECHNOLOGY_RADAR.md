@@ -13,7 +13,7 @@
 - Keep the existing Sculpt/Multires, photogrammetry and Facewrap implementations as authoritative; do not add a duplicate architecture just because a similar GitHub project exists.
 - Test candidates on copied meshes and disposable scenes; check output geometry, deterministic behavior, memory, elapsed times, Undo, save/reopen, layer preservation and Blender 5.2/5.4 compatibility.
 
-## Catalog (46 distinct verified repository endpoints)
+## Catalog (60 distinct verified repository endpoints)
 
 | Research | Area | Repository | Interesting component | License/redistribution gate | Last code push | Evidence |
 |---|---|---|---|---|---|---|
@@ -64,6 +64,20 @@
 | P0 | Blender upstream | [blender/blender](https://github.com/blender/blender) | Primary C/C++/Python upstream source and APIs | GPL family; verify files | 2026-11-16 | metadata |
 | P2 | Legacy addons mirror | [blender/blender-addons](https://github.com/blender/blender-addons) | Read-only archived GitHub mirror | Review files | 2025-06-17 | metadata |
 
+| P1 | CAD / retopo | [gregcarreno3d-dev/quadforge](https://github.com/gregcarreno3d-dev/quadforge) | Rust 4-RoSy cross-field solver and guide-aware quad remesh; engine-rs/src/stages/field.rs | GPL-3.0 | 2026-11-15 | code |
+| P1 | Camera tracking / PnP | [theartful/polychase](https://github.com/theartful/polychase) | C++ robust PnP with LM refinement and camera intrinsics; cpp/pnp/solvers.cc | GPL-3.0 | 2026-05-24 | code |
+| P2 | Garments / physics | [MarcelloMorettoni/opensew-2](https://github.com/MarcelloMorettoni/opensew-2) | Pattern/cloth draping; collision collection per garment layer avoids dependency cycles | GPL-3.0 | 2026-08-26 | code |
+| P1 | Agent automation | [dcc-mcp/dcc-mcp-blender](https://github.com/dcc-mcp/dcc-mcp-blender) | Typed Blender MCP tools, modular scene/mesh/material/rig operators and integration tests | MIT | 2026-11-15 | metadata |
+| P1 | GPU simulation | [NVIDIA/warp](https://github.com/NVIDIA/warp) | Device kernels for springs/integration; asv/benchmarks/examples/cloth.py; FEM extensions | Apache-2.0 | 2026-11-17 | code |
+| P2 | 3D deep learning | [NVIDIAGameWorks/kaolin](https://github.com/NVIDIAGameWorks/kaolin) | Differentiable 3D representations, custom CUDA/PyTorch geometry operators | Apache-2.0; models/dependencies separately | 2026-11-16 | metadata |
+| P1 | Mesh optimization / LOD | [zeux/meshoptimizer](https://github.com/zeux/meshoptimizer) | Efficient vertex-cache/index compression and mesh LOD clustering | MIT | 2026-10-14 | metadata |
+| P2 | Subdivision C++ | [PixarAnimationStudios/OpenSubdiv](https://github.com/PixarAnimationStudios/OpenSubdiv) | Subdivision evaluation kernels, stencils, GPU backends; Blender upstream already uses this | Review files | 2026-10-26 | metadata |
+| P2 | Robust geometry kernels | [CGAL/cgal](https://github.com/CGAL/cgal) | Exact predicates, robust mesh repair/intersections and surface/volume meshing | Package-specific GPL/LGPL/commercial audit | 2026-11-14 | metadata |
+| P2 | Hair interoperability | [vickyat24fps/Unreal-Groom-Importer](https://github.com/vickyat24fps/Unreal-Groom-Importer) | Unreal Groom OBJ+metadata -> native Blender Hair Curves, root UV and attributes | Review files; extension listing says GPL-3+ | 2026-08-03 | README |
+| P2 | Texture / rectification | [gokayago/UVRectifier](https://github.com/gokayago/UVRectifier) | Perspective rectification of trapezoidal photo textures | GPL-3.0 | 2025-12-14 | metadata |
+| P2 | AI image-to-geometry | [microsoft/MoGe](https://github.com/microsoft/MoGe) | Single-image metric geometry/depth estimation; research approach | Review files/models (GitHub NOASSERTION) | 2026-11-14 | metadata |
+| P2 | 3D Gaussian Splatting | [graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting) | Reference 3D Gaussian Splatting training/rendering | Research/model terms; review files | 2025-10-17 | metadata |
+| P2 | Point-cloud meshing | [ArthurReboulSalze/Frost-for-Blender](https://github.com/ArthurReboulSalze/Frost-for-Blender) | Particles and points to polygonal surfaces, C++ addon | No recognized license, reuse blocked | 2026-07-14 | metadata |
 ## Experiments to run first (all pending)
 
 | Priority | Candidate | Target | Discriminating validation / go-no-go |
@@ -130,3 +144,13 @@ An item graduates from `research` to its own implementation issue **only after**
 5. A deployment decision (native C++, bpy addon, external optional worker, GN asset, or reject) and rollback strategy.
 
 **No merges, releases, automatic downloads, or new Blender UI are authorized by this radar alone.**
+
+## Research wave 2 — additional targeted source audits (2026-11-17)
+
+- [QuadForge cross-field solver](https://github.com/gregcarreno3d-dev/quadforge/blob/main/engine-rs/src/stages/field.rs): per-face four-direction field, feature edges and path guides; **early-stage** and not a drop-in QuadriFlow replacement.
+- [Polychase PnP](https://github.com/theartful/polychase/blob/master/cpp/pnp/solvers.cc): C++ iterative weighted PnP with robust loss, Levenberg–Marquardt and inlier ratio; geometry tracking vs dense reconstruction are separate tasks.
+- [OpenSew cloth](https://github.com/MarcelloMorettoni/opensew-2/blob/main/clothing_design/sim.py): per-garment collider collections for layered garments; no claim of native muscle/tissue support.
+- [Warp cloth kernel](https://github.com/NVIDIA/warp/blob/main/asv/benchmarks/examples/cloth.py): spring evaluation and GPU kernel timing; inspect numerics and CUDA/CPU support for actual deployment.
+- [DCC MCP Blender](https://github.com/dcc-mcp/dcc-mcp-blender): typed agent interface; benchmark with sandbox data only and review exposed execution interfaces.
+
+**Added 14 non-duplicate upstream repositories this wave, verified GitHub metadata and selected source excerpts. No build or runtime tests performed.**
