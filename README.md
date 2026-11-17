@@ -129,7 +129,7 @@ Further technical references:
 
 ## Research: open-source Blender technology radar
 
-Cross-domain GitHub research (retopology, UV, procedural tools, simulation, rigging, photogrammetry, 3DGS, rendering, production pipelines and automation): [research catalog (69 verified repository endpoints, 17 November 2026)](doc/research/BLENDER_TECHNOLOGY_RADAR.md) · [machine-readable JSON](doc/research/BLENDER_TECHNOLOGY_RADAR.json) · [research tracker #19](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/19).
+Cross-domain GitHub research (retopology, UV, procedural tools, simulation, rigging, photogrammetry, 3DGS, rendering, production pipelines and automation): [research catalog (81 verified repository endpoints, 17 November 2026)](doc/research/BLENDER_TECHNOLOGY_RADAR.md) · [machine-readable JSON](doc/research/BLENDER_TECHNOLOGY_RADAR.json) · [research tracker #19](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/19).
 
 This is a **research inventory**, not an installation recommendation or implemented feature. Test tool-specific licences and dependencies before reuse. The stable Sculpt Extended build is unchanged.
 
