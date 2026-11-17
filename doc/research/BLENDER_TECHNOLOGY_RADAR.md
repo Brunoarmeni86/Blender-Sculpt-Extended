@@ -13,7 +13,7 @@
 - Keep the existing Sculpt/Multires, photogrammetry and Facewrap implementations as authoritative; do not add a duplicate architecture just because a similar GitHub project exists.
 - Test candidates on copied meshes and disposable scenes; check output geometry, deterministic behavior, memory, elapsed times, Undo, save/reopen, layer preservation and Blender 5.2/5.4 compatibility.
 
-## Catalog (81 distinct verified repository endpoints)
+## Catalog (107 distinct verified repository endpoints)
 
 | Research | Area | Repository | Interesting component | License/redistribution gate | Last code push | Evidence |
 |---|---|---|---|---|---|---|
@@ -99,6 +99,32 @@
 | P2 | Lip-sync 2D / VSE | [pommelstrike/pomLipsync](https://github.com/pommelstrike/pomLipsync) | Offline speech-to-viseme sequence and sprite mouth animation; audio sync | GPL-3.0; speech model dependencies separately | 2025-06-16 | README |
 | P2 | Lip-sync 3D / audio | [atongsak/auto-lip-sync](https://github.com/atongsak/auto-lip-sync) | Offline audio-to-viseme facial rig keyframe generation, custom pose mapping | No GitHub SPDX returned; LICENSE required | 2026-09-03 | README |
 | P2 | Discovery index / cross-domain | [naranyala/awesome-3d-blender-addons](https://github.com/naranyala/awesome-3d-blender-addons) | Community directory spanning AEC, CAM, GIS, medicine, robotics, animation, shaders, rendering, audio and VSE | Not a reusable-code candidate; upstream collection terms verify | 2026-08-26 | README |
+| P1 | GIS / geospatial | [domlysz/BlenderGIS](https://github.com/domlysz/BlenderGIS) | Coordinate-reference systems, GeoTIFF/DEM, EXIF geocameras, georeferenced raster from core/georaster/georef.py | GPL-3.0 | 2025-12-20 | code |
+| P1 | Manufacturing / CAM | [vilemduha/blendercam](https://github.com/vilemduha/blendercam) | Fabex CAM toolpaths (pocket, parallel, drill, engraving), machine postprocessors and collision simulation | GPL-3.0; CNC machine output must be independently validated | 2026-01-01 | code |
+| P0 | Scene description / interop | [PixarAnimationStudios/OpenUSD](https://github.com/PixarAnimationStudios/OpenUSD) | USD composition arcs, layering, variants, time samples and Hydra imaging | File-level audit (GitHub NOASSERTION) | 2026-11-14 | code |
+| P0 | Materials / interchange | [AcademySoftwareFoundation/MaterialX](https://github.com/AcademySoftwareFoundation/MaterialX) | Cross-renderer shader graph interchange and standard node specifications | Apache-2.0 | 2026-11-07 | source_tree |
+| P1 | Color science / display | [AcademySoftwareFoundation/OpenColorIO](https://github.com/AcademySoftwareFoundation/OpenColorIO) | Configurable linear-space/color-space transforms, ACES and transforms for VFX | BSD-3-Clause | 2026-10-01 | source_tree |
+| P1 | Image processing / I/O | [AcademySoftwareFoundation/OpenImageIO](https://github.com/AcademySoftwareFoundation/OpenImageIO) | Format-agnostic image I/O, tiled textures and image cache | Apache-2.0 | 2026-11-16 | source_tree |
+| P1 | Shader languages / rendering | [AcademySoftwareFoundation/OpenShadingLanguage](https://github.com/AcademySoftwareFoundation/OpenShadingLanguage) | OSL shader compiler/execution and texture access for renderer integration | BSD-3-Clause | 2026-11-16 | source_tree |
+| P1 | Editorial timeline interop | [AcademySoftwareFoundation/OpenTimelineIO](https://github.com/AcademySoftwareFoundation/OpenTimelineIO) | C++/Python timeline schema for media refs, tracks, transitions, markers and OTIO adapters | Apache-2.0 | 2026-11-10 | README |
+| P2 | Editorial AAF translation | [OpenTimelineIO/otio-aaf-adapter](https://github.com/OpenTimelineIO/otio-aaf-adapter) | Timeline exchange adapter for AAF in OpenTimelineIO ecosystem | Apache-2.0 | 2026-10-22 | metadata |
+| P1 | Asset management / pipeline | [OpenAssetIO/OpenAssetIO](https://github.com/OpenAssetIO/OpenAssetIO) | Entity reference resolution for production assets, versions and locations | Apache-2.0 | 2026-11-09 | code |
+| P1 | Image format / deep data | [AcademySoftwareFoundation/openexr](https://github.com/AcademySoftwareFoundation/openexr) | High-dynamic-range multichannel/tiled EXR including multipart/deep image structures | BSD-3-Clause | 2026-11-16 | metadata |
+| P2 | Format interoperability | [assimp/assimp](https://github.com/assimp/assimp) | Broad mesh/scene file-format import with normalized data model | File-level audit (GitHub NOASSERTION) | 2026-11-15 | metadata |
+| P1 | Parametric CAD | [FreeCAD/FreeCAD](https://github.com/FreeCAD/FreeCAD) | Parametric feature history and B-rep workflows with tests | LGPL-2.1; modules and OCCT separate | 2026-11-16 | source_tree |
+| P2 | Programmatic solid modeling | [openscad/openscad](https://github.com/openscad/openscad) | CSG Boolean-based procedural solid model authoring | License mixed; file-level audit | 2026-11-17 | metadata |
+| P1 | Python B-rep modeling | [CadQuery/cadquery](https://github.com/CadQuery/cadquery) | Python scripts with OpenCascade geometry, chamfer/fillet, constrained builds | Check LICENSE; API NOASSERTION | 2026-11-16 | source_tree |
+| P2 | 3D inspection / viewer | [f3d-app/f3d](https://github.com/f3d-app/f3d) | Fast headless or GUI 3D viewer using VTK render stack | BSD-3-Clause | 2026-11-16 | metadata |
+| P1 | Deformable simulation | [InteractiveComputerGraphics/PositionBasedDynamics](https://github.com/InteractiveComputerGraphics/PositionBasedDynamics) | C++ XPBD/PBD cloth, deformables, rods, SDF collisions and rigid-fluid coupling | MIT (repo); dependencies separately | 2026-09-01 | code |
+| P1 | GPU/CPU kernel programming | [taichi-dev/taichi](https://github.com/taichi-dev/taichi) | Portable GPU programming and sparse data kernels with Python API | Apache-2.0 | 2026-10-05 | metadata |
+| P2 | Collision / rigid bodies | [bulletphysics/bullet3](https://github.com/bulletphysics/bullet3) | Physics SDK, collision shapes and contact solver | File-level audit (GitHub NOASSERTION) | 2026-10-09 | metadata |
+| P2 | Multi-body dynamics | [projectchrono/chrono](https://github.com/projectchrono/chrono) | High-performance C++ multi-body vehicle and contact simulation | BSD-3-Clause | 2026-11-17 | metadata |
+| P1 | Real-time rendering | [google/filament](https://github.com/google/filament) | Cross-platform PBR rendering and material language | Apache-2.0 | 2026-11-17 | metadata |
+| P2 | Ray tracing acceleration | [RenderKit/embree](https://github.com/RenderKit/embree) | CPU ray kernels, intersection filters and BVH tools | Apache-2.0 | 2026-11-12 | metadata |
+| P2 | Denoising / rendering | [RenderKit/oidn](https://github.com/RenderKit/oidn) | CPU/GPU denoising API (CUDA/Metal/HIP/SYCL) with test infrastructure | Apache-2.0 | 2026-10-05 | source_tree |
+| P2 | Reference rendering | [mmp/pbrt-v4](https://github.com/mmp/pbrt-v4) | Physically-based path-tracing reference algorithms and literature | Apache-2.0 | 2026-11-15 | metadata |
+| P1 | Motion graphics / procedural scripting | [JacquesLucke/animation_nodes](https://github.com/JacquesLucke/animation_nodes) | Compiled Python/Cython procedural expression nodes, splines and generators | Repository API NOASSERTION; audit code/assets | 2026-07-07 | source_tree |
+| P2 | Motion graphics / animation | [mrachinskiy/commotion](https://github.com/mrachinskiy/commotion) | Object animation offsets, distributed keyframes and driven motion | GPL-3.0 | 2026-01-04 | metadata |
 ## Experiments to run first (all pending)
 
 | Priority | Candidate | Target | Discriminating validation / go-no-go |
@@ -204,3 +230,35 @@ Discovery widened to robotics/kinematics (Phobos, Kinema), video/sound/VSE (Pall
 - A safe proof-of-concept is on a copy of a small mesh: painted face sets around eyes/lips/horns, density factor 2–4, evaluate feature alignment, small-region loss, quad quality, exact boundary differences, RAM/time and whether Lmax HR regions are retained.
 
 See also [Sculpt Extended #14 mask-adaptive protected remesh](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/14), separate from QuadForge's whole-object retopology.
+
+## Research wave 5 — GIS, CAM, color science, interchange, physics and technical tools (2026-11-17)
+
+**Scope:** sector-neutral research rather than Sculpt-mode-driven discovery. Upstream metadata verified for each entry; source/README inspected where marked, no live tests or redistribution clearance implied.
+
+### High-value findings and test plans
+
+1. **Interoperability chain:** [OpenUSD](https://github.com/PixarAnimationStudios/OpenUSD) (composed scene graph, variants, time) + [MaterialX](https://github.com/AcademySoftwareFoundation/MaterialX) (portable shader graph) + [OpenAssetIO](https://github.com/OpenAssetIO/OpenAssetIO) (persistent logical asset identity) are complementary, not interchangeable. Test three independent properties: scene composition, material fidelity, asset-version resolution. Blender already has USD support: audit current code before writing bridges.
+2. **Color fidelity chain:** [OpenColorIO](https://github.com/AcademySoftwareFoundation/OpenColorIO), [OpenImageIO](https://github.com/AcademySoftwareFoundation/OpenImageIO), [OpenEXR](https://github.com/AcademySoftwareFoundation/openexr) and [OpenShadingLanguage](https://github.com/AcademySoftwareFoundation/OpenShadingLanguage). These are established tools, several already used by Blender. Study precise transforms/transfer rather than inventing new format support. Color sample test: calibrated reference -> linear EXR -> display preview -> material/render compare, preserve metadata.
+3. **Outside DCC:** [BlenderGIS](https://github.com/domlysz/BlenderGIS) supports GeoTIFF/DEM, CRS conversion and geo-tagged cameras. Real-world geocoordinates can be very large relative to float32 scene positions: use local origin and compare residual error; do not assume old Blender addon is compatible with custom build.
+4. **CNC:** [FabexCNC / formerly BlenderCAM](https://github.com/vilemduha/blendercam) exports machine G-code, includes material stock and toolpath simulation. Any implementation/use beyond *offline simulation* must independently verify feeds, tool collision and postprocessor against target machine; do not send unvalidated code to machinery.
+5. **Timeline interoperability:** [OpenTimelineIO](https://github.com/AcademySoftwareFoundation/OpenTimelineIO) is a time/clip/metadata model **not** a video encoder. Blender VSE adapter tests should preserve trims, retimes, cuts and image sequences, not assume embedded video.
+6. **Simulation reference:** [PositionBasedDynamics](https://github.com/InteractiveComputerGraphics/PositionBasedDynamics) contains tested deformable/rigid constraints and SDF collisions, and acknowledges visually plausible position-based methods are less physically accurate than full force-based solvers. Compare against [Warp](https://github.com/NVIDIA/warp) only on the same constraints and hardware; inspect how both handle collisions, stiffness and rollback.
+7. **Image/physics native overlaps:** Blender already contains/uses components from OpenSubdiv, OpenColorIO, OpenImageIO, OpenEXR, Embree and OIDN, and Bullet is related to native physics. Treat these as **upstream monitoring and performance references** rather than new addon integration.
+
+### Specific source links inspected
+
+- [BlenderGIS GeoRef implementation](https://github.com/domlysz/BlenderGIS/blob/master/core/georaster/georef.py): world files, GDAL geotransforms, TIFF tags, pixel anchors, CRS.
+- [Fabex README](https://github.com/vilemduha/blendercam/blob/master/README.md): toolpath strategies, stock simulation, post-processors.
+- [OpenAssetIO architecture](https://github.com/OpenAssetIO/OpenAssetIO/blob/main/README.md): stable entity reference resolved by manager instead of brittle file paths.
+- [PositionBasedDynamics README](https://github.com/InteractiveComputerGraphics/PositionBasedDynamics/blob/master/README.md): XPBD, collision and supported demos.
+- [OpenUSD description](https://github.com/PixarAnimationStudios/OpenUSD/blob/dev/README.md): time-sampled scene graph interchange.
+
+### Codex research queue, not implementation authorization
+
+- [ ] Read current Blender 5.2.3 + 5.4 native USD, OCIO, OIIO, OSL, OpenEXR, Bullet, Embree/OIDN bindings before proposing patches.
+- [ ] Record exact upstream commit and licenses, including any model weights and separate format adapters.
+- [ ] Prepare disposable regression assets: geotagged photo, USD variant scene, multi-part EXR, material graph, 4-point timeline, deformable tetra-block.
+- [ ] Execute test with run logs, time, peak memory, output file fingerprints, numerical error and save/reopen, then add linked findings.
+- [ ] Expand next search to accessibility/UX, data visualization and scientific Blender usage, audio-reactive animation, scripting editors, and distributed rendering.
+
+**Wave 5 adds 26 non-duplicate verified repositories; no changes to shipping Blender runtime.**
