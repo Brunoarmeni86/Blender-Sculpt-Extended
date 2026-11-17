@@ -13,7 +13,7 @@
 - Keep the existing Sculpt/Multires, photogrammetry and Facewrap implementations as authoritative; do not add a duplicate architecture just because a similar GitHub project exists.
 - Test candidates on copied meshes and disposable scenes; check output geometry, deterministic behavior, memory, elapsed times, Undo, save/reopen, layer preservation and Blender 5.2/5.4 compatibility.
 
-## Catalog (60 distinct verified repository endpoints)
+## Catalog (69 distinct verified repository endpoints)
 
 | Research | Area | Repository | Interesting component | License/redistribution gate | Last code push | Evidence |
 |---|---|---|---|---|---|---|
@@ -78,6 +78,15 @@
 | P2 | AI image-to-geometry | [microsoft/MoGe](https://github.com/microsoft/MoGe) | Single-image metric geometry/depth estimation; research approach | Review files/models (GitHub NOASSERTION) | 2026-11-14 | metadata |
 | P2 | 3D Gaussian Splatting | [graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting) | Reference 3D Gaussian Splatting training/rendering | Research/model terms; review files | 2025-10-17 | metadata |
 | P2 | Point-cloud meshing | [ArthurReboulSalze/Frost-for-Blender](https://github.com/ArthurReboulSalze/Frost-for-Blender) | Particles and points to polygonal surfaces, C++ addon | No recognized license, reuse blocked | 2026-07-14 | metadata |
+| P1 | Grease Pencil / 2D→3D | [chsh2/nijiGPen](https://github.com/chsh2/nijiGPen) | 2D Boolean/offset, stroke cleanup and shape-to-mesh generation; operators/operator_mesh.py | GPL-3.0; third-party dependencies separately | 2026-11-07 | README |
+| P2 | 2D pipeline / interop | [Malehaly/StoryPaint](https://github.com/Malehaly/StoryPaint) | Bidirectional Blender Grease Pencil ↔ Krita via local bridge, preserve layer/frame identity | GPL-3.0 | 2026-11-12 | README |
+| P1 | Rendering / compositing | [EatTheFuture/compify](https://github.com/EatTheFuture/compify) | 3D-space compositing, node workflows, Blender Python API workarounds | Code GPL-2.0 per README; API reports NOASSERTION | 2023-11-22 | README |
+| P1 | Scan alignment / ICP | [patmo141/object_alignment](https://github.com/patmo141/object_alignment) | Picked points and iterative closest point object registration; operators/icp_align.py | GPL-3.0 | 2022-09-03 | README |
+| P2 | Mesh algorithms / brushes | [Jorgeromeu/blender-geometry-processing](https://github.com/Jorgeromeu/blender-geometry-processing) | ICP, Laplacian smooth, gradient deformation and constraint-based edits | No recognized LICENSE; audit | 2023-12-01 | README |
+| P1 | Point cloud / Geometry Nodes | [luigipacheco/mixtli](https://github.com/luigipacheco/mixtli) | Composable GN point-cloud selection, corridor/distance/plane/volume queries, attribute filters | GPL-3.0 | 2026-11-05 | README |
+| P2 | Grease Pencil / modeling | [tonis2/GreaseMesh](https://github.com/tonis2/GreaseMesh) | Generate 3D meshes from Grease Pencil strokes | Extension reports GPL-3.0+; repo metadata unrecognized | 2026-10-22 | README |
+| P1 | Compositor / render passes | [kunemann/blender-extensions](https://github.com/kunemann/blender-extensions) | LayerCake editable EXR/Cycles/EEVEE pass reconstruction; .build/layercake/{builder,passes}.py | GPL-3.0 | 2026-11-12 | README |
+| P2 | Animation / UI | [Pullusb/greasepencil_tools](https://github.com/Pullusb/greasepencil_tools) | Grease Pencil animation enhancements, timeline scrub and keyboard UX | GPL-3.0 | 2026-10-24 | README |
 ## Experiments to run first (all pending)
 
 | Priority | Candidate | Target | Discriminating validation / go-no-go |
@@ -154,3 +163,15 @@ An item graduates from `research` to its own implementation issue **only after**
 - [DCC MCP Blender](https://github.com/dcc-mcp/dcc-mcp-blender): typed agent interface; benchmark with sandbox data only and review exposed execution interfaces.
 
 **Added 14 non-duplicate upstream repositories this wave, verified GitHub metadata and selected source excerpts. No build or runtime tests performed.**
+
+## Research wave 3 — compositing, Grease Pencil and point-cloud editing (2026-11-17)
+
+New source anchors:
+
+- [LayerCake](https://github.com/kunemann/blender-extensions/tree/main/.build/layercake) — multi-pass compositing and EXR pass building; test interaction with existing compositor instead of replacing it.
+- [Mixtli pointops](https://github.com/luigipacheco/mixtli/blob/main/pointops.py) — GN point-cloud selections and spatial queries, especially interesting for non-destructive exclude/mask in sparse/dense photogrammetry.
+- [Object Alignment ICP](https://github.com/patmo141/object_alignment/blob/master/operators/icp_align.py) — older alignment reference for Facewrap; does not solve non-rigid correspondence on its own.
+- [NijiGPen mesh operations](https://github.com/chsh2/nijiGPen/blob/main/operators/operator_mesh.py) — 2D vector/stroke-to-geometry.
+- [StoryPaint local bridge](https://github.com/Malehaly/StoryPaint/tree/main/blender_krita_bridge/blender) — cross-app transfer of layer/frame metadata.
+
+**All additions are research only: metadata, READMEs and repository trees, not executable validation.**
