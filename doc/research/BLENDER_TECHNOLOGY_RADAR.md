@@ -13,7 +13,7 @@
 - Keep the existing Sculpt/Multires, photogrammetry and Facewrap implementations as authoritative; do not add a duplicate architecture just because a similar GitHub project exists.
 - Test candidates on copied meshes and disposable scenes; check output geometry, deterministic behavior, memory, elapsed times, Undo, save/reopen, layer preservation and Blender 5.2/5.4 compatibility.
 
-## Catalog (69 distinct verified repository endpoints)
+## Catalog (81 distinct verified repository endpoints)
 
 | Research | Area | Repository | Interesting component | License/redistribution gate | Last code push | Evidence |
 |---|---|---|---|---|---|---|
@@ -87,6 +87,18 @@
 | P2 | Grease Pencil / modeling | [tonis2/GreaseMesh](https://github.com/tonis2/GreaseMesh) | Generate 3D meshes from Grease Pencil strokes | Extension reports GPL-3.0+; repo metadata unrecognized | 2026-10-22 | README |
 | P1 | Compositor / render passes | [kunemann/blender-extensions](https://github.com/kunemann/blender-extensions) | LayerCake editable EXR/Cycles/EEVEE pass reconstruction; .build/layercake/{builder,passes}.py | GPL-3.0 | 2026-11-12 | README |
 | P2 | Animation / UI | [Pullusb/greasepencil_tools](https://github.com/Pullusb/greasepencil_tools) | Grease Pencil animation enhancements, timeline scrub and keyboard UX | GPL-3.0 | 2026-10-24 | README |
+| P1 | Robotics / engineering | [dfki-ric/phobos](https://github.com/dfki-ric/phobos) | Robot URDF/SDF/SMURF WYSIWYG authoring and kinematic structures | BSD-3-Clause (API); dependency audit | 2026-07-14 | README |
+| P1 | Robotics / IK | [ebgenius/kinema](https://github.com/ebgenius/kinema) | Singularity-aware IK with joint limits and joint travel; src/kinema/solver + robot rig | GPL-3.0; bundled JAX/pyroki notices separately | 2026-11-14 | source_tree |
+| P1 | Facial capture / CV | [VKG5/Blender-Face-Animation](https://github.com/VKG5/Blender-Face-Animation) | Local video/webcam face capture, landmark preview and performance-to-rig retarget layer | MIT; MediaPipe model terms separately | 2026-08-22 | source_tree |
+| P1 | Full-body mocap | [Arcomade/BlendCap](https://github.com/Arcomade/BlendCap) | Video-to-body/hands/face retarget, FK/IK fcurve baking and constrained retarget pipelines | GPL-3.0 addon; AGPL and model weights audit required | 2026-08-07 | source_tree |
+| P2 | Video editing / generative VFX | [tin2tin/Pallaidium](https://github.com/tin2tin/Pallaidium) | Video Sequence Editor AI image/video/audio pipeline; plugin scheduling and remote backend isolation | GPL-3.0 addon; AI model/service terms independent | 2026-11-14 | source_tree |
+| P2 | Audio reactive procedural | [hfxstudios0001/blender-beat](https://github.com/hfxstudios0001/blender-beat) | Beat/frequency analysis driving GN and shader modulation in Blender 5.x; cached audio frequency pipeline | Repository API NOASSERTION; inspect LICENSE | 2026-09-22 | source_tree |
+| P2 | Video editing / VSE legacy | [GDQuest/blender-power-sequencer](https://github.com/GDQuest/blender-power-sequencer) | Non-destructive VSE interaction, proxy generation and editing shortcuts; upstream warns unmaintained and no Blender 5 support | GPL-3.0 | 2026-01-16 | README |
+| P1 | Physically based rendering | [LuxCoreRender/BlendLuxCore](https://github.com/LuxCoreRender/BlendLuxCore) | Exporter for AOVs, hair, light groups, material nodes, cached scene and motion blur | GPL-3.0 integration; LuxCore engine separately | 2026-11-15 | source_tree |
+| P1 | Differentiable / inverse rendering | [mitsuba-renderer/mitsuba3](https://github.com/mitsuba-renderer/mitsuba3) | C++/Python path tracing, inverse rendering, derivatives and material/camera optimization | Repo NOASSERTION; LICENSE and variant deps audit | 2026-10-30 | source_tree |
+| P2 | Lip-sync 2D / VSE | [pommelstrike/pomLipsync](https://github.com/pommelstrike/pomLipsync) | Offline speech-to-viseme sequence and sprite mouth animation; audio sync | GPL-3.0; speech model dependencies separately | 2025-06-16 | README |
+| P2 | Lip-sync 3D / audio | [atongsak/auto-lip-sync](https://github.com/atongsak/auto-lip-sync) | Offline audio-to-viseme facial rig keyframe generation, custom pose mapping | No GitHub SPDX returned; LICENSE required | 2026-09-03 | README |
+| P2 | Discovery index / cross-domain | [naranyala/awesome-3d-blender-addons](https://github.com/naranyala/awesome-3d-blender-addons) | Community directory spanning AEC, CAM, GIS, medicine, robotics, animation, shaders, rendering, audio and VSE | Not a reusable-code candidate; upstream collection terms verify | 2026-08-26 | README |
 ## Experiments to run first (all pending)
 
 | Priority | Candidate | Target | Discriminating validation / go-no-go |
@@ -175,3 +187,20 @@ New source anchors:
 - [StoryPaint local bridge](https://github.com/Malehaly/StoryPaint/tree/main/blender_krita_bridge/blender) — cross-app transfer of layer/frame metadata.
 
 **All additions are research only: metadata, READMEs and repository trees, not executable validation.**
+
+## Research wave 4 — non-sculpt areas and QuadForge Face Sets audit (2026-11-17)
+
+Discovery widened to robotics/kinematics (Phobos, Kinema), video/sound/VSE (Pallaidium, BlenderBeat, Power Sequencer), facial/body mocap (Blender-Face-Animation, BlendCap, lip-sync), and physical/inverse rendering (BlendLuxCore, Mitsuba 3). Distinguish algorithm research from runtime Blender extension readiness. Sources inspected include robot IK solver directories, VSE model-plugin modules, mocap retarget code and renderer exporters. **No installed runtime tests run.**
+
+### Verified specific: QuadForge 0.16.7 Face Sets are a real input
+
+**Source**: [QuadForge README](https://github.com/gregcarreno3d-dev/quadforge/blob/main/README.md); [core/pipeline.py](https://github.com/gregcarreno3d-dev/quadforge/blob/main/quadforge/core/pipeline.py), [core/zonedata.py](https://github.com/gregcarreno3d-dev/quadforge/blob/main/quadforge/core/zonedata.py), [properties.py](https://github.com/gregcarreno3d-dev/quadforge/blob/main/quadforge/properties.py), [zone tests](https://github.com/gregcarreno3d-dev/quadforge/blob/main/quadforge/tests/blender_zones_test.py).
+
+- `Isolate Zones > By Face Set` = `use_face_sets`; reads `.sculpt_face_set` **face-domain mesh attribute** and creates full-source region labels, plus feature-edge boundaries for quad direction constraints. It also accepts materials, mask threshold and vertex groups.
+- `Detail by Zone` = `zone_factors`; creates per-vertex edge length scale. Author's zone-detail test checks greater face density and quad/manifold result. Small zones below target face size can disappear with a warning.
+- `Copy Face Sets and Mask` = `transfer_zones`; transfers face-set IDs by nearest original face and interpolates masks onto the new topology, **not exact semantic preservation guaranteed at every boundary**.
+- The addon changes/rebuilds the retopology for the selected object; **it does NOT satisfy the #14 protected local remesh invariant** preserving unselected faces/indices/positions exactly. Do not treat zone splitting as non-destructive face-set-local remesh.
+- **Critical Sculpt Extended compatibility gap:** our fork has a **high-resolution per-CCG-grid Face Sets master** (`BKE_multires_sculpt_layers.hh::faceset_grid` / `faceset_sample`), which QuadForge does not query; reading only the base mesh `.sculpt_face_set` can lose HR sub-face boundaries. Before testing on full Lmax, implement safe face-set sampling/export to a detached evaluated mesh or adapt the addon via a read-only native query; preserve original Multires/sculpt layers and compare against source HR grid IDs.
+- A safe proof-of-concept is on a copy of a small mesh: painted face sets around eyes/lips/horns, density factor 2–4, evaluate feature alignment, small-region loss, quad quality, exact boundary differences, RAM/time and whether Lmax HR regions are retained.
+
+See also [Sculpt Extended #14 mask-adaptive protected remesh](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/14), separate from QuadForge's whole-object retopology.
