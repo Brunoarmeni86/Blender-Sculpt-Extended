@@ -126,6 +126,13 @@ Further technical references:
 - [Pose / MicroDetail / LOD roadmap](doc/sculpt_extended/ROADMAP_POSE_MICRODETAIL_LOD_20261103.md)
 - [Previous stable checkpoint and known limitations](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/releases/tag/sculpt-extended-5.2.3-stable-20261027)
 
+
+## Research: open-source Blender technology radar
+
+Cross-domain GitHub research (retopology, UV, procedural tools, simulation, rigging, photogrammetry, 3DGS, rendering, production pipelines and automation): [research catalog (46 verified repository endpoints, 17 November 2026)](doc/research/BLENDER_TECHNOLOGY_RADAR.md) · [machine-readable JSON](doc/research/BLENDER_TECHNOLOGY_RADAR.json) · [research tracker #19](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/issues/19).
+
+This is a **research inventory**, not an installation recommendation or implemented feature. Test tool-specific licences and dependencies before reuse. The stable Sculpt Extended build is unchanged.
+
 ## Reporting issues
 
 When reporting a bug, include the **release tag/build**, OS, modifier order, Multires current/total levels, whether layers/masks were active, exact steps (especially Pose → higher level), and whether Undo/Redo or save/reopen changes the behavior. A small, non-sensitive reproduction file is ideal.
