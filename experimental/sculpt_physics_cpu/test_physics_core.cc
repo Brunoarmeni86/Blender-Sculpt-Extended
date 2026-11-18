@@ -82,6 +82,51 @@ int main()
     w.cancel_stroke();
     expect(!w.bonds()[id].broken);
   }
+  // Dirty updates must be per step, not only relative to stroke start.
+  // Moving a particle back to its original position is still a viewport update.
+  {
+    World w;
+    w.add_particle({0, 0, 0});
+    w.begin_stroke();
+    expect(w.apply_grab({0, 0, 0}, 1, {1, 0, 0},
+                        {BrushPhysicsMode::FullPhysics, 1, 0}));
+    w.step(1.0 / 30, 1, 1);
+    expect(w.dirty_particles().size() == 1);
+    expect(w.apply_grab({1, 0, 0}, 1, {-1, 0, 0},
+                        {BrushPhysicsMode::FullPhysics, 1, 0}));
+    w.step(1.0 / 30, 1, 1);
+    expect(near(w.particles()[0].position.x, 0));
+    expect(w.dirty_particles().size() == 1);
+    w.cancel_stroke();
+  }
+  // Disabling assistance after an active dab must clear its previous goal.
+  {
+    World w;
+    w.add_particle({0, 0, 0});
+    w.begin_stroke();
+    w.apply_grab({0, 0, 0}, 1, {0, 1, 0},
+                 {BrushPhysicsMode::PhysicalAssist, 1, 0});
+    w.step(1.0 / 30, 1, 1);
+    w.set_gravity({0, -9000, 0});
+    expect(!w.apply_grab({0, 1, 0}, 1, {0, 1, 0},
+                         {BrushPhysicsMode::PhysicalAssist, 0, 0}));
+    w.step(1.0 / 30, 1, 1);
+    expect(w.particles()[0].position.y < 0);
+    w.cancel_stroke();
+  }
+  // Grab must propagate a constraint to a neighbor in one iteration/substep.
+  {
+    World w;
+    w.add_particle({0, 0, 0});
+    w.add_particle({1, 0, 0});
+    w.add_bond(0, 1, 0);
+    w.begin_stroke();
+    w.apply_grab({1, 0, 0}, 0.1, {0, 1, 0},
+                 {BrushPhysicsMode::PhysicalAssist, 1, 0});
+    w.step(1.0 / 30, 1, 1);
+    expect(w.particles()[0].position.y > 0);
+    w.cancel_stroke();
+  }
   // UV seams are corner data, not a shared per-particle UV.
   {
     World w;
