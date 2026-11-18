@@ -75,3 +75,9 @@ be enabled in Blender until editor integration and differential testing.
 
 [Adaptive halo design, benchmarks and limitations](ADAPTIVE_HALO_REPORT_20261118.md).
 
+
+## Follow-up correctness audit — stiff boundaries and Mask Extract
+
+[False-convergence regression, mask geometry corrections, and CPU optimization priorities](BUG_AUDIT_BOUNDARY_REACTION_MASK_20261118.md).
+
+Adaptive XPBD now checks numerical **boundary reaction** as well as boundary displacement. This fixes a case where a stiff crossing bond canceled Grab entirely yet the solver falsely reported convergence. The Mask Extract reference rejects degenerate output triangles and uses fixed-size clipping buffers rather than per-face dynamic vectors. These remain **standalone experimental changes**, not Blender-integrated features.
