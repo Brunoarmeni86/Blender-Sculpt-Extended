@@ -44,6 +44,12 @@ class SculptSurfaceBridge {
     std::size_t particle_ids[3] = {};
     double weights[3] = {};
     Vec3 detail_residual{};
+    // Orthonormal rest frame of the proxy triangle; carries fine detail through
+    // rigid rotations without leaving the residual locked to object axes.
+    Vec3 frame_u{};
+    Vec3 frame_v{};
+    Vec3 frame_n{};
+    bool frame_valid = false;
   };
   SculptSurfaceKind kind_ = SculptSurfaceKind::RegularMesh;
   std::vector<Vec3> source_positions_;
