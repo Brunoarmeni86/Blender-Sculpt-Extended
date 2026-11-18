@@ -37,22 +37,19 @@ class SculptSurfaceBridge {
       BrushPhysicsSettings settings) const;
 
   SculptSurfaceKind kind() const { return kind_; }
-  std::size_t sample_count() const { return source_positions_.size(); }
+  std::size_t sample_count() const { return sample_count_; }
 
  private:
   struct Sample {
     std::size_t particle_ids[3] = {};
     double weights[3] = {};
     Vec3 detail_residual{};
-    // Orthonormal rest frame of the proxy triangle; carries fine detail through
-    // rigid rotations without leaving the residual locked to object axes.
-    Vec3 frame_u{};
-    Vec3 frame_v{};
-    Vec3 frame_n{};
+    // When valid, detail_residual stores rest-frame local coordinates rather
+    // than an object-space vector, so no 3-vector rest frame is needed per sample.
     bool frame_valid = false;
   };
   SculptSurfaceKind kind_ = SculptSurfaceKind::RegularMesh;
-  std::vector<Vec3> source_positions_;
+  std::size_t sample_count_ = 0;
   std::vector<Sample> samples_;
 };
 
