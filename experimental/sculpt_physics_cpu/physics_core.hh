@@ -102,6 +102,7 @@ class World {
     int accepted_hops = 0; // -1 on global fallback.
     int attempts = 0;
     double max_boundary_motion = 0.0;
+    double max_boundary_reaction = 0.0; // Reaction from numerically pinned exterior.
     bool used_global_fallback = false;
   };
   AdaptiveStepResult step_local_adaptive(double dt, int substeps = 4,
