@@ -237,9 +237,17 @@ void World::step_local(double dt, int substeps, int iterations, int bond_hops)
       substeps > 256 || iterations > 256 || bond_hops < 0 || bond_hops > 256) {
     throw std::invalid_argument("Invalid local physics parameters");
   }
+  // Without an active target, a quasistatic sculpt dab must be a genuine no-op.
+  // Do not wake or advance the entire object just because the brush missed it.
+  // Scene simulation with gravity/contact still requires global integration.
+  if (targets_.empty() && !ground_enabled_ && length(gravity_) <= eps) {
+    dirty_.clear();
+    last_stats_ = {};
+    return;
+  }
   // A local brush island is an approximation for quasistatic strokes only.
-  // Global gravity/contact (or an inactive brush) requires global integration.
-  if (ground_enabled_ || length(gravity_) > eps || targets_.empty()) {
+  // Global gravity/contact requires global integration.
+  if (ground_enabled_ || length(gravity_) > eps) {
     step(dt, substeps, iterations);
     last_stats_.used_global_fallback = true;
     return;
