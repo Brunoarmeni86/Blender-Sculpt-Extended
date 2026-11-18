@@ -106,7 +106,10 @@ bool World::apply_grab(Vec3 center, double radius, Vec3 displacement,
 {
   if (!active_stroke_) throw std::logic_error("begin_stroke required");
   if (settings.mode == BrushPhysicsMode::Standard || settings.influence == 0.0) {
-    return false;  // Required exact no-op, including no allocations or simulation.
+    // Turn off the previous dab target as well. The Sculpt adapter must also skip
+    // begin_stroke/step entirely when physics is not requested.
+    targets_.clear();
+    return false;
   }
   if (!valid(center) || !valid(displacement) || !valid(radius) || radius <= 0 ||
       !valid(settings.influence) || settings.influence < 0 || settings.influence > 1 ||
@@ -138,6 +141,11 @@ void World::step(double dt, int substeps, int iterations)
   }
   const double h = dt / substeps;
   const double attenuation = std::exp(-damping_ * h);
+  // Dirty regions are consumed between dabs for PBVH updates, so compare against
+  // the start of THIS step, not against the beginning of the entire stroke.
+  std::vector<Vec3> step_start_positions;
+  step_start_positions.reserve(particles_.size());
+  for (const Particle &p : particles_) step_start_positions.push_back(p.position);
   std::vector<Vec3> old_positions(particles_.size());
   for (int s = 0; s < substeps; ++s) {
     for (std::size_t i = 0; i < particles_.size(); ++i) {
@@ -150,6 +158,19 @@ void World::step(double dt, int substeps, int iterations)
     for (Bond &b : bonds_) b.lambda = 0.0;
     for (GrabTarget &t : targets_) t.lambda_x = t.lambda_y = t.lambda_z = 0.0;
     for (int iter = 0; iter < iterations; ++iter) {
+      // Apply the moving brush target before material bonds, so nearby particles
+      // can respond in the first iteration even with only one substep.
+      for (GrabTarget &t : targets_) {
+        Particle &p = particles_[t.index];
+        const double alpha = t.compliance / (h * h);
+        const double denom = p.inverse_mass + alpha;
+        if (denom <= eps) continue;
+        const Vec3 C = p.position - t.goal;
+        const Vec3 lambda{t.lambda_x, t.lambda_y, t.lambda_z};
+        const Vec3 dlambda = (C * -1.0 - lambda * alpha) / denom;
+        p.position += dlambda * p.inverse_mass;
+        t.lambda_x += dlambda.x; t.lambda_y += dlambda.y; t.lambda_z += dlambda.z;
+      }
       for (Bond &b : bonds_) {
         if (b.broken) continue;
         Particle &a = particles_[b.a];
@@ -177,17 +198,6 @@ void World::step(double dt, int substeps, int iterations)
         a.position += direction * (-a.inverse_mass * dlambda);
         c.position += direction * (c.inverse_mass * dlambda);
       }
-      for (GrabTarget &t : targets_) {
-        Particle &p = particles_[t.index];
-        const double alpha = t.compliance / (h * h);
-        const double denom = p.inverse_mass + alpha;
-        if (denom <= eps) continue;
-        const Vec3 C = p.position - t.goal;
-        const Vec3 lambda{t.lambda_x, t.lambda_y, t.lambda_z};
-        const Vec3 dlambda = (C * -1.0 - lambda * alpha) / denom;
-        p.position += dlambda * p.inverse_mass;
-        t.lambda_x += dlambda.x; t.lambda_y += dlambda.y; t.lambda_z += dlambda.z;
-      }
       if (ground_enabled_) {
         for (Particle &p : particles_) {
           if (p.inverse_mass > 0.0) {
@@ -210,7 +220,7 @@ void World::step(double dt, int substeps, int iterations)
   }
   dirty_.clear();
   for (std::size_t i = 0; i < particles_.size(); ++i) {
-    const Vec3 delta = particles_[i].position - saved_particles_[i].position;
+    const Vec3 delta = particles_[i].position - step_start_positions[i];
     if (length(delta) > 1e-10) dirty_.push_back(i);
   }
 }
