@@ -45,3 +45,15 @@ This reference now has both a **regular mesh Sculpt** surface bridge (one partic
 `World::step_local` is an optional **approximate quasistatic brush-local XPBD** path using a bond-hop halo and fixed exterior boundaries. Global gravity or floor collision falls back to the global step. Choosing a small halo can cause visible differences from global simulation; **8 hops was much more accurate than 4 hops in the measured test**. For exact full-world dynamics, use `World::step`.
 
 See [local solver/normal sculpt audit](LOCAL_SCULPT_ADAPTER_AUDIT_20261118.md). The [correctness and optimization review](CODE_REVIEW_20261118.md) records three fixed regressions, GCC/Clang sanitizer checks, memory optimizations and remaining blockers before Blender integration. Build with `-DSCULPT_PHYSICS_BUILD_BENCHMARKS=ON` to additionally run `bench_local_physics`; run `ctest --test-dir build --output-on-failure` for both standalone test suites.
+
+## Adversarial audit and optimization research (18 November)
+
+See [additional XPBD optimization research and regression tests](OPTIMIZATION_RESEARCH_AND_ADV_TESTS_20261118.md).
+The experimental CPU solver now protects artificially pinned local halo boundaries from
+irreversible plastic/fracture edits, rejects infinite bond rest lengths, validates finite
+positions and UV/color corners in Mask Extract, and checks normal Sculpt proxy alignment
+independently of a large object translation.
+
+The new `test_adversarial.cc` is included in CTest. A locally patched standalone source
+copy passed **3/3 CTest suites**, and the adversarial tests passed GCC ASan/UBSan.
+This is not a complete CI test of the exact GitHub branch and is not a Blender build.
