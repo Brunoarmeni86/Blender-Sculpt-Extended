@@ -2,6 +2,7 @@
 #include "mask_extract_core.hh"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <stdexcept>
 #include <unordered_map>
@@ -111,34 +112,46 @@ TriangleMesh extract_mask_high_fidelity(const TriangleMesh &source, double thres
       if (vi >= source.positions.size()) throw std::out_of_range("Face vertex out of range");
       original[k] = {vi, vi, source.positions[vi], face.uv[k], face.colors[k], source.mask[vi]};
     }
-    std::vector<Corner> clipped;
+    // A triangle clipped by a scalar half-space yields at most 4 corners.
+    // Fixed storage avoids two heap allocations for each input triangle.
+    std::array<Corner, 6> clipped{};
+    std::size_t clipped_count = 0;
     for (std::size_t k = 0; k < 3; ++k) {
       const Corner &a = original[(k + 2) % 3];
       const Corner &b = original[k];
       const bool a_inside = a.mask >= threshold;
       const bool b_inside = b.mask >= threshold;
-      if (a_inside != b_inside) clipped.push_back(crossing(a, b, threshold));
-      if (b_inside) clipped.push_back(b);
+      if (a_inside != b_inside) clipped[clipped_count++] = crossing(a, b, threshold);
+      if (b_inside) clipped[clipped_count++] = b;
     }
-    // Remove duplicates at vertices whose masks exactly equal the threshold.
-    std::vector<Corner> clean;
-    for (const Corner &v : clipped) {
-      const auto same_key = [&](const Corner &other) {
-        return std::min(v.src_a, v.src_b) == std::min(other.src_a, other.src_b) &&
-               std::max(v.src_a, v.src_b) == std::max(other.src_a, other.src_b);
-      };
-      if (clean.empty() || !same_key(clean.back())) clean.push_back(v);
+    std::array<Corner, 6> clean{};
+    std::size_t clean_count = 0;
+    const auto same_key = [](const Corner &a, const Corner &b) {
+      return std::min(a.src_a, a.src_b) == std::min(b.src_a, b.src_b) &&
+             std::max(a.src_a, a.src_b) == std::max(b.src_a, b.src_b);
+    };
+    for (std::size_t k = 0; k < clipped_count; ++k) {
+      if (clean_count == 0 || !same_key(clean[clean_count - 1], clipped[k])) {
+        clean[clean_count++] = clipped[k];
+      }
     }
-    if (clean.size() > 1) {
-      const Corner &a = clean.front();
-      const Corner &b = clean.back();
-      if (std::min(a.src_a,a.src_b) == std::min(b.src_a,b.src_b) &&
-          std::max(a.src_a,a.src_b) == std::max(b.src_a,b.src_b)) clean.pop_back();
-    }
-    if (clean.size() < 3) continue;
-    for (std::size_t k = 1; k + 1 < clean.size(); ++k) {
+    if (clean_count > 1 && same_key(clean[0], clean[clean_count - 1])) --clean_count;
+    if (clean_count < 3) continue;
+    for (std::size_t k = 1; k + 1 < clean_count; ++k) {
+      const std::array<Corner, 3> corners{clean[0], clean[k], clean[k + 1]};
+      const Vec3 ab = corners[1].position - corners[0].position;
+      const Vec3 ac = corners[2].position - corners[0].position;
+      const Vec3 bc = corners[2].position - corners[1].position;
+      const auto square = [](Vec3 v) { return v.x*v.x + v.y*v.y + v.z*v.z; };
+      const double scale2 = std::max({square(ab), square(ac), square(bc)});
+      const Vec3 cross{ab.y*ac.z-ab.z*ac.y,
+                       ab.z*ac.x-ab.x*ac.z,
+                       ab.x*ac.y-ab.y*ac.x};
+      const double area2 = square(cross);
+      // Avoid invalid zero-area/near-collinear output faces and orphan points.
+      if (!(std::isfinite(scale2) && std::isfinite(area2)) ||
+          scale2 <= 0.0 || area2 <= scale2*scale2*1e-24) continue;
       SurfaceTriangle tri;
-      const std::array<Corner, 3> corners{clean[0], clean[k], clean[k+1]};
       for (std::size_t j = 0; j < 3; ++j) {
         tri.vertices[j] = get_vertex(corners[j]);
         tri.uv[j] = corners[j].uv;
