@@ -139,6 +139,9 @@ class World {
   std::vector<std::size_t> dirty_;
   std::vector<Particle> saved_particles_;
   std::vector<Bond> saved_bonds_;
+  // Sparse list of particles retaining velocity across dabs/strokes.
+  std::vector<std::size_t> moving_particle_ids_;
+  std::vector<std::size_t> saved_moving_particle_ids_;
   bool active_stroke_ = false;
   bool ground_enabled_ = false;
   double ground_y_ = 0.0;
