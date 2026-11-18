@@ -31,6 +31,7 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
     const auto before_bonds = bonds_;
     const auto before_targets = targets_;
     const auto before_dirty = dirty_;
+    const auto before_movers = moving_particle_ids_;
     const StepStatistics before_stats = last_stats_;
     try {
       step(dt, substeps, iterations);
@@ -40,6 +41,7 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
       bonds_ = before_bonds;
       targets_ = before_targets;
       dirty_ = before_dirty;
+      moving_particle_ids_ = before_movers;
       last_stats_ = before_stats;
       throw;
     }
@@ -87,6 +89,7 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
   }
 
   const auto original_dirty = dirty_;
+  const auto original_movers = moving_particle_ids_;
   const StepStatistics original_stats = last_stats_;
   const auto original_targets = targets_;
   const double tolerance = std::max(1.0e-9, boundary_fraction * max_target_displacement);
@@ -99,7 +102,7 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
   // or out-of-budget moving components require a transactional global step.
   const double minimum_speed = 1.0e-10 / dt;
   bool exterior_motion = false;
-  for (std::size_t i = 0; i < particles_.size(); ++i) {
+  for (const std::size_t i : moving_particle_ids_) {
     if (particles_[i].inverse_mass <= 0.0) continue;
     const Vec3 v = particles_[i].velocity;
     const double component_speed = std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)});
@@ -146,6 +149,7 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
         targets_[j] = original_targets[j];
       }
       dirty_ = original_dirty;
+      moving_particle_ids_ = original_movers;
       last_stats_ = original_stats;
     };
 
