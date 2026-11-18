@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.16)
+project(sculpt_physics_cpu_reference LANGUAGES CXX)
+
+add_library(sculpt_physics_reference STATIC physics_core.cc mask_extract_core.cc)
+target_include_directories(sculpt_physics_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(sculpt_physics_reference PUBLIC cxx_std_17)
+
+add_executable(test_physics_core test_physics_core.cc)
+target_link_libraries(test_physics_core PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(sculpt_physics_reference PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  target_compile_options(test_physics_core PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+enable_testing()
+add_test(NAME sculpt_physics_reference_tests COMMAND test_physics_core)
