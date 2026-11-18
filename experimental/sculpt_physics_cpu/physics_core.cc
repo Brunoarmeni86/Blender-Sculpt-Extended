@@ -103,6 +103,7 @@ void World::begin_stroke()
   saved_bonds_ = bonds_;
   targets_.clear();
   dirty_.clear();
+  adaptive_cached_hops_ = -1;
   active_stroke_ = true;
 }
 
@@ -379,6 +380,7 @@ void World::commit_stroke()
   saved_particles_.clear();
   saved_bonds_.clear();
   targets_.clear();
+  adaptive_cached_hops_ = -1;
   active_stroke_ = false;
 }
 void World::cancel_stroke()
@@ -388,6 +390,7 @@ void World::cancel_stroke()
   bonds_ = std::move(saved_bonds_);
   targets_.clear();
   dirty_.clear();
+  adaptive_cached_hops_ = -1;
   active_stroke_ = false;
 }
 bool World::stroke_active() const { return active_stroke_; }
