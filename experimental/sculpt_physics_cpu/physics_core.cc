@@ -101,6 +101,7 @@ void World::begin_stroke()
   if (active_stroke_) throw std::logic_error("Stroke already active");
   saved_particles_ = particles_;
   saved_bonds_ = bonds_;
+  saved_moving_particle_ids_ = moving_particle_ids_;
   targets_.clear();
   dirty_.clear();
   adaptive_cached_hops_ = -1;
@@ -225,10 +226,13 @@ void World::step(double dt, int substeps, int iterations)
     }
   }
   dirty_.clear();
+  moving_particle_ids_.clear();
   last_stats_ = {particles_.size(), bonds_.size() * std::size_t(substeps) * std::size_t(iterations), false};
   for (std::size_t i = 0; i < particles_.size(); ++i) {
     const Vec3 delta = particles_[i].position - step_start_positions[i];
     if (length(delta) > 1e-10) dirty_.push_back(i);
+    const Vec3 v = particles_[i].velocity;
+    if (v.x != 0.0 || v.y != 0.0 || v.z != 0.0) moving_particle_ids_.push_back(i);
   }
 }
 
@@ -291,7 +295,7 @@ void World::step_local(double dt, int substeps, int iterations, int bond_hops)
   // make it sublinear later.
   const double minimum_speed = 1.0e-10 / dt;
   bool exterior_motion = false;
-  for (std::size_t i = 0; i < particles_.size(); ++i) {
+  for (const std::size_t i : moving_particle_ids_) {
     if (included[i] || particles_[i].inverse_mass <= 0.0) continue;
     const Vec3 v = particles_[i].velocity;
     const double component_speed = std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)});
@@ -306,6 +310,7 @@ void World::step_local(double dt, int substeps, int iterations, int bond_hops)
     const auto old_bonds = bonds_;
     const auto old_targets = targets_;
     const auto old_dirty = dirty_;
+    const auto old_movers = moving_particle_ids_;
     const StepStatistics old_stats = last_stats_;
     try {
       step(dt, substeps, iterations);
@@ -315,6 +320,7 @@ void World::step_local(double dt, int substeps, int iterations, int bond_hops)
       bonds_ = old_bonds;
       targets_ = old_targets;
       dirty_ = old_dirty;
+      moving_particle_ids_ = old_movers;
       last_stats_ = old_stats;
       throw;
     }
@@ -406,6 +412,18 @@ void World::step_local(double dt, int substeps, int iterations, int bond_hops)
   }
   last_stats_ = {active.size(), selected_bonds.size() * std::size_t(substeps) *
                  std::size_t(iterations), false};
+  // Preserve motion across strokes without an O(N) scan on every brush dab.
+  moving_particle_ids_.insert(moving_particle_ids_.end(), active.begin(), active.end());
+  std::sort(moving_particle_ids_.begin(), moving_particle_ids_.end());
+  moving_particle_ids_.erase(
+      std::unique(moving_particle_ids_.begin(), moving_particle_ids_.end()),
+      moving_particle_ids_.end());
+  moving_particle_ids_.erase(
+      std::remove_if(moving_particle_ids_.begin(), moving_particle_ids_.end(),
+                     [&](std::size_t i) {
+                       const Vec3 v = particles_[i].velocity;
+                       return v.x == 0.0 && v.y == 0.0 && v.z == 0.0;
+                     }), moving_particle_ids_.end());
 }
 
 World::StepStatistics World::last_step_statistics() const { return last_stats_; }
@@ -415,6 +433,7 @@ void World::commit_stroke()
   if (!active_stroke_) throw std::logic_error("No active stroke");
   saved_particles_.clear();
   saved_bonds_.clear();
+  saved_moving_particle_ids_.clear();
   targets_.clear();
   adaptive_cached_hops_ = -1;
   active_stroke_ = false;
@@ -424,6 +443,7 @@ void World::cancel_stroke()
   if (!active_stroke_) throw std::logic_error("No active stroke");
   particles_ = std::move(saved_particles_);
   bonds_ = std::move(saved_bonds_);
+  moving_particle_ids_ = std::move(saved_moving_particle_ids_);
   targets_.clear();
   dirty_.clear();
   adaptive_cached_hops_ = -1;
