@@ -87,6 +87,12 @@ class World {
    * Not an exact replacement for a globally simulated dynamic material. */
   void step_local(double dt, int substeps = 4, int iterations = 5,
                   int bond_hops = 4);
+  /* Experimental multi-island quasistatic path: integrate Grab targets
+   * plus separately moving particles from earlier dabs, with the same
+   * approximate bond-hop halo as step_local. Gravity/ground stay global.
+   * Default step_local and adaptive behavior are unchanged. */
+  void step_local_multi(double dt, int substeps = 4, int iterations = 5,
+                        int bond_hops = 4);
   struct StepStatistics {
     std::size_t integrated_particles = 0;
     std::size_t visited_bonds = 0;
@@ -122,6 +128,8 @@ class World {
   const std::vector<std::size_t> &dirty_particles() const;
 
  private:
+  void step_local_impl(double dt, int substeps, int iterations, int bond_hops,
+                       bool include_moving_islands);
   struct GrabTarget {
     std::size_t index;
     Vec3 goal;
