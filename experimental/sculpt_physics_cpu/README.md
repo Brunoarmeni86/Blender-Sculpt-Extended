@@ -81,3 +81,15 @@ be enabled in Blender until editor integration and differential testing.
 [False-convergence regression, mask geometry corrections, and CPU optimization priorities](BUG_AUDIT_BOUNDARY_REACTION_MASK_20261118.md).
 
 Adaptive XPBD now checks numerical **boundary reaction** as well as boundary displacement. This fixes a case where a stiff crossing bond canceled Grab entirely yet the solver falsely reported convergence. The Mask Extract reference rejects degenerate output triangles and uses fixed-size clipping buffers rather than per-face dynamic vectors. These remain **standalone experimental changes**, not Blender-integrated features.
+
+## Multistroke motion continuity — CPU V4
+
+The local solver no longer silently freezes moving particles outside a new
+brush island. A distant moving component triggers a transactionally guarded
+global step; the adaptive solver includes reachable moving particles by
+expanding its halo. A sparse mover index avoids scanning every static proxy
+particle each dab, and is preserved across stroke commits/cancels.
+
+See [full correctness audit, tests and benchmark limitations](MOTION_CONTINUITY_AND_SPARSE_REGISTRY_20261118.md).
+The new fifth CTest suite is `sculpt_motion_continuity_tests`. These are
+standalone checks, **not** a real Blender Sculpt/Multires integration.
