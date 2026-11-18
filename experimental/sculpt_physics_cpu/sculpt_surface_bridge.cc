@@ -61,8 +61,7 @@ SculptSurfaceBridge SculptSurfaceBridge::for_regular_mesh(
   }
   SculptSurfaceBridge result;
   result.kind_ = SculptSurfaceKind::RegularMesh;
-  result.source_positions_ = vertex_positions;
-  result.samples_.reserve(vertex_positions.size());
+  result.sample_count_ = vertex_positions.size();
   for (std::size_t i = 0; i < vertex_positions.size(); ++i) {
     if (!finite(vertex_positions[i]) || !finite(proxy_particles[i].position)) {
       throw std::invalid_argument("Invalid regular mesh position");
@@ -74,10 +73,7 @@ SculptSurfaceBridge SculptSurfaceBridge::for_regular_mesh(
     if (std::sqrt(dot(diff, diff)) > 1e-6 * scale) {
       throw std::invalid_argument("Regular Sculpt mesh and proxy coordinates must match");
     }
-    Sample sample;
-    sample.particle_ids[0] = i;
-    sample.weights[0] = 1.0;
-    result.samples_.push_back(sample);
+    // No per-vertex anchor allocations: normal Sculpt already has 1:1 indices.
   }
   return result;
 }
@@ -92,7 +88,7 @@ SculptSurfaceBridge SculptSurfaceBridge::for_multires_samples(
   }
   SculptSurfaceBridge result;
   result.kind_ = SculptSurfaceKind::MultiresSamples;
-  result.source_positions_ = evaluated_positions;
+  result.sample_count_ = evaluated_positions.size();
   result.samples_.reserve(anchors.size());
   for (std::size_t i = 0; i < anchors.size(); ++i) {
     if (!finite(evaluated_positions[i])) {
@@ -105,14 +101,15 @@ SculptSurfaceBridge SculptSurfaceBridge::for_multires_samples(
       sample.particle_ids[k] = anchor.vertices[k];
       sample.weights[k] = anchor.weights[k];
     }
-    sample.detail_residual = evaluated_positions[i] - rest;
+    const Vec3 world_residual = evaluated_positions[i] - rest;
     const Frame frame = make_frame(rest_proxy_particles[anchor.vertices[0]].position,
                                    rest_proxy_particles[anchor.vertices[1]].position,
                                    rest_proxy_particles[anchor.vertices[2]].position);
-    sample.frame_u = frame.u;
-    sample.frame_v = frame.v;
-    sample.frame_n = frame.n;
     sample.frame_valid = frame.valid;
+    // One Vec3 of local frame components replaces three per-sample frame axes.
+    sample.detail_residual = frame.valid ?
+        Vec3{dot(frame.u, world_residual), dot(frame.v, world_residual),
+             dot(frame.n, world_residual)} : world_residual;
     result.samples_.push_back(sample);
   }
   return result;
@@ -123,7 +120,7 @@ std::vector<Vec3> SculptSurfaceBridge::compose_positions(
     const std::vector<Vec3> &standard_brush_positions,
     BrushPhysicsSettings settings) const
 {
-  if (standard_brush_positions.size() != source_positions_.size()) {
+  if (standard_brush_positions.size() != sample_count_) {
     throw std::invalid_argument("Sculpt output size mismatch");
   }
   if (!std::isfinite(settings.influence) || settings.influence < 0.0 ||
@@ -134,19 +131,33 @@ std::vector<Vec3> SculptSurfaceBridge::compose_positions(
     return standard_brush_positions; // Exact standard-geometry bypass.
   }
   std::vector<Vec3> result;
-  result.reserve(samples_.size());
+  result.reserve(sample_count_);
+  if (kind_ == SculptSurfaceKind::RegularMesh) {
+    if (current_proxy_particles.size() != sample_count_) {
+      throw std::invalid_argument("Regular Sculpt proxy vertex count changed");
+    }
+    for (std::size_t i = 0; i < sample_count_; ++i) {
+      const Vec3 physical = current_proxy_particles[i].position;
+      if (!finite(physical)) throw std::invalid_argument("Invalid regular proxy position");
+      if (settings.mode == BrushPhysicsMode::FullPhysics) result.push_back(physical);
+      else result.push_back(standard_brush_positions[i] * (1.0-settings.influence) +
+                            physical * settings.influence);
+    }
+    return result;
+  }
   for (std::size_t i = 0; i < samples_.size(); ++i) {
     const Sample &sample = samples_[i];
     Vec3 residual = sample.detail_residual;
-    if (kind_ == SculptSurfaceKind::MultiresSamples && sample.frame_valid) {
+    if (sample.frame_valid) {
       const Frame current = make_frame(current_proxy_particles.at(sample.particle_ids[0]).position,
                                        current_proxy_particles.at(sample.particle_ids[1]).position,
                                        current_proxy_particles.at(sample.particle_ids[2]).position);
-      if (current.valid) {
-        residual = current.u * dot(sample.frame_u, residual) +
-                   current.v * dot(sample.frame_v, residual) +
-                   current.n * dot(sample.frame_n, residual);
+      if (!current.valid) {
+        throw std::invalid_argument("Degenerate deformed Multires anchor: unsafe detail transfer");
       }
+      residual = current.u * sample.detail_residual.x +
+                 current.v * sample.detail_residual.y +
+                 current.n * sample.detail_residual.z;
     }
     Vec3 physics_position = residual;
     for (int k = 0; k < 3; ++k) {
