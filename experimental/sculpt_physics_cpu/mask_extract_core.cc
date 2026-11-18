@@ -60,6 +60,27 @@ TriangleMesh extract_mask_high_fidelity(const TriangleMesh &source, double thres
       throw std::invalid_argument("Mask must be finite and within [0, 1]");
     }
   }
+  // UVs may intentionally span UDIMs and colors can be HDR, but all
+  // interpolated corner attributes and input positions must be finite.
+  for (const Vec3 &p : source.positions) {
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+      throw std::invalid_argument("Non-finite source position");
+    }
+  }
+  for (const SurfaceTriangle &face : source.faces) {
+    for (std::size_t k = 0; k < 3; ++k) {
+      if (face.vertices[k] >= source.positions.size()) {
+        throw std::out_of_range("Face vertex out of range");
+      }
+      const UV2 &uv = face.uv[k];
+      const RGBA &c = face.colors[k];
+      if (!std::isfinite(uv.u) || !std::isfinite(uv.v) ||
+          !std::isfinite(c.r) || !std::isfinite(c.g) ||
+          !std::isfinite(c.b) || !std::isfinite(c.a)) {
+        throw std::invalid_argument("Non-finite corner UV/color attribute");
+      }
+    }
+  }
   TriangleMesh out;
   std::unordered_map<std::size_t, std::size_t> original_vertices;
   std::unordered_map<Edge, std::size_t, EdgeHash> edge_vertices;
