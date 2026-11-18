@@ -68,7 +68,12 @@ int main()
   const double proxy_z = 0.25*proxy.particles()[0].position.z +
                           0.25*proxy.particles()[1].position.z +
                           0.5*proxy.particles()[2].position.z;
-  CHECK(near(raised[0].z, 0.2 + proxy_z));
+  // Detail magnitude is preserved in the moving proxy frame; its normal
+  // may rotate so object-space Z is no longer a valid expected component.
+  const Vec3 raised_delta = raised[0] - Vec3{0.25, 0.5, proxy_z};
+  CHECK(near(std::sqrt(raised_delta.x*raised_delta.x +
+                       raised_delta.y*raised_delta.y +
+                       raised_delta.z*raised_delta.z), 0.2));
   CHECK(near(high[0].z, 0.2));
   proxy.cancel_stroke();
 
@@ -94,5 +99,44 @@ int main()
   CHECK(chain.last_step_statistics().used_global_fallback);
   CHECK(chain.last_step_statistics().integrated_particles == 100);
   chain.cancel_stroke();
+  // Local sculpt with no selected particles must remain idle; do not wake the whole world.
+  {
+    World w;
+    for (int i=0; i<3; ++i) w.add_particle({double(i),0,0});
+    for (int i=0; i<2; ++i) w.add_bond(i,i+1,1e-5);
+    w.begin_stroke();
+    CHECK(w.apply_grab({0,0,0},0.4,{0,1,0},
+                       {BrushPhysicsMode::PhysicalAssist,1,0}));
+    w.step_local(1./30,1,3,1);
+    const auto before=w.particles();
+    CHECK(!w.apply_grab({100,0,0},0.2,{0,1,0},
+                        {BrushPhysicsMode::PhysicalAssist,1,0}));
+    w.step_local(1./30,1,3,1);
+    for (int i=0; i<3; ++i) CHECK(near(w.particles()[i].position.y,before[i].position.y));
+    CHECK(w.dirty_particles().empty());
+    w.cancel_stroke();
+  }
+  // A normal-mesh proxy must start in the same space, or its first active dab jumps.
+  {
+    World w;
+    w.add_particle({100,0,0});
+    bool rejected=false;
+    try { (void)SculptSurfaceBridge::for_regular_mesh({{0,0,0}},w.particles()); }
+    catch(const std::invalid_argument &) { rejected=true; }
+    CHECK(rejected);
+  }
+  // Multires detail must rotate with the coarse surface frame, not stay in world Z.
+  {
+    World rest;
+    rest.add_particle({0,0,0}); rest.add_particle({1,0,0}); rest.add_particle({0,1,0});
+    SurfaceAnchor anchor{{0,1,2},{.25,.25,.5},{{0,0},{1,0},{0,1}}};
+    auto bridge=SculptSurfaceBridge::for_multires_samples({{.25,.5,.2}}, {anchor}, rest.particles());
+    std::vector<Particle> rotated=rest.particles();
+    // Rotation 90 degrees about X: original +Z should become -Y.
+    for (auto &p:rotated) {const auto q=p.position; p.position={q.x,-q.z,q.y};}
+    auto out=bridge.compose_positions(rotated,{{.25,.5,.2}}, {BrushPhysicsMode::FullPhysics,1,0});
+    CHECK(near(out[0].y,-.2));
+    CHECK(near(out[0].z,.5));
+  }
   std::cout << "Regular Sculpt + Multires surface bridge and local solver tests passed\n";
 }
