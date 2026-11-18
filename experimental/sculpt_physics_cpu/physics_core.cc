@@ -195,6 +195,11 @@ void World::step(double dt, int substeps, int iterations)
       substeps > 256 || iterations > 256) {
     throw std::invalid_argument("Invalid time step or iteration counts");
   }
+  // XPBD compliance/(h*h) is undefined when the squared substep underflows.
+  const double probe_h = dt / substeps;
+  if (probe_h * probe_h == 0.0) {
+    throw std::invalid_argument("Substep too small for XPBD constraint denominator");
+  }
   // Preserve the last accepted dab if a numerical step fails.
   // A global step needs an O(N) current-state checkpoint.
   auto step_particles = particles_;
@@ -263,8 +268,8 @@ void World::step(double dt, int substeps, int iterations)
           const double dlambda = (-C - alpha * b.lambda) / denom;
           b.lambda += dlambda;
           direction = direction / len;
-          a.position += direction * (-a.inverse_mass * dlambda);
-          c.position += direction * (c.inverse_mass * dlambda);
+          if (a.inverse_mass > 0.0) a.position += direction * (-a.inverse_mass * dlambda);
+          if (c.inverse_mass > 0.0) c.position += direction * (c.inverse_mass * dlambda);
         }
         if (ground_enabled_) {
           for (Particle &p : particles_) {
@@ -276,11 +281,13 @@ void World::step(double dt, int substeps, int iterations)
       }
       for (std::size_t i = 0; i < particles_.size(); ++i) {
         Particle &p = particles_[i];
-        if (p.inverse_mass <= 0) continue;
-        p.velocity = (p.position - old_positions[i]) / h * attenuation;
-        if (ground_enabled_ && p.position.y <= ground_y_ + p.radius + eps && p.velocity.y < 0) {
-          p.velocity.y = 0.0;
+        if (p.inverse_mass > 0.0) {
+          p.velocity = (p.position - old_positions[i]) / h * attenuation;
+          if (ground_enabled_ && p.position.y <= ground_y_ + p.radius + eps && p.velocity.y < 0) {
+            p.velocity.y = 0.0;
+          }
         }
+        // Fixed bodies must also remain valid; NaNs are not acceptable.
         if (!valid(p.position) || !valid(p.velocity)) {
           throw std::runtime_error("Physics state became non-finite");
         }
@@ -324,6 +331,11 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   if (!valid(dt) || dt <= 0.0 || substeps <= 0 || iterations <= 0 ||
       substeps > 256 || iterations > 256 || bond_hops < 0 || bond_hops > 256) {
     throw std::invalid_argument("Invalid local physics parameters");
+  }
+  // XPBD compliance/(h*h) is undefined when the squared substep underflows.
+  const double probe_h = dt / substeps;
+  if (probe_h * probe_h == 0.0) {
+    throw std::invalid_argument("Substep too small for XPBD constraint denominator");
   }
   // Without an active target, a quasistatic sculpt dab must be a genuine no-op.
   // Do not wake or advance the entire object just because the brush missed it.
