@@ -57,3 +57,21 @@ independently of a large object translation.
 The new `test_adversarial.cc` is included in CTest. A locally patched standalone source
 copy passed **3/3 CTest suites**, and the adversarial tests passed GCC ASan/UBSan.
 This is not a complete CI test of the exact GitHub branch and is not a Blender build.
+
+## Adaptive local XPBD (experimental, 18 November)
+
+`World::step_local_adaptive()` expands the brush-local bond island when the
+outer numerical boundary moves too much. It snapshots affected particle/bond
+state before each candidate, rolls back rejected trials, and can use **strict
+global fallback** or explicitly return a **bounded approximation**
+(`converged=false`). Successful halo widths are reused within the same stroke.
+The criterion is a **heuristic**, not a proven physical accuracy guarantee.
+
+The standalone project now has a fourth CTest suite (`test_adaptive`) and an
+optional `bench_adaptive_physics` target with reproducible comparison of
+fixed/strict/bounded/global latency. The strict mode can be **slower than the
+global solver** after unsuccessful local attempts. No automatic policy should
+be enabled in Blender until editor integration and differential testing.
+
+[Adaptive halo design, benchmarks and limitations](ADAPTIVE_HALO_REPORT_20261118.md).
+
