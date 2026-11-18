@@ -125,3 +125,20 @@ native Undo/Redo.
 The optional `bench_stroke_undo` CMake benchmark covers stroke startup and local
 solver time; full Blender PBVH/Multires/viewport and native Undo costs remain
 unmeasured. The global case can still be slower than V5.
+
+## V7 numeric-failure and Grab-target audit (18 November)
+
+The standalone CPU reference now protects each **global, local or multi-island
+step** from leaving partially mutated particles, plastic bonds or fracture
+state after a numerical exception. This per-step rollback is separate from
+the stroke Undo journal. `apply_grab()` stages validated finite targets
+before replacement, including a robust huge-radius path. The solver rejects
+underflowing squared XPBD timesteps and validates pinned particles.
+
+Two new CTest suites (nine total) cover numeric overflow, previous accepted
+dabs, continued valid work after an error, original stroke cancel, invalid
+target retention and near-zero timestep stability.
+
+[Reproducers, fixes, test evidence, performance impact and remaining risks](V7_NUMERIC_ATOMICITY_BUG_AUDIT_20261118.md).
+**This is not a Blender-integrated feature, and the extra step checkpointing
+may slow some brush benchmarks.**
