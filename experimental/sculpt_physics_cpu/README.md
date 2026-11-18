@@ -110,3 +110,18 @@ scene with mostly stationary unbonded particles. It does **not** measure
 full Blender Sculpt Mode brush latency.
 
 [Multi-island algorithm, benchmarks and limitations](MULTI_REGION_XPBD_AUDIT_20261118.md).
+
+## Hybrid sparse stroke Undo + persistent local buffers (V6)
+
+Local physics dabs now record particle and bond state on **first touch**, rather
+than copying the entire proxy at stroke start. If a later dab needs full-world
+XPBD, the stroke journal upgrades into a contiguous global snapshot while
+preserving original pre-stroke values. Scratch for local bond IDs, active
+particles, previous positions, and inclusion generation marks is reused across
+dabs. Undo here is a **standalone stroke cancel operation**, not Blender's
+native Undo/Redo.
+
+[Design, seven-suite tests, benchmark comparisons and remaining limits](SPARSE_UNDO_PERSISTENT_SCRATCH_V6_20261118.md).
+The optional `bench_stroke_undo` CMake benchmark covers stroke startup and local
+solver time; full Blender PBVH/Multires/viewport and native Undo costs remain
+unmeasured. The global case can still be slower than V5.
