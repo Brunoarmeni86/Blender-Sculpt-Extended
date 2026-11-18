@@ -92,8 +92,28 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
   const double tolerance = std::max(1.0e-9, boundary_fraction * max_target_displacement);
   AdaptiveStepResult answer;
   // Within the same stroke, reuse the width previously required by the solver.
-  const int start_hops = std::min(max_hops,
-                                  std::max(initial_hops, adaptive_cached_hops_));
+  int start_hops = std::min(max_hops,
+                             std::max(initial_hops, adaptive_cached_hops_));
+  // Account for motion retained by prior dabs, including across strokes:
+  // reachable moving particles enlarge the candidate island; disconnected
+  // or out-of-budget moving components require a transactional global step.
+  const double minimum_speed = 1.0e-10 / dt;
+  bool exterior_motion = false;
+  for (std::size_t i = 0; i < particles_.size(); ++i) {
+    if (particles_[i].inverse_mass <= 0.0) continue;
+    const Vec3 v = particles_[i].velocity;
+    const double component_speed = std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)});
+    if (!std::isfinite(component_speed) || component_speed <= minimum_speed) continue;
+    if (distance[i] < 0 || distance[i] > max_hops) {
+      exterior_motion = true;
+      break;
+    }
+    start_hops = std::max(start_hops, distance[i]);
+  }
+  if (exterior_motion) {
+    run_global();
+    return {true, -1, 1, 0.0, 0.0, true};
+  }
   for (int hops = start_hops;; hops = std::min(max_hops, std::max(hops + 1, hops * 2))) {
     ++answer.attempts;
     std::size_t n_active = 0;
