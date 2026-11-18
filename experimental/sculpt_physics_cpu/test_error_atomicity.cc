@@ -60,5 +60,36 @@ int main()
     CHECK(w.particles()[1].position.x == 1.0);
     CHECK(w.bonds()[bi].rest_length == 1.0);
   }
+  // Tiny but finite dt causes h*h to underflow and rigid constraints
+  // to compute 0/0. Never accept NaNs for pinned particles.
+  {
+    World w;
+    w.add_particle({0,0,0},0);
+    w.add_particle({1,0,0},0);
+    w.add_bond(0,1,0);
+    w.begin_stroke();
+    bool rejected=false;
+    try { w.step(1.e-200,1,1); }
+    catch (const std::invalid_argument &) { rejected=true; }
+    CHECK(rejected);
+    CHECK(w.particles()[0].position.x == 0.0);
+    CHECK(w.particles()[1].position.x == 1.0);
+    CHECK(w.bonds()[0].rest_length == 1.0);
+    w.cancel_stroke();
+  }
+  // Local solver must also reject substeps with underflowing h*h.
+  {
+    World w;
+    w.add_particle({0,0,0});
+    w.begin_stroke();
+    CHECK(w.apply_grab({0,0,0},1,{.1,0,0},
+                       {BrushPhysicsMode::FullPhysics,1,0}));
+    bool rejected=false;
+    try { w.step_local(1.e-200,1,1,0); }
+    catch (const std::invalid_argument &) { rejected=true; }
+    CHECK(rejected);
+    CHECK(w.particles()[0].position.x == 0.0);
+    w.cancel_stroke();
+  }
   std::cout << "Numeric step failure is atomic across global/local/multi-local\n";
 }
