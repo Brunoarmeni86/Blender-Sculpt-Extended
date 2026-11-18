@@ -48,11 +48,11 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
 
   if (targets_.empty() && !ground_enabled_ && length(gravity_) <= eps) {
     step_local(dt, substeps, iterations, initial_hops);
-    return {true, initial_hops, 0, 0.0, false};
+    return {true, initial_hops, 0, 0.0, 0.0, false};
   }
   if (ground_enabled_ || length(gravity_) > eps) {
     run_global();
-    return {true, -1, 1, 0.0, true};
+    return {true, -1, 1, 0.0, 0.0, true};
   }
 
   // A BFS over unbroken bonds gives stable hop distances. The ordered queue is
@@ -131,6 +131,7 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
 
     bool artificial_boundary = false;
     double max_boundary_motion = 0.0;
+    double max_boundary_reaction = 0.0;
     try {
       step_local(dt, substeps, iterations, hops);
       // Only a movable shell attached to unsimulated movable particles is an
@@ -146,7 +147,10 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
           if (distance[other] > hops || distance[other] < 0) {
             if (particles_[other].inverse_mass > 0.0) {
               touches_exterior = true;
-              break;
+              // A hard numerical boundary can cancel the brush without
+              // moving. The XPBD lambda exposes the hidden reaction.
+              const double reaction = std::abs(b.lambda) * particles_[pi].inverse_mass;
+              max_boundary_reaction = std::max(max_boundary_reaction, reaction);
             }
           }
         }
@@ -157,8 +161,8 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
                                            std::hypot(d.x, d.y, d.z));
         }
       }
-      if (!valid(max_boundary_motion)) {
-        throw std::runtime_error("Invalid boundary displacement");
+      if (!valid(max_boundary_motion) || !valid(max_boundary_reaction)) {
+        throw std::runtime_error("Invalid boundary displacement or reaction");
       }
     }
     catch (...) {
@@ -167,7 +171,9 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
     }
 
     answer.max_boundary_motion = max_boundary_motion;
-    if (!artificial_boundary || max_boundary_motion <= tolerance) {
+    answer.max_boundary_reaction = max_boundary_reaction;
+    if (!artificial_boundary ||
+        (max_boundary_motion <= tolerance && max_boundary_reaction <= tolerance)) {
       answer.accepted_hops = hops;
       adaptive_cached_hops_ = hops;
       return answer;
