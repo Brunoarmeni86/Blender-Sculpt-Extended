@@ -159,6 +159,7 @@ class World {
   StepStatistics last_stats_{};
   int adaptive_cached_hops_ = -1; // Reuse tested halo width within one stroke.
   std::vector<GrabTarget> targets_;
+  std::vector<GrabTarget> pending_targets_; // Reused scratch for atomic Grab updates.
   std::vector<std::size_t> dirty_;
   // Stable indices: particle/bond topology cannot change during a stroke.
   std::unordered_map<std::size_t, Particle> undo_particles_;
