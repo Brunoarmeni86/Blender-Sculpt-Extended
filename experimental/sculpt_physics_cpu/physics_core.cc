@@ -96,11 +96,49 @@ void World::set_ground_height(double y)
 }
 void World::disable_ground() { ground_enabled_ = false; }
 
+void World::remember_particle(const std::size_t i)
+{
+  if (active_stroke_ && !dense_journal_) undo_particles_.try_emplace(i, particles_[i]);
+}
+void World::remember_bond(const std::size_t i)
+{
+  if (active_stroke_ && !dense_journal_) undo_bonds_.try_emplace(i, bonds_[i]);
+}
+void World::upgrade_to_dense_journal()
+{
+  if (!active_stroke_ || dense_journal_) return;
+  // Reconstruct the pre-stroke state. A local dab may already have modified
+  // particles and plastic/broken bonds, so overlay the original sparse values.
+  // Finish allocating before discarding the existing journal.
+  std::vector<Particle> particles_before = particles_;
+  std::vector<Bond> bonds_before = bonds_;
+  for (const auto &entry : undo_particles_) particles_before[entry.first] = entry.second;
+  for (const auto &entry : undo_bonds_) bonds_before[entry.first] = entry.second;
+  dense_undo_particles_ = std::move(particles_before);
+  dense_undo_bonds_ = std::move(bonds_before);
+  dense_journal_ = true;
+  undo_particles_.clear();
+  undo_bonds_.clear();
+}
+World::StrokeJournalStatistics World::stroke_journal_statistics() const
+{
+  if (dense_journal_) {
+    return {dense_undo_particles_.size(), dense_undo_bonds_.size(),
+            dense_undo_particles_.size() * sizeof(Particle) +
+                dense_undo_bonds_.size() * sizeof(Bond), true};
+  }
+  return {undo_particles_.size(), undo_bonds_.size(),
+          undo_particles_.size() * sizeof(Particle) + undo_bonds_.size() * sizeof(Bond), false};
+}
+
 void World::begin_stroke()
 {
   if (active_stroke_) throw std::logic_error("Stroke already active");
-  saved_particles_ = particles_;
-  saved_bonds_ = bonds_;
+  undo_particles_.clear();
+  undo_bonds_.clear();
+  dense_undo_particles_.clear();
+  dense_undo_bonds_.clear();
+  dense_journal_ = false;
   saved_moving_particle_ids_ = moving_particle_ids_;
   targets_.clear();
   dirty_.clear();
@@ -148,6 +186,9 @@ void World::step(double dt, int substeps, int iterations)
   }
   const double h = dt / substeps;
   const double attenuation = std::exp(-damping_ * h);
+  // Full-world integration requires a compact snapshot. Preserve the
+  // original state if earlier local dabs wrote into the sparse journal.
+  upgrade_to_dense_journal();
   // Dirty regions are consumed between dabs for PBVH updates, so compare against
   // the start of THIS step, not against the beginning of the entire stroke.
   std::vector<Vec3> step_start_positions;
@@ -271,11 +312,25 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   }
   const double h = dt / substeps;
   const double attenuation = std::exp(-damping_ * h);
-  std::vector<unsigned char> included(particles_.size(), 0);
-  std::vector<std::size_t> active;
+  // Generation marks avoid clearing an N-particle visited array each dab.
+  if (included_generation_marks_.size() != particles_.size()) {
+    included_generation_marks_.assign(particles_.size(), 0);
+  }
+  if (++included_generation_ == 0) {
+    std::fill(included_generation_marks_.begin(), included_generation_marks_.end(), 0);
+    included_generation_ = 1;
+  }
+  const auto included = [&](std::size_t i) {
+    return included_generation_marks_[i] == included_generation_;
+  };
+  const auto include = [&](std::size_t i) {
+    included_generation_marks_[i] = included_generation_;
+  };
+  std::vector<std::size_t> &active = local_active_scratch_;
+  active.clear();
   for (const GrabTarget &target : targets_) {
-    if (!included[target.index]) {
-      included[target.index] = 1;
+    if (!included(target.index)) {
+      include(target.index);
       active.push_back(target.index);
     }
   }
@@ -287,14 +342,14 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
     for (const std::size_t pi : moving_particle_ids_) {
       if (pi >= particles_.size()) throw std::logic_error("Stale moving-particle index");
       const Particle &p = particles_[pi];
-      if (p.inverse_mass <= 0.0 || included[pi]) continue;
+      if (p.inverse_mass <= 0.0 || included(pi)) continue;
       const Vec3 v = p.velocity;
       const double component_speed = std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)});
       if (!std::isfinite(component_speed)) {
         throw std::runtime_error("Non-finite velocity in moving island");
       }
       if (component_speed > minimum_speed) {
-        included[pi] = 1;
+        include(pi);
         active.push_back(pi);
       }
     }
@@ -310,8 +365,8 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
         const Bond &b = bonds_[bi];
         if (b.broken) continue;
         const std::size_t other = b.a == pi ? b.b : b.a;
-        if (!included[other]) {
-          included[other] = 1;
+        if (!included(other)) {
+          include(other);
           active.push_back(other);
         }
       }
@@ -328,7 +383,7 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   bool exterior_motion = false;
   if (!include_moving_islands) {
     for (const std::size_t i : moving_particle_ids_) {
-      if (included[i] || particles_[i].inverse_mass <= 0.0) continue;
+      if (included(i) || particles_[i].inverse_mass <= 0.0) continue;
     const Vec3 v = particles_[i].velocity;
     const double component_speed = std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)});
       if (!std::isfinite(component_speed) || component_speed > minimum_speed) {
@@ -362,7 +417,8 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   }
   // Bonds touching the active island are solved in their original index order.
   // The halo boundary is pinned; only active particles receive changes.
-  std::vector<std::size_t> selected_bonds;
+  std::vector<std::size_t> &selected_bonds = local_bond_scratch_;
+  selected_bonds.clear();
   for (const std::size_t i : active) {
     selected_bonds.insert(selected_bonds.end(),
                           particle_bond_ids_[i].begin(), particle_bond_ids_[i].end());
@@ -370,7 +426,15 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   std::sort(selected_bonds.begin(), selected_bonds.end());
   selected_bonds.erase(std::unique(selected_bonds.begin(), selected_bonds.end()),
                        selected_bonds.end());
-  std::vector<Vec3> step_start, previous;
+  // Capture only first-touch physical state; the original snapshot survives
+  // multiple dabs, plastic creep, fracture and adaptive rejected trials.
+  for (const std::size_t i : active) {
+    if (particles_[i].inverse_mass > 0.0) remember_particle(i);
+  }
+  for (const std::size_t bi : selected_bonds) remember_bond(bi);
+  std::vector<Vec3> &step_start = local_start_scratch_;
+  std::vector<Vec3> &previous = local_previous_scratch_;
+  step_start.clear();
   step_start.reserve(active.size());
   previous.resize(active.size());
   for (const std::size_t i : active) step_start.push_back(particles_[i].position);
@@ -405,7 +469,7 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
         const double strain = (len - b.rest_length) / b.rest_length;
         // The local halo boundary is a numerical pin, not a physical pin:
         // it must not produce irreversible fracture or plastic rest changes.
-        const bool fully_active_bond = included[b.a] && included[b.b];
+        const bool fully_active_bond = included(b.a) && included(b.b);
         if (fully_active_bond && std::abs(strain) > b.fracture_strain) {
           b.broken = true;
           continue;
@@ -417,8 +481,8 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
         }
         const double C = len - b.rest_length;
         const double alpha = b.compliance / (h * h);
-        const double inv_a = included[b.a] ? a.inverse_mass : 0.0;
-        const double inv_c = included[b.b] ? c.inverse_mass : 0.0;
+        const double inv_a = included(b.a) ? a.inverse_mass : 0.0;
+        const double inv_c = included(b.b) ? c.inverse_mass : 0.0;
         const double denom = inv_a + inv_c + alpha;
         if (denom <= eps) continue;
         const double dlambda = (-C - alpha * b.lambda) / denom;
@@ -464,8 +528,11 @@ World::StepStatistics World::last_step_statistics() const { return last_stats_; 
 void World::commit_stroke()
 {
   if (!active_stroke_) throw std::logic_error("No active stroke");
-  saved_particles_.clear();
-  saved_bonds_.clear();
+  undo_particles_.clear();
+  undo_bonds_.clear();
+  dense_undo_particles_.clear();
+  dense_undo_bonds_.clear();
+  dense_journal_ = false;
   saved_moving_particle_ids_.clear();
   targets_.clear();
   adaptive_cached_hops_ = -1;
@@ -474,8 +541,17 @@ void World::commit_stroke()
 void World::cancel_stroke()
 {
   if (!active_stroke_) throw std::logic_error("No active stroke");
-  particles_ = std::move(saved_particles_);
-  bonds_ = std::move(saved_bonds_);
+  if (dense_journal_) {
+    particles_ = std::move(dense_undo_particles_);
+    bonds_ = std::move(dense_undo_bonds_);
+  }
+  else {
+    for (const auto &entry : undo_particles_) particles_[entry.first] = entry.second;
+    for (const auto &entry : undo_bonds_) bonds_[entry.first] = entry.second;
+  }
+  undo_particles_.clear();
+  undo_bonds_.clear();
+  dense_journal_ = false;
   moving_particle_ids_ = std::move(saved_moving_particle_ids_);
   targets_.clear();
   dirty_.clear();
