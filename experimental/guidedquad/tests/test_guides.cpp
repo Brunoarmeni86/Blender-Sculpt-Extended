@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "guidedquad/guide_graph.hpp"
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <cmath>
 #include <iostream>
