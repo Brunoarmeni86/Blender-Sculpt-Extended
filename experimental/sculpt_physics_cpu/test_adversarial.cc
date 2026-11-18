@@ -86,6 +86,19 @@ int main()
     check(extract_mask_high_fidelity(m, 0.5).faces.size() == 1,
           "Valid multi-tile UV improperly rejected");
   }
+  // Repeated or collinear source vertices must not create invalid Mask Extract
+  // output faces or orphan vertices.
+  {
+    TriangleMesh mesh;
+    mesh.positions={{0,0,0},{1,0,0},{2,0,0}};
+    mesh.mask={1,1,1};
+    SurfaceTriangle a; a.vertices={0,1,2};
+    SurfaceTriangle b; b.vertices={0,0,1};
+    mesh.faces={a,b};
+    const TriangleMesh out=extract_mask_high_fidelity(mesh,0.5);
+    check(out.faces.empty(),"degenerate extracted faces emitted");
+    check(out.positions.empty(),"orphan extracted vertices emitted");
+  }
   // Proxy alignment must not become permissive as object coordinates grow.
   {
     World w;
