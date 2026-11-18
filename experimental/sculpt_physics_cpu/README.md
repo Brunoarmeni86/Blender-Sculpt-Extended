@@ -93,3 +93,20 @@ particle each dab, and is preserved across stroke commits/cancels.
 See [full correctness audit, tests and benchmark limitations](MOTION_CONTINUITY_AND_SPARSE_REGISTRY_20261118.md).
 The new fifth CTest suite is `sculpt_motion_continuity_tests`. These are
 standalone checks, **not** a real Blender Sculpt/Multires integration.
+
+## Multi-island local XPBD (V5, 18 November)
+
+New opt-in `World::step_local_multi()` combines the current Grab targets and
+previously moving particles as separate seeds, expanding through unbroken
+material bonds with the same approximate bond-hop halo. This lets two distant,
+disconnected active regions advance in one CPU step without paying a full-world
+fallback. The original `step_local` and `step_local_adaptive` behavior is
+unchanged; gravity and contact still require global integration.
+
+A sixth CTest suite compares two consecutive strokes against the global
+reference on separate material components. The optional
+`bench_multi_region` target demonstrates sparse-step cost in a favorable
+scene with mostly stationary unbonded particles. It does **not** measure
+full Blender Sculpt Mode brush latency.
+
+[Multi-island algorithm, benchmarks and limitations](MULTI_REGION_XPBD_AUDIT_20261118.md).
