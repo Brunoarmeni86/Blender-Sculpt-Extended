@@ -92,6 +92,25 @@ class World {
     std::size_t visited_bonds = 0;
     bool used_global_fallback = false;
   };
+  /* Experimental local solver: expand the active region when artificial
+   * boundary motion exceeds the specified fraction of the brush motion.
+   * Attempts are transactional; strict mode falls back to global XPBD, whereas
+   * bounded mode explicitly reports an unconverged approximation. */
+  enum class BoundaryPolicy { StrictGlobalFallback, BoundedApproximation };
+  struct AdaptiveStepResult {
+    bool converged = true; // False: budget reached with unresolved boundary motion.
+    int accepted_hops = 0; // -1 on global fallback.
+    int attempts = 0;
+    double max_boundary_motion = 0.0;
+    bool used_global_fallback = false;
+  };
+  AdaptiveStepResult step_local_adaptive(double dt, int substeps = 4,
+                                         int iterations = 5,
+                                         int initial_hops = 4,
+                                         int max_hops = 16,
+                                         double boundary_fraction = 0.02,
+                                         BoundaryPolicy policy =
+                                             BoundaryPolicy::StrictGlobalFallback);
   StepStatistics last_step_statistics() const;
   void commit_stroke();
   void cancel_stroke();
@@ -114,6 +133,7 @@ class World {
   /* Undirected bond incidence, built once as topology is added. */
   std::vector<std::vector<std::size_t>> particle_bond_ids_;
   StepStatistics last_stats_{};
+  int adaptive_cached_hops_ = -1; // Reuse tested halo width within one stroke.
   std::vector<GrabTarget> targets_;
   std::vector<std::size_t> dirty_;
   std::vector<Particle> saved_particles_;
