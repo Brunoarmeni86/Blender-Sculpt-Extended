@@ -1,0 +1,6 @@
+/build/
+/build-debug/
+__pycache__/
+*.pyc
+*.blend1
+*.blend2
