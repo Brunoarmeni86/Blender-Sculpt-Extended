@@ -142,3 +142,20 @@ target retention and near-zero timestep stability.
 [Reproducers, fixes, test evidence, performance impact and remaining risks](V7_NUMERIC_ATOMICITY_BUG_AUDIT_20261118.md).
 **This is not a Blender-integrated feature, and the extra step checkpointing
 may slow some brush benchmarks.**
+
+## V8 — Numeric stability and deferred Undo conversion
+
+Two additional regressions were reproduced and fixed: an unsuccessful global
+step previously promoted an otherwise sparse stroke Undo journal to a full
+snapshot, and extremely small (but positive) XPBD timestep squares could
+overflow compliance multipliers, producing NaN bond state without an error.
+
+Successful global steps now reuse their **per-dab rollback snapshot** as the
+dense pre-stroke Undo buffer, preserving earlier sparse originals. Failed steps
+leave the sparse journal intact. Duplicate full-world fallback snapshots in
+the local and adaptive wrappers have also been eliminated.
+
+The tenth CTest suite (`sculpt_v8_transactions_tests`) exercises failed and
+successful global transitions, cancel, pinned constraints and finite-alpha
+validation. See the [V8 bug audit and benchmark](V8_NUMERIC_UNDO_FALLBACK_AUDIT_20261118.md).
+This is **standalone C++ only**, not Blender Sculpt/PBVH/Multires integration.
