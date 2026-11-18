@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "sculpt_surface_bridge.hh"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -9,6 +10,28 @@ namespace {
 bool finite(Vec3 v)
 {
   return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+double dot(Vec3 a, Vec3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+Vec3 cross(Vec3 a, Vec3 b)
+{
+  return {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x};
+}
+struct Frame { Vec3 u{}, v{}, n{}; bool valid = false; };
+Frame make_frame(Vec3 a, Vec3 b, Vec3 c)
+{
+  const Vec3 e = b - a;
+  const Vec3 n_raw = cross(e, c-a);
+  const double e_len = std::sqrt(dot(e, e));
+  const double n_len = std::sqrt(dot(n_raw, n_raw));
+  // A degenerate triangle cannot define a detail frame. Avoid NaN output.
+  if (!std::isfinite(e_len) || !std::isfinite(n_len) ||
+      e_len < 1e-12 || n_len < 1e-12) return {};
+  Frame frame;
+  frame.u = e / e_len;
+  frame.n = n_raw / n_len;
+  frame.v = cross(frame.n, frame.u);
+  frame.valid = true;
+  return frame;
 }
 Vec3 anchored_position(const SurfaceAnchor &a, const std::vector<Particle> &particles)
 {
@@ -44,6 +67,13 @@ SculptSurfaceBridge SculptSurfaceBridge::for_regular_mesh(
     if (!finite(vertex_positions[i]) || !finite(proxy_particles[i].position)) {
       throw std::invalid_argument("Invalid regular mesh position");
     }
+    const Vec3 diff = vertex_positions[i] - proxy_particles[i].position;
+    const double scale = std::max({1.0, std::abs(vertex_positions[i].x),
+                                   std::abs(vertex_positions[i].y),
+                                   std::abs(vertex_positions[i].z)});
+    if (std::sqrt(dot(diff, diff)) > 1e-6 * scale) {
+      throw std::invalid_argument("Regular Sculpt mesh and proxy coordinates must match");
+    }
     Sample sample;
     sample.particle_ids[0] = i;
     sample.weights[0] = 1.0;
@@ -76,6 +106,13 @@ SculptSurfaceBridge SculptSurfaceBridge::for_multires_samples(
       sample.weights[k] = anchor.weights[k];
     }
     sample.detail_residual = evaluated_positions[i] - rest;
+    const Frame frame = make_frame(rest_proxy_particles[anchor.vertices[0]].position,
+                                   rest_proxy_particles[anchor.vertices[1]].position,
+                                   rest_proxy_particles[anchor.vertices[2]].position);
+    sample.frame_u = frame.u;
+    sample.frame_v = frame.v;
+    sample.frame_n = frame.n;
+    sample.frame_valid = frame.valid;
     result.samples_.push_back(sample);
   }
   return result;
@@ -100,7 +137,18 @@ std::vector<Vec3> SculptSurfaceBridge::compose_positions(
   result.reserve(samples_.size());
   for (std::size_t i = 0; i < samples_.size(); ++i) {
     const Sample &sample = samples_[i];
-    Vec3 physics_position = sample.detail_residual;
+    Vec3 residual = sample.detail_residual;
+    if (kind_ == SculptSurfaceKind::MultiresSamples && sample.frame_valid) {
+      const Frame current = make_frame(current_proxy_particles.at(sample.particle_ids[0]).position,
+                                       current_proxy_particles.at(sample.particle_ids[1]).position,
+                                       current_proxy_particles.at(sample.particle_ids[2]).position);
+      if (current.valid) {
+        residual = current.u * dot(sample.frame_u, residual) +
+                   current.v * dot(sample.frame_v, residual) +
+                   current.n * dot(sample.frame_n, residual);
+      }
+    }
+    Vec3 physics_position = residual;
     for (int k = 0; k < 3; ++k) {
       if (sample.weights[k] == 0.0) continue;
       if (sample.particle_ids[k] >= current_proxy_particles.size()) {
