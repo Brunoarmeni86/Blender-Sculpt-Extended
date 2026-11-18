@@ -12,6 +12,20 @@ ctest --test-dir build -C Release --output-on-failure
 
 Tests cover Standard/0% Assist bypass, local Grab with distance-bond propagation, plastic creep and fracture, stroke cancellation, floor constraint, and **corner UV seam preservation** by barycentric surface anchors; mask threshold clipping with UV/color/material retention and welded source-edge boundaries.
 
+## Performance and correctness audit (18 November 2026)
+
+See [CPU benchmark, confirmed regressions, fidelity limits and optimization priorities](PERFORMANCE_CORRECTNESS_AUDIT_20261118.md).
+
+Reproduce benchmark (optional target, off by default):
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSCULPT_PHYSICS_BUILD_BENCHMARKS=ON
+cmake --build build --config Release
+./build/bench_physics_core
+```
+
+Three corrected issues have regression tests: per-step dirty tracking, clearing stale targets when Assist is 0%, and immediate single-substep bond propagation. The reference still copies the whole world at stroke start, and `World::step` still advances any physics when called; the **Blender brush adapter must bypass the world entirely in Standard/0% mode**.
+
 ## Already implemented here
 
 - Position/velocity/inverse-mass particles and XPBD distance bonds (in the same mathematical family as Blender's `evaluate_distance_constraint`).
