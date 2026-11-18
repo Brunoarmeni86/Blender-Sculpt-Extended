@@ -62,15 +62,27 @@ SculptSurfaceBridge SculptSurfaceBridge::for_regular_mesh(
   SculptSurfaceBridge result;
   result.kind_ = SculptSurfaceKind::RegularMesh;
   result.sample_count_ = vertex_positions.size();
+  // A large object-space translation must not inflate alignment tolerance.
+  Vec3 lower{}, upper{};
+  if (!vertex_positions.empty()) {
+    lower = upper = vertex_positions.front();
+    for (const Vec3 &v : vertex_positions) {
+      if (!finite(v)) throw std::invalid_argument("Invalid regular mesh position");
+      lower.x = std::min(lower.x, v.x); lower.y = std::min(lower.y, v.y);
+      lower.z = std::min(lower.z, v.z);
+      upper.x = std::max(upper.x, v.x); upper.y = std::max(upper.y, v.y);
+      upper.z = std::max(upper.z, v.z);
+    }
+  }
+  const Vec3 extent = upper - lower;
+  const double tolerance = std::max(1e-6, std::min(1e-3,
+      1e-7 * std::max({extent.x, extent.y, extent.z})));
   for (std::size_t i = 0; i < vertex_positions.size(); ++i) {
     if (!finite(vertex_positions[i]) || !finite(proxy_particles[i].position)) {
       throw std::invalid_argument("Invalid regular mesh position");
     }
     const Vec3 diff = vertex_positions[i] - proxy_particles[i].position;
-    const double scale = std::max({1.0, std::abs(vertex_positions[i].x),
-                                   std::abs(vertex_positions[i].y),
-                                   std::abs(vertex_positions[i].z)});
-    if (std::sqrt(dot(diff, diff)) > 1e-6 * scale) {
+    if (std::hypot(diff.x, diff.y, diff.z) > tolerance) {
       throw std::invalid_argument("Regular Sculpt mesh and proxy coordinates must match");
     }
     // No per-vertex anchor allocations: normal Sculpt already has 1:1 indices.
