@@ -2,6 +2,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <unordered_map>
 #include <limits>
 #include <vector>
 
@@ -119,6 +121,16 @@ class World {
                                          BoundaryPolicy policy =
                                              BoundaryPolicy::StrictGlobalFallback);
   StepStatistics last_step_statistics() const;
+  /* Original physical state recorded once per stroke, for undo/cancel.
+   * Sparse for a small brush island, upgraded to a contiguous snapshot only
+   * if full-world simulation is required. Payload bytes omit map overhead. */
+  struct StrokeJournalStatistics {
+    std::size_t particles_recorded = 0;
+    std::size_t bonds_recorded = 0;
+    std::size_t approximate_payload_bytes = 0;
+    bool dense_fallback = false;
+  };
+  StrokeJournalStatistics stroke_journal_statistics() const;
   void commit_stroke();
   void cancel_stroke();
   bool stroke_active() const;
@@ -128,6 +140,9 @@ class World {
   const std::vector<std::size_t> &dirty_particles() const;
 
  private:
+  void upgrade_to_dense_journal();
+  void remember_particle(std::size_t index);
+  void remember_bond(std::size_t index);
   void step_local_impl(double dt, int substeps, int iterations, int bond_hops,
                        bool include_moving_islands);
   struct GrabTarget {
@@ -145,8 +160,20 @@ class World {
   int adaptive_cached_hops_ = -1; // Reuse tested halo width within one stroke.
   std::vector<GrabTarget> targets_;
   std::vector<std::size_t> dirty_;
-  std::vector<Particle> saved_particles_;
-  std::vector<Bond> saved_bonds_;
+  // Stable indices: particle/bond topology cannot change during a stroke.
+  std::unordered_map<std::size_t, Particle> undo_particles_;
+  std::unordered_map<std::size_t, Bond> undo_bonds_;
+  bool dense_journal_ = false;
+  std::vector<Particle> dense_undo_particles_;
+  std::vector<Bond> dense_undo_bonds_;
+  // Persistent scratch avoids O(N) stamp clearing and repeated allocation
+  // on ordinary Sculpt / Multires proxy brush dabs. The World is non-reentrant.
+  std::vector<std::uint32_t> included_generation_marks_;
+  std::uint32_t included_generation_ = 0;
+  std::vector<std::size_t> local_active_scratch_;
+  std::vector<std::size_t> local_bond_scratch_;
+  std::vector<Vec3> local_start_scratch_;
+  std::vector<Vec3> local_previous_scratch_;
   // Sparse list of particles retaining velocity across dabs/strokes.
   std::vector<std::size_t> moving_particle_ids_;
   std::vector<std::size_t> saved_moving_particle_ids_;
