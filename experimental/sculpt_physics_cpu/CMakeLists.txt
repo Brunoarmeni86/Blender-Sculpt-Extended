@@ -78,3 +78,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_sparse_undo PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_sparse_undo_tests COMMAND test_sparse_undo)
+
+add_executable(test_error_atomicity test_error_atomicity.cc)
+target_link_libraries(test_error_atomicity PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_error_atomicity_tests COMMAND test_error_atomicity)
+
+add_executable(test_grab_validation test_grab_validation.cc)
+target_link_libraries(test_grab_validation PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_grab_validation_tests COMMAND test_grab_validation)
