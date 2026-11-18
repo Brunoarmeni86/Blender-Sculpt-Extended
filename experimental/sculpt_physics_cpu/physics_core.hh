@@ -81,6 +81,18 @@ class World {
   bool apply_grab(Vec3 center, double radius, Vec3 displacement,
                   BrushPhysicsSettings settings);
   void step(double dt, int substeps = 4, int iterations = 5);
+  /* Optional approximation for brush-local, quasistatic strokes. Only particles
+   * within `bond_hops` from a Grab target are integrated. Crossing bonds act as
+   * fixed boundary constraints. Gravity/ground fall back to the global step.
+   * Not an exact replacement for a globally simulated dynamic material. */
+  void step_local(double dt, int substeps = 4, int iterations = 5,
+                  int bond_hops = 4);
+  struct StepStatistics {
+    std::size_t integrated_particles = 0;
+    std::size_t visited_bonds = 0;
+    bool used_global_fallback = false;
+  };
+  StepStatistics last_step_statistics() const;
   void commit_stroke();
   void cancel_stroke();
   bool stroke_active() const;
@@ -99,6 +111,9 @@ class World {
 
   std::vector<Particle> particles_;
   std::vector<Bond> bonds_;
+  /* Undirected bond incidence, built once as topology is added. */
+  std::vector<std::vector<std::size_t>> particle_bond_ids_;
+  StepStatistics last_stats_{};
   std::vector<GrabTarget> targets_;
   std::vector<std::size_t> dirty_;
   std::vector<Particle> saved_particles_;
