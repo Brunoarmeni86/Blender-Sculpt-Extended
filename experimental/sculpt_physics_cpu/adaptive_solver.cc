@@ -27,24 +27,8 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
 
   // Global fallback is transactional too, though it requires a full snapshot.
   auto run_global = [&]() {
-    const auto before_particles = particles_;
-    const auto before_bonds = bonds_;
-    const auto before_targets = targets_;
-    const auto before_dirty = dirty_;
-    const auto before_movers = moving_particle_ids_;
-    const StepStatistics before_stats = last_stats_;
-    try {
-      step(dt, substeps, iterations);
-    }
-    catch (...) {
-      particles_ = before_particles;
-      bonds_ = before_bonds;
-      targets_ = before_targets;
-      dirty_ = before_dirty;
-      moving_particle_ids_ = before_movers;
-      last_stats_ = before_stats;
-      throw;
-    }
+    // World::step is already transactional; avoid two extra full-world copies.
+    step(dt, substeps, iterations);
     last_stats_.used_global_fallback = true;
   };
 
