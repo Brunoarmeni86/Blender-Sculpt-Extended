@@ -1,0 +1,50 @@
+name: Sculpt Physics CPU Reference (experimental)
+
+on:
+  push:
+    branches:
+      - experiment/native-physics-assisted-brushes-20261118
+    paths:
+      - 'experimental/sculpt_physics_cpu/**'
+      - '.github/workflows/sculpt-physics-reference-cpu.yml'
+  pull_request:
+    paths:
+      - 'experimental/sculpt_physics_cpu/**'
+      - '.github/workflows/sculpt-physics-reference-cpu.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  standalone-tests:
+    name: C++17 / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S experimental/sculpt_physics_cpu -B build-sculpt-physics -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build-sculpt-physics --config Release --parallel 2
+      - name: Test
+        run: ctest --test-dir build-sculpt-physics -C Release --output-on-failure
+
+  asan-ubsan:
+    name: GCC AddressSanitizer + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S experimental/sculpt_physics_cpu -B build-sculpt-physics-sanitized
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - name: Build
+        run: cmake --build build-sculpt-physics-sanitized --parallel 2
+      - name: Test
+        run: ctest --test-dir build-sculpt-physics-sanitized --output-on-failure
