@@ -285,6 +285,42 @@ void World::step_local(double dt, int substeps, int iterations, int bond_hops)
     front_end = active.size();
     if (front_begin == front_end) break;
   }
+  // A brush-centered island must not freeze a different region that is still
+  // moving from an earlier dab/stroke. Check predicted motion for this time step.
+  // This O(N) check is a correctness-first baseline; a sparse motion index can
+  // make it sublinear later.
+  const double minimum_speed = 1.0e-10 / dt;
+  bool exterior_motion = false;
+  for (std::size_t i = 0; i < particles_.size(); ++i) {
+    if (included[i] || particles_[i].inverse_mass <= 0.0) continue;
+    const Vec3 v = particles_[i].velocity;
+    const double component_speed = std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)});
+    if (!std::isfinite(component_speed) || component_speed > minimum_speed) {
+      exterior_motion = true;
+      break;
+    }
+  }
+  if (exterior_motion) {
+    // The old source state must survive exceptions during global integration.
+    const auto old_particles = particles_;
+    const auto old_bonds = bonds_;
+    const auto old_targets = targets_;
+    const auto old_dirty = dirty_;
+    const StepStatistics old_stats = last_stats_;
+    try {
+      step(dt, substeps, iterations);
+    }
+    catch (...) {
+      particles_ = old_particles;
+      bonds_ = old_bonds;
+      targets_ = old_targets;
+      dirty_ = old_dirty;
+      last_stats_ = old_stats;
+      throw;
+    }
+    last_stats_.used_global_fallback = true;
+    return;
+  }
   // Bonds touching the active island are solved in their original index order.
   // The halo boundary is pinned; only active particles receive changes.
   std::vector<std::size_t> selected_bonds;
