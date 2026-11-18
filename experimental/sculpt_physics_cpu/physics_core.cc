@@ -51,6 +51,7 @@ std::size_t World::add_particle(Vec3 position, double inverse_mass, double radiu
     throw std::invalid_argument("Invalid particle parameters");
   }
   particles_.push_back({position, {}, inverse_mass, radius});
+  particle_bond_ids_.emplace_back();
   return particles_.size() - 1;
 }
 
@@ -70,7 +71,10 @@ std::size_t World::add_bond(std::size_t a, std::size_t b, double compliance,
   if (rest < eps) throw std::invalid_argument("Zero-length bond");
   bonds_.push_back({a, b, rest, compliance, yield_strain,
                     plastic_creep, fracture_strain, 0.0, false});
-  return bonds_.size() - 1;
+  const std::size_t id = bonds_.size() - 1;
+  particle_bond_ids_[a].push_back(id);
+  particle_bond_ids_[b].push_back(id);
+  return id;
 }
 
 void World::set_gravity(Vec3 g)
@@ -219,11 +223,142 @@ void World::step(double dt, int substeps, int iterations)
     }
   }
   dirty_.clear();
+  last_stats_ = {particles_.size(), bonds_.size() * std::size_t(substeps) * std::size_t(iterations), false};
   for (std::size_t i = 0; i < particles_.size(); ++i) {
     const Vec3 delta = particles_[i].position - step_start_positions[i];
     if (length(delta) > 1e-10) dirty_.push_back(i);
   }
 }
+
+void World::step_local(double dt, int substeps, int iterations, int bond_hops)
+{
+  if (!active_stroke_) throw std::logic_error("begin_stroke required");
+  if (!valid(dt) || dt <= 0.0 || substeps <= 0 || iterations <= 0 ||
+      substeps > 256 || iterations > 256 || bond_hops < 0 || bond_hops > 256) {
+    throw std::invalid_argument("Invalid local physics parameters");
+  }
+  // A local brush island is an approximation for quasistatic strokes only.
+  // Global gravity/contact (or an inactive brush) requires global integration.
+  if (ground_enabled_ || length(gravity_) > eps || targets_.empty()) {
+    step(dt, substeps, iterations);
+    last_stats_.used_global_fallback = true;
+    return;
+  }
+  const double h = dt / substeps;
+  const double attenuation = std::exp(-damping_ * h);
+  std::vector<unsigned char> included(particles_.size(), 0);
+  std::vector<std::size_t> active;
+  for (const GrabTarget &target : targets_) {
+    if (!included[target.index]) {
+      included[target.index] = 1;
+      active.push_back(target.index);
+    }
+  }
+  // Expand through material bonds. Stable ordering is important for repeatable
+  // constraint solutions; avoid unordered iteration of the solver itself.
+  std::size_t front_begin = 0;
+  std::size_t front_end = active.size();
+  for (int hop = 0; hop < bond_hops; ++hop) {
+    for (std::size_t i = front_begin; i < front_end; ++i) {
+      const std::size_t pi = active[i];
+      for (const std::size_t bi : particle_bond_ids_[pi]) {
+        const Bond &b = bonds_[bi];
+        if (b.broken) continue;
+        const std::size_t other = b.a == pi ? b.b : b.a;
+        if (!included[other]) {
+          included[other] = 1;
+          active.push_back(other);
+        }
+      }
+    }
+    front_begin = front_end;
+    front_end = active.size();
+    if (front_begin == front_end) break;
+  }
+  // Bonds touching the active island are solved in their original index order.
+  // The halo boundary is pinned; only active particles receive changes.
+  std::vector<std::size_t> selected_bonds;
+  for (const std::size_t i : active) {
+    selected_bonds.insert(selected_bonds.end(),
+                          particle_bond_ids_[i].begin(), particle_bond_ids_[i].end());
+  }
+  std::sort(selected_bonds.begin(), selected_bonds.end());
+  selected_bonds.erase(std::unique(selected_bonds.begin(), selected_bonds.end()),
+                       selected_bonds.end());
+  std::vector<Vec3> step_start, previous;
+  step_start.reserve(active.size());
+  previous.resize(active.size());
+  for (const std::size_t i : active) step_start.push_back(particles_[i].position);
+  for (int sub = 0; sub < substeps; ++sub) {
+    for (std::size_t j = 0; j < active.size(); ++j) {
+      Particle &p = particles_[active[j]];
+      previous[j] = p.position;
+      if (p.inverse_mass > 0.0) p.position += p.velocity * h;
+    }
+    for (const std::size_t bi : selected_bonds) bonds_[bi].lambda = 0.0;
+    for (GrabTarget &t : targets_) t.lambda_x = t.lambda_y = t.lambda_z = 0.0;
+    for (int iter = 0; iter < iterations; ++iter) {
+      for (GrabTarget &t : targets_) {
+        Particle &p = particles_[t.index];
+        const double alpha = t.compliance / (h * h);
+        const double denom = p.inverse_mass + alpha;
+        if (denom <= eps) continue;
+        const Vec3 C = p.position - t.goal;
+        const Vec3 lambda{t.lambda_x, t.lambda_y, t.lambda_z};
+        const Vec3 dlambda = (C * -1.0 - lambda * alpha) / denom;
+        p.position += dlambda * p.inverse_mass;
+        t.lambda_x += dlambda.x; t.lambda_y += dlambda.y; t.lambda_z += dlambda.z;
+      }
+      for (const std::size_t bi : selected_bonds) {
+        Bond &b = bonds_[bi];
+        if (b.broken) continue;
+        Particle &a = particles_[b.a];
+        Particle &c = particles_[b.b];
+        Vec3 direction = c.position - a.position;
+        const double len = length(direction);
+        if (len < eps) continue;
+        const double strain = (len - b.rest_length) / b.rest_length;
+        if (std::abs(strain) > b.fracture_strain) {
+          b.broken = true;
+          continue;
+        }
+        if (iter == 0 && std::abs(strain) > b.yield_strain && b.plastic_creep > 0) {
+          const double rate = 1.0 - std::exp(-b.plastic_creep * h);
+          b.rest_length = std::max(eps, b.rest_length + (len - b.rest_length) * rate);
+        }
+        const double C = len - b.rest_length;
+        const double alpha = b.compliance / (h * h);
+        const double inv_a = included[b.a] ? a.inverse_mass : 0.0;
+        const double inv_c = included[b.b] ? c.inverse_mass : 0.0;
+        const double denom = inv_a + inv_c + alpha;
+        if (denom <= eps) continue;
+        const double dlambda = (-C - alpha * b.lambda) / denom;
+        b.lambda += dlambda;
+        direction = direction / len;
+        if (inv_a > 0.0) a.position += direction * (-inv_a * dlambda);
+        if (inv_c > 0.0) c.position += direction * (inv_c * dlambda);
+      }
+    }
+    for (std::size_t j = 0; j < active.size(); ++j) {
+      Particle &p = particles_[active[j]];
+      if (p.inverse_mass <= 0.0) continue;
+      p.velocity = (p.position - previous[j]) / h * attenuation;
+      if (!valid(p.position) || !valid(p.velocity)) {
+        throw std::runtime_error("Local physics state became non-finite");
+      }
+    }
+  }
+  dirty_.clear();
+  for (std::size_t j = 0; j < active.size(); ++j) {
+    if (length(particles_[active[j]].position - step_start[j]) > 1e-10) {
+      dirty_.push_back(active[j]);
+    }
+  }
+  last_stats_ = {active.size(), selected_bonds.size() * std::size_t(substeps) *
+                 std::size_t(iterations), false};
+}
+
+World::StepStatistics World::last_step_statistics() const { return last_stats_; }
 
 void World::commit_stroke()
 {
