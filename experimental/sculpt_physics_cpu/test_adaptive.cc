@@ -76,6 +76,33 @@ int main()
     }
     fixed.cancel_stroke(); bounded.cancel_stroke();
   }
+  // A stiff numerical boundary can cancel Grab without moving the border.
+  // An adaptive test using motion alone would falsely accept zero displacement.
+  {
+    auto prepare=[](){
+      World w;
+      w.add_particle({0,0,0});
+      w.add_particle({1,0,0});
+      w.add_bond(0,1,0);
+      w.begin_stroke();
+      CHECK(w.apply_grab({0,0,0},0.25,{0.25,0,0},
+                         {BrushPhysicsMode::FullPhysics,1,0}));
+      return w;
+    };
+    World global=prepare(),strict=prepare(),bounded=prepare();
+    global.step(1./30.,1,10);
+    auto correct=strict.step_local_adaptive(1./30.,1,10,0,0,0.02);
+    CHECK(correct.used_global_fallback);
+    CHECK(correct.max_boundary_motion < 1e-12);
+    CHECK(correct.max_boundary_reaction > 0.2);
+    CHECK(near(strict.particles()[0].position.x,global.particles()[0].position.x));
+    auto approx=bounded.step_local_adaptive(1./30.,1,10,0,0,0.02,
+                      World::BoundaryPolicy::BoundedApproximation);
+    CHECK(!approx.converged);
+    CHECK(approx.max_boundary_reaction > 0.2);
+    CHECK(near(bounded.particles()[0].position.x,0));
+    global.cancel_stroke(); strict.cancel_stroke(); bounded.cancel_stroke();
+  }
   // Overflow in the solver must not poison the next dab's world state.
   {
     World w;
