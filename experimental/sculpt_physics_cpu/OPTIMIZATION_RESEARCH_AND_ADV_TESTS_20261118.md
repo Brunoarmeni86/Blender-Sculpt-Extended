@@ -92,3 +92,27 @@ No Blender PBVH/viewport/Undo/transfers in these timings. Differences from earli
 - [ ] Profile real normal Sculpt and Multires dirty-tile bridge, then consider accelerated backends.
 
 **Keep the PR Draft. This is a CPU reference audit, not shipping Sculpt physics.**
+
+## Small Steps experiment — result from this reference solver
+
+Reproducible `bench_substeps` target (enable `SCULPT_PHYSICS_BUILD_BENCHMARKS=ON`).
+It compares equal **20 total constraint iterations** for `4x5`, `10x2`,
+`20x1`, plus an unequal `40x2` high-substep diagnostic. One warm solver
+run per configuration; this is a preliminary **single run**, not p50/p95.
+
+| Grid | Schedule | Solver time | RMS relative bond length error | Maximum relative bond error |
+| --- | --- | ---: | ---: | ---: |
+| 1k particles | 4x5 | 1.063 ms | 0.01244 | 0.3480 |
+| 1k particles | 10x2 | 0.980 ms | 0.01381 | 0.3090 |
+| 1k particles | 20x1 | 0.974 ms | 0.01626 | 0.2974 |
+| 8k particles | 4x5 | 10.198 ms | 0.00530 | 0.3648 |
+| 8k particles | 10x2 | 12.593 ms | 0.00535 | 0.3492 |
+| 8k particles | 20x1 | 9.709 ms | 0.00595 | 0.3367 |
+
+Interpretation: more substeps decreased **the maximum** relative length violation
+in this setup, but did **not** reduce the RMS of all bond-length deviations.
+The simple metric is not a ground-truth measure of physical accuracy or visual
+quality and can be influenced by legitimate compliant deformation. Repeat
+with volume conservation, multi-dab histories, collisions and calibrated
+references before choosing an adaptive substep policy.
+
