@@ -67,8 +67,9 @@ std::size_t World::add_bond(std::size_t a, std::size_t b, double compliance,
       std::isnan(fracture_strain) || fracture_strain < 0.0) {
     throw std::invalid_argument("Invalid bond parameters");
   }
-  const double rest = length(particles_[a].position - particles_[b].position);
-  if (rest < eps) throw std::invalid_argument("Zero-length bond");
+  const Vec3 rest_delta = particles_[a].position - particles_[b].position;
+  const double rest = std::hypot(rest_delta.x, rest_delta.y, rest_delta.z);
+  if (!valid(rest) || rest < eps) throw std::invalid_argument("Invalid bond length");
   bonds_.push_back({a, b, rest, compliance, yield_strain,
                     plastic_creep, fracture_strain, 0.0, false});
   const std::size_t id = bonds_.size() - 1;
@@ -326,11 +327,15 @@ void World::step_local(double dt, int substeps, int iterations, int bond_hops)
         const double len = length(direction);
         if (len < eps) continue;
         const double strain = (len - b.rest_length) / b.rest_length;
-        if (std::abs(strain) > b.fracture_strain) {
+        // The local halo boundary is a numerical pin, not a physical pin:
+        // it must not produce irreversible fracture or plastic rest changes.
+        const bool fully_active_bond = included[b.a] && included[b.b];
+        if (fully_active_bond && std::abs(strain) > b.fracture_strain) {
           b.broken = true;
           continue;
         }
-        if (iter == 0 && std::abs(strain) > b.yield_strain && b.plastic_creep > 0) {
+        if (fully_active_bond && iter == 0 && std::abs(strain) > b.yield_strain &&
+            b.plastic_creep > 0) {
           const double rate = 1.0 - std::exp(-b.plastic_creep * h);
           b.rest_length = std::max(eps, b.rest_length + (len - b.rest_length) * rate);
         }
