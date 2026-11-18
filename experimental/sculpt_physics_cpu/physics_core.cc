@@ -104,22 +104,6 @@ void World::remember_bond(const std::size_t i)
 {
   if (active_stroke_ && !dense_journal_) undo_bonds_.try_emplace(i, bonds_[i]);
 }
-void World::upgrade_to_dense_journal()
-{
-  if (!active_stroke_ || dense_journal_) return;
-  // Reconstruct the pre-stroke state. A local dab may already have modified
-  // particles and plastic/broken bonds, so overlay the original sparse values.
-  // Finish allocating before discarding the existing journal.
-  std::vector<Particle> particles_before = particles_;
-  std::vector<Bond> bonds_before = bonds_;
-  for (const auto &entry : undo_particles_) particles_before[entry.first] = entry.second;
-  for (const auto &entry : undo_bonds_) bonds_before[entry.first] = entry.second;
-  dense_undo_particles_ = std::move(particles_before);
-  dense_undo_bonds_ = std::move(bonds_before);
-  dense_journal_ = true;
-  undo_particles_.clear();
-  undo_bonds_.clear();
-}
 World::StrokeJournalStatistics World::stroke_journal_statistics() const
 {
   if (dense_journal_) {
@@ -197,7 +181,7 @@ void World::step(double dt, int substeps, int iterations)
   }
   // XPBD compliance/(h*h) is undefined when the squared substep underflows.
   const double probe_h = dt / substeps;
-  if (probe_h * probe_h == 0.0) {
+  if (probe_h * probe_h < std::numeric_limits<double>::min()) {
     throw std::invalid_argument("Substep too small for XPBD constraint denominator");
   }
   // Preserve the last accepted dab if a numerical step fails.
@@ -211,9 +195,8 @@ void World::step(double dt, int substeps, int iterations)
   try {
     const double h = dt / substeps;
     const double attenuation = std::exp(-damping_ * h);
-    // Full-world integration requires a compact snapshot. Preserve the
-    // original state if earlier local dabs wrote into the sparse journal.
-    upgrade_to_dense_journal();
+    // Convert the current-step checkpoint into dense Undo only after success.
+    // A failed dab must preserve the existing sparse stroke journal.
     // Dirty regions are consumed between dabs for PBVH updates, so compare against
     // the start of THIS step, not against the beginning of the entire stroke.
     std::vector<Vec3> step_start_positions;
@@ -236,11 +219,13 @@ void World::step(double dt, int substeps, int iterations)
         for (GrabTarget &t : targets_) {
           Particle &p = particles_[t.index];
           const double alpha = t.compliance / (h * h);
+          if (!valid(alpha)) throw std::runtime_error("Grab XPBD compliance out of range");
           const double denom = p.inverse_mass + alpha;
           if (denom <= eps) continue;
           const Vec3 C = p.position - t.goal;
           const Vec3 lambda{t.lambda_x, t.lambda_y, t.lambda_z};
           const Vec3 dlambda = (C * -1.0 - lambda * alpha) / denom;
+          if (!valid(dlambda)) throw std::runtime_error("Grab XPBD multiplier out of range");
           p.position += dlambda * p.inverse_mass;
           t.lambda_x += dlambda.x; t.lambda_y += dlambda.y; t.lambda_z += dlambda.z;
         }
@@ -250,6 +235,7 @@ void World::step(double dt, int substeps, int iterations)
           Particle &c = particles_[b.b];
           Vec3 direction = c.position - a.position;
           const double len = length(direction);
+          if (!valid(len)) throw std::runtime_error("Bond length out of range");
           if (len < eps) continue;
           const double strain = (len - b.rest_length) / b.rest_length;
           if (std::abs(strain) > b.fracture_strain) {
@@ -263,9 +249,13 @@ void World::step(double dt, int substeps, int iterations)
           }
           const double C = len - b.rest_length;
           const double alpha = b.compliance / (h * h);
+          if (!valid(alpha)) throw std::runtime_error("Bond XPBD compliance out of range");
           const double denom = a.inverse_mass + c.inverse_mass + alpha;
           if (denom <= eps) continue;
           const double dlambda = (-C - alpha * b.lambda) / denom;
+          if (!valid(dlambda) || !valid(b.lambda + dlambda)) {
+            throw std::runtime_error("Bond XPBD multiplier out of range");
+          }
           b.lambda += dlambda;
           direction = direction / len;
           if (a.inverse_mass > 0.0) a.position += direction * (-a.inverse_mass * dlambda);
@@ -302,6 +292,17 @@ void World::step(double dt, int substeps, int iterations)
       const Vec3 v = particles_[i].velocity;
       if (v.x != 0.0 || v.y != 0.0 || v.z != 0.0) moving_particle_ids_.push_back(i);
     }
+    if (!dense_journal_) {
+      // The rollback snapshot is the pre-global-dab state. Overlay pre-STROKE
+      // sparse originals from earlier local dabs, without a second full copy.
+      for (const auto &entry : undo_particles_) step_particles[entry.first] = entry.second;
+      for (const auto &entry : undo_bonds_) step_bonds[entry.first] = entry.second;
+      dense_undo_particles_ = std::move(step_particles);
+      dense_undo_bonds_ = std::move(step_bonds);
+      dense_journal_ = true;
+      undo_particles_.clear();
+      undo_bonds_.clear();
+    }
   }
   catch (...) {
     particles_.swap(step_particles);
@@ -334,7 +335,7 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   }
   // XPBD compliance/(h*h) is undefined when the squared substep underflows.
   const double probe_h = dt / substeps;
-  if (probe_h * probe_h == 0.0) {
+  if (probe_h * probe_h < std::numeric_limits<double>::min()) {
     throw std::invalid_argument("Substep too small for XPBD constraint denominator");
   }
   // Without an active target, a quasistatic sculpt dab must be a genuine no-op.
@@ -435,25 +436,8 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
     }
   }
   if (exterior_motion) {
-    // The old source state must survive exceptions during global integration.
-    const auto old_particles = particles_;
-    const auto old_bonds = bonds_;
-    const auto old_targets = targets_;
-    const auto old_dirty = dirty_;
-    const auto old_movers = moving_particle_ids_;
-    const StepStatistics old_stats = last_stats_;
-    try {
-      step(dt, substeps, iterations);
-    }
-    catch (...) {
-      particles_ = old_particles;
-      bonds_ = old_bonds;
-      targets_ = old_targets;
-      dirty_ = old_dirty;
-      moving_particle_ids_ = old_movers;
-      last_stats_ = old_stats;
-      throw;
-    }
+    // World::step already provides exact rollback for a failed global dab.
+    step(dt, substeps, iterations);
     last_stats_.used_global_fallback = true;
     return;
   }
@@ -505,11 +489,13 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
         for (GrabTarget &t : targets_) {
           Particle &p = particles_[t.index];
           const double alpha = t.compliance / (h * h);
+          if (!valid(alpha)) throw std::runtime_error("Grab XPBD compliance out of range");
           const double denom = p.inverse_mass + alpha;
           if (denom <= eps) continue;
           const Vec3 C = p.position - t.goal;
           const Vec3 lambda{t.lambda_x, t.lambda_y, t.lambda_z};
           const Vec3 dlambda = (C * -1.0 - lambda * alpha) / denom;
+          if (!valid(dlambda)) throw std::runtime_error("Grab XPBD multiplier out of range");
           p.position += dlambda * p.inverse_mass;
           t.lambda_x += dlambda.x; t.lambda_y += dlambda.y; t.lambda_z += dlambda.z;
         }
@@ -520,6 +506,7 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
           Particle &c = particles_[b.b];
           Vec3 direction = c.position - a.position;
           const double len = length(direction);
+          if (!valid(len)) throw std::runtime_error("Bond length out of range");
           if (len < eps) continue;
           const double strain = (len - b.rest_length) / b.rest_length;
           // The local halo boundary is a numerical pin, not a physical pin:
@@ -536,11 +523,15 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
           }
           const double C = len - b.rest_length;
           const double alpha = b.compliance / (h * h);
+          if (!valid(alpha)) throw std::runtime_error("Bond XPBD compliance out of range");
           const double inv_a = included(b.a) ? a.inverse_mass : 0.0;
           const double inv_c = included(b.b) ? c.inverse_mass : 0.0;
           const double denom = inv_a + inv_c + alpha;
           if (denom <= eps) continue;
           const double dlambda = (-C - alpha * b.lambda) / denom;
+          if (!valid(dlambda) || !valid(b.lambda + dlambda)) {
+            throw std::runtime_error("Bond XPBD multiplier out of range");
+          }
           b.lambda += dlambda;
           direction = direction / len;
           if (inv_a > 0.0) a.position += direction * (-inv_a * dlambda);
