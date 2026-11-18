@@ -238,6 +238,17 @@ void World::step(double dt, int substeps, int iterations)
 
 void World::step_local(double dt, int substeps, int iterations, int bond_hops)
 {
+  step_local_impl(dt, substeps, iterations, bond_hops, false);
+}
+
+void World::step_local_multi(double dt, int substeps, int iterations, int bond_hops)
+{
+  step_local_impl(dt, substeps, iterations, bond_hops, true);
+}
+
+void World::step_local_impl(double dt, int substeps, int iterations, int bond_hops,
+                            bool include_moving_islands)
+{
   if (!active_stroke_) throw std::logic_error("begin_stroke required");
   if (!valid(dt) || dt <= 0.0 || substeps <= 0 || iterations <= 0 ||
       substeps > 256 || iterations > 256 || bond_hops < 0 || bond_hops > 256) {
@@ -268,6 +279,26 @@ void World::step_local(double dt, int substeps, int iterations, int bond_hops)
       active.push_back(target.index);
     }
   }
+  // Seed any separately moving islands as well as the active brush targets.
+  // Unlike the legacy local path, multi-island mode advances these components
+  // without forcing an unrelated global step.
+  if (include_moving_islands) {
+    const double minimum_speed = 1.0e-10 / dt;
+    for (const std::size_t pi : moving_particle_ids_) {
+      if (pi >= particles_.size()) throw std::logic_error("Stale moving-particle index");
+      const Particle &p = particles_[pi];
+      if (p.inverse_mass <= 0.0 || included[pi]) continue;
+      const Vec3 v = p.velocity;
+      const double component_speed = std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)});
+      if (!std::isfinite(component_speed)) {
+        throw std::runtime_error("Non-finite velocity in moving island");
+      }
+      if (component_speed > minimum_speed) {
+        included[pi] = 1;
+        active.push_back(pi);
+      }
+    }
+  }
   // Expand through material bonds. Stable ordering is important for repeatable
   // constraint solutions; avoid unordered iteration of the solver itself.
   std::size_t front_begin = 0;
@@ -295,13 +326,15 @@ void World::step_local(double dt, int substeps, int iterations, int bond_hops)
   // make it sublinear later.
   const double minimum_speed = 1.0e-10 / dt;
   bool exterior_motion = false;
-  for (const std::size_t i : moving_particle_ids_) {
-    if (included[i] || particles_[i].inverse_mass <= 0.0) continue;
+  if (!include_moving_islands) {
+    for (const std::size_t i : moving_particle_ids_) {
+      if (included[i] || particles_[i].inverse_mass <= 0.0) continue;
     const Vec3 v = particles_[i].velocity;
     const double component_speed = std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)});
-    if (!std::isfinite(component_speed) || component_speed > minimum_speed) {
-      exterior_motion = true;
-      break;
+      if (!std::isfinite(component_speed) || component_speed > minimum_speed) {
+        exterior_motion = true;
+        break;
+      }
     }
   }
   if (exterior_motion) {
