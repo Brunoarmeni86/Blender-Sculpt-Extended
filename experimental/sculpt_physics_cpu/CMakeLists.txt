@@ -137,3 +137,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_multires_safety PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_multires_safety_tests COMMAND test_multires_safety)
+
+# Adapter-level contract: Blender computes exact brush factors, masks, and
+# face/corner provenance. World solves only the staged target constraints.
+add_executable(test_native_brush_targets test_native_brush_targets.cc)
+target_link_libraries(test_native_brush_targets PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_native_brush_targets PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_native_brush_contract_tests COMMAND test_native_brush_targets)

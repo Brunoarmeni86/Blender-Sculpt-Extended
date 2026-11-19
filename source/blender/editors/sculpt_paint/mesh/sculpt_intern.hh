@@ -233,6 +233,12 @@ struct StrokeCache {
   std::shared_ptr<brushes::ElasticGrabWeightCache> elastic_grab_weight_cache;
   /* SCULPT_ELASTIC_ACCELERATED_V2: approximate weights must never share Exact entries. */
   std::shared_ptr<brushes::ElasticGrabWeightCache> elastic_grab_accelerated_cache;
+  // Experimental preview state is always present in this C++ runtime struct,
+  // independent of build flags, to preserve a consistent layout across TUs.
+  // Neither field is serialized in .blend DNA.
+  float3 xpbd_v12_previous_delta = float3(0.0f);
+  bool xpbd_v12_failed = false;
+  bool xpbd_v12_active_logged = false;
   /* Invariants */
   float initial_radius = 0.0f;
   float3 scale = float3(0);

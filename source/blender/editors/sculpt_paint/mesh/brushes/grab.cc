@@ -3,6 +3,16 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include <queue>
+#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#  include <algorithm>
+#  include <cmath>
+#  include <cstdio>
+#  include <stdexcept>
+#  include <utility>
+#  include <cstdlib>
+#  include <vector>
+#  include "physics_core.hh"
+#endif
 
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
 
@@ -13,6 +23,9 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_mesh.hh"
+#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#  include "BKE_multires_sculpt_layers.hh"
+#endif
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
@@ -163,6 +176,178 @@ static void calc_bmesh(const Depsgraph &depsgraph,
   apply_translations(translations, verts);
 }
 
+#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+/* V12: deliberately conservative first native-scene integration.
+ * Runtime OFF by default, normal PBVH Mesh only. The physics proxy is
+ * reconstructed each dab (expensive), so no state survives a failed write.
+ * The active set is restricted to vertices in the existing sculpt node mask
+ * to avoid writing unrecorded vertices outside Blender's native Undo region.
+ * This is NOT yet the final multi-island/Multires integration. */
+static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
+                                  const Sculpt &sd,
+                                  Object &object,
+                                  const IndexMask &node_mask,
+                                  const Brush &brush,
+                                  const float3 &grab_delta,
+                                  bke::pbvh::Tree &pbvh)
+{
+  const char *enabled = std::getenv("BLENDER_SCULPT_XPBD_GRAB_V12");
+  if (!enabled || enabled[0] != '1' || enabled[1] != '\0') return false;
+  if (pbvh.type() != bke::pbvh::Type::Mesh) return false;
+  SculptSession &ss = *object.runtime->sculpt_session;
+  StrokeCache &cache = *ss.cache;
+  // Do not bypass Sculpt Extended's Multires base-layer recording/CCG logic.
+  // This first gate is only for an unmodified ordinary mesh object.
+  if (bke::multires_layers::base_modifier(object) != nullptr) return false;
+  // PAINT_SYMMETRY_FEATHER is ON by default even with no symmetry axes.
+  // Reject only actual mirror/tile axes, not the harmless feather option.
+  const ePaintSymmetryFlags nontrivial_symmetry = ePaintSymmetryFlags(
+      PAINT_SYMM_X | PAINT_SYMM_Y | PAINT_SYMM_Z |
+      PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z);
+  if (cache.xpbd_v12_failed || ss.deform_modifiers_active || ss.shapekey_active ||
+      (sd.paint.symmetry_flags & nontrivial_symmetry) != PAINT_SYMM_NONE ||
+      cache.tile_pass != 0 ||
+      cache.radial_symmetry_pass != 0 || cache.mirror_symmetry_pass != 0)
+  {
+    return false;
+  }
+
+  const Mesh &mesh = *id_cast<Mesh *>(object.data);
+  // Limit this baseline to meshes small enough to rebuild an XPBD proxy
+  // on every dab. Real production Sculpt will cache and incrementally update it.
+  if (mesh.verts_num == 0 || mesh.verts_num > 20000) return false;
+  const PositionDeformData position_data(depsgraph, object);
+  const Span<float3> eval = position_data.eval;
+  if (eval.size() != mesh.verts_num) return false;
+  MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  const MeshAttributeData attributes(mesh);
+  const float3 delta = grab_delta - cache.xpbd_v12_previous_delta;
+  const double h = 1.0 / 60.0;
+
+  struct Influence {
+    int vertex;
+    float factor;
+  };
+  struct PreparedNode {
+    int node_id;
+    Vector<float3> translation;
+  };
+  std::vector<PreparedNode> writes;
+  try {
+    sculpt_physics::World world;
+    for (const int i : eval.index_range()) {
+      const float3 p = eval[i];
+      const bool hidden = !attributes.hide_vert.is_empty() && attributes.hide_vert[i];
+      const float mask = attributes.mask.is_empty() ? 0.0f : attributes.mask[i];
+      const double inv_mass = hidden || mask >= 0.999f ? 0.0 :
+                              std::max(1.0e-4, 1.0 - double(mask));
+      world.add_particle({double(p.x), double(p.y), double(p.z)}, inv_mass);
+    }
+    for (const int2 edge : mesh.edges()) {
+      // Degenerate source edges do not define a valid material constraint.
+      // They must not abort the entire stroke or mutate Blender geometry.
+      try {
+        world.add_bond(std::size_t(edge[0]), std::size_t(edge[1]), 1.0e-5);
+      }
+      catch (const std::invalid_argument &) {
+        continue;
+      }
+    }
+    world.begin_stroke();
+    std::vector<Influence> selection;
+    Vector<float> factors;
+    Vector<float> distances;
+    node_mask.foreach_index([&](const int ni) {
+      const bke::pbvh::MeshNode &node = nodes[ni];
+      const OrigPositionData orig_data = orig_position_data_get_mesh(object, node);
+      const Span<int> verts = node.verts();
+      calc_factors_common_from_orig_data_mesh(depsgraph,
+                                              brush,
+                                              object,
+                                              attributes,
+                                              orig_data.positions,
+                                              orig_data.normals,
+                                              node,
+                                              factors,
+                                              distances);
+      if (brush.flag2 & BRUSH_GRAB_SILHOUETTE) {
+        calc_silhouette_factors(cache, grab_delta, orig_data.normals, factors);
+      }
+      for (const int j : verts.index_range()) {
+        if (factors[j] > 0.0f && std::isfinite(factors[j])) {
+          selection.push_back({verts[j], std::min(factors[j], 1.0f)});
+        }
+      }
+    });
+    std::sort(selection.begin(), selection.end(),
+              [](const Influence &a, const Influence &b) { return a.vertex < b.vertex; });
+    std::vector<sculpt_physics::World::BrushTargetInput> targets;
+    for (std::size_t k = 0; k < selection.size();) {
+      const int vi = selection[k].vertex;
+      float strength = selection[k].factor;
+      while (++k < selection.size() && selection[k].vertex == vi) {
+        strength = std::max(strength, selection[k].factor);
+      }
+      const float3 source = eval[vi];
+      const float3 goal = source + delta * strength;
+      targets.push_back({std::size_t(vi), {double(goal.x),double(goal.y),double(goal.z)}, 1.0e-6});
+    }
+    if (targets.empty()) {
+      cache.xpbd_v12_previous_delta = grab_delta;
+      return true;
+    }
+    world.set_brush_targets(targets);
+    // Only brush targets (hop=0) are dynamic. Crossing bonds react as
+    // numerical pins; no exterior mesh vertex can change without an Undo node.
+    world.step_local(h, 2, 5, 0);
+
+    // Complete staging and float-range validation before any editor writeback.
+    // Use the *same* PBVH node mask already handled by Blender Sculpt Undo.
+    node_mask.foreach_index([&](const int ni) {
+      PreparedNode prepared;
+      prepared.node_id = ni;
+      const Span<int> verts = nodes[ni].verts();
+      prepared.translation.resize(verts.size());
+      for (const int j : verts.index_range()) {
+        const sculpt_physics::Vec3 desired = world.particles()[verts[j]].position;
+        const float3 old = eval[verts[j]];
+        const float3 change{float(desired.x-double(old.x)),
+                            float(desired.y-double(old.y)),
+                            float(desired.z-double(old.z))};
+        if (!std::isfinite(change.x) || !std::isfinite(change.y) || !std::isfinite(change.z)) {
+          throw std::runtime_error("V12 experimental Grab displacement out of float range");
+        }
+        prepared.translation[j] = change;
+      }
+      clip_and_lock_translations(sd, ss, eval, verts, prepared.translation);
+      writes.push_back(std::move(prepared));
+    });
+    world.commit_stroke();
+  }
+  catch (const std::exception &ex) {
+    // No mesh was changed: hand this dab back to the regular Grab brush,
+    // and disable the experimental preview for the rest of this stroke.
+    std::fprintf(stderr, "[V12 XPBD Grab] preview disabled: %s\n", ex.what());
+    cache.xpbd_v12_failed = true;
+    return false;
+  }
+
+  for (PreparedNode &prepared : writes) {
+    bke::pbvh::MeshNode &node = nodes[prepared.node_id];
+    position_data.deform(prepared.translation, node.verts());
+    bke::pbvh::update_node_bounds_mesh(position_data.eval, node);
+  }
+  pbvh.tag_positions_changed(node_mask);
+  pbvh.flush_bounds_to_parents();
+  if (!cache.xpbd_v12_active_logged) {
+    std::fprintf(stderr, "[V12 XPBD Grab] experimental preview ACTIVE on ordinary mesh\n");
+    cache.xpbd_v12_active_logged = true;
+  }
+  cache.xpbd_v12_previous_delta = grab_delta;
+  return true;
+}
+#endif
+
 }  // namespace grab_cc
 
 void do_grab_brush(const Depsgraph &depsgraph,
@@ -176,6 +361,12 @@ void do_grab_brush(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
 
   const float3 grab_delta = grab_delta_get(brush, *ss.cache) * ss.cache->bstrength;
+
+#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+  if (try_xpbd_grab_preview(depsgraph, sd, object, node_mask, brush, grab_delta, pbvh)) {
+    return;
+  }
+#endif
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;
   switch (pbvh.type()) {

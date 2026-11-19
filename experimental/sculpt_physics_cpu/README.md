@@ -2,6 +2,12 @@
 
 This is **working standalone C++17 prototype code**, not a shipped Blender feature or a compiled Blender module. It is deliberately decoupled from Geometry Nodes and the editor to provide a small, testable starting contract for future native integration. Do **not** use as a general collision solver or production-ready volume simulation.
 
+## Forward roadmap: integration of open granular engines and GPU
+
+[**Carnage Grains-like capabilities, Newton/Warp MPM and Chrono DEM-Engine integration roadmap**](ROADMAP_CARNAGE_GRAINS_STYLE_GPU_BACKEND_20261119.md).
+
+The intended next phase is to evaluate **actual open-source physics backends** and independently develop comparable granular, glue, tearing, upres/meshing and texture-transfer behaviors for Sculpt Extended. Carnage Grains is a **functional reference only**; its code is not integrated. This repository currently has a **CPU-only XPBD reference** plus an opt-in **unverified native Grab preview**, not a CUDA physics implementation. GPU/CUDA options in Cycles do not enable GPU physics.
+
 ## Build and test
 
 ```sh
