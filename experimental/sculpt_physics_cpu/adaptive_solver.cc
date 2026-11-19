@@ -109,10 +109,18 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
     }
     std::vector<Particle> before_particles;
     before_particles.reserve(n_active);
+    // A numerically successful candidate may still be rejected by the
+    // boundary quality gate; its newly recorded Undo state must also revert.
+    std::vector<std::size_t> newly_recorded_particles;
+    std::vector<std::size_t> newly_recorded_bonds;
     std::vector<std::size_t> bond_ids;
     for (std::size_t j = 0; j < n_active; ++j) {
       const std::size_t id = traversal[j];
       before_particles.push_back(particles_[id]);
+      if (!dense_journal_ && particles_[id].inverse_mass > 0.0 &&
+          undo_particles_.find(id) == undo_particles_.end()) {
+        newly_recorded_particles.push_back(id);
+      }
       bond_ids.insert(bond_ids.end(), particle_bond_ids_[id].begin(),
                       particle_bond_ids_[id].end());
     }
@@ -120,9 +128,16 @@ World::AdaptiveStepResult World::step_local_adaptive(double dt, int substeps,
     bond_ids.erase(std::unique(bond_ids.begin(), bond_ids.end()), bond_ids.end());
     std::vector<Bond> before_bonds;
     before_bonds.reserve(bond_ids.size());
-    for (std::size_t id : bond_ids) before_bonds.push_back(bonds_[id]);
+    for (std::size_t id : bond_ids) {
+      before_bonds.push_back(bonds_[id]);
+      if (!dense_journal_ && undo_bonds_.find(id) == undo_bonds_.end()) {
+        newly_recorded_bonds.push_back(id);
+      }
+    }
 
     auto restore = [&]() {
+      for (std::size_t id : newly_recorded_particles) undo_particles_.erase(id);
+      for (std::size_t id : newly_recorded_bonds) undo_bonds_.erase(id);
       for (std::size_t j = 0; j < n_active; ++j) {
         particles_[traversal[j]] = before_particles[j];
       }
