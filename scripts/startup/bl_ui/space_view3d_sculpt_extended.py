@@ -97,6 +97,15 @@ def draw_polypaint_brush_controls(layout, context):
                 settings.prop(brush, prop, text=label)
         if brush.sculpt_brush_type == 'SMEAR':
             settings.prop(brush, 'smear_deform_type', text='Mode')
+    fill_box = col.box()
+    fill_box.label(text='Fill', icon='BRUSH_DATA')
+    fill_box.prop(context.scene, 'sculpt_polypaint_fill_color', text='Fill Color')
+    m = polypaint_multires(context)
+    fill_row = fill_box.row(align=True)
+    fill_row.enabled = bool(m and m.polypaint_attribute)
+    fill_row.operator('sculpt.polypaint_fill_primary', text='Fill Active Layer',
+                      icon='COLOR')
+    fill_box.label(text='Fills the complete active HR layer', icon='INFO')
     col.label(text='Shift uses Blur', icon='INFO')
 
 
@@ -121,6 +130,27 @@ class SCULPT_OT_color_v03_clear_confirm(bpy.types.Operator):
     def invoke(self,context,event):return context.window_manager.invoke_confirm(self,event)
     def execute(self,context):
         return bpy.ops.sculpt.multires_polypaint_attribute('EXEC_DEFAULT',True,action='CLEAR')
+
+
+class SCULPT_OT_polypaint_fill_primary(bpy.types.Operator):
+    bl_idname = 'sculpt.polypaint_fill_primary'
+    bl_label = 'Fill Active Polypaint Layer'
+    bl_description = 'Fill the active Polypaint HR layer with the primary brush color'
+
+    @classmethod
+    def poll(cls, context):
+        modifier = polypaint_multires(context)
+        return bool(context.object and context.object.mode == 'SCULPT' and
+                    modifier and modifier.polypaint_attribute)
+
+    def execute(self, context):
+        modifier = polypaint_multires(context)
+        if modifier is None or not modifier.polypaint_attribute:
+            return {'CANCELLED'}
+        fill_color = context.scene.sculpt_polypaint_fill_color
+        return bpy.ops.sculpt.multires_polypaint_attribute(
+            'EXEC_DEFAULT', True, action='FILL', name=modifier.polypaint_attribute,
+            fill_color=fill_color)
 
 def polypaint_multires(context):
     ob = context.object
@@ -244,8 +274,10 @@ class VIEW3D_PT_multires_brush_experiments(bpy.types.Panel):
 
 
 classes = (
+    VIEW3D_PT_polypaint_blur_v01,
     VIEW3D_PT_multires_brush_experiments,
     SCULPT_OT_color_attribute_add_auto_v07,
+    SCULPT_OT_polypaint_fill_primary,
     SCULPT_OT_extended_prepare_transport,
 )
 
@@ -268,6 +300,10 @@ def register_props():
     bpy.types.Scene.facesets_rc2_id=bpy.props.IntProperty(name='ID Face Set',default=2,min=1)
     bpy.types.Scene.facesets_rc10_solidify=bpy.props.BoolProperty(default=False)
     bpy.types.Scene.facesets_rc10_limit=bpy.props.IntProperty(default=250000,min=4,max=4000000)
+    bpy.types.Scene.sculpt_polypaint_fill_color = bpy.props.FloatVectorProperty(
+        name='Fill Color', subtype='COLOR', size=3, min=0.0, max=1.0,
+        default=(0.8, 0.8, 0.8),
+        description='Color used by Polypaint Fill, independent from the active Sculpt brush')
 
 
 def unregister_props():
@@ -280,7 +316,8 @@ def unregister_props():
     if _owns_transport_property and hasattr(bpy.types.Brush, 'sculpt_draw_transport_v01'):
         del bpy.types.Brush.sculpt_draw_transport_v01
     _owns_transport_property = False
-    for name in ('facesets_rc2_id', 'facesets_rc10_solidify', 'facesets_rc10_limit'):
+    for name in ('facesets_rc2_id', 'facesets_rc10_solidify', 'facesets_rc10_limit',
+                 'sculpt_polypaint_fill_color'):
         if hasattr(bpy.types.Scene, name):
             delattr(bpy.types.Scene, name)
 

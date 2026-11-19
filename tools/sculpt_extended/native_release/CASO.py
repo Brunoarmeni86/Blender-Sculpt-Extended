@@ -85,7 +85,8 @@ def setup():
         assert bpy.ops.sculpt.multires_layer_add()=={'FINISHED'}
         m.sculpt_layer_recording=False
     S['object']=ob().name
-    brush=activate('PAINT');brush.color=(.03,.05,.1);brush.flow=1;brush.wet_mix=0;brush.density=1;brush.size=70;brush.strength=1
+    brush=activate('PAINT');brush.color=(.03,.05,.1);brush.flow=1;brush.wet_mix=0;brush.density=1
+    brush.size=int(os.environ.get('SCULPT_TEST_PAINT_SIZE','70'));brush.strength=1
     S['white']=snapshot()
 
 def stroke(smooth=False):

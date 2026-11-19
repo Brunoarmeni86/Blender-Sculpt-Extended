@@ -13,7 +13,13 @@ using RGBA=std::array<float,4>;
 struct UnitWeight { double operator()(int,int) const { return 1.0; } };
 struct Result {
   std::unordered_map<int,RGBA> source;
-  std::map<int,RGBA> writes;
+  std::unordered_map<int,RGBA> writes;
+  size_t groups=0;
+};
+struct PaintWrite { RGBA before; RGBA after; };
+struct PaintResult {
+  std::unordered_map<int,PaintWrite> writes;
+  size_t samples=0;
   size_t groups=0;
 };
 
@@ -21,49 +27,80 @@ struct Result {
  * and transformation into one pass instead of constructing the generic
  * group/owner/candidate graph used by Blur and Smear. Shared CCG samples keep
  * the same conservative minimum influence and averaged source color. */
-template<class Sample,class Duplicates,class Hidden>
+template<class Sample,class Duplicates,class Hidden,class Transform>
 bool calculate_paint(const std::unordered_map<int,float> &influence,
                      Sample sample,
                      Duplicates duplicates,
                      Hidden hidden,
-                     Result &result,
+                     PaintResult &result,
                      size_t max_source,
-                     const std::function<bool(int,const RGBA&,float,RGBA&)> &transform)
+                     Transform transform)
 {
-  result=Result{};
-  if(!transform||influence.size()>max_source)return false;
+  result=PaintResult{};
+  if(influence.size()>max_source)return false;
   const size_t reserve_hint=std::min(max_source,influence.size()+influence.size()/8+8);
-  result.source.reserve(reserve_hint);
+  result.writes.max_load_factor(0.7f);
+  result.writes.reserve(influence.size());
   std::unordered_set<int> visited;
-  visited.reserve(reserve_hint);
-  std::vector<int> active;
-  active.reserve(influence.size());
-  for(const auto &entry:influence)if(entry.second>0)active.push_back(entry.first);
-  std::sort(active.begin(),active.end());
+  visited.max_load_factor(0.7f);
+  /* Only seam samples enter this set. Reserving for every active interior
+   * sample made broad strokes pay for a second dense hash table. */
+  visited.reserve(std::min<size_t>(reserve_hint,influence.size()/16+64));
   std::vector<int> members;
   members.reserve(8);
-  for(const int root:active){
-    if(visited.find(root)!=visited.end())continue;
+  std::vector<RGBA> member_sources;
+  member_sources.reserve(8);
+  /* Paint has no neighbor reduction, so active sample order cannot affect the
+   * result. Iterate the already-built influence table directly instead of
+   * allocating and sorting 100k-300k indices for every symmetry pass. CCG
+   * duplicate members are still sorted locally to preserve their exact mean. */
+  for(const auto &active_entry:influence){
+    if(active_entry.second<=0)continue;
+    const int root=active_entry.first;
     members.clear();members.push_back(root);
+    /* Interior samples cannot be duplicates of a seam sample. Process them
+     * without visited-set lookups, duplicate closure, or member sorting. */
+    const auto root_copies=duplicates(root);
+    if(root_copies.empty()){
+      if(result.samples>=max_source)return false;
+      RGBA before;
+      if(!sample(root,before))return false;
+      for(const float value:before)if(!std::isfinite(value))return false;
+      result.samples++;
+      result.groups++;
+      if(hidden(root))continue;
+      RGBA out;
+      if(!transform(root,before,active_entry.second,out))return false;
+      for(const float value:out)if(!std::isfinite(value))return false;
+      if(out!=before)result.writes.emplace(root,PaintWrite{before,out});
+      continue;
+    }
+    if(visited.find(root)!=visited.end())continue;
+    for(const int copy:root_copies){
+      if(std::find(members.begin(),members.end(),copy)==members.end())members.push_back(copy);
+    }
     for(size_t k=0;k<members.size();k++){
+      if(k==0)continue;
       for(const int copy:duplicates(members[k])){
         if(std::find(members.begin(),members.end(),copy)==members.end())members.push_back(copy);
       }
     }
     std::sort(members.begin(),members.end());
+    member_sources.clear();
     RGBA mean{};
     float factor=1.0f;
     bool protected_sample=false;
     for(const int i:members){
       if(!visited.insert(i).second)return false;
-      if(result.source.size()>=max_source)return false;
+      if(result.samples>=max_source)return false;
       RGBA rgba;
       if(!sample(i,rgba))return false;
       for(int c=0;c<4;c++){
         if(!std::isfinite(rgba[c]))return false;
         mean[c]+=rgba[c];
       }
-      result.source.emplace(i,rgba);
+      result.samples++;
+      member_sources.push_back(rgba);
       const auto found=influence.find(i);
       factor=std::min(factor,found==influence.end()?0.0f:found->second);
       protected_sample|=hidden(i);
@@ -74,8 +111,10 @@ bool calculate_paint(const std::unordered_map<int,float> &influence,
     RGBA out;
     if(!transform(members.front(),mean,factor,out))return false;
     for(const float value:out)if(!std::isfinite(value))return false;
-    for(const int i:members){
-      if(out!=result.source.at(i))result.writes.emplace(i,out);
+    for(size_t member_index=0;member_index<members.size();member_index++){
+      const int i=members[member_index];
+      const RGBA &before=member_sources[member_index];
+      if(out!=before)result.writes.emplace(i,PaintWrite{before,out});
     }
   }
   return true;

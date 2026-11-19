@@ -77,12 +77,18 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
  const bool smear=brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_SMEAR;
  if(smear&&stroke_is_first_brush_step_of_symmetry_pass(*ss.cache))return;
  if(paint)color_v04_paint_dabs++;else if(smear)color_v04_smear_dabs++;else color_v04_blur_dabs++;
- const size_t budget=color_v03_work_bytes(),limit=budget/640;
+ const size_t budget=color_v03_work_bytes();
+ /* Paint is independent per sample apart from small CCG seam groups. Do not
+  * reject a valid broad stroke solely because it crosses a fixed sample
+  * count. Blur and Smear still keep the conservative bounded graph path. */
+ const size_t sample_work_bytes=paint?160:640;
+ const size_t limit=paint?std::numeric_limits<size_t>::max():budget/sample_work_bytes;
  const float strength=std::clamp(std::abs(ss.cache->bstrength),0.f,1.f);
  if(!std::isfinite(strength)||strength<=0)return;
  if(paint&&(!std::isfinite(ss.cache->paint_brush.flow)||ss.cache->paint_brush.flow<=0||BKE_brush_alpha_get(&sd.paint,&brush)<=0))return;
  if(!cage&&(ccg->grids_num!=mesh.corners_num||ccg->positions.size()!=int64_t(ccg->grids_num)*low_area||ccg->normals.size()!=ccg->positions.size()))return;
  std::unordered_map<int,float> factors_by_index;
+ factors_by_index.max_load_factor(0.7f);
  Vector<float3> co_buffer;Vector<float> factors,distances;
  bool refused=false;
  const Span<float3> mesh_positions=cage?bke::pbvh::vert_positions_eval(depsgraph,ob):Span<float3>{};
@@ -153,13 +159,31 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
  const CCGKey key=cage?CCGKey{}:BKE_subdiv_ccg_key_top_level(*ccg);
  auto hidden=[&](int i){return cage?(!mesh_attributes->hide_vert.is_empty()&&mesh_attributes->hide_vert[i]):(!ccg->grid_hidden.is_empty()&&ccg->grid_hidden[i/low_area][i%low_area]);};
  auto sample=[&](int i,V04RGBA &rgba){
-  if(!cage){auto c=SubdivCCGCoord::from_index(key,i);return bke::multires_layers::polypaint_sample_with_base(*mmd,mesh,name,c.grid_index,float(c.x)/(low_side-1),float(c.y)/(low_side-1),rgba.data());}
+  if(!cage){
+   const auto c=SubdivCCGCoord::from_index(key,i);
+   /* Every displayed CCG sample maps to an exact integer sample in the
+    * higher-resolution master. Avoid a generic bilinear lookup and repeated
+    * attribute validation for every painted point on warm grids. */
+   const MultiresColorGrid &grid=mmd->sculpt_color_grids[c.grid_index];
+   if(grid.colors&&grid.level==master_level&&grid.totcolor==high_area){
+    const int ratio=(high_side-1)/(low_side-1);
+    const float *value=grid.colors[(c.y*ratio)*high_side+c.x*ratio];
+    std::memcpy(rgba.data(),value,sizeof(float[4]));
+    return true;
+   }
+   return bke::multires_layers::polypaint_sample_with_base(
+     *mmd,mesh,name,c.grid_index,float(c.x)/(low_side-1),float(c.y)/(low_side-1),rgba.data());
+  }
   rgba={0,0,0,0};int count=0;
   for(int face:vert_faces[i])for(int c:faces[face])if(corner_verts[c]==i){float v[4];if(!bke::multires_layers::polypaint_sample_with_base(*mmd,mesh,name,c,1,1,v))return false;for(int k=0;k<4;k++)rgba[k]+=v[k];count++;}
   if(!count)return false;for(float &v:rgba)v/=float(count);return true;
  };
- auto duplicates=[&](int i){std::vector<int> out;if(cage)return out;const auto c=SubdivCCGCoord::from_index(key,i);
-  if(c.x==0||c.y==0||c.x==low_side-1||c.y==low_side-1){SubdivCCGNeighbors adj;BKE_subdiv_ccg_neighbor_coords_get(*ccg,c,true,adj);for(const auto &v:adj.duplicates())out.push_back(v.to_index(key));}return out;};
+ auto duplicates=[&](int i){std::vector<int> out;if(cage)return out;
+  const int local=i%low_area,x=local%low_side,y=local/low_side;
+  if(x!=0&&y!=0&&x!=low_side-1&&y!=low_side-1)return out;
+  const auto c=SubdivCCGCoord::from_index(key,i);
+  SubdivCCGNeighbors adj;BKE_subdiv_ccg_neighbor_coords_get(*ccg,c,true,adj);
+  for(const auto &v:adj.duplicates())out.push_back(v.to_index(key));return out;};
  auto neighbors=[&](int i){std::vector<int> out;if(cage){Vector<int> ns;for(int v:vert_neighbors_get_mesh(faces,corner_verts,vert_faces,mesh_attributes->hide_poly,i,ns))out.push_back(v);}else{SubdivCCGNeighbors adj;BKE_subdiv_ccg_neighbor_coords_get(*ccg,SubdivCCGCoord::from_index(key,i),true,adj);for(const auto &v:adj.unique())out.push_back(v.to_index(key));}return out;};
  const float3 drag=brush.stroke_method==BRUSH_STROKE_ANCHORED?ss.cache->grab_delta_symm:ss.cache->location_symm-ss.cache->last_location_symm;
  auto weight=[&](int i,int j){if(!smear)return 1.;float3 motion=drag;
@@ -196,29 +220,46 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
   }
  }
 
- std::function<bool(int,const V04RGBA&,float,V04RGBA&)> transform;
- if(paint)transform=[&](int,const V04RGBA &before,float factor,V04RGBA &after){
-  const float alpha=std::clamp(factor*BKE_brush_alpha_get(&sd.paint,&brush)*ss.cache->paint_brush.flow,0.f,1.f);
+ const float paint_alpha=BKE_brush_alpha_get(&sd.paint,&brush)*ss.cache->paint_brush.flow;
+ const IMB_BlendMode paint_blend=IMB_BlendMode(brush.blend);
+ const auto paint_transform=[&](int,const V04RGBA &before,float factor,V04RGBA &after){
+  const float alpha=std::clamp(factor*paint_alpha,0.f,1.f);
   const float source[4]={primary.x*alpha,primary.y*alpha,primary.z*alpha,alpha};
-  IMB_blend_color_float(after.data(),before.data(),source,IMB_BlendMode(brush.blend));
+  if(paint_blend==IMB_BLEND_MIX)blend_color_mix_float(after.data(),before.data(),source);
+  else IMB_blend_color_float(after.data(),before.data(),source,paint_blend);
   for(float &value:after)value=std::clamp(value,0.f,1.f);
   return true;
  };
  color_local_v04::Result result;
- const bool calculated=paint?
-   color_local_v04::calculate_paint(
-     factors_by_index,sample,duplicates,hidden,result,limit,transform):
-   color_local_v04::calculate(
-     factors_by_index,sample,duplicates,neighbors,hidden,result,weight,smear,limit,transform);
+ color_local_v04::PaintResult paint_result;
+ bool calculated=false;
+ if(paint){
+  calculated=color_local_v04::calculate_paint(
+    factors_by_index,sample,duplicates,hidden,paint_result,limit,paint_transform);
+ }
+ else{
+  calculated=color_local_v04::calculate(
+    factors_by_index,sample,duplicates,neighbors,hidden,result,weight,smear,limit);
+ }
  if(!calculated){color_v04_abort("source_or_budget");return;}
- if(result.writes.empty())return;
+ const size_t changed_count=paint?paint_result.writes.size():result.writes.size();
+ const size_t sampled_count=paint?paint_result.samples:result.source.size();
+ if(changed_count==0)return;
  const double calculate_end=diagnostics?BLI_time_now_seconds():0.0;
- std::map<int,std::map<int,V04RGBA>> delta;
+ using ColorV04GridDelta=std::unordered_map<int,V04RGBA>;
+ std::unordered_map<int,ColorV04GridDelta> delta;
+ delta.reserve(std::min<size_t>(changed_count,node_mask.size()*8+8));
  if(!cage){
-  for(const auto &entry:result.writes){V04RGBA d;const auto &before=result.source.at(entry.first);for(int c=0;c<4;c++)d[c]=entry.second[c]-before[c];delta[entry.first/low_area][entry.first%low_area]=d;}
+  if(paint)for(const auto &entry:paint_result.writes){V04RGBA d;for(int c=0;c<4;c++)d[c]=entry.second.after[c]-entry.second.before[c];delta[entry.first/low_area][entry.first%low_area]=d;}
+  else for(const auto &entry:result.writes){V04RGBA d;const auto &before=result.source.at(entry.first);for(int c=0;c<4;c++)d[c]=entry.second[c]-before[c];delta[entry.first/low_area][entry.first%low_area]=d;}
  }else{
-  std::set<int> affected;for(const auto &entry:result.writes)for(int f:vert_faces[entry.first])affected.insert(f);
-  auto vertex_delta=[&](int v){V04RGBA d{};const auto it=result.writes.find(v);if(it!=result.writes.end())for(int c=0;c<4;c++)d[c]=it->second[c]-result.source.at(v)[c];return d;};
+  std::set<int> affected;
+  if(paint)for(const auto &entry:paint_result.writes)for(int f:vert_faces[entry.first])affected.insert(f);
+  else for(const auto &entry:result.writes)for(int f:vert_faces[entry.first])affected.insert(f);
+  auto vertex_delta=[&](int v){V04RGBA d{};
+   if(paint){const auto it=paint_result.writes.find(v);if(it!=paint_result.writes.end())for(int c=0;c<4;c++)d[c]=it->second.after[c]-it->second.before[c];}
+   else{const auto it=result.writes.find(v);if(it!=result.writes.end())for(int c=0;c<4;c++)d[c]=it->second[c]-result.source.at(v)[c];}
+   return d;};
   for(int f:affected){const auto face=faces[f];V04RGBA center{};for(int c:face){auto d=vertex_delta(corner_verts[c]);for(int k=0;k<4;k++)center[k]+=d[k]/float(face.size());}
    for(int j=0;j<face.size();j++){const int c=face[j];auto a=vertex_delta(corner_verts[c]),b=vertex_delta(corner_verts[face[(j+1)%face.size()]]),d=vertex_delta(corner_verts[face[(j+face.size()-1)%face.size()]]);V04RGBA next,prev;for(int k=0;k<4;k++){next[k]=(a[k]+b[k])*.5f;prev[k]=(a[k]+d[k])*.5f;}delta[c]={{0,center},{1,next},{2,prev},{3,a}};}
   }
@@ -240,7 +281,10 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
   const bool full_grid=!original.colors;
   full_grid_count+=size_t(full_grid);patch_grid_count+=size_t(!full_grid);
   const size_t staged_pixels=full_grid?size_t(high_area):size_t(patch_width)*patch_height;
-  if(uint64_t(result.source.size())*640+(staged_pixel_total+staged_pixels)*sizeof(float[4])>budget){color_v04_abort("stage_budget");return;}
+  if(!paint&&uint64_t(sampled_count)*sample_work_bytes+
+      (staged_pixel_total+staged_pixels)*sizeof(float[4])>budget){
+   color_v04_abort("stage_budget");return;
+  }
   staged_pixel_total+=staged_pixels;
   auto stage=std::make_unique<ColorV04GridStage>();stage->index=g;stage->side=high_side;
   stage->x0=bounds.x0;stage->y0=bounds.y0;stage->width=patch_width;stage->height=patch_height;
@@ -299,7 +343,8 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
    * affected face before changing the base attribute, even outside the brush
    * nodes. Do not silently prune boundary vertices to fit an Undo footprint. */
   std::set<int> changed_faces;
-  for(const auto &entry:result.writes)for(int f:vert_faces[entry.first])changed_faces.insert(f);
+  if(paint)for(const auto &entry:paint_result.writes)for(int f:vert_faces[entry.first])changed_faces.insert(f);
+  else for(const auto &entry:result.writes)for(int f:vert_faces[entry.first])changed_faces.insert(f);
   IndexMaskMemory memory;
   const auto all_nodes=bke::pbvh::all_leaf_nodes(tree,memory);
   const auto nodes=tree.nodes<bke::pbvh::MeshNode>();
@@ -315,7 +360,8 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
    }
   }
   auto attribute=active_color_attribute_for_write(mesh);if(!attribute)return;
-  for(const auto &entry:result.writes){const auto &v=entry.second;color_vert_set(faces,corner_verts,vert_faces,attribute.domain,entry.first,float4(v[0],v[1],v[2],v[3]),attribute.span);}
+  if(paint)for(const auto &entry:paint_result.writes){const auto &v=entry.second.after;color_vert_set(faces,corner_verts,vert_faces,attribute.domain,entry.first,float4(v[0],v[1],v[2],v[3]),attribute.span);}
+  else for(const auto &entry:result.writes){const auto &v=entry.second;color_vert_set(faces,corner_verts,vert_faces,attribute.domain,entry.first,float4(v[0],v[1],v[2],v[3]),attribute.span);}
   attribute.finish();
   tree.tag_attribute_changed(support_nodes,name);
  }
@@ -362,7 +408,7 @@ static void do_polypaint_all_v04(const Depsgraph &depsgraph,const Sculpt &sd,Obj
  else tree.tag_attribute_changed(node_mask,name);
  const double redraw_end=diagnostics?BLI_time_now_seconds():0.0;
  if(polypaint_v04_diagnostics_enabled()){
-  std::printf("[POLYPAINT_V04] level=%d master=%d brush=%d grids=%llu changed=%llu\n",int(mmd->sculptlvl),master_level,int(brush.sculpt_brush_type),(unsigned long long)staged.size(),(unsigned long long)result.writes.size());std::fflush(stdout);
+  std::printf("[POLYPAINT_V04] level=%d master=%d brush=%d grids=%llu changed=%llu\n",int(mmd->sculptlvl),master_level,int(brush.sculpt_brush_type),(unsigned long long)staged.size(),(unsigned long long)changed_count);std::fflush(stdout);
   std::printf("[POLYPAINT_V04_PROFILE] collect=%.3fms calculate=%.3fms "
               "stage_init=%.3fms project=%.3fms publish=%.3fms redraw=%.3fms "
               "total=%.3fms full_grids=%llu patch_grids=%llu staged_pixels=%llu\n",

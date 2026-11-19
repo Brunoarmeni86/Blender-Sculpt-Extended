@@ -14,6 +14,7 @@
 #include "BLI_index_mask.hh"
 #include "BLI_path_utils.hh"
 #include "BLI_time.h"
+#include <atomic>
 #include <cstdio>
 #include "bmesh.hh"
 #include <cstdint>
@@ -736,6 +737,59 @@ static wmOperatorStatus sculpt_multires_polypaint_attribute_exec(bContext *C, wm
     if (was_active) BKE_id_attributes_active_color_set(&mesh.id, new_name);
     if (was_default) BKE_id_attributes_default_color_set(&mesh.id, new_name);
   }
+  else if (action == 5) {
+    if (!meta || meta->data_type != bke::AttrType::ColorFloat) {
+      BKE_report(op->reports, RPT_ERROR, "Fill requires a float Color Attribute");
+      return OPERATOR_CANCELLED;
+    }
+    float fill_rgb[3];
+    RNA_float_get_array(op->ptr, "fill_color", fill_rgb);
+    const float3 primary(fill_rgb);
+    const ColorGeometry4f fill(primary.x, primary.y, primary.z, 1.0f);
+    auto colors = writable.lookup_for_write_span<ColorGeometry4f>(name);
+    if (!colors || colors.span.size() != mesh.corners_num) {
+      BKE_report(op->reports, RPT_ERROR, "Fill requires a corner-domain float Color Attribute");
+      return OPERATOR_CANCELLED;
+    }
+    if (!bke::multires_layers::polypaint_attribute_activate(*mmd, name)) {
+      BKE_report(op->reports, RPT_ERROR, "Paint master selection failed");
+      return OPERATOR_CANCELLED;
+    }
+    const int level = mmd->sculpt_color_level > 0 ? mmd->sculpt_color_level :
+                                                   std::max(1, int(mmd->totlvl));
+    if (!bke::multires_layers::polypaint_ensure(*mmd, level, mesh.corners_num)) {
+      BKE_report(op->reports, RPT_ERROR, "Unable to create the Paint master");
+      return OPERATOR_CANCELLED;
+    }
+    const int side = bke::subdiv::grid_size_from_level(level);
+    const int area = side * side;
+    std::atomic_bool failed = false;
+    threading::parallel_for(IndexRange(mesh.corners_num), 32, [&](const IndexRange range) {
+      for (const int corner : range) {
+        float (*grid)[4] = bke::multires_layers::polypaint_grid_ensure_master(*mmd, corner);
+        if (!grid) {
+          failed.store(true, std::memory_order_relaxed);
+          continue;
+        }
+        for (int i = 0; i < area; i++) {
+          grid[i][0] = primary.x;
+          grid[i][1] = primary.y;
+          grid[i][2] = primary.z;
+          grid[i][3] = 1.0f;
+        }
+      }
+    });
+    if (failed.load(std::memory_order_relaxed)) {
+      BKE_report(op->reports, RPT_ERROR, "Invalid Paint master grid; use Undo to restore the checkpoint");
+      return OPERATOR_CANCELLED;
+    }
+    colors.span.fill(fill);
+    colors.finish();
+    BKE_id_attributes_active_color_set(&mesh.id, name);
+    if (!mesh.default_color_attribute || !mesh.default_color_attribute[0]) {
+      BKE_id_attributes_default_color_set(&mesh.id, name);
+    }
+  }
   /* Selection only refreshes named GPU buffers. Structural attribute changes
    * also invalidate evaluated mesh attributes through the dependency graph. */
   if (session) {
@@ -753,6 +807,12 @@ static wmOperatorStatus sculpt_multires_polypaint_attribute_exec(bContext *C, wm
   DEG_id_tag_update(&object->id, action == 0 ? ID_RECALC_SYNC_TO_EVAL : ID_RECALC_GEOMETRY);
   WM_main_add_notifier(NC_GEOM | ND_DATA, &mesh);
   WM_main_add_notifier(NC_OBJECT | ND_MODIFIER, object);
+  /* FILL creates or replaces a potentially sparse high-resolution payload.
+   * Keep both sides of the memfile transaction so Redo can restore the dense
+   * master instead of only recovering the base Color Attribute. */
+  if (action == 5) {
+    ED_undo_push(C, "Polypaint Fill");
+  }
   std::printf("[POLYPAINT_ATTRIBUTE] action=%d name=%s master=%s level=%d archived=%d\n",
               action, name, mmd->sculpt_color_attribute, mmd->sculpt_color_level,
               mmd->sculpt_color_attributes.count());
@@ -781,6 +841,7 @@ static void SCULPT_OT_multires_polypaint_attribute(wmOperatorType *ot)
       {2, "REMOVE", 0, "Remove", "Remove the attribute and its Paint master"},
       {3, "RENAME", 0, "Rename", "Rename the attribute and its Paint master together"},
       {4, "CLEAR", 0, "Clear All Colors", "Remove every Color Attribute and all active, inactive and orphaned Multires Paint masters; supports Undo"},
+      {5, "FILL", 0, "Fill", "Fill the active float Color Attribute and its Multires Paint master with the primary brush color"},
       {0, nullptr, 0, nullptr, nullptr},
   };
   ot->name = "Multires Polypaint Attribute";
@@ -792,6 +853,16 @@ static void SCULPT_OT_multires_polypaint_attribute(wmOperatorType *ot)
   RNA_def_enum(ot->srna, "action", actions, 0, "Action", "Color Attribute operation");
   RNA_def_string(ot->srna, "name", nullptr, 68, "Attribute", "Color Attribute name");
   RNA_def_string(ot->srna, "new_name", nullptr, 68, "New Name", "New unique name");
+  RNA_def_float_color(ot->srna,
+                      "fill_color",
+                      3,
+                      nullptr,
+                      0.0f,
+                      1.0f,
+                      "Fill Color",
+                      "Color written to the complete active Paint master",
+                      0.0f,
+                      1.0f);
 }
 
 static bool sculpt_multires_merge_visible_to_base_poll(bContext *C)

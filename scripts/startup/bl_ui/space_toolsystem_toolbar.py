@@ -1501,6 +1501,22 @@ class _defs_sculpt:
             brush_type='PAINT',
         )
 
+    @ToolDef.from_fn
+    def polypaint_fill():
+        def draw_settings(context, layout, _tool):
+            layout.prop(context.scene, "sculpt_polypaint_fill_color", text="Fill Color")
+
+        return dict(
+            idname="builtin.polypaint_fill",
+            label="Polypaint Fill",
+            description="Fill the active Polypaint HR layer with the primary color",
+            icon="brush.paint_texture.fill",
+            widget=None,
+            cursor='PAINT_CROSS',
+            keymap="3D View Tool: Sculpt, Polypaint Fill",
+            draw_settings=draw_settings,
+        )
+
     @staticmethod
     def poll_dyntopo(context):
         if context is None:
@@ -3956,6 +3972,7 @@ class VIEW3D_PT_tools_active(ToolSelectPanelHelper, Panel):
         'SCULPT': [
             _sculpt_tool,
             _defs_sculpt.paint,
+            _defs_sculpt.polypaint_fill,
             _defs_sculpt.mask,
             _defs_sculpt.draw_face_sets,
             lambda context: (

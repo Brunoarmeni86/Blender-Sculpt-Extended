@@ -8414,6 +8414,17 @@ def km_3d_view_tool_sculpt_color_filter(params):
     )
 
 
+def km_3d_view_tool_sculpt_polypaint_fill(params):
+    return (
+        "3D View Tool: Sculpt, Polypaint Fill",
+        {"space_type": 'VIEW_3D', "region_type": 'WINDOW'},
+        {"items": [
+            ("sculpt.polypaint_fill_primary",
+             {"type": params.tool_mouse, "value": 'PRESS'}, None),
+        ]},
+    )
+
+
 def km_3d_view_tool_sculpt_mask_by_color(params):
     return (
         "3D View Tool: Sculpt, Mask by Color",
@@ -9229,6 +9240,7 @@ def generate_keymaps(params=None):
         km_3d_view_tool_sculpt_mesh_filter(params),
         km_3d_view_tool_sculpt_cloth_filter(params),
         km_3d_view_tool_sculpt_color_filter(params),
+        km_3d_view_tool_sculpt_polypaint_fill(params),
         km_3d_view_tool_sculpt_mask_by_color(params),
         km_3d_view_tool_sculpt_face_set_edit(params),
         km_3d_view_tool_paint_weight_sample_weight(params),
