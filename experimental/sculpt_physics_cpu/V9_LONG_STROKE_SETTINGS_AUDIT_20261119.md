@@ -38,6 +38,39 @@ Added `test_v9_resilience.cc`, the **eleventh** standalone CTest suite in the V8
 
 **What this validates:** the multi-island path produces the same result as the global solver **for these fully covered, disconnected components and these material profiles**, and the configuration transaction is exact. It does **not** prove equality when active islands cut through a connected mesh, or calibrate clay material laws. This deliberately isolates incremental-integration correctness from artificial-boundary approximation.
 
+## Connected, stiff mesh accuracy diagnostic
+
+The disjoint-component equivalence tests alone are insufficient to validate a
+real connected sculpt surface. A separate `25×25` bonded square grid with
+**625 particles and 1,200 bonds** was tested under a single center Grab
+(offset `(0.8, 0.4, 0)`, radius `1.2`, four substeps × five iterations).
+The reference is the full global XPBD solution, not a physically calibrated
+ground truth.
+
+| Bond compliance | Max local positional error, 4 hops | Max error, 8 hops | Strict adaptive (cap 8) |
+| ---: | ---: | ---: | --- |
+| 0 (rigid) | ~0.16073 | ~0.12087 | Global fallback, zero difference |
+| 1e-10 | ~0.16073 | ~0.12087 | Global fallback, zero difference |
+| 1e-6 | ~0.15685 | ~0.11418 | Global fallback, zero difference |
+| 1e-3 (soft) | ~0.00001049 | ~5.48e-11 | Four-hop adaptive accepted |
+
+These are **single-run, standalone CPU results from the V7-derived local
+baseline** for the same local/adaptive algorithms; they are not a Blender
+benchmark. Numeric values are in world-coordinate units. The strict fallback
+does not improve the approximate local physics itself: it refuses an
+insufficient halo and pays the global solve cost. Bounded mode correctly marks
+the stiff eight-hop solution `converged=false`.
+
+A new regression on the exact V8 branch verifies **strict fallback and exact
+global parity** on the rigid connected grid, plus bounded nonconvergence. An
+optional `bench_v9_stiffness_grid` CMake target prints errors for all four
+stiffness settings.
+
+**Implication:** a tiny local solver can look plausible but deform highly
+connected, stiff material incorrectly. We must not enable hard-coded four-hop
+physics assistance as a production default without a visible accuracy budget
+and robust fallback/quality handling.
+
 ## Local checks and CI
 
 A local V7-derived C++17 baseline with the V9 configuration fix and tests passed:
