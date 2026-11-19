@@ -182,6 +182,12 @@ class World {
   double ground_y_ = 0.0;
   double damping_ = 0.0;
   Vec3 gravity_{};
+  // Config edits within an active stroke belong to its undo transaction.
+  bool saved_ground_enabled_ = false;
+  double saved_ground_y_ = 0.0;
+  double saved_damping_ = 0.0;
+  Vec3 saved_gravity_{};
+
 };
 
 }  // namespace sculpt_physics
