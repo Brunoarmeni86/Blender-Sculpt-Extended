@@ -8,8 +8,11 @@ storage are therefore reused by subsequent dabs. The proxy is automatically dest
 stroke and is never serialized in a `.blend` file.
 
 The existing conservative safety contract remains unchanged: runtime opt-in, ordinary PBVH Mesh,
-20k vertex limit, native mask/falloff sampling, no real symmetry passes, and `bond_hops = 0` so the
-solver cannot write vertices outside Blender's existing Undo node coverage.
+native mask/falloff sampling, no real symmetry passes, and `bond_hops = 0` so the solver cannot
+write vertices outside Blender's existing Undo node coverage. The former fixed 20k vertex ceiling
+has been removed after the proxy became stroke-persistent. Allocation or solver exceptions remain
+transactional and fall back to Blender's standard Grab path; practical limits now depend on memory
+and first-dab proxy construction time.
 
 ## Validation
 

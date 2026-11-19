@@ -213,8 +213,9 @@ static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
   }
 
   const Mesh &mesh = *id_cast<Mesh *>(object.data);
-  // Keep the preview bounded while the proxy still covers the complete mesh.
-  if (mesh.verts_num == 0 || mesh.verts_num > 20000) return false;
+  // V13 persistent proxy: no fixed vertex ceiling. Allocation or solver failures
+  // remain transactional and fall back to Blender's standard Grab path.
+  if (mesh.verts_num == 0) return false;
   const PositionDeformData position_data(depsgraph, object);
   const Span<float3> eval = position_data.eval;
   if (eval.size() != mesh.verts_num) return false;
