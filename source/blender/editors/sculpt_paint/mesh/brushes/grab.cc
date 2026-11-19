@@ -177,9 +177,9 @@ static void calc_bmesh(const Depsgraph &depsgraph,
 }
 
 #ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
-/* V12: deliberately conservative first native-scene integration.
+/* V13: deliberately conservative persistent native-scene integration.
  * Runtime OFF by default, normal PBVH Mesh only. The physics proxy is
- * reconstructed each dab (expensive), so no state survives a failed write.
+ * constructed once per Blender stroke and released with StrokeCache.
  * The active set is restricted to vertices in the existing sculpt node mask
  * to avoid writing unrecorded vertices outside Blender's native Undo region.
  * This is NOT yet the final multi-island/Multires integration. */
@@ -213,8 +213,7 @@ static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
   }
 
   const Mesh &mesh = *id_cast<Mesh *>(object.data);
-  // Limit this baseline to meshes small enough to rebuild an XPBD proxy
-  // on every dab. Real production Sculpt will cache and incrementally update it.
+  // Keep the preview bounded while the proxy still covers the complete mesh.
   if (mesh.verts_num == 0 || mesh.verts_num > 20000) return false;
   const PositionDeformData position_data(depsgraph, object);
   const Span<float3> eval = position_data.eval;
@@ -234,26 +233,31 @@ static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
   };
   std::vector<PreparedNode> writes;
   try {
-    sculpt_physics::World world;
-    for (const int i : eval.index_range()) {
-      const float3 p = eval[i];
-      const bool hidden = !attributes.hide_vert.is_empty() && attributes.hide_vert[i];
-      const float mask = attributes.mask.is_empty() ? 0.0f : attributes.mask[i];
-      const double inv_mass = hidden || mask >= 0.999f ? 0.0 :
-                              std::max(1.0e-4, 1.0 - double(mask));
-      world.add_particle({double(p.x), double(p.y), double(p.z)}, inv_mass);
-    }
-    for (const int2 edge : mesh.edges()) {
-      // Degenerate source edges do not define a valid material constraint.
-      // They must not abort the entire stroke or mutate Blender geometry.
-      try {
-        world.add_bond(std::size_t(edge[0]), std::size_t(edge[1]), 1.0e-5);
+    std::shared_ptr<sculpt_physics::World> world =
+        std::static_pointer_cast<sculpt_physics::World>(cache.xpbd_v12_world);
+    if (!world || cache.xpbd_v12_world_verts != mesh.verts_num) {
+      world = std::make_shared<sculpt_physics::World>();
+      for (const int i : eval.index_range()) {
+        const float3 p = eval[i];
+        const bool hidden = !attributes.hide_vert.is_empty() && attributes.hide_vert[i];
+        const float mask = attributes.mask.is_empty() ? 0.0f : attributes.mask[i];
+        const double inv_mass = hidden || mask >= 0.999f ? 0.0 :
+                                std::max(1.0e-4, 1.0 - double(mask));
+        world->add_particle({double(p.x), double(p.y), double(p.z)}, inv_mass);
       }
-      catch (const std::invalid_argument &) {
-        continue;
+      for (const int2 edge : mesh.edges()) {
+        // Degenerate source edges do not define a valid material constraint.
+        try {
+          world->add_bond(std::size_t(edge[0]), std::size_t(edge[1]), 1.0e-5);
+        }
+        catch (const std::invalid_argument &) {
+          continue;
+        }
       }
+      world->begin_stroke();
+      cache.xpbd_v12_world = world;
+      cache.xpbd_v12_world_verts = mesh.verts_num;
     }
-    world.begin_stroke();
     std::vector<Influence> selection;
     Vector<float> factors;
     Vector<float> distances;
@@ -296,10 +300,10 @@ static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
       cache.xpbd_v12_previous_delta = grab_delta;
       return true;
     }
-    world.set_brush_targets(targets);
+    world->set_brush_targets(targets);
     // Only brush targets (hop=0) are dynamic. Crossing bonds react as
     // numerical pins; no exterior mesh vertex can change without an Undo node.
-    world.step_local(h, 2, 5, 0);
+    world->step_local(h, 2, 5, 0);
 
     // Complete staging and float-range validation before any editor writeback.
     // Use the *same* PBVH node mask already handled by Blender Sculpt Undo.
@@ -309,7 +313,7 @@ static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
       const Span<int> verts = nodes[ni].verts();
       prepared.translation.resize(verts.size());
       for (const int j : verts.index_range()) {
-        const sculpt_physics::Vec3 desired = world.particles()[verts[j]].position;
+        const sculpt_physics::Vec3 desired = world->particles()[verts[j]].position;
         const float3 old = eval[verts[j]];
         const float3 change{float(desired.x-double(old.x)),
                             float(desired.y-double(old.y)),
@@ -322,12 +326,13 @@ static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
       clip_and_lock_translations(sd, ss, eval, verts, prepared.translation);
       writes.push_back(std::move(prepared));
     });
-    world.commit_stroke();
   }
   catch (const std::exception &ex) {
     // No mesh was changed: hand this dab back to the regular Grab brush,
     // and disable the experimental preview for the rest of this stroke.
     std::fprintf(stderr, "[V12 XPBD Grab] preview disabled: %s\n", ex.what());
+    cache.xpbd_v12_world.reset();
+    cache.xpbd_v12_world_verts = 0;
     cache.xpbd_v12_failed = true;
     return false;
   }
