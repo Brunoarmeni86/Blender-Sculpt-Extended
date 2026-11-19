@@ -158,8 +158,8 @@ bool World::apply_grab(Vec3 center, double radius, Vec3 displacement,
     if (particles_[i].inverse_mass == 0) continue;
     const Vec3 offset = particles_[i].position - center;
     const double dist_sq = offset.x * offset.x + offset.y * offset.y + offset.z * offset.z;
-    if (std::isfinite(radius_sq) && dist_sq >= radius_sq) continue;
-    const double distance = std::isfinite(radius_sq) ? std::sqrt(dist_sq) :
+    if (std::isfinite(radius_sq) && radius_sq > 0.0 && dist_sq >= radius_sq) continue;
+    const double distance = (std::isfinite(radius_sq) && radius_sq > 0.0) ? std::sqrt(dist_sq) :
                             std::hypot(offset.x, offset.y, offset.z);
     if (!(distance < radius)) continue;
     const double q = 1.0 - distance / radius;
@@ -456,12 +456,10 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   std::sort(selected_bonds.begin(), selected_bonds.end());
   selected_bonds.erase(std::unique(selected_bonds.begin(), selected_bonds.end()),
                        selected_bonds.end());
-  // Capture only first-touch physical state; the original snapshot survives
-  // multiple dabs, plastic creep, fracture and adaptive rejected trials.
-  for (const std::size_t i : active) {
-    if (particles_[i].inverse_mass > 0.0) remember_particle(i);
-  }
-  for (const std::size_t bi : selected_bonds) remember_bond(bi);
+  // A rejected dab is a transaction: its first-touch Undo entries must
+  // disappear together with its failed geometric changes.
+  local_undo_new_particle_ids_.clear();
+  local_undo_new_bond_ids_.clear();
   std::vector<Vec3> &step_start = local_start_scratch_;
   std::vector<Vec3> &previous = local_previous_scratch_;
   step_start.clear();
@@ -481,6 +479,21 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   auto step_movers = moving_particle_ids_;
   const StepStatistics step_stats = last_stats_;
   try {
+    if (!dense_journal_) {
+      for (const std::size_t i : active) {
+        if (particles_[i].inverse_mass > 0.0 &&
+            undo_particles_.find(i) == undo_particles_.end()) {
+          local_undo_new_particle_ids_.push_back(i);
+          remember_particle(i);
+        }
+      }
+      for (const std::size_t bi : selected_bonds) {
+        if (undo_bonds_.find(bi) == undo_bonds_.end()) {
+          local_undo_new_bond_ids_.push_back(bi);
+          remember_bond(bi);
+        }
+      }
+    }
     for (int sub = 0; sub < substeps; ++sub) {
       for (std::size_t j = 0; j < active.size(); ++j) {
         Particle &p = particles_[active[j]];
@@ -573,6 +586,9 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
                        }), moving_particle_ids_.end());
   }
   catch (...) {
+    // Restore the per-dab journal membership, not only particles and bonds.
+    for (const std::size_t i : local_undo_new_particle_ids_) undo_particles_.erase(i);
+    for (const std::size_t i : local_undo_new_bond_ids_) undo_bonds_.erase(i);
     for (std::size_t j = 0; j < active.size(); ++j) {
       particles_[active[j]] = step_particles[j];
     }
