@@ -7,6 +7,8 @@
 #  include <algorithm>
 #  include <cmath>
 #  include <cstdio>
+#  include <stdexcept>
+#  include <utility>
 #  include <cstdlib>
 #  include <vector>
 #  include "physics_core.hh"
@@ -21,6 +23,9 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_mesh.hh"
+#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#  include "BKE_multires_sculpt_layers.hh"
+#endif
 #include "BKE_object_types.hh"
 #include "BKE_paint.hh"
 #include "BKE_paint_bvh.hh"
@@ -191,6 +196,9 @@ static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
   if (pbvh.type() != bke::pbvh::Type::Mesh) return false;
   SculptSession &ss = *object.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
+  // Do not bypass Sculpt Extended's Multires base-layer recording/CCG logic.
+  // This first gate is only for an unmodified ordinary mesh object.
+  if (bke::multires_layers::base_modifier(object) != nullptr) return false;
   if (cache.xpbd_v12_failed || ss.deform_modifiers_active || ss.shapekey_active ||
       sd.paint.symmetry_flags != 0 || cache.tile_pass != 0 ||
       cache.radial_symmetry_pass != 0 || cache.mirror_symmetry_pass != 0)
