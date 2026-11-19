@@ -44,7 +44,7 @@ cmake --build build-sculpt-physics --config Release --parallel 4
 ctest --test-dir build-sculpt-physics -C Release --output-on-failure
 ```
 
-The branch's CI uses equivalent CMake and CTest steps and currently tests **13 standalone suites**, including V11 scale and PBVH-candidate parity tests. If you update to a later revision, the count may change.
+The branch's CI uses equivalent CMake and CTest steps and currently tests **14 standalone suites**, including V11 scale, PBVH-candidate parity and Multires output-safety tests. If you update to a later revision, the count may change.
 
 To run the optional selection benchmark:
 
