@@ -169,3 +169,21 @@ See [Windows build/test instructions](WINDOWS_BUILD_AND_TEST_20261119.md).
 **Release untouched.** Native Sculpt/PBVH and Multires writeback are **still
 not implemented**; this document is the foundation design gate, not a claim
 that the integration exists.
+
+## 6. Additional Multires boundary safety regression
+
+A fourth cross-domain correctness defect was reproduced in the standalone
+Multires surface bridge: when an anchor uses the fallback for a degenerate rest
+triangle, a non-finite deformed proxy coordinate could propagate directly into
+the returned evaluated sample without an exception. A non-finite standard
+brush coordinate could likewise poison a positive-influence assist blend.
+
+The bridge now rejects non-finite rest anchors/detail residuals and both
+non-finite reconstructed and mixed Multires outputs **before returning the
+position array**. The original Standard/0%-Assist bypass remains unchanged.
+`test_multires_safety.cc` tests both failing input cases and the bypass.
+
+This guarantees *finite output*, not high-frequency detail quality for
+degenerate anchors, flipped triangles, or strong shears. Those are still native
+Multires/CCG integration gates. With this addition there are **14** CTest
+suites on the experimental branch.
