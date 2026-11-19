@@ -49,5 +49,5 @@ int main()
     CHECK(near(world.particles()[0].position.x,0.5));
     world.cancel_stroke();
   }
-  std::cout << "Assist strength and FullPhysics strength contracts passed\\n";
+  std::cout << "Assist strength and FullPhysics strength contracts passed\n";
 }
