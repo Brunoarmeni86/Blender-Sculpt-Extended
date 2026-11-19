@@ -211,3 +211,13 @@ indices** and excludes PBVH query cost and all Blender viewport work.
 - [Step-by-step Windows 11 build and test guide](WINDOWS_BUILD_AND_TEST_20261119.md)
 
 This remains **standalone research code**, not a native Blender sculpt feature.
+
+## V11 addendum — fail-safe Multires sample output
+
+The standalone Multires bridge rejects non-finite rest anchors, detail
+residuals and physically reconstructed/blended sample positions before
+returning any geometry for editor writeback. This closes a reproduced gap
+for degenerate rest frames with invalid deformed proxy coordinates.
+`test_multires_safety.cc` brings standalone CTest coverage to **14 suites**.
+This does **not** establish native Multires CCG/Undo integration or detailed
+shape preservation under arbitrary shear/triangle inversion.
