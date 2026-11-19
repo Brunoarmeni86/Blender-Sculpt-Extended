@@ -99,6 +99,32 @@ int main()
       else {global.commit_stroke(); multi.commit_stroke();}
     }
   }
+  // A dense, stiff connected surface cannot safely use a truncated local
+  // halo. The strict policy must fall back and reproduce the global result.
+  {
+    World reference;
+    for(int y=0;y<25;++y)for(int x=0;x<25;++x)
+      reference.add_particle({double(x),double(y),0});
+    for(int y=0;y<25;++y)for(int x=0;x<25;++x){
+      const int i=y*25+x;
+      if(x<24)reference.add_bond(i,i+1,0.0);
+      if(y<24)reference.add_bond(i,i+25,0.0);
+    }
+    World strict=reference,bounded=reference;
+    for(World* w:{&reference,&strict,&bounded}) {
+      w->begin_stroke();
+      CHECK(w->apply_grab({12,12,0},1.2,{.8,.4,0},
+                          {BrushPhysicsMode::FullPhysics,1,0}));
+    }
+    reference.step(1./30.,4,5);
+    const auto r=strict.step_local_adaptive(1./30.,4,5,4,8,.02);
+    CHECK(r.used_global_fallback);
+    same_physical_state(reference,strict);
+    const auto approximate=bounded.step_local_adaptive(1./30.,4,5,4,8,.02,
+                                   World::BoundaryPolicy::BoundedApproximation);
+    CHECK(!approximate.used_global_fallback && !approximate.converged);
+    reference.cancel_stroke();strict.cancel_stroke();bounded.cancel_stroke();
+  }
   // Previously cancel restored particles but leaked gravity, damping and
   // floor settings into the following Sculpt brush stroke.
   {
