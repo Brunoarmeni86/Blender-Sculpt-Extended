@@ -109,11 +109,13 @@ SculptSurfaceBridge SculptSurfaceBridge::for_multires_samples(
     Sample sample;
     const SurfaceAnchor &anchor = anchors[i];
     const Vec3 rest = anchored_position(anchor, rest_proxy_particles);
+    if (!finite(rest)) throw std::invalid_argument("Non-finite Multires rest anchor");
     for (int k = 0; k < 3; ++k) {
       sample.particle_ids[k] = anchor.vertices[k];
       sample.weights[k] = anchor.weights[k];
     }
     const Vec3 world_residual = evaluated_positions[i] - rest;
+    if (!finite(world_residual)) throw std::invalid_argument("Non-finite Multires detail residual");
     const Frame frame = make_frame(rest_proxy_particles[anchor.vertices[0]].position,
                                    rest_proxy_particles[anchor.vertices[1]].position,
                                    rest_proxy_particles[anchor.vertices[2]].position);
@@ -180,12 +182,19 @@ std::vector<Vec3> SculptSurfaceBridge::compose_positions(
       physics_position += current_proxy_particles[sample.particle_ids[k]].position *
                           sample.weights[k];
     }
+    if (!finite(physics_position)) {
+      throw std::invalid_argument("Non-finite reconstructed Multires sample");
+    }
     if (settings.mode == BrushPhysicsMode::FullPhysics) {
       result.push_back(physics_position);
     }
     else {
       const double t = settings.influence;
-      result.push_back(standard_brush_positions[i] * (1.0 - t) + physics_position * t);
+      const Vec3 blended = standard_brush_positions[i] * (1.0 - t) + physics_position * t;
+      if (!finite(blended)) {
+        throw std::invalid_argument("Non-finite Multires assist sample");
+      }
+      result.push_back(blended);
     }
   }
   return result;
