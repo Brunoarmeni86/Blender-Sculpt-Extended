@@ -221,3 +221,23 @@ for degenerate rest frames with invalid deformed proxy coordinates.
 `test_multires_safety.cc` brings standalone CTest coverage to **14 suites**.
 This does **not** establish native Multires CCG/Undo integration or detailed
 shape preservation under arbitrary shear/triangle inversion.
+
+## V11 — Assist strength / separate semantics (19 November 2026)
+
+A regression found that `PhysicalAssist` previously multiplied `influence` when
+creating the Grab goal **and again** when interpolating between the ordinary
+Sculpt brush output and the physical surface. For a single unconstrained
+particle this effectively squared the selected UI influence (50% became 25%
+physical displacement before accounting for the artistic brush).
+
+The Grab goal now uses unscaled falloff in `PhysicalAssist`, leaving its
+influence exclusively to `SculptSurfaceBridge::compose_positions`.
+`FullPhysics` retains direct strength scaling of its Grab target.
+`test_assist_strength.cc` covers 25/50/75/100% Assist, direct and PBVH-candidate
+paths, zero/standard bypass, and FullPhysics at 50%.
+
+The behavior was reproduced and corrected in a local standalone reference
+build with GCC Release, Clang Release, and GCC ASan/UBSan checks. The newer
+GitHub branch has extra features and was **not** compiled in this local
+sandbox. Run the complete CTest suite and Windows/MSVC build on the actual
+branch before native Blender integration.
