@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -48,6 +49,21 @@ int main()
     world.step_local(1.0/30,1,1,0);
     CHECK(near(world.particles()[0].position.x,0.5));
     world.cancel_stroke();
+  }
+  // Regular-mesh Assist, like Multires Assist, rejects invalid artistic input
+  // before producing coordinates that could corrupt an edited Blender mesh.
+  {
+    World world;
+    world.add_particle({0,0,0});
+    auto bridge = SculptSurfaceBridge::for_regular_mesh({{0,0,0}},world.particles());
+    bool rejected = false;
+    try {
+      (void)bridge.compose_positions(world.particles(),
+          {{std::numeric_limits<double>::quiet_NaN(),0,0}},
+          {BrushPhysicsMode::PhysicalAssist,0.5,0});
+    }
+    catch (const std::invalid_argument &) { rejected = true; }
+    CHECK(rejected);
   }
   std::cout << "Assist strength and FullPhysics strength contracts passed\n";
 }
