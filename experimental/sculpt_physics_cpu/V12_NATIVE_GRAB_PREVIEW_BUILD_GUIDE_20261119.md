@@ -51,6 +51,9 @@ ctest --test-dir build-physics -C Release --output-on-failure
 The 15th standalone suite checks new editor-authored goal targets, fixed/masked particles, sorted targets, duplicate/invalid rollback and refusal to change topology during an active stroke.
 
 ## Full Blender fork build (large!)
+**Important for Git worktrees:** `make.bat update` calls Blender's source-update script, which can change source branch or revision. Do **not** run it blindly in the V12 worktree. First check `git status -sb`; install or reuse the correct `lib/windows_x64` dependencies without touching Codex's stable source. The `make.bat nobuild builddir ...` command creates only an isolated CMake configuration and does not compile Blender. The follow-up `cmake --build` step performs the build after the experimental option is enabled.
+
+
 
 **Prerequisites:** Visual Studio 2022 with *Desktop development with C++*, Windows SDK, CMake, Git, a suitably recent Windows toolchain and space for Blender source + downloaded dependencies. Review https://developer.blender.org/docs/handbook/building_blender/windows/.
 
@@ -58,8 +61,11 @@ In PowerShell from the V12 repo root:
 
 ```powershell
 Set-Location C:\Dev\Sculpt-XPBD-V12
-.\make.bat update
-.\make.bat
+# First inspect the source checkout and existing Blender libraries.
+git status -sb
+Test-Path .\lib\windows_x64\.git
+# Only when the required dependencies are present:
+.\make.bat nobuild builddir C:\Dev\build-xpbd-v12 2022
 ```
 
 The first build uses the existing default path, **without** experimental physics. It establishes a baseline and downloads dependencies. Resolve any standard build errors first. Do not reuse the directory of your stable released Blender.
