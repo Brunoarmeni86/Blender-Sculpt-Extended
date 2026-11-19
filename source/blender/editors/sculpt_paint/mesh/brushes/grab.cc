@@ -199,8 +199,14 @@ static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
   // Do not bypass Sculpt Extended's Multires base-layer recording/CCG logic.
   // This first gate is only for an unmodified ordinary mesh object.
   if (bke::multires_layers::base_modifier(object) != nullptr) return false;
+  // PAINT_SYMMETRY_FEATHER is ON by default even with no symmetry axes.
+  // Reject only actual mirror/tile axes, not the harmless feather option.
+  const ePaintSymmetryFlags nontrivial_symmetry = ePaintSymmetryFlags(
+      PAINT_SYMM_X | PAINT_SYMM_Y | PAINT_SYMM_Z |
+      PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z);
   if (cache.xpbd_v12_failed || ss.deform_modifiers_active || ss.shapekey_active ||
-      sd.paint.symmetry_flags != 0 || cache.tile_pass != 0 ||
+      (sd.paint.symmetry_flags & nontrivial_symmetry) != PAINT_SYMM_NONE ||
+      cache.tile_pass != 0 ||
       cache.radial_symmetry_pass != 0 || cache.mirror_symmetry_pass != 0)
   {
     return false;
