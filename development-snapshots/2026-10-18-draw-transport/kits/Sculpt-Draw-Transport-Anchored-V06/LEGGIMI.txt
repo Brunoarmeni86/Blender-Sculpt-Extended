@@ -1,0 +1,105 @@
+DRAW TRANSPORT V06 - RICERCA COERENTE DEI TRIANGOLI
+
+La V05 e stata confermata funzionante e piu fluida dall utente.
+Il log mostra che il costo residuo e principalmente nel ricampionamento:
+MOVE circa 89-111ms/frame; SS 10.5ms; un frame R 795ms (775ms map).
+
+V06 aggiunge riferimenti al triangolo trovato nello stesso campione al frame
+precedente e nel campione vicino del blocco corrente. La distanza esatta da
+questi triangoli restringe il limite iniziale della ricerca BVH globale.
+La ricerca globale viene sempre eseguita; nessuna decimazione o anteprima
+ridotta. Un fallback ripete la ricerca con il limite originale se necessario.
+I riferimenti vengono azzerati quando cambia la regione destinazione.
+Costo memoria aggiuntivo: un int per campione della regione (circa 8.6MB
+per 2.15 milioni di campioni). Nessun tetto fisso aggiunto.
+Su distanze esattamente uguali tra primitive sovrapposte la scelta del
+triangolo dipende comunque dall ordine di attraversamento della BVH.
+
+CONFRONTO NELLA STESSA BUILD
+AVVIA.ps1: V06 attiva per default.
+AVVIA.ps1 -NoCoherence: ricerca senza suggerimenti, come V05.
+AVVIA.ps1 -Reference: percorso precedente V04 (non V05).
+Restano disponibili -Serial e -NoTransportProfile.
+Chiudi Blender prima di cambiare avvio; usa stessa mesh e stessa impronta.
+Confronta soprattutto R e S; SS era gia in cache nella V05.
+I log sono nella sottocartella experiment-tools; invia log ed errors dopo
+aver chiuso Blender. I nuovi marker sono DRAW_TRANSPORT_V06.
+Nessun guadagno di velocita dichiarato prima della prova Windows.
+
+APPLICAZIONE
+Chiudi Blender. Estrai la cartella dello ZIP in C:\BlenderDev.
+In Developer PowerShell VS2022:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Draw-Transport-Anchored-V06\APPLICA-COMPILA.ps1"
+Accetta le basi originali pulita/V01/V02/V03/V04/V05 con controllo hash.
+Crea backup dei sorgenti interessati e dell eseguibile. Non ripristinare prima V04.
+I worker MSBuild /nodemode:1 rimasti in riuso non bloccano lo script;
+una compilazione effettivamente attiva resta bloccante e riporta i PID.
+COMPILA.ps1 trova CMake anche dal CMakeCache della build.
+Per ricompilare: COMPILA.ps1. Per ripristinare il backup: RIPRISTINA.ps1.
+
+AVVIO OTTIMIZZATO (default: parallelo, profilazione attiva)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Draw-Transport-Anchored-V06\AVVIA.ps1"
+Per confronto V04 nella stessa build aggiungi -Reference.
+Per ottimizzato senza parallelismo aggiungi -Serial.
+Per disattivare i soli tempi aggiungi -NoTransportProfile.
+Chiudi Blender fra due avvii. I comandi e il pennello rimangono quelli gia provati.
+
+PENNELLO DEDICATO
+In Sculpt Mode seleziona il Draw di cui vuoi ereditare texture e parametri.
+Premi Draw Transport nell intestazione della viewport, oppure F3 > Draw Transport.
+Alla prima attivazione crea una copia locale chiamata Draw Transport e la marca
+come asset locale. Le attivazioni successive riusano quella copia.
+Il cambio pennello usa il percorso nativo WM_toolsystem_activate_brush_and_tool,
+lo stesso usato dall attivazione degli asset di pennello.
+Il Draw sorgente conserva texture e altri parametri; la vecchia opzione Transport
+viene disabilitata sul sorgente quando si attiva la copia dedicata.
+Non scrive asset su disco esterno: salva il .blend per conservare il pennello locale.
+Puoi in seguito usare il normale comando Blender Save As Asset per una libreria pennelli.
+Il loader Python va caricato tramite AVVIA per usare il comportamento Transport.
+La selezione di altri pennelli resta quella normale di Blender.
+
+GESTO
+1. Premi e trascina come Anchored: raggio e orientamento iniziali.
+2. Rilascia: muovendo il mouse trasli l impronta sulla superficie.
+3. R: rotazione; clic/Invio/R accetta l angolo e torna alla traslazione.
+4. S: scala. Allontana/avvicina il mouse dal/al centro del dettaglio.
+   Solo l estensione tangente cambia: il rilievo non diventa piu alto per effetto della scala.
+5. S seguito da un secondo S: Strength della sola impronta in anteprima.
+   Mouse a destra aumenta, a sinistra diminuisce. La scala gia scelta resta invariata.
+   Non cambia la Strength del layer e non modifica le altre pennellate presenti.
+6. Clic/Invio durante R/S/SS: accetta la regolazione e torna alla traslazione.
+7. Clic/Invio durante la traslazione: conferma lo stroke nel layer REC attivo.
+8. Esc/destro in ogni fase: annulla l intero stroke corrente.
+
+PROVA MIRATA
+Sulla stessa mesh e con lo stesso dettaglio della V04, confronta il trascinamento,
+R, S e SS, poi conferma. Prova anche Esc e un Undo/Redo della conferma.
+Non occorre ripetere i test generali degli altri pennelli.
+Se resta lento, confronta un avvio -Reference e conserva i log in experiment-tools.
+Le righe DRAW_TRANSPORT_V06 distinguono i tempi delle singole fasi;
+DRAW_TRANSPORT_V06_REFERENCE identifica il percorso V04 di confronto.
+Non promettiamo un fattore di accelerazione prima della prova reale.
+
+LIMITI INVARIATI
+Solo Draw Anchored, falloff sferico, no Edge to Edge/Dyntopo; Multires massimo,
+mesh locale single-user, niente simmetria o deformazioni live.
+S: scala tangente 0.05x-8x senza aumentare la profondita; SS: intensita 0x-10x.
+La maschera sorgente e nel delta; viene applicata anche quella destinazione.
+Il trasporto resta un ricampionamento locale con allineamento delle normali,
+non una parametrizzazione geodetica su pieghe o superfici sovrapposte.
+Cache limitata alla regione corrente (capacita massima raggiunta nello stroke),
+con Undo nativo cumulativo. Regioni grandi richiedono comunque memoria.
+Scrittura tramite apply_translations nativo: journal dirty grids/samples mantenuto.
+Nessuna modifica DNA, formato .blend o implementazione Face Sets HR.
+
+VALIDAZIONE V06
+PASS: 100000 confronti trasformazioni; 86400 confronti kernel con riferimento
+V04, patch piane/curve, maschere, Strength zero, quattro thread; errore nullo.
+L adattatore della ricerca applica esclusione conservativa tramite AABB
+per verificare il nuovo limite di distanza, senza usare la BVH Blender reale.
+PASS: pipeline capture e move effettive su 90 frame, 36000 confronti posizioni,
+errore nullo, seriale/parallelo identici; 14 riusi SS; annullamento Undo simulato.
+I test sono C++ standalone con adattatori delle API Blender. Non sostituiscono
+compilazione Windows o test reali layer/Undo. La V06 non e compilata qui contro
+Blender; non e stato eseguito un benchmark Blender.
+Face Sets HR resta isolato e sospeso.

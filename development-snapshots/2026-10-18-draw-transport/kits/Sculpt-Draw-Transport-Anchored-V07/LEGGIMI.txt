@@ -1,0 +1,102 @@
+DRAW TRANSPORT V07 - CACHE IN CRESCITA E SCARTO CONSERVATIVO
+
+Base: V06 confermata funzionante dall utente. Face Sets HR resta isolato.
+1. Quando S amplia la regione alla stessa destinazione, i riferimenti ai
+   triangoli sorgente dei campioni comuni sono ricopiati tramite ID griglia.
+   Il riordino delle griglie non associa un riferimento al campione sbagliato.
+2. Prima della ricerca BVH si escludono soltanto query esterne all AABB sorgente
+   espansa del raggio massimo di ricerca piu un margine numerico. Nessuna
+   assunzione di superficie piana. Nessuna riduzione di risoluzione o campioni.
+   I campioni completamente mascherati saltano il ricampionamento.
+3. Contatori per query, mancati risultati, fallback, scarti, suggerimenti
+   validi e campioni conservati al cambio regione. Accumulo per blocco senza
+   atomiche per campione. Nessuna modifica alla geometria dal profiler.
+
+Il riuso avviene solo con destinazione invariata e regione precedente valida.
+La BVH globale resta autorevole, con lo stesso fallback V06.
+Quando cresce la regione, vecchio e nuovo vettore riferimenti coesistono
+brevemente (un int/campione ciascuno); non c e una cache dell intera mesh.
+Nessuna modifica al writer nativo, al percorso Undo o alla composizione layer.
+Le modifiche mirano ai picchi di S; la loro eliminazione non e garantita.
+
+APPLICAZIONE
+Chiudi Blender. Estrai la cartella dello ZIP in C:\BlenderDev.
+In Developer PowerShell VS2022:
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Draw-Transport-Anchored-V07\APPLICA-COMPILA.ps1"
+Accetta le basi originali pulita/V01/V02/V03/V04/V05/V06 con controllo hash.
+Backup automatico dei sorgenti e dell eseguibile. Non ripristinare prima V06.
+Per ricompilare: COMPILA.ps1. Per tornare al backup: RIPRISTINA.ps1.
+
+AVVIO
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\BlenderDev\Sculpt-Draw-Transport-Anchored-V07\AVVIA.ps1"
+-V06Baseline disattiva il trasferimento cache e lo scarto AABB aggiunti in V07.
+E un confronto delle due ottimizzazioni; restano i nuovi contatori, la
+suddivisione fissa in blocchi e lo skip dei campioni completamente mascherati.
+-NoCoherence disattiva anche i suggerimenti introdotti nella V06.
+-Reference usa il vecchio percorso V04, non V06.
+-Serial disattiva parallelismo. -NoTransportProfile disattiva tempi e contatori.
+Chiudi Blender fra due avvii. Log in experiment-tools, marker DRAW_TRANSPORT_V07.
+QUERY: retained_samples conta i campioni comuni ricopiati, inclusi riferimenti
+non validi; queries conta le prime ricerche BVH; fallbacks le ricerche ripetute;
+misses quelle senza risultato finale; culled gli scarti AABB; hinted i limiti
+ristretti dai suggerimenti. Durante SS riusato le nuove query sono zero.
+I contatori sono stampati con i frame campionati, non per ogni evento.
+
+PROVA MIRATA
+Sulla copia della stessa mesh, usa un impronta simile e allargala gradualmente
+con S, poi riducila, ruotala e prova SS. Verifica Esc e Undo/Redo della conferma.
+Non serve ripetere i test generali degli altri pennelli.
+Invia log ed errors dopo la chiusura di Blender.
+Non sono dichiarati benchmark Blender o guadagni misurati su Windows.
+
+PENNELLO DEDICATO
+In Sculpt Mode seleziona il Draw di cui vuoi ereditare texture e parametri.
+Premi Draw Transport nell intestazione della viewport, oppure F3 > Draw Transport.
+Alla prima attivazione crea una copia locale chiamata Draw Transport e la marca
+come asset locale. Le attivazioni successive riusano quella copia.
+Il cambio pennello usa il percorso nativo WM_toolsystem_activate_brush_and_tool,
+lo stesso usato dall attivazione degli asset di pennello.
+Il Draw sorgente conserva texture e altri parametri; la vecchia opzione Transport
+viene disabilitata sul sorgente quando si attiva la copia dedicata.
+Non scrive asset su disco esterno: salva il .blend per conservare il pennello locale.
+Puoi in seguito usare il normale comando Blender Save As Asset per una libreria pennelli.
+Il loader Python va caricato tramite AVVIA per usare il comportamento Transport.
+La selezione di altri pennelli resta quella normale di Blender.
+
+GESTO
+1. Premi e trascina come Anchored: raggio e orientamento iniziali.
+2. Rilascia: muovendo il mouse trasli l impronta sulla superficie.
+3. R: rotazione; clic/Invio/R accetta l angolo e torna alla traslazione.
+4. S: scala. Allontana/avvicina il mouse dal/al centro del dettaglio.
+   Solo l estensione tangente cambia: il rilievo non diventa piu alto per effetto della scala.
+5. S seguito da un secondo S: Strength della sola impronta in anteprima.
+   Mouse a destra aumenta, a sinistra diminuisce. La scala gia scelta resta invariata.
+   Non cambia la Strength del layer e non modifica le altre pennellate presenti.
+6. Clic/Invio durante R/S/SS: accetta la regolazione e torna alla traslazione.
+7. Clic/Invio durante la traslazione: conferma lo stroke nel layer REC attivo.
+8. Esc/destro in ogni fase: annulla l intero stroke corrente.
+
+LIMITI INVARIATI
+Solo Draw Anchored, falloff sferico, no Edge to Edge/Dyntopo; Multires massimo,
+mesh locale single-user, niente simmetria o deformazioni live.
+S: scala tangente 0.05x-8x senza aumentare la profondita; SS: intensita 0x-10x.
+La maschera sorgente e nel delta; viene applicata anche quella destinazione.
+Il trasporto resta un ricampionamento locale con allineamento delle normali,
+non una parametrizzazione geodetica su pieghe o superfici sovrapposte.
+Cache limitata alla regione corrente (capacita massima raggiunta nello stroke),
+con Undo nativo cumulativo. Regioni grandi richiedono comunque memoria.
+Scrittura tramite apply_translations nativo: journal dirty grids/samples mantenuto.
+Nessuna modifica DNA, formato .blend o implementazione Face Sets HR.
+
+VALIDAZIONE V07
+Test C++ standalone su funzioni effettive del payload con adattatori Blender:
+PASS 100000 confronti trasformazioni e 86400 confronti kernel contro V04,
+patch piane/curve, maschere, Strength zero, seriale/parallelo identici.
+PASS scarto AABB vs ricerca senza scarto per query esterna e seed invalidi.
+PASS pipeline capture/move su 90 frame MOVE/R/S/SS/fuori mesh/crescita/riduzione:
+36000 confronti posizioni con errore nullo; 3775 campioni conservati attraverso
+crescita; risultato identico con cache/cull abilitati o disabilitati;
+14 riusi SS, cancellazione tramite adattatore Undo ripristina la base esatta.
+Le API PBVH, CCG, Undo e nearest sono adattatori sintetici. La BVH Blender reale,
+la compilazione Windows, la stabilita integrata e le prestazioni restano da
+verificare sulla macchina utente. I test non costituiscono una garanzia assoluta.

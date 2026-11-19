@@ -1,0 +1,184 @@
+--- V05/sculpt.cc
++++ V06/sculpt.cc
+@@ -7852,7 +7852,7 @@
+   WM_event_add_notifier(this->evil_C, NC_OBJECT | ND_DRAW, &ob);
+   brush_exit_tex(sd);
+   if (transport_profile) {
+-    std::printf("[DRAW_TRANSPORT_V05_END] cancel=%d done_ms=%.3f\n",int(is_cancel),
++    std::printf("[DRAW_TRANSPORT_V06_END] cancel=%d done_ms=%.3f\n",int(is_cancel),
+                 (BLI_time_now_seconds()-transport_done_start)*1000.0);
+     std::fflush(stdout);
+   }
+@@ -8416,7 +8416,7 @@
+           BKE_report(op->reports, RPT_WARNING, "Move the detail onto a valid surface before confirming");
+           return OPERATOR_RUNNING_MODAL;
+         }
+-        std::printf("[DRAW_TRANSPORT_V05] confirm\n");
++        std::printf("[DRAW_TRANSPORT_V06] confirm\n");
+         std::fflush(stdout);
+         stroke->finish(C);
+         MEM_delete(stroke);
+--- V05/sculpt_draw_transport_v01.hh
++++ V06/sculpt_draw_transport_v01.hh
+@@ -32,7 +32,7 @@
+   float initial_brush_rotation = 0.0f, initial_mask_rotation = 0.0f;
+   const char *failure_reason = nullptr;
+   int64_t capture_samples = 0;
+-  bool reference_path = false, parallel = true, profile = false;
++  bool reference_path = false, parallel = true, profile = false, coherent = true;
+   bool target_cached = false, region_cached = false, mapping_cached = false;
+   float2 cached_mouse = float2(0);
+   float3 cached_location = float3(0), cached_normal = float3(0);
+@@ -40,13 +40,14 @@
+   std::vector<int> region_nodes, region_grids, preview_nodes;
+   std::vector<ReferenceSample> region_samples;
+   std::vector<float3> mapped_deltas;
++  std::vector<int> nearest_seeds;
+   std::vector<SavedPosition> preview_before;
+   int64_t positions_num = 0, profile_frames = 0;
+   std::array<double,5> profile_total = {};
+   bool placing = false, valid = false;
+   ~State() {
+     if (profile && profile_frames) {
+-      std::printf("[DRAW_TRANSPORT_V05_SUMMARY] frames=%lld avg_restore_ms=%.3f avg_surface_ms=%.3f avg_map_ms=%.3f avg_write_ms=%.3f avg_update_ms=%.3f\n",
++      std::printf("[DRAW_TRANSPORT_V06_SUMMARY] frames=%lld avg_restore_ms=%.3f avg_surface_ms=%.3f avg_map_ms=%.3f avg_write_ms=%.3f avg_update_ms=%.3f\n",
+           static_cast<long long>(profile_frames),profile_total[0]/profile_frames,
+           profile_total[1]/profile_frames,profile_total[2]/profile_frames,
+           profile_total[3]/profile_frames,profile_total[4]/profile_frames);
+@@ -132,27 +133,27 @@
+   if (brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_DRAW || brush.stroke_method != BRUSH_STROKE_ANCHORED ||
+       brush.falloff_shape != PAINT_FALLOFF_SHAPE_SPHERE || (brush.flag & BRUSH_EDGE_TO_EDGE) ||
+       RNA_enum_get(op.ptr, "brush_toggle") != int(BrushSwitchMode::None))
+-  { return "Draw Transport V05 requires Draw, Anchored, sphere falloff, no Edge to Edge or alternate brush"; }
++  { return "Draw Transport V06 requires Draw, Anchored, sphere falloff, no Edge to Edge or alternate brush"; }
+   if (!ss || ss->bm || !ss->subdiv_ccg || !mmd || ss->cache || ss->filter_cache ||
+       ss->subdiv_ccg->level != mmd->totlvl || mmd->sculptlvl != mmd->totlvl ||
+       mmd->sculpt_displacement_enabled || mmd->sculpt_shrinkwrap_enabled ||
+       (mmd->flags & eMultiresModifierFlag_UseSculptBaseMesh) || ob.modifiers.count() != 1 ||
+       mesh.id.us != 1 || mesh.key || ob.id.lib || ob.id.override_library || mesh.id.lib)
+-  { return "Draw Transport V05 requires local single-user Multires at maximum Sculpt Level, no other modifiers or live deformation"; }
++  { return "Draw Transport V06 requires local single-user Multires at maximum Sculpt Level, no other modifiers or live deformation"; }
+   if (mesh_symmetry_xyz_get(ob) || mesh.radial_symmetry[0] != 1 || mesh.radial_symmetry[1] != 1 ||
+       mesh.radial_symmetry[2] != 1 || (sd.paint.symmetry_flags & (PAINT_TILE_X|PAINT_TILE_Y|PAINT_TILE_Z)) ||
+       (sd.flags & (SCULPT_LOCK_X|SCULPT_LOCK_Y|SCULPT_LOCK_Z)))
+-  { return "Draw Transport V05 requires mirror/radial/tile symmetry and axis locks disabled"; }
++  { return "Draw Transport V06 requires mirror/radial/tile symmetry and axis locks disabled"; }
+   if (!BKE_sculptsession_use_pbvh_draw(&ob, CTX_wm_region_view3d(C)))
+-  { return "Draw Transport V05 requires native PBVH viewport drawing"; }
++  { return "Draw Transport V06 requires native PBVH viewport drawing"; }
+   if (!(U.uiflag & USER_GLOBALUNDO) || U.undosteps <= 0)
+-  { return "Draw Transport V05 requires Global Undo"; }
++  { return "Draw Transport V06 requires Global Undo"; }
+   return nullptr;
+ }
+ inline bool fail(State &state, const char *reason)
+ {
+   state.failure_reason = reason;
+-  std::fprintf(stderr,"[DRAW_TRANSPORT_V05] stopped=%s source_samples=%lld triangles=%zu\n",
++  std::fprintf(stderr,"[DRAW_TRANSPORT_V06] stopped=%s source_samples=%lld triangles=%zu\n",
+                reason,static_cast<long long>(state.capture_samples),state.triangles.size());
+   return false;
+ }
+@@ -162,6 +163,8 @@
+   const char *reference = std::getenv("BLENDER_SCULPT_DRAW_TRANSPORT_REFERENCE");
+   const char *serial = std::getenv("BLENDER_SCULPT_DRAW_TRANSPORT_SERIAL");
+   const char *profiling = std::getenv("BLENDER_SCULPT_DRAW_TRANSPORT_PROFILE");
++  const char *coherence = std::getenv("BLENDER_SCULPT_DRAW_TRANSPORT_NO_COHERENCE");
++  state.coherent = !(coherence && coherence[0] == '1');
+   state.reference_path = reference && reference[0] == '1';
+   state.parallel = !(serial && serial[0] == '1');
+   state.profile = profiling && profiling[0] == '1';
+@@ -237,13 +240,13 @@
+   const double tree_start = BLI_time_now_seconds();
+   BLI_bvhtree_balance(state.tree);
+   if (state.profile) {
+-    std::printf("[DRAW_TRANSPORT_V05_CAPTURE] total_ms=%.3f balance_ms=%.3f triangles=%zu source_samples=%lld sparse_restore_samples=%zu reference=%d parallel=%d\n",
++    std::printf("[DRAW_TRANSPORT_V06_CAPTURE] total_ms=%.3f balance_ms=%.3f triangles=%zu source_samples=%lld sparse_restore_samples=%zu reference=%d parallel=%d\n",
+         (BLI_time_now_seconds()-capture_start)*1000.0,(BLI_time_now_seconds()-tree_start)*1000.0,
+         state.triangles.size(),static_cast<long long>(samples),state.preview_before.size(),int(state.reference_path),int(state.parallel));
+   }
+   state.placing = true;
+   state.valid = true; /* Initial imprint remains a valid position until first motion. */
+-  std::printf("[DRAW_TRANSPORT_V05] captured samples=%lld triangles=%zu radius=%.6f\n",
++  std::printf("[DRAW_TRANSPORT_V06] captured samples=%lld triangles=%zu radius=%.6f\n",
+               static_cast<long long>(samples), state.triangles.size(), state.radius);
+   std::fflush(stdout);
+   return true;
+@@ -431,7 +434,8 @@
+                                    const float support, const float max_distance,
+                                    const PreparedAxisRotation &inverse_angle,
+                                    const PreparedNormalRotation &inverse_normal,
+-                                   const PreparedAxisRotation &output_angle)
++                                   const PreparedAxisRotation &output_angle,
++                                   int *seed = nullptr, const int neighbor_seed = -1)
+ {
+   if (sample.hidden || math::distance_squared(sample.position,location)>support*support ||
+       math::dot(sample.normal,normal)<.25f) { return float3(0); }
+@@ -439,7 +443,27 @@
+   const float3 query=state.center+footprint_inverse(unrotated,state.normal,state.footprint_scale);
+   BVHTreeNearest nearest{};
+   nearest.index=-1; nearest.dist_sq=max_distance*max_distance;
++  /* Coherent triangles give a valid upper distance bound, never a replacement
++   * for the global nearest search. Do not seed the result index: ties still go
++   * through the normal tree traversal. Inflate the bound to include its owner. */
++  const float original_limit=nearest.dist_sq;
++  if (seed) {
++    BVHTreeNearest hint{};
++    hint.index=-1;hint.dist_sq=original_limit;
++    for (const int candidate : {*seed,neighbor_seed}) {
++      if (candidate>=0 && size_t(candidate)<state.triangles.size()) {
++        nearest_cb(const_cast<State *>(&state),candidate,query,&hint);
++      }
++    }
++    if (hint.index>=0) { nearest.dist_sq=std::nextafter(hint.dist_sq,original_limit); }
++  }
+   BLI_bvhtree_find_nearest(state.tree,query,&nearest,nearest_cb,const_cast<State *>(&state));
++  if (nearest.index<0 && nearest.dist_sq<original_limit) {
++    /* Defensive fallback for floating-point boundary rejection. */
++    nearest.dist_sq=original_limit;
++    BLI_bvhtree_find_nearest(state.tree,query,&nearest,nearest_cb,const_cast<State *>(&state));
++  }
++  if (seed) { *seed=nearest.index; }
+   if (nearest.index<0) { return float3(0); }
+   const Triangle &tri=state.triangles[nearest.index];
+   float3 w;
+@@ -490,7 +514,7 @@
+   state.profile_frames++;
+   for (int i=0;i<5;i++) { state.profile_total[i]+=times[i]; }
+   if (state.profile_frames<=8 || state.profile_frames%15==0) {
+-    std::printf("[DRAW_TRANSPORT_V05_FRAME] frame=%lld mode=%s restored=%lld samples=%zu reuse_region=%d reuse_mapping=%d parallel=%d restore_ms=%.3f surface_ms=%.3f map_ms=%.3f write_ms=%.3f update_ms=%.3f total_ms=%.3f\n",
++    std::printf("[DRAW_TRANSPORT_V06_FRAME] frame=%lld mode=%s restored=%lld samples=%zu reuse_region=%d reuse_mapping=%d parallel=%d restore_ms=%.3f surface_ms=%.3f map_ms=%.3f write_ms=%.3f update_ms=%.3f total_ms=%.3f\n",
+         static_cast<long long>(state.profile_frames),state.strength_adjust?"SS":state.scaling?"S":state.rotating?"R":"MOVE",
+         static_cast<long long>(restored),state.region_samples.size(),int(reused_region),int(reused_mapping),int(state.parallel),
+         times[0],times[1],times[2],times[3],times[4],times[0]+times[1]+times[2]+times[3]+times[4]);
+@@ -603,6 +627,7 @@
+     else { capture_region(IndexRange(state.region_samples.size())); }
+     state.region_support=support;
+     state.region_cached=true;state.mapping_cached=false;
++    state.nearest_seeds.assign(state.region_samples.size(),-1);
+   }
+   times[1]=(BLI_time_now_seconds()-phase)*1000.0;phase=BLI_time_now_seconds();
+   const bool reused_mapping=state.mapping_cached && reused_region &&
+@@ -612,9 +637,12 @@
+     const PreparedAxisRotation inverse_angle(normal,-state.angle),output_angle(normal,state.angle);
+     const PreparedNormalRotation inverse_normal(normal,state.normal);
+     const auto map_range=[&](const IndexRange range) {
++      int neighbor_seed=-1;
+       for (const int64_t i:range) {
+         state.mapped_deltas[i]=map_reference_sample(state,state.region_samples[i],location,normal,
+-            support,max_distance,inverse_angle,inverse_normal,output_angle);
++            support,max_distance,inverse_angle,inverse_normal,output_angle,
++            state.coherent ? &state.nearest_seeds[i] : nullptr,neighbor_seed);
++        neighbor_seed=state.nearest_seeds[i];
+       }
+     };
+     if (state.parallel) { threading::parallel_for(IndexRange(state.region_samples.size()),1024,map_range); }
+@@ -678,7 +706,7 @@
+     const double start=BLI_time_now_seconds();
+     const bool result=move_reference(state,C,vc,event);
+     if (state.profile) {
+-      std::printf("[DRAW_TRANSPORT_V05_REFERENCE] mode=%s total_ms=%.3f\n",
++      std::printf("[DRAW_TRANSPORT_V06_REFERENCE] mode=%s total_ms=%.3f\n",
+                   state.strength_adjust?"SS":state.scaling?"S":state.rotating?"R":"MOVE",
+                   (BLI_time_now_seconds()-start)*1000.0);
+     }

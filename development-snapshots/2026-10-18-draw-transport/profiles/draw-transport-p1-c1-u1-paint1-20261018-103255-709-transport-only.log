@@ -1,0 +1,46 @@
+[DRAW_TRANSPORT_V07] UI pronta: pulsante Draw Transport nell intestazione Sculpt; F3 > Draw Transport
+[DRAW_TRANSPORT_V07_CAPTURE] total_ms=595.037 balance_ms=184.961 triangles=2565014 source_samples=1646144 sparse_restore_samples=1437747 reference=0 parallel=1
+[DRAW_TRANSPORT_V07] captured samples=1646144 triangles=2565014 radius=0.382897
+[DRAW_TRANSPORT_V07_FRAME] frame=1 mode=MOVE restored=1437747 samples=2472684 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=8.478 surface_ms=31.505 map_ms=129.042 write_ms=23.459 update_ms=2.248 total_ms=194.732
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=2300310 misses=58896 fallbacks=0 culled=2400 hinted=2235864 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=2 mode=MOVE restored=1450418 samples=2377892 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=2.916 surface_ms=23.714 map_ms=197.435 write_ms=17.884 update_ms=1.925 total_ms=243.874
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=2174370 misses=64950 fallbacks=0 culled=5545 hinted=2103860 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=3 mode=MOVE restored=1328162 samples=2375580 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=2.238 surface_ms=21.575 map_ms=199.699 write_ms=18.042 update_ms=1.949 total_ms=243.503
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=2177480 misses=65525 fallbacks=0 culled=5623 hinted=2106376 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=4 mode=MOVE restored=1329731 samples=2420664 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=2.677 surface_ms=21.964 map_ms=183.507 write_ms=18.502 update_ms=2.226 total_ms=228.876
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=2219110 misses=70266 fallbacks=0 culled=5597 hinted=2143217 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=5 mode=MOVE restored=1349672 samples=2471528 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=2.322 surface_ms=22.092 map_ms=184.675 write_ms=18.742 update_ms=1.967 total_ms=229.797
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=2275775 misses=68258 fallbacks=0 culled=4163 hinted=2201828 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=6 mode=MOVE restored=1382077 samples=2477308 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=2.433 surface_ms=37.655 map_ms=185.996 write_ms=22.928 update_ms=1.917 total_ms=250.930
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=2290517 misses=66207 fallbacks=0 culled=4017 hinted=2218625 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=7 mode=MOVE restored=1404196 samples=2501584 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=2.494 surface_ms=21.606 map_ms=167.637 write_ms=24.059 update_ms=1.883 total_ms=217.679
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=2308332 misses=64407 fallbacks=0 culled=3489 hinted=2238345 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=8 mode=MOVE restored=1445914 samples=2508520 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=2.568 surface_ms=23.232 map_ms=161.729 write_ms=24.198 update_ms=1.980 total_ms=213.707
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=2311885 misses=63956 fallbacks=0 culled=3265 hinted=2242295 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=15 mode=MOVE restored=1469951 samples=2487712 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=2.728 surface_ms=21.870 map_ms=132.615 write_ms=19.666 update_ms=1.910 total_ms=178.789
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=2308408 misses=59606 fallbacks=0 culled=2374 hinted=2243249 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_SUMMARY] frames=25 avg_restore_ms=3.126 avg_surface_ms=24.898 avg_map_ms=1045.974 avg_write_ms=27.401 avg_update_ms=3.263
+[DRAW_TRANSPORT_V07_END] cancel=1 done_ms=37.718
+[DRAW_TRANSPORT_V07_CAPTURE] total_ms=322.710 balance_ms=103.291 triangles=1519460 source_samples=1041556 sparse_restore_samples=849815 reference=0 parallel=1
+[DRAW_TRANSPORT_V07] captured samples=1041556 triangles=1519460 radius=0.311388
+[DRAW_TRANSPORT_V07_FRAME] frame=1 mode=MOVE restored=849815 samples=1559444 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=4.546 surface_ms=21.794 map_ms=51.488 write_ms=14.347 update_ms=1.072 total_ms=93.247
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=1409116 misses=37879 fallbacks=0 culled=1052 hinted=1367068 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=2 mode=MOVE restored=858051 samples=1692384 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=1.427 surface_ms=26.058 map_ms=86.115 write_ms=17.061 update_ms=1.040 total_ms=131.701
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=1546984 misses=45144 fallbacks=0 culled=1278 hinted=1497518 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=3 mode=MOVE restored=936706 samples=1694696 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=1.631 surface_ms=14.651 map_ms=84.730 write_ms=15.830 update_ms=1.105 total_ms=117.948
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=1549204 misses=45135 fallbacks=0 culled=1307 hinted=1499758 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=4 mode=S restored=938739 samples=1699320 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=4.523 surface_ms=18.961 map_ms=84.582 write_ms=16.515 update_ms=0.886 total_ms=125.466
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=1694696 queries=1555091 misses=45008 fallbacks=0 culled=1302 hinted=1508416 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=5 mode=S restored=943000 samples=1939768 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=1.539 surface_ms=18.681 map_ms=271.474 write_ms=18.111 update_ms=1.096 total_ms=310.900
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=1699320 queries=1792292 misses=54693 fallbacks=0 culled=2506 hinted=1734410 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=6 mode=S restored=1118261 samples=2041496 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=1.886 surface_ms=19.946 map_ms=335.473 write_ms=19.260 update_ms=1.636 total_ms=378.201
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=1939768 queries=1873516 misses=65117 fallbacks=0 culled=5770 hinted=1805422 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=7 mode=S restored=1180762 samples=2167500 reuse_region=0 reuse_mapping=0 parallel=1 restore_ms=1.946 surface_ms=21.472 map_ms=440.236 write_ms=20.469 update_ms=1.804 total_ms=485.926
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=2041496 queries=1979592 misses=85758 fallbacks=0 culled=11954 hinted=1890674 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=8 mode=S restored=1262556 samples=2167500 reuse_region=1 reuse_mapping=0 parallel=1 restore_ms=2.078 surface_ms=0.000 map_ms=410.968 write_ms=16.792 update_ms=1.745 total_ms=431.583
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=1959599 misses=81165 fallbacks=0 culled=10684 hinted=1878434 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_FRAME] frame=15 mode=S restored=1028089 samples=2167500 reuse_region=1 reuse_mapping=0 parallel=1 restore_ms=1.899 surface_ms=0.000 map_ms=142.681 write_ms=14.880 update_ms=1.701 total_ms=161.161
+[DRAW_TRANSPORT_V07_QUERY] retained_samples=0 queries=1632300 misses=44784 fallbacks=0 culled=653 hinted=1587514 reuse=1 cull=1
+[DRAW_TRANSPORT_V07_SUMMARY] frames=29 avg_restore_ms=2.369 avg_surface_ms=4.882 avg_map_ms=176.443 avg_write_ms=15.514 avg_update_ms=1.609
+[DRAW_TRANSPORT_V07_END] cancel=1 done_ms=14.753
+[LAYER_COMMIT_LOCAL] grids=13226/98304 samples=3748828/3822314 area=289 sample_mode=EXACT parallel=1 publish_parallel=1 context=0.127ms alloc=0.023ms solve=69.190ms publish=3.692ms total=77.170ms

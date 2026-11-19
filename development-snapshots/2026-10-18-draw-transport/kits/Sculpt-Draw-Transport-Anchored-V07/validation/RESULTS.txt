@@ -1,0 +1,12 @@
+VALIDAZIONE V07
+Test C++ standalone su funzioni effettive del payload con adattatori Blender:
+PASS 100000 confronti trasformazioni e 86400 confronti kernel contro V04,
+patch piane/curve, maschere, Strength zero, seriale/parallelo identici.
+PASS scarto AABB vs ricerca senza scarto per query esterna e seed invalidi.
+PASS pipeline capture/move su 90 frame MOVE/R/S/SS/fuori mesh/crescita/riduzione:
+36000 confronti posizioni con errore nullo; 3775 campioni conservati attraverso
+crescita; risultato identico con cache/cull abilitati o disabilitati;
+14 riusi SS, cancellazione tramite adattatore Undo ripristina la base esatta.
+Le API PBVH, CCG, Undo e nearest sono adattatori sintetici. La BVH Blender reale,
+la compilazione Windows, la stabilita integrata e le prestazioni restano da
+verificare sulla macchina utente. I test non costituiscono una garanzia assoluta.
