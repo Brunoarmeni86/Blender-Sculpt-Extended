@@ -89,6 +89,16 @@ class World {
   bool apply_grab_candidates(Vec3 center, double radius, Vec3 displacement,
                              BrushPhysicsSettings settings,
                              const std::vector<std::size_t> &candidate_ids);
+  /* Adapter-owned exact target goals, e.g. after Blender native mask,
+   * texture, automasking and symmetry calculations. Duplicate particle IDs
+   * are invalid; rejected input leaves the previous dab unchanged.
+   * Goals are in the same world/proxy coordinate space as particle positions. */
+  struct BrushTargetInput {
+    std::size_t particle_index = 0;
+    Vec3 goal{};
+    double compliance = 0.0;
+  };
+  bool set_brush_targets(const std::vector<BrushTargetInput> &targets);
   void step(double dt, int substeps = 4, int iterations = 5);
   /* Optional approximation for brush-local, quasistatic strokes. Only particles
    * within `bond_hops` from a Grab target are integrated. Crossing bonds act as
