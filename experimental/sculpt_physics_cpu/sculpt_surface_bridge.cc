@@ -154,8 +154,14 @@ std::vector<Vec3> SculptSurfaceBridge::compose_positions(
       const Vec3 physical = current_proxy_particles[i].position;
       if (!finite(physical)) throw std::invalid_argument("Invalid regular proxy position");
       if (settings.mode == BrushPhysicsMode::FullPhysics) result.push_back(physical);
-      else result.push_back(standard_brush_positions[i] * (1.0-settings.influence) +
-                            physical * settings.influence);
+      else {
+        const Vec3 blended = standard_brush_positions[i] * (1.0-settings.influence) +
+                             physical * settings.influence;
+        if (!finite(blended)) {
+          throw std::invalid_argument("Non-finite regular Sculpt assist sample");
+        }
+        result.push_back(blended);
+      }
     }
     return result;
   }
