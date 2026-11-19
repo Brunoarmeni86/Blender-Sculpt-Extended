@@ -140,8 +140,6 @@ class World {
   const std::vector<std::size_t> &dirty_particles() const;
 
  private:
-  void remember_particle(std::size_t index);
-  void remember_bond(std::size_t index);
   void step_local_impl(double dt, int substeps, int iterations, int bond_hops,
                        bool include_moving_islands);
   struct GrabTarget {
