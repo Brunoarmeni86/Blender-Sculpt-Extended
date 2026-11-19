@@ -191,3 +191,23 @@ extremely small finite brush hits its exact center.
 [Reproducers, regression tests, preliminary timings and remaining risks](V10_UNDO_JOURNAL_RADIUS_AUDIT_20261119.md).
 The twelfth standalone CTest suite is `sculpt_v10_journal_radius_tests`.
 **None of this is compiled into a Blender Sculpt brush yet.**
+
+## V11 foundation: scale-safe XPBD and native-friendly PBVH candidate API
+
+Global, local, and multi-island XPBD no longer drop rigid constraints because
+the inverse mass is positive but smaller than a hard-coded `1e-12` threshold.
+Bond lengths at extreme (but finite) coordinate magnitudes use a robust
+overflow-safe norm path. The new `World::apply_grab_candidates()` accepts
+PBVH-like preselected particle indices, sorted and deduplicated internally,
+and uses the same target generation path as the existing full-scan Grab.
+This keeps Blender's own spatial structure as the preferred source of brush
+candidates; a second physics-only spatial hash is not necessary just for Grab.
+
+The 13th CTest suite checks scale robustness and exact indexed/full-scan
+parity. `bench_candidate_query` measures selection time **given preselected
+indices** and excludes PBVH query cost and all Blender viewport work.
+
+- [V11 architecture / quality and Blender integration contracts](FOUNDATION_ARCHITECTURE_GATE_V11_20261119.md)
+- [Step-by-step Windows 11 build and test guide](WINDOWS_BUILD_AND_TEST_20261119.md)
+
+This remains **standalone research code**, not a native Blender sculpt feature.
