@@ -96,14 +96,6 @@ void World::set_ground_height(double y)
 }
 void World::disable_ground() { ground_enabled_ = false; }
 
-void World::remember_particle(const std::size_t i)
-{
-  if (active_stroke_ && !dense_journal_) undo_particles_.try_emplace(i, particles_[i]);
-}
-void World::remember_bond(const std::size_t i)
-{
-  if (active_stroke_ && !dense_journal_) undo_bonds_.try_emplace(i, bonds_[i]);
-}
 World::StrokeJournalStatistics World::stroke_journal_statistics() const
 {
   if (dense_journal_) {
@@ -460,6 +452,12 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   // disappear together with its failed geometric changes.
   local_undo_new_particle_ids_.clear();
   local_undo_new_bond_ids_.clear();
+  if (!dense_journal_) {
+    // Ensure adding ID keys during rollback tracking cannot allocate after a
+    // first-touch hash insertion, preserving exception safety.
+    local_undo_new_particle_ids_.reserve(active.size());
+    local_undo_new_bond_ids_.reserve(selected_bonds.size());
+  }
   std::vector<Vec3> &step_start = local_start_scratch_;
   std::vector<Vec3> &previous = local_previous_scratch_;
   step_start.clear();
@@ -482,15 +480,13 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
     if (!dense_journal_) {
       for (const std::size_t i : active) {
         if (particles_[i].inverse_mass > 0.0 &&
-            undo_particles_.find(i) == undo_particles_.end()) {
+            undo_particles_.try_emplace(i, particles_[i]).second) {
           local_undo_new_particle_ids_.push_back(i);
-          remember_particle(i);
         }
       }
       for (const std::size_t bi : selected_bonds) {
-        if (undo_bonds_.find(bi) == undo_bonds_.end()) {
+        if (undo_bonds_.try_emplace(bi, bonds_[bi]).second) {
           local_undo_new_bond_ids_.push_back(bi);
-          remember_bond(bi);
         }
       }
     }
