@@ -174,3 +174,20 @@ reference tests**, not equivalence guarantees for truncated local islands
 or a working Blender Sculpt/Multires brush.
 
 [Minimal bug reproducer, test design and remaining limitations](V9_LONG_STROKE_SETTINGS_AUDIT_20261119.md).
+
+## V10 — Exact Undo membership for rejected dabs
+
+The local solver now removes first-touch journal records introduced by a
+**failed numeric step**, and the adaptive halo solver removes records from a
+numerically successful but **quality-rejected candidate**. This prevents
+unused Undo allocations after repeated failed/retried dabs without disturbing
+previously accepted strokes. A reused key scratch and single-pass hash insert
+reduce the additional bookkeeping cost.
+
+The Grab radius fast path now falls back to robust `std::hypot` when the
+squared radius is zero from underflow (as well as overflow), so even an
+extremely small finite brush hits its exact center.
+
+[Reproducers, regression tests, preliminary timings and remaining risks](V10_UNDO_JOURNAL_RADIUS_AUDIT_20261119.md).
+The twelfth standalone CTest suite is `sculpt_v10_journal_radius_tests`.
+**None of this is compiled into a Blender Sculpt brush yet.**
