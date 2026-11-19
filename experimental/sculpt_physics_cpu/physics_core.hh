@@ -174,6 +174,9 @@ class World {
   std::vector<std::size_t> local_bond_scratch_;
   std::vector<Vec3> local_start_scratch_;
   std::vector<Vec3> local_previous_scratch_;
+  // Reused journal key lists: a rejected dab must remove only its new entries.
+  std::vector<std::size_t> local_undo_new_particle_ids_;
+  std::vector<std::size_t> local_undo_new_bond_ids_;
   // Sparse list of particles retaining velocity across dabs/strokes.
   std::vector<std::size_t> moving_particle_ids_;
   std::vector<std::size_t> saved_moving_particle_ids_;
