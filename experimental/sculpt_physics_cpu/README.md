@@ -159,3 +159,18 @@ The tenth CTest suite (`sculpt_v8_transactions_tests`) exercises failed and
 successful global transitions, cancel, pinned constraints and finite-alpha
 validation. See the [V8 bug audit and benchmark](V8_NUMERIC_UNDO_FALLBACK_AUDIT_20261118.md).
 This is **standalone C++ only**, not Blender Sculpt/PBVH/Multires integration.
+
+## V9 — Long-run stiffness tests and cancelled configuration edits
+
+Cancelled strokes now restore gravity, damping and ground settings as well as
+the physical particles, bonds and sparse motion state. Committed settings form
+the baseline for subsequent strokes; cancelling a later edit restores it.
+
+An eleventh CTest suite exercises **720 alternating reference strokes**:
+640 across four distance-constraint stiffness settings and 80 further
+plasticity/fracture strokes, comparing complete disconnected components against
+the global solver with repeated stroke commits/cancels. These are **CPU
+reference tests**, not equivalence guarantees for truncated local islands
+or a working Blender Sculpt/Multires brush.
+
+[Minimal bug reproducer, test design and remaining limitations](V9_LONG_STROKE_SETTINGS_AUDIT_20261119.md).
