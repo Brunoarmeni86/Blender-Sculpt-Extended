@@ -340,7 +340,7 @@ static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
   pbvh.tag_positions_changed(node_mask);
   pbvh.flush_bounds_to_parents();
   if (!cache.xpbd_v12_active_logged) {
-    std::fprintf(stderr, "[V12 XPBD Grab] experimental preview ACTIVE on ordinary mesh\\n");
+    std::fprintf(stderr, "[V12 XPBD Grab] experimental preview ACTIVE on ordinary mesh\n");
     cache.xpbd_v12_active_logged = true;
   }
   cache.xpbd_v12_previous_delta = grab_delta;
