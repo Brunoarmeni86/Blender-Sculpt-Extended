@@ -129,3 +129,11 @@ if(SCULPT_PHYSICS_BUILD_BENCHMARKS)
   add_executable(bench_candidate_query bench_candidate_query.cc)
   target_link_libraries(bench_candidate_query PRIVATE sculpt_physics_reference)
 endif()
+
+# Reject non-finite detail transfer before the native Blender CCG writeback gate.
+add_executable(test_multires_safety test_multires_safety.cc)
+target_link_libraries(test_multires_safety PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_multires_safety PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_multires_safety_tests COMMAND test_multires_safety)
