@@ -228,6 +228,24 @@ if(WITH_TBB AND MSVC_CLANG)
   string(APPEND CMAKE_CXX_FLAGS " /D_LIBCPP_VERSION")
 endif()
 
+# V12 research: OFF unless explicitly enabled when configuring the full
+# Blender fork. Runtime is separately disabled unless the environment flag
+# BLENDER_SCULPT_XPBD_GRAB_V12=1 is set. Never built into release by default.
+option(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+       "Build opt-in XPBD Grab research integration (normal mesh only)" OFF)
+if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
+  list(APPEND SRC
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/physics_core.cc"
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/physics_core.hh"
+  )
+  list(APPEND INC
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu"
+  )
+endif()
+
 blender_add_lib(bf_editor_sculpt_paint "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
+if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
+  target_compile_definitions(bf_editor_sculpt_paint PRIVATE WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
+endif()
 # RNA_prototypes.hh
 add_dependencies(bf_editor_sculpt_paint bf_rna)
