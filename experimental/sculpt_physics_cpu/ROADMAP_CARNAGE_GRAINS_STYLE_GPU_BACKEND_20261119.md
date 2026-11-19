@@ -125,3 +125,60 @@ Measure:
 - [ ] Track per-stage benchmark and gates in documentation before increasing particle counts or enabling by default.
 
 **Summary:** Learn from Carnage Grains' *demonstrated capability category* (GPU-driven grains, cohesive/soft materials, tearing), not from unverified internal source. Preserve the existing Blender/Polypaint toolchain, finish a reliable native CPU integration, then move to an independently engineered, optional CUDA backend.
+
+## 7. Explicit project objective: integrate open physics libraries, then reach Carnage Grains-like capabilities
+
+**User decision (19 Nov 2026):** Do not limit the plan to a homegrown CUDA rewrite of the existing CPU XPBD brush. **Evaluate actual integration of suitable open-source physics engines/libraries**, and develop comparable *user-visible behavior* to Carnage Grains independently, especially for granular materials, snow/mud/clay, glue/cohesion, plasticity, tearing, caching, meshing and texture transfer. The final project is native Blender Sculpt Extended, **not** merely a Python proof-of-concept or an external simulation viewer.
+
+### 7.1 Updated library shortlist and precise role
+
+| Library / upstream source | Already available publicly | Where it fits | Integration risk / gate |
+| --- | --- | --- | --- |
+| **Newton Physics** — https://github.com/newton-physics/newton | GPU simulation built on NVIDIA Warp; examples: `mpm_granular`, `mpm_snow_ball`, `mpm_viscous`, `mpm_multi_material`; multiple solvers including XPBD and implicit MPM | **First MPM PoC** for cohesive granular/continuum materials (snow, clay-like, mud); compare actual constitutive models and material controls | Python/Warp execution and dependency packaging in Blender; determine C++/native embedding strategy rather than assume drop-in library |
+| **NVIDIA Warp** — https://github.com/NVIDIA/warp | Public GPU/CPU programming framework, CUDA-backed kernels, Apache-2.0 project license | Kernel development layer; ideal for fast independent prototype of custom glue, contact, material painting, and brush-driven forces | JIT/runtime and driver/toolkit packaging; no Python launch/compilation per dab; production embedding viability and startup cost must be measured |
+| **Chrono DEM-Engine (DEME)** — https://github.com/projectchrono/DEM-Engine | Public GPU DEM solver supporting grains, clumps, contacts, customizable forces; C++ and Python interfaces, BSD-3-Clause described by project | **Parallel DEM PoC** for loose granular materials, sand, detritus and collisions; compare against MPM and CPU reference | Upstream recommends supported Linux or WSL2 CUDA for Python setup; **Windows native build compatibility must be verified**, not presumed; distinct DEM physics and high integration cost |
+| **Blender existing XPBD** — `source/blender/geometry/xpbd/` | Source already in our Blender fork, with C++ constraint API | Retain/share existing CPU XPBD brush semantics and optional soft-glue constraint work | Need adapter and careful ownership; not necessarily an appropriate DEM/MPM engine itself |
+| **Carnage Grains** — https://superhivemarket.com/products/carnage-grains | Commercial Blender add-on with advertised glue, attraction, collision/friction, cache/upres, meshing and UV transfer | **Functional reference / behavior benchmark**, not code dependency | Do not import source or replicate branding/UI/assets without permission. Public product feature descriptions do not establish source code availability |
+
+**Do not conflate solvers:** DEM resolves interactions of distinct grains; MPM represents continua/granular-like materials via particles and a grid; XPBD enforces geometric/elastic constraints. A hybrid architecture may offer the right artist-facing presets but may also have coupling, memory and transfer costs. Validate whether a shared simulation state can actually couple these methods instead of promising seamless interoperability.
+
+### 7.2 First executable integration pilot (Codex)
+
+Choose **Newton Physics + Warp as the initial isolated experimental PoC**, since public examples directly target granular, snow and multi-material MPM. Run *outside the main Blender editor* with the supported toolchain, keeping the existing Sculpt XPBD branch and Polypaint R2 untouched.
+
+**Pilot A — technical feasibility, not product integration:**
+1. Record OS/Windows version, Python version, NVIDIA GPU model, driver and supported CUDA runtime. Verify the exact Newton/Warp release and license compatibility before install. No unpinned upgrades to Blender's bundled Python.
+2. Create a separate, pinned virtual environment under the experimental workspace (not inside `scripts/startup`); install Newton/Warp and run the existing `mpm_granular`, `mpm_snow_ball`, `mpm_multi_material` examples in headless mode where possible.
+3. Create our own **neutral test scene**: box, colliders, 10k/100k test particles, deterministic seed, initial particle positions/velocities/material IDs, fixed time step and expected collision boundaries. Compare CPU and CUDA outcomes using identical inputs and documented tolerances.
+4. Export/import a **minimal stable interchange** (positions, velocities, particle IDs, material IDs, transforms, simulation time, frame index, topology generation). Test a single Blender frame readback first; measure transfer size, loading time and required synchronization.
+5. Prove a **brush-force interface** (grab target, sphere contact/drag, material-specific mask values) without attempting full Blender native Undo. Record startup/JIT time separately from steady-state stepping.
+6. Profile end-to-end p50/p95 + VRAM, not only kernel times. Assess whether a persistent in-process backend, native module, or tightly controlled asynchronous worker can be supported **without Python-per-dab overhead or fragile editor dependencies**.
+7. Only then propose a Blender build flag / optional runtime backend and a stable native C++ interface; first integration must remain opt-in and have CPU fallback and tested editor Undo/PBVH/Multires transaction gates.
+
+**Pilot B — DEM alternative:** run a comparable set with Chrono DEM-Engine, beginning on the platform upstream supports; compare rolling/sliding, stable grain pile, clumping extensions, memory, contacts and performance. Do not choose DEME solely because it advertises large GPU particle counts.
+
+### 7.3 Carnage Grains-like feature-by-feature parity targets
+
+| Capability to reproduce independently | Candidate mechanics | Blender Sculpt Extended-specific requirement |
+| --- | --- | --- |
+| Loose grains and collisions | DEM or MPM sand model, granular friction and contact | Paint/select grain spawn region and colliders, reversible editor workflow |
+| Glue / breakable bonds / tearing | XPBD glue constraints, fracture energy/yield, cohesive DEM or suitable MPM damage model | Masks/Face Sets material-dependent fracture; topology modifications outside live Multires until safe |
+| Attraction / clumping | Neighbour-based cohesive forces, bounded radii and acceleration | Art-directable field, brush influence and material masks |
+| Clay, mud, snow, soft flesh | Distinct constitutive/material models; plastic flow, viscosity, compressibility, damping | Physical Assist + Full Physics presets; preserve detail and posed symmetry |
+| Animated attach/collider/drag | Persistent handles, robust collision constraints, GPU/CPU synchronization | Native Blender object transforms, modifiers and depsgraph |
+| Baking and playback | Versioned disk cache with stable IDs and material metadata | Save/reopen/replay; invalidate on source topology/material change |
+| Upres without rerun | Particle flow interpolation / secondary detail conditioned on cached coarse motion | Adaptive microdetail and Multires detail transport; no global subdivision |
+| Surface/strand meshing | Anisotropic particle reconstruction, implicit surface / strand mesh from glue graph | UV/color-per-corner provenance, newly exposed interior mapping, editable output where feasible |
+| Texture transfer | Reference surface anchoring and barycentric interpolation | Preserve Polypaint and UV seams, don't silently average corner discontinuities |
+
+**Acceptance is behavior, not identical implementation:** For each item, define scene fixtures, rendered/mesh outputs, numerical metrics, stability and artist usability comparisons. Target functionality only; no copying original source, assets, packaging or trademarked presentation.
+
+### 7.4 Immediate task order
+
+- **First:** finish compiling/testing the present V12 native CPU Grab on the current Polypaint source; record the actual full Blender build and ensure no Polypaint regression.
+- **Then, in parallel on an isolated workspace:** run the Newton/Warp MPM smoke test and DEME comparison. **Do not insert an untested dependency into the fork.**
+- **Next:** define a reusable `GranularBackend` / `PhysicsBackend` neutral particle/material interchange contract and benchmark host-device transfers and persistent state.
+- **After that:** bring a first CUDA-backed simulation into Blender as an opt-in **simulation mode/object cache** (safer than immediately mutating live Multires), then expose brush-driven force inputs.
+- **Finally:** integrate volume/material simulations into normal Sculpt and Multires with transactionally validated proxy-to-surface transfer and native Undo; expand into glue/fracture/upres/meshing.
+
+**Decision checkpoint:** prefer Newton+Warp **for first proof of concept**, not as a permanent dependency selection. The actual backend must be selected by correctness, performance, maintenance, platform and deployment tests, with Chrono DEM-Engine retained as a specialist granular contender. Do not equate Cycles CUDA/OptiX with any of this implementation.
