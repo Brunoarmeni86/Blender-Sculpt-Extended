@@ -189,7 +189,12 @@ bool World::apply_grab_impl(Vec3 center, double radius, Vec3 displacement,
                             std::hypot(offset.x, offset.y, offset.z);
     if (!(distance < radius)) return;
     const double q = 1.0 - distance / radius;
-    const double w = q * q * (3.0 - 2.0 * q) * settings.influence;
+    // Assist is blended with the ordinary brush by SculptSurfaceBridge.
+    // Applying influence here as well would square the UI strength.
+    // FullPhysics still scales its Grab target by the requested strength.
+    const double target_strength = settings.mode == BrushPhysicsMode::PhysicalAssist ?
+                                       1.0 : settings.influence;
+    const double w = q * q * (3.0 - 2.0 * q) * target_strength;
     if (w <= eps) return;
     const Vec3 goal = particles_[i].position + displacement * w;
     const double effective_compliance = settings.compliance / w;
