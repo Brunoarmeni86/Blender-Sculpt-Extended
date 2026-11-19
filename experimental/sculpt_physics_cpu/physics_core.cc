@@ -57,8 +57,16 @@ std::size_t World::add_particle(Vec3 position, double inverse_mass, double radiu
       !valid(radius) || radius <= 0.0) {
     throw std::invalid_argument("Invalid particle parameters");
   }
-  particles_.push_back({position, {}, inverse_mass, radius});
+  // Maintain exact particle/adjoining-graph parity on allocation failure.
+  // Otherwise a failed topology operation can corrupt later Undo/BFS indexing.
   particle_bond_ids_.emplace_back();
+  try {
+    particles_.push_back({position, {}, inverse_mass, radius});
+  }
+  catch (...) {
+    particle_bond_ids_.pop_back();
+    throw;
+  }
   return particles_.size() - 1;
 }
 
@@ -77,11 +85,26 @@ std::size_t World::add_bond(std::size_t a, std::size_t b, double compliance,
   const Vec3 rest_delta = particles_[a].position - particles_[b].position;
   const double rest = std::hypot(rest_delta.x, rest_delta.y, rest_delta.z);
   if (!valid(rest) || rest < eps) throw std::invalid_argument("Invalid bond length");
+  // All-or-nothing graph update. A failed adjacency allocation must never
+  // leave a bond that references only one endpoint.
+  const std::size_t id = bonds_.size();
   bonds_.push_back({a, b, rest, compliance, yield_strain,
                     plastic_creep, fracture_strain, 0.0, false});
-  const std::size_t id = bonds_.size() - 1;
-  particle_bond_ids_[a].push_back(id);
-  particle_bond_ids_[b].push_back(id);
+  try {
+    particle_bond_ids_[a].push_back(id);
+  }
+  catch (...) {
+    bonds_.pop_back();
+    throw;
+  }
+  try {
+    particle_bond_ids_[b].push_back(id);
+  }
+  catch (...) {
+    particle_bond_ids_[a].pop_back();
+    bonds_.pop_back();
+    throw;
+  }
   return id;
 }
 
@@ -157,6 +180,32 @@ bool World::apply_grab_candidates(Vec3 center, double radius, Vec3 displacement,
       std::unique(brush_candidate_scratch_.begin(), brush_candidate_scratch_.end()),
       brush_candidate_scratch_.end());
   return apply_grab_impl(center, radius, displacement, settings, &brush_candidate_scratch_);
+}
+
+bool World::set_brush_targets(const std::vector<BrushTargetInput> &inputs)
+{
+  if (!active_stroke_) throw std::logic_error("begin_stroke required");
+  // Both candidate duplication and invalid values are rejected before
+  // replacing an accepted target list; the pending vector is reused.
+  pending_targets_.clear();
+  pending_targets_.reserve(inputs.size());
+  for (const BrushTargetInput &in : inputs) {
+    if (in.particle_index >= particles_.size() ||
+        !valid(in.goal) || !valid(in.compliance) || in.compliance < 0.0) {
+      throw std::invalid_argument("Invalid native Sculpt brush constraint");
+    }
+    if (particles_[in.particle_index].inverse_mass <= 0.0) continue;
+    pending_targets_.push_back({in.particle_index, in.goal, in.compliance, 0.0, 0.0, 0.0});
+  }
+  std::sort(pending_targets_.begin(), pending_targets_.end(),
+            [](const GrabTarget &a, const GrabTarget &b) { return a.index < b.index; });
+  for (std::size_t i = 1; i < pending_targets_.size(); ++i) {
+    if (pending_targets_[i].index == pending_targets_[i-1].index) {
+      throw std::invalid_argument("Duplicate native Sculpt brush target");
+    }
+  }
+  targets_.swap(pending_targets_);
+  return !targets_.empty();
 }
 
 bool World::apply_grab_impl(Vec3 center, double radius, Vec3 displacement,
