@@ -124,6 +124,10 @@ void World::begin_stroke()
   dense_undo_bonds_.clear();
   dense_journal_ = false;
   saved_moving_particle_ids_ = moving_particle_ids_;
+  saved_ground_enabled_ = ground_enabled_;
+  saved_ground_y_ = ground_y_;
+  saved_damping_ = damping_;
+  saved_gravity_ = gravity_;
   targets_.clear();
   pending_targets_.clear();
   dirty_.clear();
@@ -613,6 +617,10 @@ void World::cancel_stroke()
   undo_bonds_.clear();
   dense_journal_ = false;
   moving_particle_ids_ = std::move(saved_moving_particle_ids_);
+  ground_enabled_ = saved_ground_enabled_;
+  ground_y_ = saved_ground_y_;
+  damping_ = saved_damping_;
+  gravity_ = saved_gravity_;
   targets_.clear();
   dirty_.clear();
   adaptive_cached_hops_ = -1;
