@@ -137,6 +137,32 @@ void World::begin_stroke()
 bool World::apply_grab(Vec3 center, double radius, Vec3 displacement,
                        BrushPhysicsSettings settings)
 {
+  return apply_grab_impl(center, radius, displacement, settings, nullptr);
+}
+
+bool World::apply_grab_candidates(Vec3 center, double radius, Vec3 displacement,
+                                  BrushPhysicsSettings settings,
+                                  const std::vector<std::size_t> &candidate_ids)
+{
+  if (!active_stroke_) throw std::logic_error("begin_stroke required");
+  if (settings.mode == BrushPhysicsMode::Standard || settings.influence == 0.0) {
+    targets_.clear();
+    return false;
+  }
+  // Stable order is required for reproducible Gauss-Seidel brush constraints.
+  // This is O(K log K), but K is the PBVH-selected region, not all N particles.
+  brush_candidate_scratch_ = candidate_ids;
+  std::sort(brush_candidate_scratch_.begin(), brush_candidate_scratch_.end());
+  brush_candidate_scratch_.erase(
+      std::unique(brush_candidate_scratch_.begin(), brush_candidate_scratch_.end()),
+      brush_candidate_scratch_.end());
+  return apply_grab_impl(center, radius, displacement, settings, &brush_candidate_scratch_);
+}
+
+bool World::apply_grab_impl(Vec3 center, double radius, Vec3 displacement,
+                            BrushPhysicsSettings settings,
+                            const std::vector<std::size_t> *candidate_ids)
+{
   if (!active_stroke_) throw std::logic_error("begin_stroke required");
   if (settings.mode == BrushPhysicsMode::Standard || settings.influence == 0.0) {
     // Turn off the previous dab target as well. The Sculpt adapter must also skip
@@ -153,23 +179,30 @@ bool World::apply_grab(Vec3 center, double radius, Vec3 displacement,
   // Scratch capacity is reused to avoid heap churn between brush updates.
   pending_targets_.clear();
   const double radius_sq = radius * radius;
-  for (std::size_t i = 0; i < particles_.size(); ++i) {
-    if (particles_[i].inverse_mass == 0) continue;
+  auto visit = [&](std::size_t i) {
+    if (i >= particles_.size()) throw std::out_of_range("Invalid PBVH Grab candidate index");
+    if (particles_[i].inverse_mass == 0) return;
     const Vec3 offset = particles_[i].position - center;
     const double dist_sq = offset.x * offset.x + offset.y * offset.y + offset.z * offset.z;
-    if (std::isfinite(radius_sq) && radius_sq > 0.0 && dist_sq >= radius_sq) continue;
+    if (std::isfinite(radius_sq) && radius_sq > 0.0 && dist_sq >= radius_sq) return;
     const double distance = (std::isfinite(radius_sq) && radius_sq > 0.0) ? std::sqrt(dist_sq) :
                             std::hypot(offset.x, offset.y, offset.z);
-    if (!(distance < radius)) continue;
+    if (!(distance < radius)) return;
     const double q = 1.0 - distance / radius;
     const double w = q * q * (3.0 - 2.0 * q) * settings.influence;
-    if (w <= eps) continue;
+    if (w <= eps) return;
     const Vec3 goal = particles_[i].position + displacement * w;
     const double effective_compliance = settings.compliance / w;
     if (!valid(goal) || !valid(effective_compliance)) {
       throw std::invalid_argument("Grab produced non-finite target parameters");
     }
     pending_targets_.push_back({i, goal, effective_compliance, 0.0, 0.0, 0.0});
+  };
+  if (candidate_ids) {
+    for (std::size_t i : *candidate_ids) visit(i);
+  }
+  else {
+    for (std::size_t i = 0; i < particles_.size(); ++i) visit(i);
   }
   targets_.swap(pending_targets_);
   return !targets_.empty();
