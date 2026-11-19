@@ -44,7 +44,7 @@ enum class BrushPhysicsMode { Standard, PhysicalAssist, FullPhysics };
 
 struct BrushPhysicsSettings {
   BrushPhysicsMode mode = BrushPhysicsMode::Standard;
-  double influence = 0.0; // 0 = default brush, no solver side effects
+  // Assist: blend factor for standard vs physical surface result (applied once).\n  // FullPhysics: physical Grab-target strength. Zero bypasses the solver.\n  double influence = 0.0;
   double compliance = 1e-6;
 };
 
