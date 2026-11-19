@@ -2,6 +2,24 @@
 
 **19 November 2026. Development-only, UNVERIFIED full Blender editor build.** This is a separate experimental branch based on the 14-suite V11 CPU reference, not a released feature. Build with care; back up your files. **The native Blender code has not yet passed a complete Blender/Windows compile.** The 15 standalone CPU CTest suites do not compile `grab.cc`.
 
+## V12 pre-build audit, 19 November 2026
+
+**Critical preview-gate fix:** In Blender's `DNA_scene_types.h`, the default `Paint::symmetry_flags` value is `PAINT_SYMMETRY_FEATHER` (bit 3), even with no symmetry axis enabled. The initial V12 guard `symmetry_flags != 0` consequently disabled the XPBD preview on ordinary default scene settings. The native Grab gate now rejects *only actual mirror axes and tiled passes*, allowing the feather-only default. Keep X/Y/Z symmetry and tiling disabled for the first test.
+
+**Verification boundary:** This correction is a source-level audit; the repository's existing C++17 CI exercises the standalone physics library, not `source/blender/editors/sculpt_paint/mesh/brushes/grab.cc`. A full Blender build with the opt-in flag is still necessary.
+
+**Reuse `C:\\BlenderDev` without modifying existing branches:** inspect whether `C:\\BlenderDev\\blender-github` or `C:\\BlenderDev\\blender` has `origin` pointing to `Brunoarmeni86/Blender-Sculpt-Extended`. If so, use a separate Git worktree instead of cloning another full repository:
+
+```powershell
+git -C C:\BlenderDev\blender-github remote get-url origin
+git -C C:\BlenderDev\blender-github status -sb
+# Use this only after confirming the repository is the expected fork.
+git -C C:\BlenderDev\blender-github fetch origin
+git -C C:\BlenderDev\blender-github worktree add --detach C:\BlenderDev\XPBD-V12 origin/experiment/sculpt-physics-native-grab-v12-20261119
+```
+
+An isolated worktree shares Git objects but not checked-out files or builds. Use a unique build directory. Never run a hard reset over existing Codex changes.
+
 ## V12 implementation scope
 
 - The original Blender Grab code remains the default. CMake option `WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL` is **OFF** by default. Even when compiled ON, the experimental branch is runtime OFF unless environment variable `BLENDER_SCULPT_XPBD_GRAB_V12=1`.
