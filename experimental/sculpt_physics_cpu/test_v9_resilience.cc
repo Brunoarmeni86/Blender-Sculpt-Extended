@@ -67,6 +67,38 @@ int main()
       }
     }
   }
+  // The comparison also covers material memory: plastic rest lengths and
+  // breakable bonds, with alternating accepted and cancelled strokes.
+  {
+    World global, multi;
+    for (World *w : {&global,&multi}) {
+      for (int i=0;i<3;++i) w->add_particle({double(i),0,0}, i==0?0.0:1.0);
+      for (int i=0;i<3;++i) w->add_particle({double(i+100),0,0}, i==0?0.0:1.0);
+      for (int i=0;i<2;++i) {
+        w->add_bond(i,i+1,1e-5,.01,20.0,.30);
+        w->add_bond(i+3,i+4,1e-5,.01,20.0,.30);
+      }
+    }
+    for (int dab=0;dab<80;++dab) {
+      const World old_global=global,old_multi=multi;
+      global.begin_stroke();multi.begin_stroke();
+      const int id=(dab%2==0)?2:5;
+      const Vec3 center=global.particles()[id].position;
+      const Vec3 delta{0,(dab%4==0)?0.35:-0.08,0};
+      const BrushPhysicsSettings brush{BrushPhysicsMode::FullPhysics,1.0,0};
+      CHECK(global.apply_grab(center,.3,delta,brush));
+      CHECK(multi.apply_grab(center,.3,delta,brush));
+      global.step(1./60.,2,6);
+      multi.step_local_multi(1./60.,2,6,3);
+      same_physical_state(global,multi);
+      if(dab%5==0) {
+        global.cancel_stroke(); multi.cancel_stroke();
+        same_physical_state(global,old_global);
+        same_physical_state(multi,old_multi);
+      }
+      else {global.commit_stroke(); multi.commit_stroke();}
+    }
+  }
   // Previously cancel restored particles but leaked gravity, damping and
   // floor settings into the following Sculpt brush stroke.
   {
