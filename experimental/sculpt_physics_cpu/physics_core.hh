@@ -82,6 +82,13 @@ class World {
   void begin_stroke();
   bool apply_grab(Vec3 center, double radius, Vec3 displacement,
                   BrushPhysicsSettings settings);
+  /* Accept a PBVH-selected candidate set: avoids scanning all physics proxy
+   * particles for a brush with a small footprint. Caller supplies all nearby
+   * proxy IDs; duplicates and order are normalized, invalid IDs throw without
+   * replacing the previous valid dab. C++17 reference, Blender Span adapter TBD. */
+  bool apply_grab_candidates(Vec3 center, double radius, Vec3 displacement,
+                             BrushPhysicsSettings settings,
+                             const std::vector<std::size_t> &candidate_ids);
   void step(double dt, int substeps = 4, int iterations = 5);
   /* Optional approximation for brush-local, quasistatic strokes. Only particles
    * within `bond_hops` from a Grab target are integrated. Crossing bonds act as
@@ -140,6 +147,9 @@ class World {
   const std::vector<std::size_t> &dirty_particles() const;
 
  private:
+  bool apply_grab_impl(Vec3 center, double radius, Vec3 displacement,
+                       BrushPhysicsSettings settings,
+                       const std::vector<std::size_t> *candidate_ids);
   void step_local_impl(double dt, int substeps, int iterations, int bond_hops,
                        bool include_moving_islands);
   struct GrabTarget {
@@ -157,6 +167,7 @@ class World {
   int adaptive_cached_hops_ = -1; // Reuse tested halo width within one stroke.
   std::vector<GrabTarget> targets_;
   std::vector<GrabTarget> pending_targets_; // Reused scratch for atomic Grab updates.
+  std::vector<std::size_t> brush_candidate_scratch_; // Sort/deduplicate PBVH IDs.
   std::vector<std::size_t> dirty_;
   // Stable indices: particle/bond topology cannot change during a stroke.
   std::unordered_map<std::size_t, Particle> undo_particles_;
