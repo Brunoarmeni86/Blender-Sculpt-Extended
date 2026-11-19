@@ -16,7 +16,14 @@ The integration intentionally excludes unrelated history from the R&D branch, wh
 
 ## Validation status
 
-- Standalone XPBD tests: pending on the integrated branch.
-- Full Blender VS2022 compilation: pending.
-- Viewport, Undo, and visual behavior: pending user test.
+- Standalone XPBD tests: **15/15 passed**, Release, Visual Studio 2022 / MSVC 19.44.
+- Full Blender VS2022 compilation: **passed** with
+  `WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL=ON`.
+- CUDA/OptiX settings preserved from the working build: CUDA `sm_86` and OptiX enabled.
+- Compiled executable:
+  `C:/BlenderDev/build-se-polypaint-fill-clean-vs2022-20261115-r2/bin/Release/blender.exe`.
+- Viewport deformation, native Undo, mask behavior, and visual comparison: pending user test.
+
+The full editor build emitted only existing unused-parameter warnings in Sculpt code; no XPBD
+compile or link errors occurred.
 
