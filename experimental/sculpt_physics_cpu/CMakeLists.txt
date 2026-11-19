@@ -115,3 +115,17 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_v10_journal_radius PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_v10_journal_radius_tests COMMAND test_v10_journal_radius)
+
+# Foundation integration contract: inverse-mass scale, robust length and
+# PBVH-preselected Grab candidate parity against the original full scan.
+add_executable(test_foundation_contract test_foundation_contract.cc)
+target_link_libraries(test_foundation_contract PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_foundation_contract PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_foundation_contract_tests COMMAND test_foundation_contract)
+
+if(SCULPT_PHYSICS_BUILD_BENCHMARKS)
+  add_executable(bench_candidate_query bench_candidate_query.cc)
+  target_link_libraries(bench_candidate_query PRIVATE sculpt_physics_reference)
+endif()
