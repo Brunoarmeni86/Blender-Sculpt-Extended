@@ -9,7 +9,14 @@
 namespace sculpt_physics {
 namespace {
 constexpr double eps = 1e-12;
-double length(Vec3 v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+double length(Vec3 v)
+{
+  // Fast path at ordinary object scales, robust fallback at extreme scales.
+  const double square = v.x * v.x + v.y * v.y + v.z * v.z;
+  if (std::isfinite(square) && square > 0.0) return std::sqrt(square);
+  if (v.x == 0.0 && v.y == 0.0 && v.z == 0.0) return 0.0;
+  return std::hypot(v.x, v.y, v.z);
+}
 bool valid(double n) { return std::isfinite(n); }
 bool valid(Vec3 v) { return valid(v.x) && valid(v.y) && valid(v.z); }
 }  // namespace
@@ -217,7 +224,8 @@ void World::step(double dt, int substeps, int iterations)
           const double alpha = t.compliance / (h * h);
           if (!valid(alpha)) throw std::runtime_error("Grab XPBD compliance out of range");
           const double denom = p.inverse_mass + alpha;
-          if (denom <= eps) continue;
+          if (!valid(denom)) throw std::runtime_error("XPBD effective mass out of range");
+          if (denom <= 0.0) continue;
           const Vec3 C = p.position - t.goal;
           const Vec3 lambda{t.lambda_x, t.lambda_y, t.lambda_z};
           const Vec3 dlambda = (C * -1.0 - lambda * alpha) / denom;
@@ -247,7 +255,8 @@ void World::step(double dt, int substeps, int iterations)
           const double alpha = b.compliance / (h * h);
           if (!valid(alpha)) throw std::runtime_error("Bond XPBD compliance out of range");
           const double denom = a.inverse_mass + c.inverse_mass + alpha;
-          if (denom <= eps) continue;
+          if (!valid(denom)) throw std::runtime_error("XPBD effective mass out of range");
+          if (denom <= 0.0) continue;
           const double dlambda = (-C - alpha * b.lambda) / denom;
           if (!valid(dlambda) || !valid(b.lambda + dlambda)) {
             throw std::runtime_error("Bond XPBD multiplier out of range");
@@ -504,7 +513,8 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
           const double alpha = t.compliance / (h * h);
           if (!valid(alpha)) throw std::runtime_error("Grab XPBD compliance out of range");
           const double denom = p.inverse_mass + alpha;
-          if (denom <= eps) continue;
+          if (!valid(denom)) throw std::runtime_error("XPBD effective mass out of range");
+          if (denom <= 0.0) continue;
           const Vec3 C = p.position - t.goal;
           const Vec3 lambda{t.lambda_x, t.lambda_y, t.lambda_z};
           const Vec3 dlambda = (C * -1.0 - lambda * alpha) / denom;
@@ -540,7 +550,8 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
           const double inv_a = included(b.a) ? a.inverse_mass : 0.0;
           const double inv_c = included(b.b) ? c.inverse_mass : 0.0;
           const double denom = inv_a + inv_c + alpha;
-          if (denom <= eps) continue;
+          if (!valid(denom)) throw std::runtime_error("XPBD effective mass out of range");
+          if (denom <= 0.0) continue;
           const double dlambda = (-C - alpha * b.lambda) / denom;
           if (!valid(dlambda) || !valid(b.lambda + dlambda)) {
             throw std::runtime_error("Bond XPBD multiplier out of range");
