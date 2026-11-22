@@ -263,12 +263,29 @@ if(WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
   )
 endif()
 
+# V15 multi-brush preview: shares verified V14 native CPU executor, but
+# has a SEPARATE OFF-by-default compile/runtime switch. Never silently change
+# standard Clay, Draw, Smooth or Clay Strips behavior.
+option(WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+       "Build opt-in XPBD Clay/Draw/other sculpt brush preview (Mesh only)" OFF)
+if(WITH_SCULPT_XPBD_OTHER_BRUSHES_V15)
+  if(NOT WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
+    message(FATAL_ERROR "V15 other brushes require WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14=ON")
+  endif()
+  list(APPEND SRC
+    mesh/brushes/physics_brush_v15.hh
+  )
+endif()
+
 blender_add_lib(bf_editor_sculpt_paint "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
   target_compile_definitions(bf_editor_sculpt_paint PRIVATE WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
 endif()
 if(WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
   target_compile_definitions(bf_editor_sculpt_paint PRIVATE WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
+endif()
+if(WITH_SCULPT_XPBD_OTHER_BRUSHES_V15)
+  target_compile_definitions(bf_editor_sculpt_paint PRIVATE WITH_SCULPT_XPBD_OTHER_BRUSHES_V15)
 endif()
 # RNA_prototypes.hh
 add_dependencies(bf_editor_sculpt_paint bf_rna)
