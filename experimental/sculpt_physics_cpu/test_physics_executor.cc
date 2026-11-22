@@ -192,6 +192,35 @@ void test_compliant_targets_match_native_world()
   }
 }
 
+void test_fixed_halo_matches_world_bond_projection()
+{
+  // Compare one real pinned-boundary distance bond against the existing
+  // World local XPBD equations (not an abstract/single-vertex toy case).
+  for (double compliance : {0.0,1e-5}) {
+    World world;
+    world.add_particle({0,0,0},0.0); // fixed exterior of PBVH/Undo region
+    world.add_particle({1,0,0});
+    world.add_bond(0,1,compliance);
+    auto exec=make_cpu_xpbd_executor();
+    exec->allocate_island(build_gpu_local_island(
+        world,{1},{0},{1},33,false));
+    exec->begin_stroke();
+    exec->set_targets({{1,{1.0,0.4,0.0},1e-6}});
+    exec->step(1.0/60.0,1,8);
+    auto staged=exec->download_dirty();
+    assert(staged.size()==1 && staged[0].global_index==1);
+
+    world.begin_stroke();
+    world.set_brush_targets({{1,{1.0,0.4,0.0},1e-6}});
+    world.step_local(1.0/60.0,1,8,0);
+    assert(near(staged[0].position.x,world.particles()[1].position.x,1e-8));
+    assert(near(staged[0].position.y,world.particles()[1].position.y,1e-8));
+    assert(near(world.particles()[0].position.y,0.0));
+    exec->cancel();
+    world.cancel_stroke();
+  }
+}
+
 void test_target_strength_and_atomic_step()
 {
   World world;
@@ -225,6 +254,7 @@ int main()
 {
   test_cpu_factory_and_lifetime();
   test_compliant_targets_match_native_world();
+  test_fixed_halo_matches_world_bond_projection();
   test_target_strength_and_atomic_step();
   return 0;
 }
