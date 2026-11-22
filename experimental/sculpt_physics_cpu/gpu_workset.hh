@@ -83,6 +83,37 @@ class GpuTopologyBondIndex {
   std::vector<std::size_t> incident_bonds_; // 2*B bond IDs
 };
 
+/* Device-friendly float32 proxy coordinates relative to a stable double
+ * precision island origin. This avoids catastrophic cancellation when the
+ * Blender object is translated far from origin.
+ *
+ * The CPU World remains authoritative in doubles; Warp/CUDA receives
+ * relative float32. A change of island origin requires a full GPU re-upload.
+ */
+struct GpuFloat3 {
+  float x = 0.0f;
+  float y = 0.0f;
+  float z = 0.0f;
+};
+
+struct GpuLocalFloatPack {
+  Vec3 origin{};
+  std::vector<GpuFloat3> relative_positions;
+};
+
+GpuLocalFloatPack pack_gpu_island_relative(const GpuLocalIsland &island);
+
+/* Reconstruct changed positions from GPU-relative float values.
+ * Compare against the ORIGINAL relative pack to avoid reporting float32
+ * rounding as an artist edit. Reject changes to pinned/Undo-excluded IDs.
+ * Returns world-space doubles for staging via native Blender Undo.
+ */
+std::vector<GpuProxyChange> stage_gpu_relative_writes(
+    const GpuLocalIsland &island,
+    const GpuLocalFloatPack &packed,
+    const std::vector<GpuFloat3> &solved_relative,
+    double movement_epsilon = 1.0e-8);
+
 /* Validate staged GPU positions before ANY Blender PBVH/CCG writeback.
  * Pinned/halo vertices must not move. Returns only changed writable global
  * positions; caller must also validate topology generation and CCG anchors. */
