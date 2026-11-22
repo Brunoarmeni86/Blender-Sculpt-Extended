@@ -322,14 +322,16 @@ void test_repeated_dabs_with_reused_solver_scratch()
 void test_sparse_ack_on_large_proxy()
 {
   World world;
+  std::vector<std::size_t> all;
+  all.reserve(5000);
   for (std::size_t i=0;i<5000;++i) {
     world.add_particle({static_cast<double>(i),0,0});
+    all.push_back(i);
   }
-  // No bonds: deliberately isolate sparse upload/ack cost from XPBD solving.
-  const std::vector<std::size_t> selected{10,300,4000};
+  // All 5000 vertices are in the proxy, but only two change on this dab.
+  // No bonds: isolate sparse acknowledgment from physics propagation.
   auto exec=make_cpu_xpbd_executor();
-  exec->allocate_island(build_gpu_local_island(
-      world,selected,{},{10,300,4000},52,false));
+  exec->allocate_island(build_gpu_local_island(world,all,{},all,52,false));
   exec->begin_stroke();
   exec->upload_dirty({{4000,{4000,0.3,0}},{10,{10,0.1,0}}});
   auto first=exec->stage_incremental();
