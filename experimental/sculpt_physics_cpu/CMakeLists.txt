@@ -256,3 +256,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 add_test(NAME sculpt_native_grab_executor_adapter_tests
          COMMAND test_native_grab_executor_adapter)
+
+# V15 translation-based adapter: preserves exact native Clay/Clay Strips/
+# Smooth/Draw factors and tests safety on fixed-halo CPU XPBD islands.
+add_executable(test_native_other_brushes_executor_adapter
+  test_native_other_brushes_executor_adapter.cc)
+target_link_libraries(test_native_other_brushes_executor_adapter
+  PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_native_other_brushes_executor_adapter
+    PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_native_other_brushes_executor_tests
+         COMMAND test_native_other_brushes_executor_adapter)
