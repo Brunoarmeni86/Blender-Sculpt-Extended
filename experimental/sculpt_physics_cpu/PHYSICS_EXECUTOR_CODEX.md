@@ -1,6 +1,17 @@
 # IPhysicsExecutor — native backend contract for Codex
 **22 November 2026 — PR #24 (experimental, not Blender viewport-ready)**
 
+**V14 progress:** A separate native Grab callback has been added to the
+Blender fork under two opt-in switches. It translates final native
+PBVH Grab factors into `IPhysicsExecutor` targets and stages positions
+before any editor writes. The pure adapter and halo logic are CTest-
+covered on Linux/MSVC; the full Blender executable has not yet been
+compiled with V14 ON. See
+[`V14_NATIVE_GRAB_EXECUTOR_BUILD_AND_TEST.md`](V14_NATIVE_GRAB_EXECUTOR_BUILD_AND_TEST.md).
+`CpuXpbdExecutor::commit()` now refuses pending unacknowledged
+dirty changes. Never interpret a standalone proxy commit as a native
+Blender Undo transaction.
+
 ## Why this exists
 The original `CpuStrokePipeline` already owns a complete local
 `World` XPBD/DEM stroke and its standalone rollback. The Python/Warp
