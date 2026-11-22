@@ -46,6 +46,16 @@ def smoke(device):
     session.update_positions([0,1],[[0,0,0],[0.6,0,0]])
     edited = session.read_positions([0,1])
     assert equal(edited,points[:2])
+    # Real Warp (CPU/CUDA) must reuse device work arrays on equal-size dabs.
+    if device in ("warp-cpu","cuda"):
+        scratch_allocs=session.stats.allocations
+        assert session.sparse_capacity >= 2
+        for _ in range(4):
+            session.update_positions([0,1],[[0,0,0],[0.6,0,0]])
+            assert equal(session.read_positions([0,1]), points[:2])
+        assert session.stats.allocations == scratch_allocs, (
+            "allocations grew despite fixed sparse workset capacity"
+        )
     session.step(iterations=3, cohesion=0.0)
     assert session.read_positions([0,1])[0,0] < 0
     session.update_positions([0,1],[[0,0,0],[1.2,0,0]])
