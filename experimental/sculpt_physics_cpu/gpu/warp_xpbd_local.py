@@ -304,15 +304,20 @@ class LocalXpbdSession:
         if not np.isfinite(h2) or h2<=0:
             raise ValueError("XPBD timestep underflow/overflow")
         if self._warp:
-            self._lam_gpu.zero_()  # reset XPBD multipliers between distinct dabs
-            # Kinematic targets must hold at the end of EVERY constraint
-            # sweep. Otherwise the final bond color silently pulls them away
-            # from the artist's requested position.
-            if len(self._goals_ids):
+            self._lam_gpu.zero_()  # reset bond multipliers between separate dabs
+            if self._target_mode=="compliant" and len(self._goals_ids):
+                self._target_lam_gpu.zero_()  # one XPBD target lambda per dab
+            if self._target_mode=="hard" and len(self._goals_ids):
                 wp.launch(_apply_hard_targets,dim=len(self._goals_ids),
                     inputs=[self._x,self._inv_gpu,self._ids_gpu,
                             self._goals_gpu],device=self._dev)
             for _ in range(iterations):
+                # Match World: brush targets first, then distance bonds.
+                if self._target_mode=="compliant" and len(self._goals_ids):
+                    wp.launch(_xpbd_compliant_targets,dim=len(self._goals_ids),
+                        inputs=[self._x,self._inv_gpu,self._ids_gpu,
+                                self._goals_gpu,self._target_comp_gpu,
+                                self._target_lam_gpu,h2],device=self._dev)
                 for color in range(self.num_colors):
                     start,end=map(int,self._offsets[color:color+2])
                     if end==start: continue
@@ -320,7 +325,7 @@ class LocalXpbdSession:
                         inputs=[self._x,self._inv_gpu,self._a_gpu,
                                 self._b_gpu,self._rest_gpu,self._comp_gpu,
                                 self._lam_gpu,start,h2],device=self._dev)
-                if len(self._goals_ids):
+                if self._target_mode=="hard" and len(self._goals_ids):
                     wp.launch(_apply_hard_targets,dim=len(self._goals_ids),
                         inputs=[self._x,self._inv_gpu,self._ids_gpu,
                                 self._goals_gpu],device=self._dev)
