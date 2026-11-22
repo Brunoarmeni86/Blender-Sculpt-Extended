@@ -146,3 +146,17 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_native_brush_targets PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_native_brush_contract_tests COMMAND test_native_brush_targets)
+
+# Opt-in experimental brush target, granular contact and Multires dirty-tile
+# planning modules. They are standalone CPU reference code, not editor callbacks.
+target_sources(sculpt_physics_reference PRIVATE
+  brush_targets.cc
+  granular_contacts.cc
+  multires_dirty_map.cc
+)
+add_executable(test_brush_materials test_brush_materials.cc)
+target_link_libraries(test_brush_materials PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_brush_materials PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_physical_brush_and_granular_tests COMMAND test_brush_materials)
