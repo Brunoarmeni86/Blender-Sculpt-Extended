@@ -21,6 +21,19 @@ projects the same form of soft artist targets as `World`, with
 CPU-oracle and Warp-CPU JIT tests. The readback API returns owned copies
 instead of aliases to recycled Warp buffers.
 
+**Native Blender Grab integration spike (V14):** This branch now has
+a separate **OFF-by-default** source callback in
+`source/blender/editors/sculpt_paint/mesh/brushes/grab.cc`, gated by
+`WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14` at compile time and
+`BLENDER_SCULPT_XPBD_GRAB_EXECUTOR_V14=1` at runtime. It routes
+Blender-computed native Grab factors into the new CPU `IPhysicsExecutor`
+through a fixed one-ring local island. The rest graph/CSR is cached for
+a stroke, while each dab uses a fresh correctness-first solver island.
+See [`V14_NATIVE_GRAB_EXECUTOR_BUILD_AND_TEST.md`](V14_NATIVE_GRAB_EXECUTOR_BUILD_AND_TEST.md).
+**The complete Blender VS2022 build and real viewport/Undo interaction
+are unverified**; standalone Linux/Windows adapter tests are not
+proof of native runtime correctness. Normal Blender builds remain untouched.
+
 **New native executor boundary:** [`PHYSICS_EXECUTOR_CODEX.md`](PHYSICS_EXECUTOR_CODEX.md)
 defines the first actual `IPhysicsExecutor` C++ interface and a working
 `CpuXpbdExecutor` reference for **compliant XPBD target/bond constraints**.
