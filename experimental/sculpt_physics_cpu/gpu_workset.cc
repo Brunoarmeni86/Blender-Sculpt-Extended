@@ -188,6 +188,87 @@ GpuLocalIsland GpuTopologyBondIndex::build(
                                      allow_truncated_graph, &bond_ids);
 }
 
+GpuLocalFloatPack pack_gpu_island_relative(const GpuLocalIsland &island)
+{
+  static_assert(sizeof(GpuFloat3) == 3 * sizeof(float),
+                "GpuFloat3 must be packed as three float32 values");
+  GpuLocalFloatPack packed;
+  if (island.positions.empty()) return packed;
+
+  Vec3 lo = island.positions.front();
+  Vec3 hi = lo;
+  for (const Vec3 &p : island.positions) {
+    if (!finite(p)) throw std::invalid_argument("Non-finite GPU proxy position");
+    lo.x = std::min(lo.x,p.x); lo.y = std::min(lo.y,p.y); lo.z = std::min(lo.z,p.z);
+    hi.x = std::max(hi.x,p.x); hi.y = std::max(hi.y,p.y); hi.z = std::max(hi.z,p.z);
+  }
+  // Half-sums resist overflow when the original coordinate magnitude is
+  // enormous. A local origin is fixed for this whole device-island lifetime.
+  packed.origin = {0.5*lo.x + 0.5*hi.x,
+                   0.5*lo.y + 0.5*hi.y,
+                   0.5*lo.z + 0.5*hi.z};
+  if (!finite(packed.origin)) {
+    throw std::invalid_argument("Non-finite GPU island origin");
+  }
+  packed.relative_positions.reserve(island.positions.size());
+  for (const Vec3 &p : island.positions) {
+    const Vec3 offset = p - packed.origin;
+    if (!finite(offset)) throw std::invalid_argument("GPU island span overflow");
+    const GpuFloat3 local{static_cast<float>(offset.x),
+                          static_cast<float>(offset.y),
+                          static_cast<float>(offset.z)};
+    if (!std::isfinite(local.x) || !std::isfinite(local.y) ||
+        !std::isfinite(local.z)) {
+      throw std::invalid_argument("GPU island span exceeds float32 range");
+    }
+    packed.relative_positions.push_back(local);
+  }
+  return packed;
+}
+
+std::vector<GpuProxyChange> stage_gpu_relative_writes(
+    const GpuLocalIsland &island,
+    const GpuLocalFloatPack &packed,
+    const std::vector<GpuFloat3> &solved_relative,
+    double movement_epsilon)
+{
+  const std::size_t n = island.positions.size();
+  if (solved_relative.size() != n || packed.relative_positions.size() != n ||
+      island.global_ids.size() != n || island.writable.size() != n ||
+      island.inverse_masses.size() != n || !finite(packed.origin) ||
+      !std::isfinite(movement_epsilon) || movement_epsilon < 0.0) {
+    throw std::invalid_argument("Invalid rebased GPU writeback dimensions");
+  }
+  std::vector<GpuProxyChange> changes;
+  changes.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const GpuFloat3 cur = solved_relative[i];
+    const GpuFloat3 old = packed.relative_positions[i];
+    if (!std::isfinite(cur.x) || !std::isfinite(cur.y) || !std::isfinite(cur.z) ||
+        !std::isfinite(old.x) || !std::isfinite(old.y) || !std::isfinite(old.z)) {
+      throw std::invalid_argument("Non-finite relative GPU result");
+    }
+    const Vec3 d{static_cast<double>(cur.x) - static_cast<double>(old.x),
+                 static_cast<double>(cur.y) - static_cast<double>(old.y),
+                 static_cast<double>(cur.z) - static_cast<double>(old.z)};
+    const double displacement = std::hypot(d.x,d.y,d.z);
+    if (!std::isfinite(displacement)) throw std::invalid_argument("GPU delta overflow");
+    if (displacement <= movement_epsilon) continue;
+    if (!island.writable[i] || island.inverse_masses[i] <= 0.0) {
+      throw std::logic_error("GPU changed pinned vertex in rebased island");
+    }
+    const Vec3 world{packed.origin.x + static_cast<double>(cur.x),
+                     packed.origin.y + static_cast<double>(cur.y),
+                     packed.origin.z + static_cast<double>(cur.z)};
+    if (!finite(world)) throw std::invalid_argument("GPU world-space result overflow");
+    const Vec3 change = world - island.positions[i];
+    if (std::hypot(change.x,change.y,change.z) > movement_epsilon) {
+      changes.push_back({island.global_ids[i],world});
+    }
+  }
+  return changes;
+}
+
 std::vector<GpuProxyChange> stage_gpu_local_writes(
     const GpuLocalIsland &island,
     const std::vector<Vec3> &solved_positions,
