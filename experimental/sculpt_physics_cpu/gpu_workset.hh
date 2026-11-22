@@ -76,6 +76,15 @@ class GpuTopologyBondIndex {
                        std::uint64_t topology_generation,
                        bool allow_truncated_graph = false) const;
 
+  /* For a strictly local quasistatic brush: include all immediate
+   * neighbors of each writable vertex as fixed boundary particles.
+   * Outgoing bonds from these fixed halo vertices may be omitted without
+   * affecting the interior. Costs O(sum degree(active)) for cached CSR. */
+  std::vector<std::size_t> one_ring_halo(
+      const World &world,
+      const std::vector<std::size_t> &active_ids,
+      std::uint64_t topology_generation) const;
+
   std::size_t particle_count() const { return particle_count_; }
   std::size_t bond_count() const { return bond_count_; }
 
