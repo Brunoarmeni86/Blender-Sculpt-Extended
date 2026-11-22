@@ -83,6 +83,40 @@ Sculpt Layers, Undo, viewport/draw and dynamic topology updates. CSR
 requires additional memory (roughly two bond-ID entries per intact bond
 plus N+1 offsets, ignoring allocator overhead).
 
+## Warp compliant sculpt targets (new)
+
+`warp_xpbd_local.py` now accepts
+`LocalXpbdSession(..., target_mode="compliant")` and
+`set_targets(ids, goals, target_compliance=...)`. Compliance accepts
+a scalar or a per-target array. The previously tested hard-target mode
+remains the default, so existing experiments are not silently changed.
+
+The compliant kernel projects each target using the same XPBD form as
+the native C++ `World` / `CpuXpbdExecutor`. Per-target vector Lagrange
+multipliers are reset each separate dab and accumulated across solver
+iterations. The artist target is solved before each colored bond pass,
+rather than forcibly re-pinned after the pass. Hence a **soft** target
+can move with material constraints; it is not guaranteed to finish
+exactly at the artist's goal. It is distinct from the previous rigid
+kinematic mode.
+
+The `test_warp_xpbd_compliant.py` suite tests varying compliant
+targets, fixed boundary vertices, invalid target inputs, multi-dab
+parity between NumPy and the real Warp CPU JIT kernel, and a
+closed-form one-particle XPBD result.
+
+**Critical readback bug fixed:** Warp CPU `.numpy()` on a reused
+readback buffer can expose aliasing; a snapshot retained by a caller
+could be overwritten on the next dab. `read_positions` now returns
+its own NumPy copy, verified by repeated-read tests. The original
+parity discrepancy was traced to this ownership bug, **not** a proven
+error in the XPBD constraint equations. This ownership rule must also
+apply to the future native C++ CUDA readback buffer and editor staging.
+
+This is still **not** CUDA hardware validation or complete C++/Warp
+parity for long deforming meshes. Follow up with differential tests on
+identically ordered, pinned and compliant constraint graphs.
+
 ## Why these optimizations matter
 
 ### 1 — Persistent GPU arrays
