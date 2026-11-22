@@ -54,6 +54,8 @@ if wp is not None:
                 direction = offset / dist
             elif i > j:
                 direction = wp.vec3(-1.0, 0.0, 0.0)
+            elif i > j:
+                direction = wp.vec3(-1.0, 0.0, 0.0)
             signed_shift = 0.0
             if dist < touching:
                 signed_shift = -(touching - dist) * separation
@@ -122,7 +124,7 @@ def project(positions, inverse_masses, radii, *, iterations=4,
     side = max(8, int(np.ceil(len(p) ** (1.0 / 3.0))))
     grid = wp.HashGrid(dim_x=side, dim_y=side, dim_z=side, device="cuda:0")
     for _ in range(iterations):
-        grid.build(points=x, radius=search_radius)
+        grid.build(x, search_radius)
         wp.launch(_contact_jacobi, dim=len(p),
                   inputs=[grid.id, x, inv, rr, separation, cohesion,
                           cohesion_range, search_radius], outputs=[y], device="cuda:0")
