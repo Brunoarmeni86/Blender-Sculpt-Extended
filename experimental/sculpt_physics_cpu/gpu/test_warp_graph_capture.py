@@ -50,6 +50,38 @@ def check(device: str, mode: str) -> None:
     print("Warp captured XPBD parity:", device, mode, captured.graph_stats)
 
 
+def check_buffer_growth(device: str) -> None:
+    # A grown target buffer must NOT replay a graph with stale pointers.
+    p = np.stack((np.arange(12, dtype=np.float32),
+                  np.zeros(12, dtype=np.float32),
+                  np.zeros(12, dtype=np.float32)), axis=1)
+    mass = np.ones(12, dtype=np.float32)
+    mass[0] = 0
+    edges = np.stack((np.arange(11, dtype=np.int32),
+                      np.arange(1, 12, dtype=np.int32)), axis=1)
+    plain = LocalXpbdSession(p, mass, edges, device=device)
+    graph = LocalXpbdSession(p, mass, edges, device=device, graph_capture=True)
+    for offset in (0.1, 0.2):
+        for session in (plain, graph):
+            session.set_targets([11], [[11 + offset, 0, 0]])
+            session.solve(iterations=2)
+        assert np.allclose(plain.read_positions([10, 11]),
+                           graph.read_positions([10, 11]), atol=3e-5)
+    assert graph.graph_stats[2] == 1, graph.graph_stats
+
+    many = list(range(2, 12))  # ten movable targets; previous capacity was 8
+    goals = [[float(i) + 0.25, 0.0, 0.0] for i in many]
+    for session in (plain, graph):
+        session.set_targets(many, goals)
+    assert graph.graph_stats[2] == 0, (
+        "cached graph still references target buffers after reallocation")
+    for session in (plain, graph):
+        session.solve(iterations=2)
+    assert np.allclose(plain.read_positions(list(range(12))),
+                       graph.read_positions(list(range(12))), atol=3e-5)
+    print("Warp XPBD graph pointer invalidation passed:", device)
+
+
 def reject_bad_mode() -> None:
     p = np.array([[0,0,0],[1,0,0]], dtype=np.float32)
     inv = np.array([0,1], dtype=np.float32)
@@ -69,3 +101,4 @@ if __name__ == "__main__":
     reject_bad_mode()
     check(args.device, "hard")
     check(args.device, "compliant")
+    check_buffer_growth(args.device)
