@@ -341,6 +341,9 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
   SculptSession &ss = *object.runtime->sculpt_session;
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if (physics_v15::freeze_if_mode_changed(object,pbvh)) return;
+#endif
   const bool flip = (ss.cache->bstrength < 0.0f);
 
   /* Note: This return has to happen *after* the call to calc_brush_plane for now, as
