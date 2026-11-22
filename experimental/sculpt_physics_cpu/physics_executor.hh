@@ -86,4 +86,9 @@ std::unique_ptr<IPhysicsExecutor> make_cpu_xpbd_executor();
  * Python kernel compiled on CPU or a CUDA device is installed. */
 std::unique_ptr<IPhysicsExecutor> make_native_executor(SolverDevice device);
 
+/* A solver plan also contains its physical solver FAMILY. A CPU device is
+ * not evidence of a DEM/volume/MPM implementation: reject unsupported
+ * families instead of silently substituting XPBD surface. */
+std::unique_ptr<IPhysicsExecutor> make_native_executor(const SolverPlan &plan);
+
 }  // namespace sculpt_physics
