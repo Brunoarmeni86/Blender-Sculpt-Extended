@@ -121,6 +121,38 @@ int main()
   catch(const std::logic_error &) { rejected = true; }
   assert(rejected);
 
+  // A strict island may end at a PINNED halo boundary. Crossing bonds
+  // attached solely to such fixed halo nodes have zero positional effect
+  // on the editable interior. Thus the entire connected component does
+  // not have to be sent to CUDA for a one-ring local XPBD solve.
+  World boundary;
+  for (int i=0;i<8;++i) boundary.add_particle({double(i),0.0,0.0});
+  for (int i=1;i<8;++i) boundary.add_bond(i-1,i,1e-6);
+  const GpuTopologyBondIndex boundary_index(boundary,82);
+  const auto strict=boundary_index.build(boundary,{3},{2,4},{3},82,false);
+  assert(strict.global_ids.size()==3);
+  assert(strict.crossing_bonds==0);
+  assert(strict.ignored_fixed_crossings==2);
+  assert(strict.bonds.size()==2);
+  assert(strict.inverse_masses[0]==0 && strict.inverse_masses[2]==0);
+  auto reference=build_gpu_local_island(boundary,{3},{2,4},{3},82,false);
+  assert(reference.ignored_fixed_crossings==strict.ignored_fixed_crossings);
+  assert(reference.bonds.size()==strict.bonds.size());
+  auto moved_boundary=strict.positions;
+  moved_boundary[1].y=0.25;
+  assert(stage_gpu_local_writes(strict,moved_boundary).size()==1);
+  moved_boundary[0].y=0.25;
+  rejected=false;
+  try {(void)stage_gpu_local_writes(strict,moved_boundary);}
+  catch (const std::logic_error &) {rejected=true;}
+  assert(rejected);
+  // By contrast, omitting a directly connected vertex from a FREE active
+  // region is unsafe and MUST be rejected in the strict path.
+  rejected=false;
+  try {(void)boundary_index.build(boundary,{3},{2},{3},82,false);}
+  catch (const std::logic_error &) {rejected=true;}
+  assert(rejected);
+
   // Float32 absolute coordinates at 1e12 cannot represent a 2mm change.
   // The GPU workset must pack origin-relative values and reconstruct only
   // genuine edits, without flagging float32 roundoff on pinned halo vertices.
