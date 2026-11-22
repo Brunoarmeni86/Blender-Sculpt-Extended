@@ -33,3 +33,5 @@ jobs:
           python experimental/sculpt_physics_cpu/gpu/warp_granular_probe.py --device cpu --self-test
           python -m py_compile experimental/sculpt_physics_cpu/gpu/warp_resident_contact.py
           python experimental/sculpt_physics_cpu/gpu/test_warp_resident_contact.py --device cpu
+          python -m py_compile experimental/sculpt_physics_cpu/gpu/warp_xpbd_local.py
+          python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_local.py --device cpu
