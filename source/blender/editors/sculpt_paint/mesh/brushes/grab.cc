@@ -608,8 +608,20 @@ void do_grab_brush(const Depsgraph &depsgraph,
   const float3 grab_delta = grab_delta_get(brush, *ss.cache) * ss.cache->bstrength;
 
 #ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
-  if (try_xpbd_grab_preview(depsgraph, sd, object, node_mask, brush, grab_delta, pbvh)) {
-    return;
+#  ifdef WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14
+  const char *v14 = std::getenv("BLENDER_SCULPT_XPBD_GRAB_EXECUTOR_V14");
+  if (v14 && v14[0] == '1' && v14[1] == '\0') {
+    if (try_xpbd_executor_grab_preview(
+            depsgraph, sd, object, node_mask, brush, grab_delta, pbvh)) {
+      return;
+    }
+  }
+  else
+#  endif
+  {
+    if (try_xpbd_grab_preview(depsgraph, sd, object, node_mask, brush, grab_delta, pbvh)) {
+      return;
+    }
   }
 #endif
 
