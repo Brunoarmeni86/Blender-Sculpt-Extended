@@ -1,5 +1,11 @@
 # Sculpt Physics CPU Reference Prototype (experimental, standalone)
 
+**Native Clay, Clay Strips, Smooth, Draw/Nudge/Gravity V15 (experimental):**
+[`V15_OTHER_BRUSHES_BUILD_AND_TEST.md`](V15_OTHER_BRUSHES_BUILD_AND_TEST.md)
+explains the OFF-by-default source hooks, exact stock translation
+preservation, shared CPU XPBD adapter, standalone Linux/MSVC tests,
+and missing full Blender/viewport/Undo/CUDA validation.
+
 **Blender Grab V14 native CPU integration (experimental):**
 [`V14_NATIVE_GRAB_EXECUTOR_BUILD_AND_TEST.md`](V14_NATIVE_GRAB_EXECUTOR_BUILD_AND_TEST.md)
 describes two separate opt-in flags, the actual source callback,
