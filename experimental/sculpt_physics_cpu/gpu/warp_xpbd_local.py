@@ -139,7 +139,8 @@ class LocalXpbdSession:
     """
 
     def __init__(self, positions, inverse_masses, edges, *,
-                 compliance=0.0, rest_lengths=None, device="auto", target_mode="hard"):
+                 compliance=0.0, rest_lengths=None, device="auto", target_mode="hard",
+                 graph_capture=False):
         p=np.asarray(positions,dtype=np.float32)
         mass=np.asarray(inverse_masses,dtype=np.float32)
         pair=np.asarray(edges)
@@ -166,6 +167,15 @@ class LocalXpbdSession:
         if target_mode not in ("hard","compliant"):
             raise ValueError("target_mode must be 'hard' or 'compliant'")
         self._target_mode=target_mode
+        if type(graph_capture) is not bool:
+            raise ValueError("graph_capture must be boolean")
+        if graph_capture and not self._warp:
+            raise ValueError("graph capture requires Warp CPU or CUDA, not NumPy oracle")
+        self._graph_capture=graph_capture
+        self._solve_graphs={}
+        self._graph_warmed=False
+        self._graph_builds=0
+        self._graph_replays=0
         self._n=len(p)
         self._m=len(pair)
         c=np.asarray(compliance,dtype=np.float32)
@@ -232,6 +242,12 @@ class LocalXpbdSession:
         # readback operations. Do NOT share this index buffer with readback.
         if not self._warp or count <= self._target_capacity:
             return
+        # Capture arguments retain old target buffer pointers. Finish queued
+        # CUDA replays before releasing the graphs on a resize.
+        if self._solve_graphs:
+            if self._cuda:
+                wp.synchronize_device(self._dev)
+            self._solve_graphs.clear()
         cap=max(8,count,self._target_capacity*2)
         ids_gpu=wp.empty(cap,dtype=wp.int32,device=self._dev)
         goals_gpu=wp.empty(cap,dtype=wp.vec3,device=self._dev)
@@ -254,6 +270,11 @@ class LocalXpbdSession:
         self._readback_gpu=output_gpu
         self._read_capacity=cap
         self._sparse_device_allocations+=2
+
+    @property
+    def graph_stats(self):
+        """(captures, replays, cached variants); no claimed speedup."""
+        return (self._graph_builds, self._graph_replays, len(self._solve_graphs))
 
     @property
     def sparse_device_allocations(self):
@@ -296,6 +317,35 @@ class LocalXpbdSession:
         self._goals=xyz.copy()
         self._goal_compliances=c.copy()
 
+    def _launch_warp_solve(self, h2, iterations):
+        """Capture-safe fixed dispatch sequence over resident arrays."""
+        self._lam_gpu.zero_()
+        count=len(self._goals_ids)
+        if self._target_mode=="compliant" and count:
+            self._target_lam_gpu.zero_()
+        if self._target_mode=="hard" and count:
+            wp.launch(_apply_hard_targets,dim=count,
+                inputs=[self._x,self._inv_gpu,self._ids_gpu,
+                        self._goals_gpu],device=self._dev)
+        for _ in range(iterations):
+            if self._target_mode=="compliant" and count:
+                wp.launch(_xpbd_compliant_targets,dim=count,
+                    inputs=[self._x,self._inv_gpu,self._ids_gpu,
+                            self._goals_gpu,self._target_comp_gpu,
+                            self._target_lam_gpu,h2],device=self._dev)
+            for color in range(self.num_colors):
+                start,end=map(int,self._offsets[color:color+2])
+                if end==start:
+                    continue
+                wp.launch(_xpbd_color_bonds,dim=end-start,
+                    inputs=[self._x,self._inv_gpu,self._a_gpu,
+                            self._b_gpu,self._rest_gpu,self._comp_gpu,
+                            self._lam_gpu,start,h2],device=self._dev)
+            if self._target_mode=="hard" and count:
+                wp.launch(_apply_hard_targets,dim=count,
+                    inputs=[self._x,self._inv_gpu,self._ids_gpu,
+                            self._goals_gpu],device=self._dev)
+
     def solve(self, *, dt=1.0/60.0, iterations=5):
         if (not np.isfinite(dt) or dt<=0 or
                 not isinstance(iterations,int) or not 1<=iterations<=256):
@@ -304,31 +354,27 @@ class LocalXpbdSession:
         if not np.isfinite(h2) or h2<=0:
             raise ValueError("XPBD timestep underflow/overflow")
         if self._warp:
-            self._lam_gpu.zero_()  # reset bond multipliers between separate dabs
-            if self._target_mode=="compliant" and len(self._goals_ids):
-                self._target_lam_gpu.zero_()  # one XPBD target lambda per dab
-            if self._target_mode=="hard" and len(self._goals_ids):
-                wp.launch(_apply_hard_targets,dim=len(self._goals_ids),
-                    inputs=[self._x,self._inv_gpu,self._ids_gpu,
-                            self._goals_gpu],device=self._dev)
-            for _ in range(iterations):
-                # Match World: brush targets first, then distance bonds.
-                if self._target_mode=="compliant" and len(self._goals_ids):
-                    wp.launch(_xpbd_compliant_targets,dim=len(self._goals_ids),
-                        inputs=[self._x,self._inv_gpu,self._ids_gpu,
-                                self._goals_gpu,self._target_comp_gpu,
-                                self._target_lam_gpu,h2],device=self._dev)
-                for color in range(self.num_colors):
-                    start,end=map(int,self._offsets[color:color+2])
-                    if end==start: continue
-                    wp.launch(_xpbd_color_bonds,dim=end-start,
-                        inputs=[self._x,self._inv_gpu,self._a_gpu,
-                                self._b_gpu,self._rest_gpu,self._comp_gpu,
-                                self._lam_gpu,start,h2],device=self._dev)
-                if self._target_mode=="hard" and len(self._goals_ids):
-                    wp.launch(_apply_hard_targets,dim=len(self._goals_ids),
-                        inputs=[self._x,self._inv_gpu,self._ids_gpu,
-                                self._goals_gpu],device=self._dev)
+            if not self._graph_capture or not self._graph_warmed:
+                # First dab compiles and runs all required kernels outside
+                # capture; CUDA lazy module initialization is not capture-safe.
+                self._launch_warp_solve(h2,iterations)
+                self._graph_warmed=True
+                return
+            key=(h2,iterations,len(self._goals_ids))
+            graph=self._solve_graphs.get(key)
+            if graph is None:
+                # Avoid unbounded VRAM use from variable target counts/dt.
+                if len(self._solve_graphs)>=4:
+                    if self._cuda:
+                        wp.synchronize_device(self._dev)
+                    self._solve_graphs.clear()
+                with wp.ScopedCapture(device=self._dev) as capture:
+                    self._launch_warp_solve(h2,iterations)
+                graph=capture.graph
+                self._solve_graphs[key]=graph
+                self._graph_builds+=1
+            wp.capture_launch(graph)
+            self._graph_replays+=1
             return
         lam=np.zeros(self._m,dtype=np.float32)
         target_lam=np.zeros((len(self._goals_ids),3),dtype=np.float32)
