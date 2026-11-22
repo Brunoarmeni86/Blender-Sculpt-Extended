@@ -165,6 +165,10 @@ void do_clay_brush(const Depsgraph &depsgraph,
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
 
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if (physics_v15::freeze_if_mode_changed(object,pbvh)) return;
+#endif
+
   float3 area_no;
   float3 area_co;
   calc_brush_plane(depsgraph, brush, object, node_mask, area_no, area_co);
