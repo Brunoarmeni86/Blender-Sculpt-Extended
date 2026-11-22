@@ -21,6 +21,14 @@ jobs:
         run: cmake --build build-physics --config Debug --parallel 2
       - name: Run actual CPU reference tests
         run: ctest --test-dir build-physics -C Debug --output-on-failure
+      - name: Configure optimized GPU-island preparation benchmark (Linux)
+        if: runner.os == 'Linux'
+        run: cmake -S experimental/sculpt_physics_cpu -B build-workset-bench -DCMAKE_BUILD_TYPE=Release -DSCULPT_PHYSICS_BUILD_BENCHMARKS=ON
+      - name: Compile and run GPU-island CSR-vs-full-scan smoke (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake --build build-workset-bench --target bench_gpu_workset --parallel 2
+          ./build-workset-bench/bench_gpu_workset 12000 30
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
