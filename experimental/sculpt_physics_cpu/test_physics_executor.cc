@@ -134,6 +134,13 @@ void test_cpu_factory_and_lifetime()
   exec->step(1.0/60.0,1,5);
   assert(exec->download_dirty().empty());
   exec->upload_dirty({{2,{2,0.3,0}}});
+  rejected=false;
+  try { exec->commit(); }
+  catch (const std::logic_error &) { rejected=true; }
+  assert(rejected && exec->stroke_active());
+  const auto to_editor=exec->stage_incremental();
+  assert(to_editor.writes.size()==1);
+  exec->acknowledge_incremental(to_editor.revision);
   exec->commit();
   assert(!exec->stroke_active());
   exec->begin_stroke();
