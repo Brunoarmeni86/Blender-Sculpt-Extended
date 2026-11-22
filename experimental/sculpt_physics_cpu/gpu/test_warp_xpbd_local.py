@@ -72,6 +72,23 @@ def test_rest_length_from_native_world(device):
         else: raise AssertionError("invalid physical rest length accepted")
 
 
+def test_warp_cpu_parity():
+    """Compile and execute the ACTUAL Warp kernel on a CPU device."""
+    p=np.array([[0,0,0],[1,0,0],[2,0,0]],dtype=np.float32)
+    inv=np.array([0,1,1],dtype=np.float32)
+    edges=np.array([[0,1],[1,2]],dtype=np.int32)
+    oracle=LocalXpbdSession(p,inv,edges,device="cpu")
+    kernel=LocalXpbdSession(p,inv,edges,device="warp-cpu")
+    for goal in (2.6,2.2,2.9):
+        for session in (oracle,kernel):
+            session.set_targets([2],[[goal,0,0]])
+            session.solve(iterations=8)
+        a=oracle.read_positions([0,1,2])
+        b=kernel.read_positions([0,1,2])
+        assert np.allclose(a,b,atol=5e-4,rtol=5e-4),(a,b)
+    assert kernel.transfer_bytes[0] == 0 # no device-to-device H2D
+
+
 def test_gpu_parity():
     p=np.array([[0,0,0],[1,0,0],[2,0,0]],dtype=np.float32)
     inv=np.array([0,1,1],dtype=np.float32)
@@ -89,9 +106,11 @@ def test_gpu_parity():
 
 if __name__=="__main__":
     parser=argparse.ArgumentParser()
-    parser.add_argument("--device",choices=("cpu","cuda"),default="cpu")
+    parser.add_argument("--device",choices=("cpu","warp-cpu","cuda"),default="cpu")
     args=parser.parse_args()
     run(args.device)
     test_rest_length_from_native_world(args.device)
+    if args.device=="warp-cpu":
+        test_warp_cpu_parity()
     if args.device=="cuda":
         test_gpu_parity()
