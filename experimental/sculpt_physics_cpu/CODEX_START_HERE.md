@@ -21,6 +21,20 @@ projects the same form of soft artist targets as `World`, with
 CPU-oracle and Warp-CPU JIT tests. The readback API returns owned copies
 instead of aliases to recycled Warp buffers.
 
+**NEW: multi-brush source integration spike (V15):** The common
+`NativeBrushTranslation` adapter and the OFF-by-default
+`physics_brush_v15.hh` native bridge now connect stock computed
+translations for **Clay, Clay Strips, Smooth, Draw, Nudge and Gravity**
+to a local CPU `IPhysicsExecutor`. The adapter passes CTest on
+Linux/MSVC; the guarded Blender callback code has **not yet been
+compiled in a full Blender build**, and no actual viewport/Undo/Multires
+claims are made. Build gating:
+`WITH_SCULPT_XPBD_OTHER_BRUSHES_V15=ON` requires the two V14 research
+flags, and runtime additionally requires
+`BLENDER_SCULPT_XPBD_OTHER_BRUSHES_V15=1`.
+See [`V15_OTHER_BRUSHES_BUILD_AND_TEST.md`](V15_OTHER_BRUSHES_BUILD_AND_TEST.md)
+before modifying any brush. The original stock paths remain the default.
+
 **Native Blender Grab integration spike (V14):** This branch now has
 a separate **OFF-by-default** source callback in
 `source/blender/editors/sculpt_paint/mesh/brushes/grab.cc`, gated by
