@@ -189,3 +189,53 @@ Original source in this branch is GPL-2.0-or-later or Python reference;
 no third-party Warp example source was pasted into the repository.
 
 **Do not merge to main until actual Blender viewport + Undo + GPU tests pass.**
+
+
+## Kernel execution audit — beyond the NumPy oracles (2026-11-22)
+
+This branch now includes an independent GitHub Actions
+`warp-kernel-cpu` job that installs Warp and compiles/runs the actual
+`@wp.kernel` functions on Warp's **CPU device**, in addition to
+the NumPy oracle and standalone C++/MSVC checks.
+
+- [First real Warp CPU kernel CI success](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/actions/runs/45025703347):
+  Warp 1.19.0 compiled and executed the graph-colored XPBD kernels and
+  the HashGrid DEM contact kernels, with comparison to the NumPy oracle.
+  The runner had **no NVIDIA CUDA driver**.
+- `warp_resident_contact.py` now rejects artist edits to pinned
+  (zero-inverse-mass) granular halo particles.
+- `warp_resident_contact.py` reuses GPU/Warp sparse IDs, values and
+  readback arrays. Growth is geometric, only when the selected workset
+  exceeds the current capacity. `wp.copy(..., count=K)` transfers K
+  positions/IDs, not the whole capacity. Only a short-lived **host** source
+  array is allocated per call; no promise of pinned/async transfers yet.
+- `warp_xpbd_local.py` now also reuses sparse buffers, BUT keeps
+  target-ID/goal arrays **separate from readback ID/result arrays**, to
+  prevent a read between `set_targets()` and `solve()` from overwriting
+  the scheduled brush target.
+- [Warp CPU scratch regression](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/actions/runs/45025939759):
+  repeated sparse contact edits/readbacks consumed **8 tracked Warp
+  device-array allocations**, versus 35 in the old test scenario.
+  XPBD separately asserts zero allocation growth at fixed workset size.
+  These are the prototype's allocation counters, not measured CUDA VRAM.
+- The latest real-Warp test uses `warp-lang==1.19.0`; pin this version
+  in CI to make API/kernel regressions reproducible.
+
+### Remaining opportunities, in implementation order
+
+| Priority | Improvement | Where | Acceptance gate |
+| --- | --- | --- | --- |
+| **P0** | Validate device state and rollback after an interrupted stroke; release/rebuild buffers when topology generation changes | Native `IPhysicsExecutor` and `GpuTopologyBondIndex` | Inject failure between solve and staged write; no partial Blender/World state |
+| **P0** | Track and preserve exact normal Sculpt brush target semantics (PhysicalAssist once-only blend, full per-vertex factor) rather than current GPU **hard-target** proxy | `warp_xpbd_local.py` + C++ `World::BrushTargetInput` | CPU-vs-Warp full target/bond residuals over 100 strokes |
+| **P1** | Pre-allocate pinned host upload/download buffers, reuse CUDA streams, avoid implicit `.numpy()` synchronizations inside each dab | Native CUDA bridge | Device timeline proves reduced syncs and no repeated VRAM allocs |
+| **P1** | Batch equal-color constraints and benchmark fewer kernel launches; consider Jacobi/fused loops or CUDA Graphs when graph topology remains fixed | XPBD executor | GPU kernel count, total p50/p95 and numerical error compared on 1k–1M island sizes |
+| **P1** | Keep active halo physically complete and detect large boundary reactions; grow workset only when needed | Native PBVH adapter + CSR worksets | No visible seams/popping at region border; strict mode always safe |
+| **P1** | Replace one-size GPU threshold with measured cost model using active vertices, bond colors, transfers and first-dab warmup | `solver_policy.cc` | CPU wins for small dabs; GPU selected only if faster end-to-end |
+| **P2** | Surface/Multires dirty **true CCG grid IDs**, active Sculpt Layer deltas, corner UV/color/Face Sets and native Undo | Native Blender CCG writer | 3+ levels, multiple layers, save/reload, seams, symmetry tests |
+| **P2** | More accurate DEM friction history, contact persistence and particle boundary colliders; MPM plasticity for clay/mud | Granular + future MPM | Material consistency and CPU/GPU parity under long strokes |
+| **P2** | Coarse proxy construction and feature-preserving detail residual with dynamic error-driven resolution | `sculpt_surface_bridge` | Detail/volume error and viewport latency measured against 2M–20M mesh |
+| **P3** | Portable Vulkan/AMD/Intel backend after CPU/CUDA numerical parity | Separate compute backend | Same material tests, no mandatory NVIDIA dependency |
+
+**Release criterion:** Warp CPU compilation does NOT validate CUDA kernel
+execution, GPU memory hazards, PCIe overhead, Blender Undo or actual
+Multires. Those are separate acceptance gates; keep stable builds CPU-first.
