@@ -63,5 +63,12 @@ jobs:
         run: python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_local.py --device warp-cpu
       - name: Validate compliant XPBD artist-target Warp kernel
         run: python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_compliant.py --device warp-cpu
+      - name: Build independent native C++ World XPBD reference fixture
+        run: |
+          cmake -S experimental/sculpt_physics_cpu -B build-xpbd-interop -DCMAKE_BUILD_TYPE=Release -DSCULPT_PHYSICS_BUILD_INTEROP_TESTS=ON
+          cmake --build build-xpbd-interop --target emit_xpbd_reference --parallel 2
+      - name: Compare actual Warp XPBD kernel with native C++ World
+        run: |
+          python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_compliant.py --device warp-cpu --cpp-reference ./build-xpbd-interop/emit_xpbd_reference
       - name: Execute Warp HashGrid DEM contact kernel and compare with NumPy
         run: python experimental/sculpt_physics_cpu/gpu/test_warp_resident_contact.py --device warp-cpu
