@@ -88,6 +88,9 @@ std::vector<Vec3> solve_tetra_volume_xpbd(
   // Stage BOTH geometry and lambdas; solver failure cannot damage a stroke.
   std::vector<Vec3> staged = positions;
   std::vector<TetraVolumeConstraint> staged_constraints = constraints;
+  // XPBD lambdas are accumulated across iterations of ONE time step only.
+  // Never carry old compliance forces into the next independent brush dab.
+  for (auto &tet : staged_constraints) tet.lambda = 0.0;
   for (int iter = 0; iter < iterations; ++iter) {
     for (auto &tet : staged_constraints) {
       const auto &id = tet.indices;
