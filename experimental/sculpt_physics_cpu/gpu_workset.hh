@@ -28,7 +28,12 @@ struct GpuLocalIsland {
   std::vector<double> radii;
   std::vector<GpuLocalBond> bonds;
   std::vector<bool> writable;
-  std::size_t crossing_bonds = 0; // truncated local graph, not exact physics
+  /* Only a crossing bond attached to a FREE included vertex affects local
+   * XPBD. Bonds whose included endpoint is pinned have identically zero
+   * positional effect; they may be safely omitted without globally closing
+   * the entire connected mesh graph. */
+  std::size_t crossing_bonds = 0; // unsafe crossings attached to FREE vertices
+  std::size_t ignored_fixed_crossings = 0; // safe crossings of pinned halo
 };
 
 struct GpuProxyChange {
