@@ -121,11 +121,13 @@ static void calc_bmesh(const Depsgraph &depsgraph,
 
 }  // namespace draw_cc
 
+enum class OffsetBrushKind { Draw, Nudge, Gravity };
 static void offset_positions(const Depsgraph &depsgraph,
                              const Sculpt &sd,
                              Object &object,
                              const float3 &offset,
-                             const IndexMask &node_mask)
+                             const IndexMask &node_mask,
+                             const OffsetBrushKind brush_kind)
 {
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
@@ -162,8 +164,13 @@ static void offset_positions(const Depsgraph &depsgraph,
                            double(translation.z)}});
       }
     });
-    if (physics_v15::try_apply(sd,object,node_mask,pos,
-                              sculpt_physics::NativeSculptBrushKind::Draw,native)) {
+    const auto physical_kind =
+        brush_kind == OffsetBrushKind::Nudge ?
+            sculpt_physics::NativeSculptBrushKind::Nudge :
+        brush_kind == OffsetBrushKind::Gravity ?
+            sculpt_physics::NativeSculptBrushKind::Gravity :
+            sculpt_physics::NativeSculptBrushKind::Draw;
+    if (physics_v15::try_apply(sd,object,node_mask,pos,physical_kind,native)) {
       return;
     }
   }
@@ -238,7 +245,7 @@ void do_draw_brush(const Depsgraph &depsgraph,
   const float3 offset = effective_normal * ss.cache->radius * ss.cache->scale *
                         ss.cache->bstrength;
 
-  offset_positions(depsgraph, sd, object, offset, node_mask);
+  offset_positions(depsgraph, sd, object, offset, node_mask, OffsetBrushKind::Draw);
 }
 
 void do_nudge_brush(const Depsgraph &depsgraph,
@@ -253,7 +260,8 @@ void do_nudge_brush(const Depsgraph &depsgraph,
       math::cross(ss.cache->sculpt_normal_symm, ss.cache->grab_delta_symm),
       ss.cache->sculpt_normal_symm);
 
-  offset_positions(depsgraph, sd, object, offset * ss.cache->bstrength, node_mask);
+  offset_positions(depsgraph, sd, object, offset * ss.cache->bstrength, node_mask,
+                   OffsetBrushKind::Nudge);
 }
 
 void do_gravity_brush(const Depsgraph &depsgraph,
@@ -267,7 +275,7 @@ void do_gravity_brush(const Depsgraph &depsgraph,
   const float3 offset = ss.cache->gravity_direction_symm * -ss.cache->radius_squared *
                         ss.cache->scale * sd.gravity_factor;
 
-  offset_positions(depsgraph, sd, object, offset, node_mask);
+  offset_positions(depsgraph, sd, object, offset, node_mask, OffsetBrushKind::Gravity);
 }
 
 }  // namespace blender::ed::sculpt_paint::brushes
