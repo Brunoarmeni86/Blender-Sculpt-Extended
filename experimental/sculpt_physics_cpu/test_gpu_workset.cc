@@ -120,5 +120,43 @@ int main()
   try { (void)fast.build(large,{5},{4,6},{5},7,true); }
   catch(const std::logic_error &) { rejected = true; }
   assert(rejected);
+
+  // Float32 absolute coordinates at 1e12 cannot represent a 2mm change.
+  // The GPU workset must pack origin-relative values and reconstruct only
+  // genuine edits, without flagging float32 roundoff on pinned halo vertices.
+  World far_world;
+  far_world.add_particle({1.0e12,0,0});
+  far_world.add_particle({1.0e12+0.002,0,0});
+  far_world.add_particle({1.0e12+1.0,0,0});
+  far_world.add_bond(0,1);
+  far_world.add_bond(1,2);
+  const auto far_island=build_gpu_local_island(
+      far_world,{1},{0,2},{1},77,false);
+  const auto packed=pack_gpu_island_relative(far_island);
+  assert(packed.relative_positions.size()==3);
+  assert(std::abs(static_cast<double>(packed.relative_positions[1].x) -
+                  static_cast<double>(packed.relative_positions[0].x) -
+                  0.002) < 1.0e-4);
+  assert(static_cast<float>(far_world.particles()[0].position.x) ==
+         static_cast<float>(far_world.particles()[1].position.x));
+  auto local_positions=packed.relative_positions;
+  assert(stage_gpu_relative_writes(far_island,packed,local_positions).empty());
+  local_positions[1].y += 0.02f;
+  const auto far_changes=stage_gpu_relative_writes(
+      far_island,packed,local_positions);
+  assert(far_changes.size()==1 && far_changes[0].global_index==1);
+  assert(std::abs(far_changes[0].position.y-0.02)<1.0e-6);
+  assert(far_world.particles()[1].position.y==0.0);
+  local_positions[0].x += 0.1f;
+  rejected=false;
+  try { (void)stage_gpu_relative_writes(far_island,packed,local_positions); }
+  catch (const std::logic_error &) { rejected=true; }
+  assert(rejected);
+  local_positions[0]=packed.relative_positions[0];
+  local_positions[1].x=std::numeric_limits<float>::quiet_NaN();
+  rejected=false;
+  try { (void)stage_gpu_relative_writes(far_island,packed,local_positions); }
+  catch (const std::invalid_argument &) { rejected=true; }
+  assert(rejected);
   return 0;
 }
