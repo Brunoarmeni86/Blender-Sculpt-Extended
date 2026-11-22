@@ -16,8 +16,18 @@ struct AvailablePhysics {
   bool cpu_volume = true;     // experimental tetra constraint reference
   bool cpu_dem = true;        // simplified granular target planner
   bool mpm_ready = false;     // not integrated: never assume ready
-  bool warp_cuda_ready = false; // only true after device+kernel parity tests
-  bool vulkan_ready = false;  // not integrated
+  bool warp_cuda_ready = false; // device/driver/backend initialized
+  bool vulkan_ready = false;    // device/driver/backend initialized
+  // Device existence does NOT imply support for every physical solver.
+  // Set a family flag only after that implementation passes parity tests.
+  bool warp_surface_ready = false;
+  bool warp_volume_ready = false;
+  bool warp_dem_ready = false;
+  bool warp_mpm_ready = false;
+  bool vulkan_surface_ready = false;
+  bool vulkan_volume_ready = false;
+  bool vulkan_dem_ready = false;
+  bool vulkan_mpm_ready = false;
 };
 
 struct SolverRequest {
