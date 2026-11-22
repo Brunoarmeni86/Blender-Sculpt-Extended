@@ -127,7 +127,7 @@ static void offset_positions(const Depsgraph &depsgraph,
                              Object &object,
                              const float3 &offset,
                              const IndexMask &node_mask,
-                             const OffsetBrushKind brush_kind)
+                             [[maybe_unused]] const OffsetBrushKind brush_kind)
 {
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
