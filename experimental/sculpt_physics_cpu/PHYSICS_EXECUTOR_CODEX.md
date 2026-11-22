@@ -163,6 +163,25 @@ execution. Future Warp native executors must preserve the same
 revisioned acknowledgment contract, including stale ACK rejection,
 device failure cancellation and global-ID ordering.
 
+### Reference CI measurement for sparse writeback
+
+[GitHub Actions run 45029798634](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/actions/runs/45029798634)
+ran a Release C++ microbenchmark on a synthetic proxy of 50,000
+vertices, modifying 4 vertices per dab over 30 dabs:
+
+| Operation | Median | p95 |
+| --- | ---: | ---: |
+| Incremental staged writes | 0.090 µs | 0.130 µs |
+| Incremental acknowledgment | 0.030 µs | 0.030 µs |
+| Full-stroke baseline scan | 193.232 µs | 204.650 µs |
+
+**Scope:** isolated in-memory CPU proxy API, Linux CI runner, no solver
+step, no native Blender geometry, Undo/CCG or CUDA kernel/transfer.
+The previous full-stroke method remains necessary for rollback and
+verification. Do not extrapolate microbenchmark ratios to viewport FPS.
+Measure multiple island topologies, different dirty fractions and
+actual PBVH+CCG writeback before selecting GPU/CPU thresholds.
+
 ## Proposed next implementation gates
 
 **Gate 1 — Native Sculpt adapter, CPU:** Refactor existing Grab V13 callback
