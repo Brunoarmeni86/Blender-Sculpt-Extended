@@ -249,6 +249,11 @@ struct StrokeCache {
   float3 xpbd_v14_previous_delta = float3(0.0f);
   bool xpbd_v14_failed = false;
   bool xpbd_v14_active_logged = false;
+  // V15 translation-based physical Clay/ClayStrips/Draw/Smooth research.
+  // Only a runtime stroke cache; never serialized and OFF by default.
+  std::shared_ptr<void> xpbd_v15_state;
+  bool xpbd_v15_failed = false;
+  bool xpbd_v15_active_logged = false;
   /* Invariants */
   float initial_radius = 0.0f;
   float3 scale = float3(0);
