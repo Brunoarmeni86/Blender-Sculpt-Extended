@@ -117,6 +117,33 @@ This is still **not** CUDA hardware validation or complete C++/Warp
 parity for long deforming meshes. Follow up with differential tests on
 identically ordered, pinned and compliant constraint graphs.
 
+## Cross-language XPBD parity gate (new)
+
+The CI now compiles `../emit_xpbd_reference.cc` against the **actual
+C++ `World`**, with a pinned boundary, two distance bonds and a
+compliant artist target. It then runs the same one-substep graph through
+`LocalXpbdSession(target_mode="compliant", device="warp-cpu")` and compares
+all three resulting particle positions.
+
+[GitHub Actions cross-language success](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/actions/runs/45029548847)
+includes the real Warp 1.19.0 CPU JIT compile, the native C++ World fixture,
+and the numerical parity test. This validates one defined physical feature
+subset, **not** complete CPU-vs-CUDA physics or native Blender behavior.
+
+```bash
+cmake -S experimental/sculpt_physics_cpu -B build-interop \
+  -DCMAKE_BUILD_TYPE=Release -DSCULPT_PHYSICS_BUILD_INTEROP_TESTS=ON
+cmake --build build-interop --target emit_xpbd_reference
+python -m pip install numpy 'warp-lang==1.19.0'
+python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_compliant.py \
+  --device warp-cpu --cpp-reference ./build-interop/emit_xpbd_reference
+```
+
+Add the next tests with explicit physical feature parity: a heterogeneous
+4–8 vertex organic patch, varying inverse mass, overlapping influences,
+2–4 substeps, motion continuity and long strokes. Document feature gaps
+before broadening tolerances.
+
 ## Why these optimizations matter
 
 ### 1 — Persistent GPU arrays
