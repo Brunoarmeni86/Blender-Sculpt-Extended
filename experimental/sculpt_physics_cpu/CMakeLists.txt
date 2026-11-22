@@ -168,3 +168,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_assist_strength PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_assist_strength_tests COMMAND test_assist_strength)
+
+# Solver-family experiment: XPBD tetra volume constraint and backend planner.
+# Explicitly not a Blender editor/CCG integration.
+target_sources(sculpt_physics_reference PRIVATE
+  volume_constraints.cc
+  solver_policy.cc
+)
+add_executable(test_multiphysics_volume test_multiphysics_volume.cc)
+target_link_libraries(test_multiphysics_volume PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_multiphysics_volume PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_multiphysics_volume_and_backend_tests COMMAND test_multiphysics_volume)
