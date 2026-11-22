@@ -62,6 +62,14 @@ static void test_tetra_volume_reference()
   const auto pinned = solve_tetra_volume_xpbd(
       deformed, {0.0,0.0,0.0,0.0}, tets, 1.0/60.0, 2);
   assert(close(pinned[3].z, 1.5));
+  // XPBD lambda warm starts are unsafe across unrelated brush time steps.
+  // Even with an old nonzero lambda, the rest geometry must not move.
+  auto soft = make_volume_constraint(rest,{0,1,2,3},1.0e-5);
+  soft.lambda = 1.0;
+  std::vector<TetraVolumeConstraint> warm{soft};
+  const auto untouched = solve_tetra_volume_xpbd(
+      rest, {0.0,0.0,0.0,1.0}, warm, 1.0/60.0, 2);
+  assert(close(untouched[3].z,1.0) && close(warm[0].lambda,0.0));
 }
 
 static void test_backend_policy()
