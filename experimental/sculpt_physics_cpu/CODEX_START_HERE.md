@@ -6,6 +6,12 @@ This is the **single starting point for Codex**. The aim is a maintainable,
 single physics architecture for *existing* Blender Sculpt brushes rather than
 unrelated brush-specific solvers.
 
+**GPU optimization update:** There are now persistent local CUDA/Warp
+prototype executors for XPBD bonds and DEM contacts. Read
+[`gpu/GPU_OPTIMIZATION_CODEX.md`](gpu/GPU_OPTIMIZATION_CODEX.md)
+before changing GPU code. They keep local proxy arrays on-device across dabs
+and use sparse readback; neither is attached to Blender's C++ editor pipeline.
+
 **Important reality check:** The C++ reference can execute CPU XPBD / approximate
 DEM strokes and produce validated proxy-vertex changes. It does **not** yet write
 to Blender's PBVH, Multires CCG grids, Sculpt Layers or native Undo. Volume XPBD
