@@ -331,9 +331,21 @@ class LocalXpbdSession:
                                 self._goals_gpu],device=self._dev)
             return
         lam=np.zeros(self._m,dtype=np.float32)
-        if len(self._goals_ids):
+        target_lam=np.zeros((len(self._goals_ids),3),dtype=np.float32)
+        if self._target_mode=="hard" and len(self._goals_ids):
             self._x_cpu[self._goals_ids]=self._goals
         for _ in range(iterations):
+            if self._target_mode=="compliant" and len(self._goals_ids):
+                ids=self._goals_ids
+                w=self._inv[ids]
+                alpha=self._goal_compliances/h2
+                denom=w+alpha
+                if not np.isfinite(denom).all() or np.any(denom<=0):
+                    raise FloatingPointError("invalid XPBD target denominator")
+                dl=(-(self._x_cpu[ids]-self._goals) -
+                    alpha[:,None]*target_lam)/denom[:,None]
+                self._x_cpu[ids]+=w[:,None]*dl
+                target_lam+=dl
             for color in range(self.num_colors):
                 start,end=map(int,self._offsets[color:color+2])
                 for k in range(start,end):
@@ -350,7 +362,7 @@ class LocalXpbdSession:
                     self._x_cpu[a]-=direction*(wi*dl)
                     self._x_cpu[b]+=direction*(wj*dl)
                     lam[k]+=dl
-            if len(self._goals_ids):
+            if self._target_mode=="hard" and len(self._goals_ids):
                 self._x_cpu[self._goals_ids]=self._goals
         if not np.isfinite(self._x_cpu).all():
             raise FloatingPointError("non-finite CPU XPBD positions")
