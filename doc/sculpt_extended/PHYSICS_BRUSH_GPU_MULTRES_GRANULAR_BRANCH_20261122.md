@@ -46,3 +46,19 @@ python experimental/sculpt_physics_cpu/gpu/warp_granular_probe.py --device cuda 
 ## Main architectural risk
 
 GPU, CCG, Sculpt Layers, Undo and real granularity require a common transaction boundary. Never write beyond the PBVH Undo coverage; stage all numerical results and validate finiteness before committing geometry changes. The current granular contact planner uses a local candidate halo and is **not** sufficient for global simulation or meshing.
+
+## Multi-solver extension — 22 November
+
+This branch is deliberately **not Warp-only**. New original standalone
+`volume_constraints.hh/.cc` implements transactional XPBD tetra volume
+correction (a generated volumetric proxy is still required before it can
+deform Sculpt geometry). `solver_policy.hh/.cc` provides capability-gated
+selection across XPBD surface/volume, simplified DEM and future MPM backends,
+with CPU/CUDA/Vulkan device placeholders that never become enabled by default.
+`test_multiphysics_volume.cc` covers conservative volume projection, fixed
+vertices, validation/rollback and backend selection. This is standalone C++
+reference code, **not** the final Blender editor interface.
+
+Solver comparisons, licensing decisions, source references, material mapping
+and implementation gates are documented in
+[`MULTISOLVER_SOURCE_REUSE_AND_INTEGRATION_20261122.md`](MULTISOLVER_SOURCE_REUSE_AND_INTEGRATION_20261122.md).
