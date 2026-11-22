@@ -54,6 +54,24 @@ def run(device):
     return out
 
 
+def test_rest_length_from_native_world(device):
+    # Plastic/rest lengths must come from the authoritative C++ World and
+    # must not be silently rebuilt from the deformed geometry.
+    p=np.array([[0.0,0.0,0.0],[1.0,0.0,0.0]],dtype=np.float32)
+    inv=np.array([0.0,1.0],dtype=np.float32)
+    edges=np.array([[0,1]],dtype=np.int32)
+    default=LocalXpbdSession(p,inv,edges,device=device)
+    default.solve(iterations=5)
+    assert np.allclose(default.read_positions([1]),[[1.0,0,0]],atol=1e-6)
+    stored=LocalXpbdSession(p,inv,edges,rest_lengths=[0.6],device=device)
+    stored.solve(iterations=5)
+    assert np.allclose(stored.read_positions([1]),[[0.6,0,0]],atol=2e-5)
+    for bad in ([float("nan")],[-1.0],[0.0],[],[0.6,0.7]):
+        try: LocalXpbdSession(p,inv,edges,rest_lengths=bad,device=device)
+        except ValueError: pass
+        else: raise AssertionError("invalid physical rest length accepted")
+
+
 def test_gpu_parity():
     p=np.array([[0,0,0],[1,0,0],[2,0,0]],dtype=np.float32)
     inv=np.array([0,1,1],dtype=np.float32)
@@ -74,5 +92,6 @@ if __name__=="__main__":
     parser.add_argument("--device",choices=("cpu","cuda"),default="cpu")
     args=parser.parse_args()
     run(args.device)
+    test_rest_length_from_native_world(args.device)
     if args.device=="cuda":
         test_gpu_parity()
