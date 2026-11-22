@@ -62,6 +62,27 @@ cmake --build build-gpu-perf --target bench_gpu_workset --parallel
 ./build-gpu-perf/bench_gpu_workset 125000 100
 ```
 
+### Measured CPU workset preparation (GitHub Actions, Linux Release)
+
+Source: [CI run 45024496154](https://github.com/Brunoarmeni86/Blender-Sculpt-Extended/actions/runs/45024496154).
+One deterministic linear-chain topology; small (17-vertex) worksets;
+results are a **single CI-host measurement** and must be repeated on the
+artist workstation, more-connected organic meshes, and multiple brush radii.
+
+| Full proxy | Index construction (once) | Previous full bond scan p50 / p95 | Cached CSR p50 / p95 |
+| ---: | ---: | ---: | ---: |
+| 12,000 verts | 0.241 ms | 0.1518 / 0.1728 ms | 0.0013 / 0.0019 ms |
+| 125,000 verts | 3.857 ms | 1.5919 / 1.6288 ms | 0.0029 / 0.0033 ms |
+
+The 125k case saves ~1.589 ms **only in local workset preparation** per
+dab after initial index construction; in this particular synthetic case
+the index construction cost is recovered after roughly three local dabs.
+Do not extrapolate this ratio to overall Sculpt latency or CUDA speed.
+Benchmarks exclude GPU transfer and kernels, Native PBVH, Multires CCG,
+Sculpt Layers, Undo, viewport/draw and dynamic topology updates. CSR
+requires additional memory (roughly two bond-ID entries per intact bond
+plus N+1 offsets, ignoring allocator overhead).
+
 ## Why these optimizations matter
 
 ### 1 — Persistent GPU arrays
