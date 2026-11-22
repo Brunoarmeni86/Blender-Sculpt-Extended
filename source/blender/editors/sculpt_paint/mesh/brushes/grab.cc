@@ -357,6 +357,240 @@ static bool try_xpbd_grab_preview(const Depsgraph &depsgraph,
   cache.xpbd_v12_previous_delta = grab_delta;
   return true;
 }
+
+#ifdef WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14
+/* V14 is a SEPARATE opt-in research path, deliberately independent from the
+ * legacy V12/V13 World preview. Unlike V12, it exercises IPhysicsExecutor
+ * through a strictly local, pinned one-ring island. It only runs on an
+ * ordinary PBVH Mesh and relies on the existing native Grab Undo node mask.
+ * This is not the final persistent CUDA or Multires integration. */
+struct V14GrabState {
+  sculpt_physics::World rest_world;
+  std::unique_ptr<sculpt_physics::GpuTopologyBondIndex> topology;
+  int verts_num = 0;
+  int edges_num = 0;
+};
+
+static bool try_xpbd_executor_grab_preview(const Depsgraph &depsgraph,
+                                           const Sculpt &sd,
+                                           Object &object,
+                                           const IndexMask &node_mask,
+                                           const Brush &brush,
+                                           const float3 &grab_delta,
+                                           bke::pbvh::Tree &pbvh)
+{
+  const char *enabled = std::getenv("BLENDER_SCULPT_XPBD_GRAB_EXECUTOR_V14");
+  if (!enabled || enabled[0] != '1' || enabled[1] != '\0') return false;
+  if (pbvh.type() != bke::pbvh::Type::Mesh) return false;
+  SculptSession &ss = *object.runtime->sculpt_session;
+  StrokeCache &cache = *ss.cache;
+  const ePaintSymmetryFlags nontrivial_symmetry = ePaintSymmetryFlags(
+      PAINT_SYMM_X | PAINT_SYMM_Y | PAINT_SYMM_Z |
+      PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z);
+  if (cache.xpbd_v14_failed || ss.deform_modifiers_active ||
+      ss.shapekey_active || bke::multires_layers::base_modifier(object) != nullptr ||
+      (sd.paint.symmetry_flags & nontrivial_symmetry) != PAINT_SYMM_NONE ||
+      cache.tile_pass != 0 || cache.radial_symmetry_pass != 0 ||
+      cache.mirror_symmetry_pass != 0) {
+    return false;
+  }
+
+  const Mesh &mesh = *id_cast<Mesh *>(object.data);
+  if (mesh.verts_num <= 0) return false;
+  const PositionDeformData position_data(depsgraph, object);
+  const Span<float3> eval = position_data.eval;
+  if (eval.size() != mesh.verts_num) return false;
+  MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  const MeshAttributeData attributes(mesh);
+  const float3 delta = grab_delta - cache.xpbd_v14_previous_delta;
+  struct PreparedNode {
+    int node_id;
+    Vector<float3> translation;
+  };
+  std::vector<PreparedNode> node_writes;
+  sculpt_physics::PreparedNativeGrabDab prepared;
+  std::shared_ptr<V14GrabState> state;
+
+  // Staging must COMPLETE before any Blender PBVH geometry is modified.
+  try {
+    state = std::static_pointer_cast<V14GrabState>(cache.xpbd_v14_state);
+    if (state && (state->verts_num != mesh.verts_num ||
+                  state->edges_num != mesh.edges_num)) {
+      throw std::runtime_error("V14 native Grab topology changed during a stroke");
+    }
+    if (!state) {
+      state = std::make_shared<V14GrabState>();
+      state->verts_num = mesh.verts_num;
+      state->edges_num = mesh.edges_num;
+      for (const int i : eval.index_range()) {
+        const float3 p = eval[i];
+        const bool hidden = !attributes.hide_vert.is_empty() && attributes.hide_vert[i];
+        const float mask = attributes.mask.is_empty() ? 0.0f : attributes.mask[i];
+        const double inv_mass = hidden || mask >= 0.999f ? 0.0 :
+                                std::max(1.0e-4, 1.0 - double(mask));
+        state->rest_world.add_particle(
+            {double(p.x), double(p.y), double(p.z)}, inv_mass);
+      }
+      for (const int2 edge : mesh.edges()) {
+        try {
+          state->rest_world.add_bond(
+              std::size_t(edge[0]), std::size_t(edge[1]), 1.0e-5);
+        }
+        catch (const std::invalid_argument &) {
+          // Degenerate source edge must not introduce an invalid constraint.
+        }
+      }
+      state->topology = std::make_unique<sculpt_physics::GpuTopologyBondIndex>(
+          state->rest_world, 1);
+    }
+
+    std::vector<sculpt_physics::NativeGrabSample> samples;
+    Vector<float> factors;
+    Vector<float> distances;
+    node_mask.foreach_index([&](const int ni) {
+      const bke::pbvh::MeshNode &node = nodes[ni];
+      const OrigPositionData orig_data = orig_position_data_get_mesh(object, node);
+      const Span<int> verts = node.verts();
+      calc_factors_common_from_orig_data_mesh(depsgraph,
+                                              brush,
+                                              object,
+                                              attributes,
+                                              orig_data.positions,
+                                              orig_data.normals,
+                                              node,
+                                              factors,
+                                              distances);
+      if (brush.flag2 & BRUSH_GRAB_SILHOUETTE) {
+        calc_silhouette_factors(cache, grab_delta, orig_data.normals, factors);
+      }
+      for (const int j : verts.index_range()) {
+        if (factors[j] > 0.0f && std::isfinite(factors[j])) {
+          samples.push_back(
+              {std::size_t(verts[j]), double(std::min(factors[j], 1.0f))});
+        }
+      }
+    });
+    std::sort(samples.begin(), samples.end(),
+              [](const auto &a, const auto &b) {
+                return a.global_index < b.global_index;
+              });
+    // PBVH nodes may carry repeated vertex IDs. The existing V12 behavior
+    // keeps the largest final native factor, without multiplying it twice.
+    std::vector<sculpt_physics::NativeGrabSample> unique;
+    unique.reserve(samples.size());
+    for (const auto &sample : samples) {
+      if (!unique.empty() && unique.back().global_index == sample.global_index) {
+        unique.back().factor = std::max(unique.back().factor, sample.factor);
+      }
+      else {
+        unique.push_back(sample);
+      }
+    }
+    sculpt_physics::NativeGrabDab dab;
+    dab.delta = {double(delta.x), double(delta.y), double(delta.z)};
+    dab.compliance = 1.0e-6;
+    dab.dt = 1.0 / 60.0;
+    dab.substeps = 2;
+    dab.iterations = 5;
+    dab.topology_generation = 1;
+
+    prepared = sculpt_physics::prepare_cpu_native_grab_dab(
+        state->rest_world,
+        *state->topology,
+        unique,
+        [&](std::size_t vi) -> sculpt_physics::Vec3 {
+          if (vi >= std::size_t(eval.size())) {
+            throw std::out_of_range("V14 current PBVH vertex ID out of range");
+          }
+          const float3 p = eval[int(vi)];
+          return {double(p.x), double(p.y), double(p.z)};
+        },
+        dab);
+
+    std::unordered_map<std::size_t, float3> staged_translations;
+    staged_translations.reserve(prepared.writes().size());
+    for (const auto &write : prepared.writes()) {
+      const float3 old = eval[int(write.global_index)];
+      const float3 translation{
+          float(write.position.x - double(old.x)),
+          float(write.position.y - double(old.y)),
+          float(write.position.z - double(old.z))};
+      if (!std::isfinite(translation.x) || !std::isfinite(translation.y) ||
+          !std::isfinite(translation.z)) {
+        throw std::runtime_error("V14 native Grab result outside float position range");
+      }
+      if (!staged_translations.emplace(write.global_index, translation).second) {
+        throw std::runtime_error("V14 duplicate writeback vertex");
+      }
+    }
+
+    std::unordered_set<std::size_t> seen;
+    seen.reserve(staged_translations.size());
+    node_mask.foreach_index([&](const int ni) {
+      PreparedNode node_write;
+      node_write.node_id = ni;
+      const Span<int> verts = nodes[ni].verts();
+      node_write.translation.resize(verts.size());
+      for (const int j : verts.index_range()) {
+        const auto it = staged_translations.find(std::size_t(verts[j]));
+        node_write.translation[j] = it == staged_translations.end() ?
+                                    float3(0.0f) : it->second;
+        if (it != staged_translations.end() &&
+            !seen.insert(std::size_t(verts[j])).second) {
+          throw std::logic_error("V14 PBVH vertex overlaps multiple Undo nodes");
+        }
+      }
+      clip_and_lock_translations(sd, ss, eval, verts, node_write.translation);
+      // A constrained/locked coordinate would invalidate the isolated
+      // solver's acknowledged positions. Fail BEFORE editor modification and
+      // return this dab to the original Blender Grab brush instead.
+      for (const int j : verts.index_range()) {
+        const auto it = staged_translations.find(std::size_t(verts[j]));
+        const float3 expected = it == staged_translations.end() ?
+                                float3(0.0f) : it->second;
+        const float3 actual = node_write.translation[j];
+        const float eps = 1.0e-6f * (1.0f + math::length(expected));
+        if (std::abs(actual.x - expected.x) > eps ||
+            std::abs(actual.y - expected.y) > eps ||
+            std::abs(actual.z - expected.z) > eps) {
+          throw std::runtime_error("V14 locked/mirror-clipped Grab: using stock brush");
+        }
+      }
+      node_writes.push_back(std::move(node_write));
+    });
+    if (seen.size() != staged_translations.size()) {
+      throw std::logic_error("V14 XPBD output is not fully covered by native Undo PBVH nodes");
+    }
+  }
+  catch (const std::exception &ex) {
+    // No Blender mesh write has occurred here; keep standard Grab intact.
+    std::fprintf(stderr, "[V14 XPBD Grab] disabled: %s\n", ex.what());
+    prepared.cancel();
+    cache.xpbd_v14_state.reset();
+    cache.xpbd_v14_failed = true;
+    return false;
+  }
+
+  // Native Blender Sculpt owns Undo and the actual PBVH writeback. These
+  // operations currently have no full multi-node rollback hook. V14 remains
+  // an explicitly enabled research preview, not production-ready physics.
+  for (PreparedNode &node_write : node_writes) {
+    bke::pbvh::MeshNode &node = nodes[node_write.node_id];
+    position_data.deform(node_write.translation, node.verts());
+    bke::pbvh::update_node_bounds_mesh(position_data.eval, node);
+  }
+  pbvh.tag_positions_changed(node_mask);
+  pbvh.flush_bounds_to_parents();
+  prepared.finish_editor_success();
+  cache.xpbd_v14_state = state;
+  cache.xpbd_v14_previous_delta = grab_delta;
+  if (!cache.xpbd_v14_active_logged) {
+    std::fprintf(stderr, "[V14 XPBD Grab] native IPhysicsExecutor preview ACTIVE\n");
+    cache.xpbd_v14_active_logged = true;
+  }
+  return true;
+}
+#endif
 #endif
 
 }  // namespace grab_cc
