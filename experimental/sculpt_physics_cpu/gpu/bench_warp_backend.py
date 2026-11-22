@@ -23,7 +23,9 @@ def sync(device):
         wp.synchronize_device("cuda:0")
 
 
-def run(solver,device,particles,dabs,iterations):
+def run(solver,device,particles,dabs,iterations,graph_capture=False):
+    if graph_capture and (solver!="xpbd" or device!="cuda"):
+        raise ValueError("--graph requires XPBD on a CUDA device")
     if device=="cpu" and particles>256:
         raise ValueError("Python CPU oracle capped at 256 particles")
     if particles<4 or particles>2_000_000 or dabs<3 or dabs>1000:
@@ -36,7 +38,8 @@ def run(solver,device,particles,dabs,iterations):
         edges=np.stack((np.arange(particles-1,dtype=np.int32),
                         np.arange(1,particles,dtype=np.int32)),axis=1)
         start=time.perf_counter()
-        session=LocalXpbdSession(base,inv,edges,device=device)
+        session=LocalXpbdSession(base,inv,edges,device=device,
+                                 graph_capture=graph_capture)
         init_ms=(time.perf_counter()-start)*1000.0
         center=particles//2
         def dab(k):
@@ -76,6 +79,8 @@ def run(solver,device,particles,dabs,iterations):
         "dab_ms_p50":round(float(np.percentile(timings,50)),4),
         "dab_ms_p95":round(float(np.percentile(timings,95)),4),
         "transfer_counters":str(stats),
+        "graph_capture":graph_capture,
+        "graph_stats":session.graph_stats if solver=="xpbd" else None,
         "scope":"standalone Python/Warp proxy, no Blender PBVH/CCG/Undo/viewport"
     }
 
@@ -87,6 +92,7 @@ if __name__=="__main__":
     parser.add_argument("--particles",type=int,default=64)
     parser.add_argument("--dabs",type=int,default=10)
     parser.add_argument("--iterations",type=int,default=4)
+    parser.add_argument("--graph",action="store_true",help="opt-in cached CUDA XPBD graph replay")
     args=parser.parse_args()
     print(json.dumps(run(args.solver,args.device,args.particles,
-                         args.dabs,args.iterations),indent=2))
+                         args.dabs,args.iterations,graph_capture=args.graph),indent=2))
