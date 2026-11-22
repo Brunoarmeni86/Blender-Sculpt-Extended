@@ -30,6 +30,11 @@ implemented. NVIDIA Warp is an isolated experimental Python/CUDA kernel.
 | `sculpt_physics_pipeline.hh/.cc` | **New single CPU execution path**: begin, plan, solve, stage, cancel/commit | Integrated with CPU World only |
 | `sculpt_surface_bridge.hh/.cc` | Preserve regular-mesh or anchored Multires detail on physical proxy deformation | Standalone reference |
 | `multires_dirty_map.hh/.cc` | Map dirty proxy particles to dependent evaluated surface samples | Standalone index; not actual CCG tiles |
+| `gpu_workset.hh/.cc` | Build a compact CPU→GPU local proxy island, pinned boundary, validated sparse writeback | Standalone C++ contract, not CUDA execution |
+| `gpu/warp_resident_contact.py` | Reuse on-device granular state/HashGrid across multiple dabs | Python/Warp CUDA experiment; no native editor |
+| `gpu/warp_xpbd_local.py` | Edge-colored parallel XPBD local proxy constraints, resident arrays | Python/Warp CUDA experiment; no native editor |
+| `gpu/bench_warp_backend.py` | Runtime and transfer measurements p50/p95 | Benchmark script; no results claimed |
+
 | `gpu/warp_granular_probe.py` | CUDA/HashGrid experiment with CPU NumPy oracle | Not native C++ or viewport |
 | `test_sculpt_physics_pipeline.cc` | End-to-end CPU lifecycle, Undo-coverage and failure rollback regression | CTest / GitHub Actions |
 
