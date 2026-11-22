@@ -237,8 +237,12 @@ class LocalXpbdSession:
         goals_gpu=wp.empty(cap,dtype=wp.vec3,device=self._dev)
         self._ids_gpu=ids_gpu
         self._goals_gpu=goals_gpu
+        if self._target_mode=="compliant":
+            # Persistent per-target compliance and XPBD lambda array.
+            self._target_comp_gpu=wp.empty(cap,dtype=wp.float32,device=self._dev)
+            self._target_lam_gpu=wp.zeros(cap,dtype=wp.vec3,device=self._dev)
         self._target_capacity=cap
-        self._sparse_device_allocations+=2
+        self._sparse_device_allocations+=4 if self._target_mode=="compliant" else 2
 
     def _reserve_readback(self, count):
         if not self._warp or count <= self._read_capacity:
@@ -259,11 +263,19 @@ class LocalXpbdSession:
     def scratch_capacities(self):
         return (self._target_capacity,self._read_capacity)
 
-    def set_targets(self, indices, goals):
+    def set_targets(self, indices, goals, *, target_compliance=0.0):
+        # Validate all inputs before modifying resident targets or buffers.
         ids=_checked_indices(indices,self._n)
         xyz=np.asarray(goals,dtype=np.float32)
         if xyz.shape!=(len(ids),3) or not np.isfinite(xyz).all():
             raise ValueError("invalid brush target")
+        c=np.asarray(target_compliance,dtype=np.float32)
+        if c.ndim==0:
+            c=np.full(len(ids),float(c),dtype=np.float32)
+        if c.shape!=(len(ids),) or not np.isfinite(c).all() or np.any(c<0):
+            raise ValueError("invalid XPBD target compliance")
+        if self._target_mode=="hard" and np.any(c>0):
+            raise ValueError("hard target mode cannot use nonzero compliance")
         if len(ids) and np.any(self._inv[ids]<=0):
             raise ValueError("cannot target a pinned local vertex")
         if self._warp and len(ids):
@@ -273,10 +285,16 @@ class LocalXpbdSession:
                     wp.array(ids,dtype=wp.int32,device="cpu"),count=len(ids))
             wp.copy(self._goals_gpu,
                     wp.array(xyz,dtype=wp.vec3,device="cpu"),count=len(ids))
+            if self._target_mode=="compliant":
+                wp.copy(self._target_comp_gpu,
+                        wp.array(c,dtype=wp.float32,device="cpu"),count=len(ids))
             if self._cuda:
                 self._sparse_h2d+=ids.nbytes+xyz.nbytes
+                if self._target_mode=="compliant":
+                    self._sparse_h2d+=c.nbytes
         self._goals_ids=ids.copy()
         self._goals=xyz.copy()
+        self._goal_compliances=c.copy()
 
     def solve(self, *, dt=1.0/60.0, iterations=5):
         if (not np.isfinite(dt) or dt<=0 or
