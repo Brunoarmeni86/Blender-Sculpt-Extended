@@ -70,9 +70,15 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     GpuLocalIsland staged = island;
     std::vector<Vec3> positions = island.positions;
     std::vector<Vec3> acknowledged = island.positions;
+    // Allocate sparse tracking once per stable proxy topology, never per dab.
+    std::vector<unsigned char> dirty_flags(island.positions.size(),0);
+    std::vector<std::size_t> dirty_ids;
+    dirty_ids.reserve(island.positions.size());
     island_ = std::move(staged);
     positions_.swap(positions);
     acknowledged_.swap(acknowledged);
+    dirty_flags_.swap(dirty_flags);
+    dirty_ids_.swap(dirty_ids);
     revision_ = 0;
     snapshot_.clear();
     targets_.clear();
@@ -94,6 +100,8 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     std::vector<Vec3> acknowledged = positions_;
     snapshot_.swap(new_snapshot);
     acknowledged_.swap(acknowledged);
+    for (std::size_t i : dirty_ids_) dirty_flags_[i]=0;
+    dirty_ids_.clear();
     revision_=0;
     targets_.clear();
     active_=true;
@@ -123,7 +131,10 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
       throw std::overflow_error("Executor writeback revision exhausted");
     }
     // No allocations/no exceptions after all input has been validated.
-    for (const auto &edit : accepted) positions_[edit.first] = edit.second;
+    for (const auto &edit : accepted) {
+      positions_[edit.first] = edit.second;
+      mark_dirty(edit.first);
+    }
     if (!accepted.empty()) ++revision_;
   }
 
@@ -227,6 +238,13 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     if (revision_==std::numeric_limits<std::uint64_t>::max()) {
       throw std::overflow_error("Executor writeback revision exhausted");
     }
+    for (std::size_t i=0;i<positions_.size();++i) {
+      if (next[i].x != positions_[i].x ||
+          next[i].y != positions_[i].y ||
+          next[i].z != positions_[i].z) {
+        mark_dirty(i);
+      }
+    }
     positions_.swap(next);
     ++revision_;
   }
@@ -246,7 +264,7 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     }
     ExecutorWriteBatch batch;
     batch.revision = revision_;
-    for (std::size_t i=0;i<positions_.size();++i) {
+    for (std::size_t i : dirty_ids_) {
       const Vec3 current=positions_[i];
       const Vec3 old=acknowledged_[i];
       if (!finite(current) || !finite(old)) {
@@ -262,6 +280,10 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
       }
       batch.writes.push_back({island_.global_ids[i],current});
     }
+    std::sort(batch.writes.begin(),batch.writes.end(),
+              [](const GpuProxyChange &a,const GpuProxyChange &b) {
+                return a.global_index < b.global_index;
+              });
     return batch;
   }
 
@@ -271,9 +293,13 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     if (revision != revision_) {
       throw std::logic_error("Stale editor writeback acknowledgment");
     }
-    // Preserve the prior successful acknowledgement on allocation failure.
-    std::vector<Vec3> snapshot = positions_;
-    acknowledged_.swap(snapshot);
+    // All storage is reserved when the island is allocated. Updating an
+    // acknowledged dab now costs O(changed K), NOT O(all island N).
+    for (std::size_t i : dirty_ids_) {
+      acknowledged_[i]=positions_[i];
+      dirty_flags_[i]=0;
+    }
+    dirty_ids_.clear();
   }
 
   void commit() override
@@ -303,6 +329,16 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     double compliance=0.0;
   };
 
+  void mark_dirty(std::size_t local_id)
+  {
+    // dirty_ids_ has N slots reserved during allocate_island. Each local ID
+    // is inserted at most once before the next native editor acknowledgment.
+    if (!dirty_flags_[local_id]) {
+      dirty_flags_[local_id]=1;
+      dirty_ids_.push_back(local_id);
+    }
+  }
+
   void require_active() const
   {
     if (!active_) throw std::logic_error("Executor begin_stroke required");
@@ -327,6 +363,8 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   std::vector<Vec3> scratch_positions_;
   std::vector<double> scratch_bond_lambda_;
   std::vector<Vec3> scratch_target_lambda_;
+  std::vector<unsigned char> dirty_flags_;
+  std::vector<std::size_t> dirty_ids_;
   std::uint64_t revision_=0;
   std::vector<LocalTarget> targets_;
   bool ready_=false;
