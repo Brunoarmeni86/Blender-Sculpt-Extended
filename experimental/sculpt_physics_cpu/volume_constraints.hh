@@ -17,7 +17,7 @@ struct TetraVolumeConstraint {
   std::array<std::size_t, 4> indices{};
   double rest_volume = 0.0;  // Signed, strictly positive; mesh caller owns winding.
   double compliance = 0.0;   // Compliance in units appropriate to volume^2.
-  double lambda = 0.0;       // Iteration accumulator, transactional.
+  double lambda = 0.0;       // Last-step diagnostic; reset at every new solve call.
 };
 
 double signed_tetra_volume(const std::array<Vec3, 4> &positions);
