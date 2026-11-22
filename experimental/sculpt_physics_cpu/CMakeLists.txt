@@ -213,3 +213,14 @@ if(SCULPT_PHYSICS_BUILD_BENCHMARKS)
     target_compile_options(bench_gpu_workset PRIVATE -Wall -Wextra -Wpedantic -Werror)
   endif()
 endif()
+
+# Native backend-neutral executor: production CUDA/Vulkan is NOT registered yet.
+# CPU XPBD implementation follows the same sparse staging/transaction API that
+# future GPU executors must implement, without importing Warp into Blender.
+target_sources(sculpt_physics_reference PRIVATE physics_executor.cc)
+add_executable(test_physics_executor test_physics_executor.cc)
+target_link_libraries(test_physics_executor PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_physics_executor PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_physics_executor_contract_tests COMMAND test_physics_executor)
