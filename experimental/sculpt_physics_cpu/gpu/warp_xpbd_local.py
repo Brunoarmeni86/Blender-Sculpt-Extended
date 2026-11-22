@@ -117,7 +117,7 @@ class LocalXpbdSession:
     """
 
     def __init__(self, positions, inverse_masses, edges, *,
-                 compliance=0.0, device="auto"):
+                 compliance=0.0, rest_lengths=None, device="auto"):
         p=np.asarray(positions,dtype=np.float32)
         mass=np.asarray(inverse_masses,dtype=np.float32)
         pair=np.asarray(edges)
@@ -149,7 +149,15 @@ class LocalXpbdSession:
         pair=pair[order].astype(np.int32)
         self._a=pair[:,0].copy()
         self._b=pair[:,1].copy()
-        self._rest=np.linalg.norm(p[self._b]-p[self._a],axis=1).astype(np.float32)
+        # Keep the C++ World's plastic/rest bond lengths when provided.
+        # Rebuilding them from deformed positions would erase plastic memory.
+        if rest_lengths is None:
+            self._rest=np.linalg.norm(p[self._b]-p[self._a],axis=1).astype(np.float32)
+        else:
+            source_rest=np.asarray(rest_lengths,dtype=np.float32)
+            if source_rest.shape!=(self._m,):
+                raise ValueError("expected one rest length per proxy bond")
+            self._rest=np.ascontiguousarray(source_rest[order])
         if not np.isfinite(self._rest).all() or np.any(self._rest<=1.0e-12):
             raise ValueError("degenerate proxy bond")
         self._compliance=c[order]
