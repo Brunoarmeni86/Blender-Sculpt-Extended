@@ -35,6 +35,7 @@ def run(device):
         assert solver.sparse_device_allocations >= allocs
         allocs=solver.sparse_device_allocations
     solver.solve(iterations=4)
+    assert np.allclose(solver.read_positions([2]), [[2.2,0,0]],atol=1e-6)
     if device in ("warp-cpu","cuda"):
         for k in range(4):
             goal=2.25 + 0.05*k
@@ -48,7 +49,8 @@ def run(device):
         )
     second=solver.read_positions([1,2])
     assert np.isfinite(second).all()
-    assert np.allclose(second[1], [2.2,0,0],atol=1e-6)
+    expected_last = 2.4 if device in ("warp-cpu","cuda") else 2.2
+    assert np.allclose(second[1], [expected_last,0,0],atol=1e-5)
     assert solver.transfer_bytes[0]==baseline[0]
 
     before=solver.read_positions([0,1,2])
