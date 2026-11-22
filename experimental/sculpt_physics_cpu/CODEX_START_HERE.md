@@ -39,6 +39,8 @@ and execute on Warp's CPU backend in CI (Warp 1.19.0), with oracle parity.
 
 | File | Responsibility | Current readiness |
 | --- | --- | --- |
+| `physics_executor.hh/.cc` | **New** `IPhysicsExecutor`: typed target/edit/step/commit/cancel; CPU local XPBD implementation and checked per-family factory | Standalone C++ tested; CUDA/Vulkan refused |
+| `test_physics_executor.cc` | Parity with native World target/bond projection; atomic edit and rollback; per-solver capability safety | Linux GCC + Windows MSVC CTest |
 | `physics_core.hh/.cc`, `adaptive_solver.cc` | Authoritative XPBD CPU `World`, bond state, local solve, rollback | Standalone C++ |
 | `brush_targets.hh/.cc` | Turn Blender-provided mask/falloff/pressure into sparse goals | Standalone C++ |
 | `granular_contacts.hh/.cc` | Sparse cell-hash overlap/cohesion goals for small DEM-like particles | Approximate CPU |
