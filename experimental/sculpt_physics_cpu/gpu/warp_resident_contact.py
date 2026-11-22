@@ -65,8 +65,8 @@ class ResidentContactSession:
     """
 
     def __init__(self, positions, inverse_masses, radii, *, device="auto"):
-        if device not in ("auto", "cpu", "cuda"):
-            raise ValueError("device must be 'auto', 'cpu' or 'cuda'")
+        if device not in ("auto", "cpu", "warp-cpu", "cuda"):
+            raise ValueError("device must be 'auto', 'cpu', 'warp-cpu' or 'cuda'")
         points = np.asarray(positions, dtype=np.float32)
         mass = np.asarray(inverse_masses, dtype=np.float32)
         radius = np.asarray(radii, dtype=np.float32)
@@ -79,7 +79,10 @@ class ResidentContactSession:
         cuda_available = bool(wp is not None and wp.get_cuda_device_count() > 0)
         if device == "cuda" and not cuda_available:
             raise RuntimeError("Warp CUDA unavailable: no suitable NVIDIA device/runtime")
+        if device == "warp-cpu" and wp is None:
+            raise RuntimeError("Warp CPU runtime unavailable (install warp-lang)")
         self._cuda = device == "cuda" or (device == "auto" and cuda_available)
+        self._warp = self._cuda or device == "warp-cpu"
         self._n = len(points)
         self._max_radius = float(np.max(radius)) if self._n else 0.0
         self._initial_upload = int(points.nbytes + mass.nbytes + radius.nbytes) if self._cuda else 0
@@ -87,8 +90,9 @@ class ResidentContactSession:
         self._sparse_download = 0
         self._full_download = 0
         self._allocations = 0
-        self._device = "cuda:0"
-        if self._cuda and self._n:
+        self._device = "cuda:0" if self._cuda else "cpu"
+        self._host_inv_mass = mass.copy()
+        if self._warp and self._n:
             wp.init()
             self._x = wp.array(points, dtype=wp.vec3, device=self._device)
             self._y = wp.zeros(self._n, dtype=wp.vec3, device=self._device)
@@ -105,7 +109,7 @@ class ResidentContactSession:
 
     @property
     def device(self):
-        return "cuda" if self._cuda else "cpu"
+        return "cuda" if self._cuda else ("warp-cpu" if self._warp else "cpu")
 
     @property
     def particle_count(self):
@@ -139,7 +143,11 @@ class ResidentContactSession:
             raise ValueError("invalid sparse positions")
         if not len(ids):
             return
-        if not self._cuda:
+        # Fixed exterior/halo particles must never be edited by the brush.
+        # Native Blender owns the actual Undo scope and must validate it too.
+        if np.any(self._host_inv_mass[ids] <= 0.0):
+            raise ValueError("cannot edit pinned/zero-inverse-mass particles")
+        if not self._warp:
             self._cpu_positions[ids] = pts
             return
         # Allocates only O(dirty_count), NOT O(proxy_count) per dab.
@@ -148,7 +156,8 @@ class ResidentContactSession:
         pts_gpu = wp.array(pts, dtype=wp.vec3, device=self._device)
         wp.launch(_scatter_positions, dim=len(ids), inputs=[self._x, ids_gpu, pts_gpu],
                   device=self._device)
-        self._sparse_upload += ids.nbytes + pts.nbytes
+        if self._cuda:
+            self._sparse_upload += ids.nbytes + pts.nbytes
         self._allocations += 2
 
     def step(self, *, iterations=4, separation=0.85,
@@ -161,7 +170,7 @@ class ResidentContactSession:
             raise ValueError("invalid contact parameters")
         if self._n <= 1:
             return
-        if not self._cuda:
+        if not self._warp:
             for _ in range(iterations):
                 self._cpu_positions = _cpu_step(
                     self._cpu_positions, self._cpu_masses, self._cpu_radii,
@@ -187,7 +196,7 @@ class ResidentContactSession:
     def read_positions(self, indices=None):
         """Explicit readback: subset only, unless indices=None is requested."""
         if indices is None:
-            if not self._cuda:
+            if not self._warp:
                 return self._cpu_positions.copy()
             if not self._n:
                 return np.empty((0, 3), dtype=np.float32)
@@ -197,7 +206,7 @@ class ResidentContactSession:
             ids = self._indices(indices)
             if not len(ids):
                 return np.empty((0, 3), dtype=np.float32)
-            if not self._cuda:
+            if not self._warp:
                 return self._cpu_positions[ids].copy()
             ids_gpu = wp.array(ids, dtype=wp.int32, device=self._device)
             result_gpu = wp.empty(len(ids), dtype=wp.vec3, device=self._device)
@@ -205,8 +214,9 @@ class ResidentContactSession:
                       inputs=[self._x, ids_gpu], outputs=[result_gpu],
                       device=self._device)
             result = result_gpu.numpy()
-            self._sparse_upload += ids.nbytes
-            self._sparse_download += result.nbytes
+            if self._cuda:
+                self._sparse_upload += ids.nbytes
+                self._sparse_download += result.nbytes
             self._allocations += 2
         if not np.isfinite(result).all():
             raise FloatingPointError("non-finite GPU contact output: refuse writeback")
