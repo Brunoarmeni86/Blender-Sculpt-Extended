@@ -1,6 +1,17 @@
 # IPhysicsExecutor — native backend contract for Codex
 **22 November 2026 — PR #24 (experimental, not Blender viewport-ready)**
 
+**V15 multi-brush spike:** A common typed
+`NativeBrushTranslation` adapter now accepts original Blender
+per-vertex translations from Clay, Clay Strips, Smooth, Draw, Nudge
+and Gravity. A separately gated native callback is written for each
+of these brushes, using the same CPU `IPhysicsExecutor` and
+cached CSR rest graph. Standalone CTest verifies these kinds, pinned
+halo, invalid inputs, Undo staging and consecutive dabs. The guarded
+full Blender source has NOT been compiled/tested in a native VS2022
+viewport build. See
+[`V15_OTHER_BRUSHES_BUILD_AND_TEST.md`](V15_OTHER_BRUSHES_BUILD_AND_TEST.md).
+
 **V14 progress:** A separate native Grab callback has been added to the
 Blender fork under two opt-in switches. It translates final native
 PBVH Grab factors into `IPhysicsExecutor` targets and stages positions
