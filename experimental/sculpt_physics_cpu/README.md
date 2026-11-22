@@ -1,5 +1,12 @@
 # Sculpt Physics CPU Reference Prototype (experimental, standalone)
 
+**Blender Grab V14 native CPU integration (experimental):**
+[`V14_NATIVE_GRAB_EXECUTOR_BUILD_AND_TEST.md`](V14_NATIVE_GRAB_EXECUTOR_BUILD_AND_TEST.md)
+describes two separate opt-in flags, the actual source callback,
+persistent rest-graph CSR, pinned one-ring dabs, native test matrix and
+the **unverified full Blender VS2022 compile**. Not a CUDA or Multires
+implementation.
+
 **Native solver executor contract (new):**
 [`PHYSICS_EXECUTOR_CODEX.md`](PHYSICS_EXECUTOR_CODEX.md) describes a typed
 `IPhysicsExecutor` API, the standalone CPU XPBD implementation and
