@@ -387,11 +387,19 @@ static bool try_xpbd_executor_grab_preview(const Depsgraph &depsgraph,
   const ePaintSymmetryFlags nontrivial_symmetry = ePaintSymmetryFlags(
       PAINT_SYMM_X | PAINT_SYMM_Y | PAINT_SYMM_Z |
       PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z);
-  if (cache.xpbd_v14_failed || ss.deform_modifiers_active ||
-      ss.shapekey_active || bke::multires_layers::base_modifier(object) != nullptr ||
+  // Never switch from incremental V14 goals to stock Grab's cumulative
+  // displacement in the MIDDLE of one stroke: that could jump the mesh.
+  // After a V14 failure, freeze this stroke until the user releases Grab.
+  if (cache.xpbd_v14_failed) return cache.xpbd_v14_active_logged;
+  if (ss.deform_modifiers_active || ss.shapekey_active ||
+      bke::multires_layers::base_modifier(object) != nullptr ||
       (sd.paint.symmetry_flags & nontrivial_symmetry) != PAINT_SYMM_NONE ||
       cache.tile_pass != 0 || cache.radial_symmetry_pass != 0 ||
       cache.mirror_symmetry_pass != 0) {
+    if (cache.xpbd_v14_active_logged) {
+      cache.xpbd_v14_failed = true;
+      return true;
+    }
     return false;
   }
 
@@ -568,7 +576,10 @@ static bool try_xpbd_executor_grab_preview(const Depsgraph &depsgraph,
     prepared.cancel();
     cache.xpbd_v14_state.reset();
     cache.xpbd_v14_failed = true;
-    return false;
+    // Stock Grab uses a different cumulative displacement convention.
+    // If V14 already wrote a previous dab, freeze until stroke end instead
+    // of mixing two solvers with incompatible mid-stroke coordinates.
+    return cache.xpbd_v14_active_logged;
   }
 
   // Native Blender Sculpt owns Undo and the actual PBVH writeback. These
