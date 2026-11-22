@@ -34,6 +34,28 @@ if wp is not None:
             x[p] = goals[i]
 
     @wp.kernel
+    def _xpbd_compliant_targets(
+        x: wp.array(dtype=wp.vec3),
+        inv_mass: wp.array(dtype=wp.float32),
+        ids: wp.array(dtype=wp.int32),
+        goals: wp.array(dtype=wp.vec3),
+        compliance: wp.array(dtype=wp.float32),
+        multipliers: wp.array(dtype=wp.vec3),
+        h2: wp.float32,
+    ):
+        t = wp.tid()
+        particle = ids[t]
+        w = inv_mass[particle]
+        alpha = compliance[t] / h2
+        denominator = w + alpha
+        if denominator <= 0.0:
+            return
+        c = x[particle] - goals[t]
+        dl = (c * (-1.0) - multipliers[t] * alpha) / denominator
+        x[particle] = x[particle] + dl * w
+        multipliers[t] = multipliers[t] + dl
+
+    @wp.kernel
     def _xpbd_color_bonds(
         x: wp.array(dtype=wp.vec3),
         inv_mass: wp.array(dtype=wp.float32),
@@ -117,7 +139,7 @@ class LocalXpbdSession:
     """
 
     def __init__(self, positions, inverse_masses, edges, *,
-                 compliance=0.0, rest_lengths=None, device="auto"):
+                 compliance=0.0, rest_lengths=None, device="auto", target_mode="hard"):
         p=np.asarray(positions,dtype=np.float32)
         mass=np.asarray(inverse_masses,dtype=np.float32)
         pair=np.asarray(edges)
@@ -141,6 +163,9 @@ class LocalXpbdSession:
             raise RuntimeError("Warp CPU runtime unavailable (install warp-lang)")
         self._cuda=(device=="cuda" or (device=="auto" and available))
         self._warp=self._cuda or device=="warp-cpu"
+        if target_mode not in ("hard","compliant"):
+            raise ValueError("target_mode must be 'hard' or 'compliant'")
+        self._target_mode=target_mode
         self._n=len(p)
         self._m=len(pair)
         c=np.asarray(compliance,dtype=np.float32)
@@ -167,6 +192,7 @@ class LocalXpbdSession:
         self._inv=mass.copy()
         self._goals_ids=np.empty(0,dtype=np.int32)
         self._goals=np.empty((0,3),dtype=np.float32)
+        self._goal_compliances=np.empty(0,dtype=np.float32)
         self._sparse_h2d=0
         self._sparse_d2h=0
         self._initial_h2d=0
