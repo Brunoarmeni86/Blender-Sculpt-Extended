@@ -197,6 +197,33 @@ GpuLocalIsland GpuTopologyBondIndex::build(
                                      allow_truncated_graph, &bond_ids);
 }
 
+std::vector<std::size_t> GpuTopologyBondIndex::one_ring_halo(
+    const World &world,
+    const std::vector<std::size_t> &active_ids,
+    std::uint64_t topology_generation) const
+{
+  if (world_ != &world || topology_generation != generation_ ||
+      world.particles().size() != particle_count_ ||
+      world.bonds().size() != bond_count_) {
+    throw std::logic_error("Stale GPU CSR index: rebuild halo after topology change");
+  }
+  const auto active = validated_set(active_ids, particle_count_);
+  std::vector<std::size_t> halo;
+  for (const std::size_t id : active) {
+    for (std::size_t k = offsets_[id]; k < offsets_[id + 1]; ++k) {
+      const Bond &bond = world.bonds()[incident_bonds_[k]];
+      if (bond.broken) continue;
+      const std::size_t neighbor = bond.a == id ? bond.b : bond.a;
+      if (!std::binary_search(active.begin(), active.end(), neighbor)) {
+        halo.push_back(neighbor);
+      }
+    }
+  }
+  std::sort(halo.begin(), halo.end());
+  halo.erase(std::unique(halo.begin(), halo.end()), halo.end());
+  return halo;
+}
+
 GpuLocalFloatPack pack_gpu_island_relative(const GpuLocalIsland &island)
 {
   static_assert(sizeof(GpuFloat3) == 3 * sizeof(float),
