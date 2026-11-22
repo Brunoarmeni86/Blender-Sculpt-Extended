@@ -27,6 +27,11 @@ def sample(device):
     solver.set_targets([2],[[2,0.8,0]],target_compliance=1.0e-4)
     solver.solve(iterations=12)
     result=solver.read_positions([0,1,2])
+    first_read=result.copy()
+    # Stable snapshots must never alias resident Warp readback buffers.
+    # Repeated staged reads with other ID orders must not change result.
+    assert np.isfinite(solver.read_positions([2,1])).all()
+    assert matches(result,first_read,1e-7)
     assert matches(result[0],p[0])
     assert 0.0 < result[2,1] < 0.8
     assert result[1,1] > 0.0
@@ -43,6 +48,9 @@ def sample(device):
         staged=solver.read_positions([0,1,2])
         assert np.isfinite(staged).all()
         history.append(staged.copy())
+        assert matches(result,first_read,1e-7), (
+            "previously returned readback snapshot was mutated by next dab"
+        )
     assert solver.transfer_bytes[0] == baseline_transfer
 
     prev=solver.read_positions([0,1,2])
