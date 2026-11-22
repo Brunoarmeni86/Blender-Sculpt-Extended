@@ -73,8 +73,12 @@ std::vector<World::BrushTargetInput> plan_granular_contacts(
   std::vector<std::size_t> ids = candidate_particles;
   std::sort(ids.begin(), ids.end());
   ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-  if (ids.size() < 2) return {};
   const auto &particles = world.particles();
+  // Reject invalid IDs even for a one-particle candidate list.
+  for (std::size_t id : ids) {
+    if (id >= particles.size()) throw std::out_of_range("Granular candidate OOB");
+  }
+  if (ids.size() < 2) return {};
   std::vector<Vec3> positions;
   positions.reserve(ids.size());
   double maximum_radius = 0.0;
