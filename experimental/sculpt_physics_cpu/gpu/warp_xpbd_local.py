@@ -132,12 +132,15 @@ class LocalXpbdSession:
         if (np.any(pair<0) or np.any(pair>=len(p)) or
                 np.any(pair[:,0]==pair[:,1])):
             raise ValueError("invalid/self-connected bond")
-        if device not in ("auto","cpu","cuda"):
-            raise ValueError("device must be cpu, cuda, or auto")
+        if device not in ("auto","cpu","cuda","warp-cpu"):
+            raise ValueError("device must be cpu, warp-cpu, cuda, or auto")
         available=bool(wp is not None and wp.get_cuda_device_count()>0)
         if device=="cuda" and not available:
             raise RuntimeError("Warp CUDA unavailable")
+        if device=="warp-cpu" and wp is None:
+            raise RuntimeError("Warp CPU runtime unavailable (install warp-lang)")
         self._cuda=(device=="cuda" or (device=="auto" and available))
+        self._warp=self._cuda or device=="warp-cpu"
         self._n=len(p)
         self._m=len(pair)
         c=np.asarray(compliance,dtype=np.float32)
@@ -167,9 +170,9 @@ class LocalXpbdSession:
         self._sparse_h2d=0
         self._sparse_d2h=0
         self._initial_h2d=0
-        if self._cuda:
+        if self._warp:
             wp.init()
-            self._dev="cuda:0"
+            self._dev="cuda:0" if self._cuda else "cpu"
             self._x=wp.array(p,dtype=wp.vec3,device=self._dev)
             self._inv_gpu=wp.array(self._inv,dtype=wp.float32,device=self._dev)
             self._a_gpu=wp.array(self._a,dtype=wp.int32,device=self._dev)
@@ -177,14 +180,15 @@ class LocalXpbdSession:
             self._rest_gpu=wp.array(self._rest,dtype=wp.float32,device=self._dev)
             self._comp_gpu=wp.array(self._compliance,dtype=wp.float32,device=self._dev)
             self._lam_gpu=wp.zeros(self._m,dtype=wp.float32,device=self._dev)
-            self._initial_h2d=sum(v.nbytes for v in
+            self._initial_h2d=(sum(v.nbytes for v in
                (p,self._inv,self._a,self._b,self._rest,self._compliance))
+               if self._cuda else 0)
         else:
             self._x_cpu=p.copy()
 
     @property
     def device(self):
-        return "cuda" if self._cuda else "cpu"
+        return "cuda" if self._cuda else ("warp-cpu" if self._warp else "cpu")
 
     @property
     def num_colors(self):
@@ -201,13 +205,14 @@ class LocalXpbdSession:
             raise ValueError("invalid brush target")
         if len(ids) and np.any(self._inv[ids]<=0):
             raise ValueError("cannot target a pinned local vertex")
-        if self._cuda and len(ids):
+        if self._warp and len(ids):
             # O(K) upload per dab, not O(N); persistent geometry/bonds stay put.
             new_ids=wp.array(ids,dtype=wp.int32,device=self._dev)
             new_goals=wp.array(xyz,dtype=wp.vec3,device=self._dev)
             self._ids_gpu=new_ids
             self._goals_gpu=new_goals
-            self._sparse_h2d+=ids.nbytes+xyz.nbytes
+            if self._cuda:
+                self._sparse_h2d+=ids.nbytes+xyz.nbytes
         self._goals_ids=ids.copy()
         self._goals=xyz.copy()
 
@@ -218,7 +223,7 @@ class LocalXpbdSession:
         h2=float(dt*dt)
         if not np.isfinite(h2) or h2<=0:
             raise ValueError("XPBD timestep underflow/overflow")
-        if self._cuda:
+        if self._warp:
             self._lam_gpu.zero_()  # reset XPBD multipliers between distinct dabs
             # Kinematic targets must hold at the end of EVERY constraint
             # sweep. Otherwise the final bond color silently pulls them away
@@ -269,7 +274,7 @@ class LocalXpbdSession:
         ids=_checked_indices(indices,self._n)
         if not len(ids):
             return np.empty((0,3),dtype=np.float32)
-        if not self._cuda:
+        if not self._warp:
             return self._x_cpu[ids].copy()
         gpu_ids=wp.array(ids,dtype=wp.int32,device=self._dev)
         out_gpu=wp.empty(len(ids),dtype=wp.vec3,device=self._dev)
@@ -277,8 +282,9 @@ class LocalXpbdSession:
                   inputs=[self._x,gpu_ids],outputs=[out_gpu],
                   device=self._dev)
         out=out_gpu.numpy()
-        self._sparse_h2d+=ids.nbytes
-        self._sparse_d2h+=out.nbytes
+        if self._cuda:
+            self._sparse_h2d+=ids.nbytes
+            self._sparse_d2h+=out.nbytes
         if not np.isfinite(out).all():
             raise FloatingPointError("invalid CUDA XPBD result; refuse writeback")
         return out
