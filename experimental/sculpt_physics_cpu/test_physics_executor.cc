@@ -280,6 +280,45 @@ void test_incremental_editor_ack_protocol()
   exec->cancel();
 }
 
+void test_repeated_dabs_with_reused_solver_scratch()
+{
+  World world;
+  world.add_particle({0,0,0},0.0);
+  for (std::size_t i=1;i<45;++i) {
+    world.add_particle({static_cast<double>(i),0.0,0.0});
+    world.add_bond(i-1,i,1e-6);
+  }
+  std::vector<std::size_t> active;
+  for (std::size_t i=1;i<45;++i) active.push_back(i);
+  auto exec=make_cpu_xpbd_executor();
+  exec->allocate_island(build_gpu_local_island(world,active,{0},active,8,false));
+  exec->begin_stroke();
+  for (int dab=0;dab<100;++dab) {
+    const double displacement=(dab%2==0) ? 0.2 : -0.1;
+    // Change target count and locations to exercise scratch-capacity reuse.
+    if (dab%3==0) {
+      exec->set_targets({{10,{10,displacement,0},1e-5},
+                         {20,{20,displacement*0.5,0},1e-5}});
+    }
+    else {
+      exec->set_targets({{10,{10,displacement,0},1e-5}});
+    }
+    exec->step(1.0/60.0,2,3);
+    auto batch=exec->stage_incremental();
+    for (const auto &e : batch.writes) {
+      assert(e.global_index!=0 && std::isfinite(e.position.x) &&
+             std::isfinite(e.position.y));
+    }
+    exec->acknowledge_incremental(batch.revision);
+    assert(exec->stage_incremental().writes.empty());
+  }
+  assert(!exec->download_dirty().empty());
+  exec->cancel();
+  exec->begin_stroke();
+  assert(exec->download_dirty().empty());
+  exec->cancel();
+}
+
 void test_target_strength_and_atomic_step()
 {
   World world;
@@ -316,5 +355,6 @@ int main()
   test_fixed_halo_matches_world_bond_projection();
   test_target_strength_and_atomic_step();
   test_incremental_editor_ack_protocol();
+  test_repeated_dabs_with_reused_solver_scratch();
   return 0;
 }
