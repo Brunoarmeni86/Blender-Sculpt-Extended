@@ -24,7 +24,9 @@ color pass. Benchmarks and validation are listed in
 DEM strokes and produce validated proxy-vertex changes. It does **not** yet write
 to Blender's PBVH, Multires CCG grids, Sculpt Layers or native Undo. Volume XPBD
 is a separate tested reference; MPM, Vulkan and CUDA editor executors are NOT
-implemented. NVIDIA Warp is an isolated experimental Python/CUDA kernel.
+implemented. The isolated Python/Warp XPBD and DEM kernels now compile
+and execute on Warp's CPU backend in CI (Warp 1.19.0), with oracle parity.
+**NVIDIA CUDA kernel execution and Blender integration remain unvalidated.**
 
 ## 1. Which code belongs where?
 
@@ -164,8 +166,17 @@ python -m pip install numpy
 python experimental/sculpt_physics_cpu/gpu/warp_granular_probe.py --device cpu --self-test
 ```
 
-The CUDA probe requires NVIDIA CUDA hardware plus `warp-lang`; testing it
-does not make Blender's brushes GPU-accelerated.
+The real Warp JIT kernels are also tested on the Warp CPU device
+(`warp-lang==1.19.0`) in the separate GitHub CI job. Run locally:
+
+```bash
+python -m pip install 'warp-lang==1.19.0'
+python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_local.py --device warp-cpu
+python experimental/sculpt_physics_cpu/gpu/test_warp_resident_contact.py --device warp-cpu
+```
+
+**These tests do not establish CUDA performance or Blender acceleration.**
+See the detailed [GPU audit and next gates](gpu/GPU_OPTIMIZATION_CODEX.md).
 
 ## 7. What Codex should do first
 
