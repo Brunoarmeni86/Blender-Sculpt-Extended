@@ -59,6 +59,7 @@ def smoke(device):
         ([4],[[0,0,0]],IndexError),
         ([0],[[np.nan,0,0]],ValueError),
         ([0],[[0,0]],ValueError),
+        ([2],[[3.5,0,0]],ValueError), # pinned halo must not move
     ]:
         rejected = False
         try:
@@ -75,6 +76,24 @@ def smoke(device):
     print("resident contact tests passed:",device,session.stats)
 
 
+def warp_cpu_kernel_parity():
+    """Execute Warp HashGrid and contact kernels on an actual Warp CPU device."""
+    p=np.array([[0,0,0],[0.6,0,0],[2.5,0,0]],dtype=np.float32)
+    m=np.array([1,1,0],dtype=np.float32)
+    r=np.full(3,0.5,dtype=np.float32)
+    base=ResidentContactSession(p,m,r,device="cpu")
+    engine=ResidentContactSession(p,m,r,device="warp-cpu")
+    for cohesion in (0.0,0.2):
+        if cohesion:
+            for solver in (base,engine):
+                solver.update_positions([0,1],[[0,0,0],[1.2,0,0]])
+        for solver in (base,engine):
+            solver.step(iterations=3,cohesion=cohesion)
+        x=base.read_positions()
+        y=engine.read_positions()
+        assert np.allclose(x,y,atol=3e-4,rtol=3e-4),(x,y)
+
+
 def cpu_oracle_parity():
     p=np.array([[0,0,0],[0.6,0,0],[2.5,0,0]],dtype=np.float32)
     m=np.array([1,1,0],dtype=np.float32)
@@ -88,8 +107,10 @@ def cpu_oracle_parity():
 
 if __name__ == "__main__":
     parser=argparse.ArgumentParser()
-    parser.add_argument("--device",choices=("cpu","cuda"),default="cpu")
+    parser.add_argument("--device",choices=("cpu","warp-cpu","cuda"),default="cpu")
     args=parser.parse_args()
     smoke(args.device)
     if args.device=="cpu":
         cpu_oracle_parity()
+    if args.device=="warp-cpu":
+        warp_cpu_kernel_parity()
