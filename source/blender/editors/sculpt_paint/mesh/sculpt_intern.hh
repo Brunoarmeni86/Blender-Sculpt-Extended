@@ -242,6 +242,13 @@ struct StrokeCache {
   float3 xpbd_v12_previous_delta = float3(0.0f);
   bool xpbd_v12_failed = false;
   bool xpbd_v12_active_logged = false;
+  // V14 opt-in native IPhysicsExecutor Grab bridge: independent from V12.
+  // This state lives exactly one stroke in StrokeCache, not .blend DNA.
+  // Normal mesh only; absence of the V14 build+runtime flags means zero effect.
+  std::shared_ptr<void> xpbd_v14_state;
+  float3 xpbd_v14_previous_delta = float3(0.0f);
+  bool xpbd_v14_failed = false;
+  bool xpbd_v14_active_logged = false;
   /* Invariants */
   float initial_radius = 0.0f;
   float3 scale = float3(0);
