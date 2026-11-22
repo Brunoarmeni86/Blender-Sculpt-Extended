@@ -211,12 +211,15 @@ class LocalXpbdSession:
         if not np.isfinite(h2) or h2<=0:
             raise ValueError("XPBD timestep underflow/overflow")
         if self._cuda:
-            self._lam_gpu.zero_() # reset warm-start between separate dabs
+            self._lam_gpu.zero_()  # reset XPBD multipliers between distinct dabs
+            # Kinematic targets must hold at the end of EVERY constraint
+            # sweep. Otherwise the final bond color silently pulls them away
+            # from the artist's requested position.
+            if len(self._goals_ids):
+                wp.launch(_apply_hard_targets,dim=len(self._goals_ids),
+                    inputs=[self._x,self._inv_gpu,self._ids_gpu,
+                            self._goals_gpu],device=self._dev)
             for _ in range(iterations):
-                if len(self._goals_ids):
-                    wp.launch(_apply_hard_targets,dim=len(self._goals_ids),
-                        inputs=[self._x,self._inv_gpu,self._ids_gpu,
-                                self._goals_gpu],device=self._dev)
                 for color in range(self.num_colors):
                     start,end=map(int,self._offsets[color:color+2])
                     if end==start: continue
@@ -224,11 +227,15 @@ class LocalXpbdSession:
                         inputs=[self._x,self._inv_gpu,self._a_gpu,
                                 self._b_gpu,self._rest_gpu,self._comp_gpu,
                                 self._lam_gpu,start,h2],device=self._dev)
+                if len(self._goals_ids):
+                    wp.launch(_apply_hard_targets,dim=len(self._goals_ids),
+                        inputs=[self._x,self._inv_gpu,self._ids_gpu,
+                                self._goals_gpu],device=self._dev)
             return
         lam=np.zeros(self._m,dtype=np.float32)
+        if len(self._goals_ids):
+            self._x_cpu[self._goals_ids]=self._goals
         for _ in range(iterations):
-            if len(self._goals_ids):
-                self._x_cpu[self._goals_ids]=self._goals
             for color in range(self.num_colors):
                 start,end=map(int,self._offsets[color:color+2])
                 for k in range(start,end):
@@ -245,6 +252,8 @@ class LocalXpbdSession:
                     self._x_cpu[a]-=direction*(wi*dl)
                     self._x_cpu[b]+=direction*(wj*dl)
                     lam[k]+=dl
+            if len(self._goals_ids):
+                self._x_cpu[self._goals_ids]=self._goals
         if not np.isfinite(self._x_cpu).all():
             raise FloatingPointError("non-finite CPU XPBD positions")
 
