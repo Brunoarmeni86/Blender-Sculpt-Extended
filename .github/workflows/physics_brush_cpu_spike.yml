@@ -30,6 +30,8 @@ jobs:
           cmake --build build-workset-bench --target bench_gpu_workset --parallel 2
           ./build-workset-bench/bench_gpu_workset 12000 30
           ./build-workset-bench/bench_gpu_workset 125000 100
+          cmake --build build-workset-bench --target bench_executor_writeback --parallel 2
+          ./build-workset-bench/bench_executor_writeback 50000 30
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
