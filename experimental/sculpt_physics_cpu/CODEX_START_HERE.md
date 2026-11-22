@@ -12,6 +12,14 @@ prototype executors for XPBD bonds and DEM contacts. Read
 before changing GPU code. They keep local proxy arrays on-device across dabs
 and use sparse readback; neither is attached to Blender's C++ editor pipeline.
 
+**Current quality/performance additions:** `GpuTopologyBondIndex` now
+uses a reusable CSR index to avoid a global bond scan for each GPU island;
+`pack_gpu_island_relative` protects small sculpt displacements far from
+object origin when using float32 CUDA; `LocalXpbdSession` now accepts
+authoritative C++ rest lengths and holds hard brush targets after each
+color pass. Benchmarks and validation are listed in
+[`gpu/GPU_OPTIMIZATION_CODEX.md`](gpu/GPU_OPTIMIZATION_CODEX.md).
+
 **Important reality check:** The C++ reference can execute CPU XPBD / approximate
 DEM strokes and produce validated proxy-vertex changes. It does **not** yet write
 to Blender's PBVH, Multires CCG grids, Sculpt Layers or native Undo. Volume XPBD
@@ -34,7 +42,6 @@ implemented. NVIDIA Warp is an isolated experimental Python/CUDA kernel.
 | `gpu/warp_resident_contact.py` | Reuse on-device granular state/HashGrid across multiple dabs | Python/Warp CUDA experiment; no native editor |
 | `gpu/warp_xpbd_local.py` | Edge-colored parallel XPBD local proxy constraints, resident arrays | Python/Warp CUDA experiment; no native editor |
 | `gpu/bench_warp_backend.py` | Runtime and transfer measurements p50/p95 | Benchmark script; no results claimed |
-
 | `gpu/warp_granular_probe.py` | CUDA/HashGrid experiment with CPU NumPy oracle | Not native C++ or viewport |
 | `test_sculpt_physics_pipeline.cc` | End-to-end CPU lifecycle, Undo-coverage and failure rollback regression | CTest / GitHub Actions |
 
