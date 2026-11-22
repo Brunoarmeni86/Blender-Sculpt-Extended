@@ -540,22 +540,22 @@ static bool try_xpbd_executor_grab_preview(const Depsgraph &depsgraph,
       const Span<int> verts = nodes[ni].verts();
       node_write.translation.resize(verts.size());
       for (const int j : verts.index_range()) {
-        const auto it = staged_translations.find(std::size_t(verts[j]));
-        node_write.translation[j] = it == staged_translations.end() ?
-                                    float3(0.0f) : it->second;
-        if (it != staged_translations.end() &&
-            !seen.insert(std::size_t(verts[j])).second) {
-          throw std::logic_error("V14 PBVH vertex overlaps multiple Undo nodes");
-        }
+        const std::size_t vi=std::size_t(verts[j]);
+        const auto it=staged_translations.find(vi);
+        // If PBVH nodes share a boundary vertex, only the FIRST covered
+        // node is allowed to deform that vertex. Subsequent nodes receive
+        // zero displacement; this avoids applying a sparse edit twice.
+        const bool first_owner=(it != staged_translations.end() &&
+                                seen.insert(vi).second);
+        node_write.translation[j]=first_owner ? it->second : float3(0.0f);
       }
+      const Vector<float3> unclipped=node_write.translation;
       clip_and_lock_translations(sd, ss, eval, verts, node_write.translation);
       // A constrained/locked coordinate would invalidate the isolated
       // solver's acknowledged positions. Fail BEFORE editor modification and
       // return this dab to the original Blender Grab brush instead.
       for (const int j : verts.index_range()) {
-        const auto it = staged_translations.find(std::size_t(verts[j]));
-        const float3 expected = it == staged_translations.end() ?
-                                float3(0.0f) : it->second;
+        const float3 expected = unclipped[j];
         const float3 actual = node_write.translation[j];
         const float eps = 1.0e-6f * (1.0f + math::length(expected));
         if (std::abs(actual.x - expected.x) > eps ||
