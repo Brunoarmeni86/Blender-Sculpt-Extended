@@ -235,3 +235,13 @@ if(SCULPT_PHYSICS_BUILD_INTEROP_TESTS)
     target_compile_options(emit_xpbd_reference PRIVATE -Wall -Wextra -Wpedantic -Werror)
   endif()
 endif()
+
+# Benchmarks sparse per-dab writeback versus full-stroke proxy scanning;
+# never equate these measurements with end-to-end Blender or CUDA timing.
+if(SCULPT_PHYSICS_BUILD_BENCHMARKS)
+  add_executable(bench_executor_writeback bench_executor_writeback.cc)
+  target_link_libraries(bench_executor_writeback PRIVATE sculpt_physics_reference)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(bench_executor_writeback PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  endif()
+endif()
