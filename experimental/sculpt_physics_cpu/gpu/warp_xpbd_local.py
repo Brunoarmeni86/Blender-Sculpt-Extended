@@ -385,4 +385,8 @@ class LocalXpbdSession:
             self._sparse_d2h+=out.nbytes
         if not np.isfinite(out).all():
             raise FloatingPointError("invalid CUDA XPBD result; refuse writeback")
-        return out
+        # Warp CPU .numpy() may alias the reused readback scratch. A caller
+        # must receive a stable snapshot that subsequent dabs cannot mutate.
+        # CUDA .numpy() also synchronizes; this is deliberately an explicit
+        # staging boundary rather than a purported asynchronous Blender path.
+        return np.array(out,dtype=np.float32,copy=True)
