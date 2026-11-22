@@ -38,6 +38,37 @@ void test_cpu_factory_and_lifetime()
   catch(const std::logic_error &) { rejected=true; }
   assert(rejected);
 
+  // A policy may select a device that exists but NOT implement the
+  // requested physical solver. Never silently execute surface XPBD for MPM
+  // or DEM just because CPU is present.
+  SolverPlan supported;
+  supported.family=SolverFamily::XPBDSurface;
+  supported.device=SolverDevice::CPU;
+  supported.implementation_available=true;
+  assert(make_native_executor(supported)->capabilities().has_real_executor);
+  for (SolverFamily family : {SolverFamily::XPBDVolume,
+                              SolverFamily::DEMGrains,
+                              SolverFamily::MPMContinuum}) {
+    SolverPlan unsupported=supported;
+    unsupported.family=family;
+    rejected=false;
+    try { (void)make_native_executor(unsupported); }
+    catch (const std::logic_error &) { rejected=true; }
+    assert(rejected);
+  }
+  SolverPlan unavailable=supported;
+  unavailable.implementation_available=false;
+  rejected=false;
+  try { (void)make_native_executor(unavailable); }
+  catch (const std::logic_error &) { rejected=true; }
+  assert(rejected);
+  unavailable=supported;
+  unavailable.device=SolverDevice::WarpCUDA;
+  rejected=false;
+  try { (void)make_native_executor(unavailable); }
+  catch (const std::logic_error &) { rejected=true; }
+  assert(rejected);
+
   World world;
   world.add_particle({0,0,0});
   world.add_particle({1,0,0});
