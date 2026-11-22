@@ -90,6 +90,7 @@ class ResidentContactSession:
         self._sparse_download = 0
         self._full_download = 0
         self._allocations = 0
+        self._sparse_capacity = 0
         self._device = "cuda:0" if self._cuda else "cpu"
         self._host_inv_mass = mass.copy()
         if self._warp and self._n:
@@ -135,6 +136,29 @@ class ResidentContactSession:
             raise ValueError("duplicate particle IDs in a sparse transfer")
         return np.asarray(ids, dtype=np.int32)
 
+    def _reserve_sparse(self, count):
+        """Reuse GPU sparse ID, value and readback allocations across dabs.
+
+        The CPU host source for wp.copy() is intentionally temporary;
+        this avoids repeated VRAM allocations, not all host allocations.
+        A fixed island cannot resize its physical proxy here.
+        """
+        if not self._warp or count <= self._sparse_capacity:
+            return
+        capacity = max(8, self._sparse_capacity * 2, count)
+        new_ids = wp.empty(capacity, dtype=wp.int32, device=self._device)
+        new_values = wp.empty(capacity, dtype=wp.vec3, device=self._device)
+        new_readback = wp.empty(capacity, dtype=wp.vec3, device=self._device)
+        self._sparse_ids = new_ids
+        self._sparse_values = new_values
+        self._sparse_readback = new_readback
+        self._sparse_capacity = capacity
+        self._allocations += 3
+
+    @property
+    def sparse_capacity(self):
+        return self._sparse_capacity
+
     def update_positions(self, indices, positions):
         """Stage an artist/proxy edit for selected local IDs only."""
         ids = self._indices(indices)
@@ -150,15 +174,17 @@ class ResidentContactSession:
         if not self._warp:
             self._cpu_positions[ids] = pts
             return
-        # Allocates only O(dirty_count), NOT O(proxy_count) per dab.
-        # Future optimization: reusable pinned host / GPU scratch buffers.
-        ids_gpu = wp.array(ids, dtype=wp.int32, device=self._device)
-        pts_gpu = wp.array(pts, dtype=wp.vec3, device=self._device)
-        wp.launch(_scatter_positions, dim=len(ids), inputs=[self._x, ids_gpu, pts_gpu],
+        self._reserve_sparse(len(ids))
+        # wp.copy performs O(K) host->device copies into *resident* buffers.
+        wp.copy(self._sparse_ids,
+                wp.array(ids, dtype=wp.int32, device="cpu"), count=len(ids))
+        wp.copy(self._sparse_values,
+                wp.array(pts, dtype=wp.vec3, device="cpu"), count=len(ids))
+        wp.launch(_scatter_positions, dim=len(ids),
+                  inputs=[self._x, self._sparse_ids, self._sparse_values],
                   device=self._device)
         if self._cuda:
             self._sparse_upload += ids.nbytes + pts.nbytes
-        self._allocations += 2
 
     def step(self, *, iterations=4, separation=0.85,
              cohesion=0.0, cohesion_range=1.25):
@@ -208,16 +234,16 @@ class ResidentContactSession:
                 return np.empty((0, 3), dtype=np.float32)
             if not self._warp:
                 return self._cpu_positions[ids].copy()
-            ids_gpu = wp.array(ids, dtype=wp.int32, device=self._device)
-            result_gpu = wp.empty(len(ids), dtype=wp.vec3, device=self._device)
+            self._reserve_sparse(len(ids))
+            wp.copy(self._sparse_ids,
+                    wp.array(ids, dtype=wp.int32, device="cpu"), count=len(ids))
             wp.launch(_gather_positions, dim=len(ids),
-                      inputs=[self._x, ids_gpu], outputs=[result_gpu],
-                      device=self._device)
-            result = result_gpu.numpy()
+                      inputs=[self._x, self._sparse_ids],
+                      outputs=[self._sparse_readback], device=self._device)
+            result = self._sparse_readback[:len(ids)].numpy()
             if self._cuda:
                 self._sparse_upload += ids.nbytes
                 self._sparse_download += result.nbytes
-            self._allocations += 2
         if not np.isfinite(result).all():
             raise FloatingPointError("non-finite GPU contact output: refuse writeback")
         return np.array(result, dtype=np.float32, copy=True)
