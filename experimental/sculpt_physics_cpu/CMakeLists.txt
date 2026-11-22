@@ -193,3 +193,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 add_test(NAME sculpt_physics_pipeline_integration_tests
          COMMAND test_sculpt_physics_pipeline)
+
+# Backend-neutral GPU island bridge. It packs proxy topology and validates
+# sparse outputs without CUDA/Warp dependencies in the core C++ build.
+target_sources(sculpt_physics_reference PRIVATE gpu_workset.cc)
+add_executable(test_gpu_workset test_gpu_workset.cc)
+target_link_libraries(test_gpu_workset PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_gpu_workset PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_gpu_workset_integrity_tests COMMAND test_gpu_workset)
