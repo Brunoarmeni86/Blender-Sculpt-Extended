@@ -57,7 +57,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install Warp kernel runtime and numerical oracle
-        run: python -m pip install numpy warp-lang
+        run: python -m pip install numpy 'warp-lang==1.19.0'
       - name: Execute Warp XPBD kernel and compare with NumPy
         run: python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_local.py --device warp-cpu
       - name: Execute Warp HashGrid DEM contact kernel and compare with NumPy
