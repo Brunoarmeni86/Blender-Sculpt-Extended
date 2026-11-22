@@ -160,3 +160,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_brush_materials PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_physical_brush_and_granular_tests COMMAND test_brush_materials)
+
+# Protect PhysicalAssist blend semantics and finite editor geometry.
+add_executable(test_assist_strength test_assist_strength.cc)
+target_link_libraries(test_assist_strength PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_assist_strength PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_assist_strength_tests COMMAND test_assist_strength)
