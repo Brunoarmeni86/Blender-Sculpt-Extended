@@ -139,6 +139,30 @@ copying the local island positions each step or prove a frame-rate gain.
   each step and each editor write. The reference owns an island snapshot,
   not live access to Blender's changing graph.
 
+## Sparse writeback performance gate
+
+`CpuXpbdExecutor` tracks unique changed **local IDs** across dabs.
+`stage_incremental()` only examines that set and returns sorted
+global IDs; `acknowledge_incremental()` updates the successfully
+written baseline only for those IDs. Full-stroke cancellation still
+restores the original beginning-of-stroke snapshot.
+
+For reproducible staging measurements, use
+`bench_executor_writeback.cc` (optional CMake benchmark target):
+
+```bash
+cmake -S experimental/sculpt_physics_cpu -B build-writeback \
+  -DCMAKE_BUILD_TYPE=Release -DSCULPT_PHYSICS_BUILD_BENCHMARKS=ON
+cmake --build build-writeback --target bench_executor_writeback
+./build-writeback/bench_executor_writeback 50000 30
+```
+
+The benchmark deliberately measures only the **CPU proxy and sparse
+staging**, never the Blender editor/Undo/CCG transaction or CUDA
+execution. Future Warp native executors must preserve the same
+revisioned acknowledgment contract, including stale ACK rejection,
+device failure cancellation and global-ID ordering.
+
 ## Proposed next implementation gates
 
 **Gate 1 — Native Sculpt adapter, CPU:** Refactor existing Grab V13 callback
