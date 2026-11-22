@@ -82,6 +82,11 @@ static void test_backend_policy()
   assert(plan.device == SolverDevice::CPU && plan.approximate_material);
   clay.volume_cage_available = true;
   plan = choose_solver(clay,caps);
+  assert(plan.family == SolverFamily::XPBDSurface && plan.approximate_material);
+  // A mathematical reference is not an integrated backend. Only an explicit
+  // future volume-executor registration can activate this family.
+  caps.cpu_volume = true;
+  plan = choose_solver(clay,caps);
   assert(plan.family == SolverFamily::XPBDVolume && plan.implementation_available);
   clay.prefer_gpu = true;
   clay.active_proxy_particles = 20000;
