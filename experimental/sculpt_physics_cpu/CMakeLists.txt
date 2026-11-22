@@ -245,3 +245,14 @@ if(SCULPT_PHYSICS_BUILD_BENCHMARKS)
     target_compile_options(bench_executor_writeback PRIVATE -Wall -Wextra -Wpedantic -Werror)
   endif()
 endif()
+
+# Native Grab executor adapter (no Blender dependency): stages exact final
+# PBVH factors, fixed first-ring halo and independent per-dab XPBD proxy.
+target_sources(sculpt_physics_reference PRIVATE native_grab_executor_adapter.cc)
+add_executable(test_native_grab_executor_adapter test_native_grab_executor_adapter.cc)
+target_link_libraries(test_native_grab_executor_adapter PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_native_grab_executor_adapter PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_native_grab_executor_adapter_tests
+         COMMAND test_native_grab_executor_adapter)
