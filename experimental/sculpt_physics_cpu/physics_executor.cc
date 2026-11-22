@@ -69,8 +69,11 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     // Strong exception safety: copy and allocate first, then take ownership.
     GpuLocalIsland staged = island;
     std::vector<Vec3> positions = island.positions;
+    std::vector<Vec3> acknowledged = island.positions;
     island_ = std::move(staged);
     positions_.swap(positions);
+    acknowledged_.swap(acknowledged);
+    revision_ = 0;
     snapshot_.clear();
     targets_.clear();
     ready_ = true;
@@ -88,7 +91,10 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   {
     if (!ready_ || active_) throw std::logic_error("Executor stroke already active or no island");
     std::vector<Vec3> new_snapshot = positions_;
+    std::vector<Vec3> acknowledged = positions_;
     snapshot_.swap(new_snapshot);
+    acknowledged_.swap(acknowledged);
+    revision_=0;
     targets_.clear();
     active_=true;
   }
@@ -113,8 +119,12 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
         throw std::invalid_argument("Duplicate sparse edit ID");
       }
     }
+    if (!accepted.empty() && revision_==std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("Executor writeback revision exhausted");
+    }
     // No allocations/no exceptions after all input has been validated.
     for (const auto &edit : accepted) positions_[edit.first] = edit.second;
+    if (!accepted.empty()) ++revision_;
   }
 
   void set_targets(const std::vector<ExecutorTarget> &targets) override
@@ -210,13 +220,56 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
         }
       }
     }
+    if (revision_==std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("Executor writeback revision exhausted");
+    }
     positions_.swap(next);
+    ++revision_;
   }
 
   std::vector<GpuProxyChange> download_dirty(double epsilon) const override
   {
     require_active();
     return stage_gpu_local_writes(island_,positions_,epsilon);
+  }
+
+  ExecutorWriteBatch stage_incremental(double epsilon) const override
+  {
+    require_active();
+    if (!std::isfinite(epsilon) || epsilon < 0.0 ||
+        acknowledged_.size()!=positions_.size()) {
+      throw std::invalid_argument("Invalid incremental writeback threshold/state");
+    }
+    ExecutorWriteBatch batch;
+    batch.revision = revision_;
+    for (std::size_t i=0;i<positions_.size();++i) {
+      const Vec3 current=positions_[i];
+      const Vec3 old=acknowledged_[i];
+      if (!finite(current) || !finite(old)) {
+        throw std::invalid_argument("Non-finite incremental XPBD writeback");
+      }
+      const double movement=length(current-old);
+      if (!std::isfinite(movement)) {
+        throw std::invalid_argument("Incremental XPBD displacement overflow");
+      }
+      if (movement<=epsilon) continue;
+      if (!island_.writable[i] || island_.inverse_masses[i]<=0.0) {
+        throw std::logic_error("Incremental XPBD moved an untracked/pinned vertex");
+      }
+      batch.writes.push_back({island_.global_ids[i],current});
+    }
+    return batch;
+  }
+
+  void acknowledge_incremental(std::uint64_t revision) override
+  {
+    require_active();
+    if (revision != revision_) {
+      throw std::logic_error("Stale editor writeback acknowledgment");
+    }
+    // Preserve the prior successful acknowledgement on allocation failure.
+    std::vector<Vec3> snapshot = positions_;
+    acknowledged_.swap(snapshot);
   }
 
   void commit() override
@@ -264,6 +317,8 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   GpuLocalIsland island_;
   std::vector<Vec3> positions_;
   std::vector<Vec3> snapshot_;
+  std::vector<Vec3> acknowledged_;
+  std::uint64_t revision_=0;
   std::vector<LocalTarget> targets_;
   bool ready_=false;
   bool active_=false;
