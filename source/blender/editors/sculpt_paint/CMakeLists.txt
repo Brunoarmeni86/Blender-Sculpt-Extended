@@ -243,9 +243,32 @@ if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
   )
 endif()
 
+# V14 native CPU physics-executor Grab research (requires legacy V12 build
+# scaffolding, but uses a separate runtime flag and separate StrokeCache).
+# No CUDA, Warp Python, PBVH grids, Dyntopo or Multires support claimed.
+option(WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14
+       "Build opt-in native IPhysicsExecutor Grab preview (ordinary Mesh only)" OFF)
+if(WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
+  if(NOT WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
+    message(FATAL_ERROR "V14 Grab executor requires WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL=ON")
+  endif()
+  list(APPEND SRC
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/gpu_workset.cc"
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/gpu_workset.hh"
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/solver_policy.cc"
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/physics_executor.cc"
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/physics_executor.hh"
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/native_grab_executor_adapter.cc"
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/native_grab_executor_adapter.hh"
+  )
+endif()
+
 blender_add_lib(bf_editor_sculpt_paint "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
   target_compile_definitions(bf_editor_sculpt_paint PRIVATE WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
+endif()
+if(WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
+  target_compile_definitions(bf_editor_sculpt_paint PRIVATE WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
 endif()
 # RNA_prototypes.hh
 add_dependencies(bf_editor_sculpt_paint bf_rna)
