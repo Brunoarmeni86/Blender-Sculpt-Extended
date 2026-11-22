@@ -28,7 +28,24 @@ def run(device):
     assert solver.transfer_bytes[0]==baseline[0] # geometry never re-uploaded
 
     solver.set_targets([2],[[2.2,0,0]])
+    if device in ("warp-cpu","cuda"):
+        allocs=solver.sparse_device_allocations
+        # Reading must NOT overwrite the resident target-index buffer.
+        assert np.isfinite(solver.read_positions([0,1,2])).all()
+        assert solver.sparse_device_allocations >= allocs
+        allocs=solver.sparse_device_allocations
     solver.solve(iterations=4)
+    if device in ("warp-cpu","cuda"):
+        for k in range(4):
+            goal=2.25 + 0.05*k
+            solver.set_targets([2],[[goal,0,0]])
+            assert np.isfinite(solver.read_positions([0,1,2])).all()
+            solver.solve(iterations=3)
+            assert np.allclose(solver.read_positions([2]),
+                               [[goal,0,0]],atol=1e-5)
+        assert solver.sparse_device_allocations == allocs, (
+            "fixed-size XPBD target/readback must reuse device allocations"
+        )
     second=solver.read_positions([1,2])
     assert np.isfinite(second).all()
     assert np.allclose(second[1], [2.2,0,0],atol=1e-6)
