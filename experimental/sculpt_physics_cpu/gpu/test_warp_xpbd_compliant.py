@@ -31,6 +31,7 @@ def sample(device):
     assert 0.0 < result[2,1] < 0.8
     assert result[1,1] > 0.0
     assert np.isfinite(result).all()
+    history=[result.copy()]
 
     # Compliant goals are not forcefully re-pinned after bond constraints.
     # Repeated dabs keep resident geometry, but reset XPBD multipliers.
@@ -39,7 +40,9 @@ def sample(device):
         solver.set_targets([1,2],[[1,0.1,0],[2,goal_y,0]],
                            target_compliance=[1.0e-6,1.0e-4])
         solver.solve(iterations=7)
-        assert np.isfinite(solver.read_positions([0,1,2])).all()
+        staged=solver.read_positions([0,1,2])
+        assert np.isfinite(staged).all()
+        history.append(staged.copy())
     assert solver.transfer_bytes[0] == baseline_transfer
 
     prev=solver.read_positions([0,1,2])
@@ -56,7 +59,7 @@ def sample(device):
         try: solver.set_targets(ids,goals,target_compliance=1e-4)
         except ValueError: pass
         else: raise AssertionError("invalid target set accepted")
-    return result
+    return np.stack(history)
 
 
 def isolated_compliant_solution(device):
@@ -84,7 +87,8 @@ def isolated_compliant_solution(device):
 def parity():
     cpu=sample("cpu")
     warp=sample("warp-cpu")
-    assert matches(cpu,warp),(cpu,warp)
+    for step,(a,b) in enumerate(zip(cpu,warp)):
+        assert matches(a,b),(step,a,b)
     isolated_compliant_solution("cpu")
     isolated_compliant_solution("warp-cpu")
 
