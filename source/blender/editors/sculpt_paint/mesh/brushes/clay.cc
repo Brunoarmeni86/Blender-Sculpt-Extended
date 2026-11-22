@@ -21,6 +21,9 @@
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 
 #include "bmesh.hh"
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+#  include "physics_brush_v15.hh"
+#endif
 
 namespace blender::ed::sculpt_paint::brushes {
 inline namespace clay_cc {
@@ -186,6 +189,51 @@ void do_clay_brush(const Depsgraph &depsgraph,
   BLI_ASSERT_UNIT_V3(test_plane);
 
   const float bstrength = fabsf(ss.cache->bstrength);
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if (physics_v15::requested() && pbvh.type()==bke::pbvh::Type::Mesh) {
+    const Mesh &mesh=*id_cast<Mesh *>(object.data);
+    const MeshAttributeData attributes(mesh);
+    const PositionDeformData pos(depsgraph,object,true);
+    const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
+    MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
+    std::vector<sculpt_physics::NativeBrushTranslation> native;
+    Vector<float> factors;
+    Vector<float> distances;
+    Vector<float3> translations;
+    node_mask.foreach_index([&](const int ni) {
+      const bke::pbvh::MeshNode &node=nodes[ni];
+      const Span<int> verts=node.verts();
+      calc_factors_common_mesh_indexed(depsgraph,
+                                       brush,
+                                       object,
+                                       attributes,
+                                       pos.eval,
+                                       normals,
+                                       node,
+                                       factors,
+                                       distances);
+      translations.resize(verts.size());
+      // Reuse Clay's OWN plane projection, strength and final brush factors.
+      // The physical executor receives finished goals and never reapplies
+      // the displacement factor or replaces the clay plane with a normal.
+      calc_closest_to_plane(test_plane,pos.eval,verts,translations);
+      scale_translations(translations,bstrength);
+      scale_translations(translations,factors);
+      for (const int j : verts.index_range()) {
+        const float3 value=translations[j];
+        if (!std::isfinite(value.x) || !std::isfinite(value.y) ||
+            !std::isfinite(value.z)) continue;
+        native.push_back({std::size_t(verts[j]),
+                          {double(value.x),double(value.y),double(value.z)}});
+      }
+    });
+    if (physics_v15::try_apply(sd,object,node_mask,pos,
+                              sculpt_physics::NativeSculptBrushKind::Clay,native)) {
+      return;
+    }
+  }
+#endif
+
   threading::EnumerableThreadSpecific<LocalData> all_tls;
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
