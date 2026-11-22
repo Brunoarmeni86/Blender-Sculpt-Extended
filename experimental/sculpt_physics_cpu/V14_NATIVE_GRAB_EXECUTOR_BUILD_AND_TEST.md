@@ -101,7 +101,12 @@ on first dab or after a previously successful V14 dab.
 
 ## Correctness scope / research caveats
 
-1. The native callback uses Blender's existing `calc_factors_common...`
+1. If two PBVH Mesh nodes expose the same boundary vertex, V14
+   assigns that sparse write to the first covered node and sends a zero
+   translation to subsequent nodes, avoiding accidental duplicate movement.
+   This specific Blender PBVH ownership behavior still needs a full
+   VS2022/viewport test.
+2. The native callback uses Blender's existing `calc_factors_common...`
    and `clip_and_lock_translations`; it stages all translations before
    writing any PBVH Mesh node. A clipped/locked result that differs from
    the solver's intended change is rejected *before* editing.
