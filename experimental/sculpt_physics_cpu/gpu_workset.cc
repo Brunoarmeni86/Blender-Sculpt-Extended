@@ -95,7 +95,16 @@ static GpuLocalIsland build_gpu_local_island_impl(
     const auto b = local.find(bond.b);
     if (a == local.end() && b == local.end()) continue;
     if (a == local.end() || b == local.end()) {
-      ++island.crossing_bonds;
+      // Exactly one endpoint is included in the island. A fixed local
+      // endpoint cannot move due to this bond, so it does not exert any
+      // effect on the editable interior and we may safely omit it.
+      const auto inside = a != local.end() ? a : b;
+      if (island.inverse_masses[inside->second] == 0.0) {
+        ++island.ignored_fixed_crossings;
+      }
+      else {
+        ++island.crossing_bonds;
+      }
       continue;
     }
     island.bonds.push_back({a->second,b->second,bond.rest_length,bond.compliance});
