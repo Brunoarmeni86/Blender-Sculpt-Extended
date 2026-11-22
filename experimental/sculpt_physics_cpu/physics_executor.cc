@@ -168,13 +168,17 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     if (targets_.empty()) return; // Local sculpt dab missed the proxy.
 
     // Transactional per dab: errors never leak half-solved geometry.
-    std::vector<Vec3> next = positions_;
-    std::vector<double> bond_lambda(island_.bonds.size(),0.0);
-    struct TargetLambda { Vec3 value{}; };
-    std::vector<TargetLambda> target_lambda(targets_.size());
+    // Reuse allocations across dabs. Positions are still copied into a
+    // separate scratch buffer so a failed solve cannot corrupt the stroke.
+    scratch_positions_.assign(positions_.begin(),positions_.end());
+    scratch_bond_lambda_.assign(island_.bonds.size(),0.0);
+    scratch_target_lambda_.assign(targets_.size(),Vec3{});
+    auto &next=scratch_positions_;
+    auto &bond_lambda=scratch_bond_lambda_;
+    auto &target_lambda=scratch_target_lambda_;
     for (int sub=0;sub<substeps;++sub) {
       std::fill(bond_lambda.begin(),bond_lambda.end(),0.0);
-      for (auto &lambda : target_lambda) lambda.value={};
+      for (auto &lambda : target_lambda) lambda={};
       for (int iter=0;iter<iterations;++iter) {
         for (std::size_t t=0;t<targets_.size();++t) {
           const LocalTarget &target=targets_[t];
@@ -184,11 +188,11 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
           if (!std::isfinite(alpha) || !std::isfinite(denominator) ||
               denominator<=0.0) throw std::runtime_error("Target XPBD denominator invalid");
           const Vec3 c=next[target.id]-target.goal;
-          const Vec3 delta=(c*(-1.0)-target_lambda[t].value*alpha)/denominator;
+          const Vec3 delta=(c*(-1.0)-target_lambda[t]*alpha)/denominator;
           if (!finite(delta)) throw std::runtime_error("Target XPBD diverged");
           next[target.id]+=delta*w;
-          target_lambda[t].value+=delta;
-          if (!finite(next[target.id]) || !finite(target_lambda[t].value)) {
+          target_lambda[t]+=delta;
+          if (!finite(next[target.id]) || !finite(target_lambda[t])) {
             throw std::runtime_error("Target position/multiplier overflow");
           }
         }
@@ -318,6 +322,11 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   std::vector<Vec3> positions_;
   std::vector<Vec3> snapshot_;
   std::vector<Vec3> acknowledged_;
+  // Per-dab simulation scratch, never the live committed/reference state.
+  // Buffer capacities persist across repeated strokes and local solver steps.
+  std::vector<Vec3> scratch_positions_;
+  std::vector<double> scratch_bond_lambda_;
+  std::vector<Vec3> scratch_target_lambda_;
   std::uint64_t revision_=0;
   std::vector<LocalTarget> targets_;
   bool ready_=false;
