@@ -61,6 +61,21 @@ relative to the beginning of the stroke**, not just the most recent dab.
 This is intentional for safe full-stroke rollback. Codex may later add
 a dirty generation cursor and acknowledged per-dab deltas for performance.
 
+### Verified-plan factory and stronger parity gate
+
+Use `make_native_executor(const SolverPlan &)` when routing a
+`choose_solver` decision. Unlike a device-only request, this checked
+factory requires **both** `SolverDevice::CPU` and
+`SolverFamily::XPBDSurface` plus `implementation_available=true`.
+It rejects DEM, MPM, XPBDVolume, CUDA and Vulkan: no fallback is silently
+substituted for a different physical material.
+
+`test_physics_executor.cc` now compares the CPU executor to the native
+`World::step_local()` in two cases: a compliant single target **and**
+an actual connected distance bond crossing a fixed non-Undo halo boundary.
+Both tests use one substep to compare the same quasistatic equations,
+not additional unimplemented dynamics or long-term plastic evolution.
+
 ## Explicit backend boundaries
 
 - `make_native_executor(CPU)` returns a real C++ local XPBD executor;
