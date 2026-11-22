@@ -24,6 +24,9 @@
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 
 #include "bmesh.hh"
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+#  include "physics_brush_v15.hh"
+#endif
 
 namespace blender::ed::sculpt_paint::brushes {
 
@@ -126,6 +129,45 @@ static void offset_positions(const Depsgraph &depsgraph,
 {
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
+
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if (physics_v15::requested() && pbvh.type()==bke::pbvh::Type::Mesh) {
+    const Mesh &mesh=*id_cast<Mesh *>(object.data);
+    const MeshAttributeData attributes(mesh);
+    const PositionDeformData pos(depsgraph,object,true);
+    const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
+    MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
+    std::vector<sculpt_physics::NativeBrushTranslation> native;
+    Vector<float> factors;
+    Vector<float> distances;
+    node_mask.foreach_index([&](const int ni) {
+      const bke::pbvh::MeshNode &node=nodes[ni];
+      const Span<int> verts=node.verts();
+      calc_factors_common_mesh_indexed(depsgraph,
+                                       brush,
+                                       object,
+                                       attributes,
+                                       pos.eval,
+                                       normals,
+                                       node,
+                                       factors,
+                                       distances);
+      for (const int j : verts.index_range()) {
+        const float factor=factors[j];
+        if (!std::isfinite(factor) || factor==0.0f) continue;
+        const float3 translation=offset*factor;
+        native.push_back({std::size_t(verts[j]),
+                          {double(translation.x),
+                           double(translation.y),
+                           double(translation.z)}});
+      }
+    });
+    if (physics_v15::try_apply(sd,object,node_mask,pos,
+                              sculpt_physics::NativeSculptBrushKind::Draw,native)) {
+      return;
+    }
+  }
+#endif
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;
   switch (pbvh.type()) {
