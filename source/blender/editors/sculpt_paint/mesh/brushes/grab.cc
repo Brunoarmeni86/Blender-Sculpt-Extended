@@ -12,6 +12,11 @@
 #  include <cstdlib>
 #  include <vector>
 #  include "physics_core.hh"
+#  ifdef WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14
+#    include <unordered_map>
+#    include <unordered_set>
+#    include "native_grab_executor_adapter.hh"
+#  endif
 #endif
 
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
