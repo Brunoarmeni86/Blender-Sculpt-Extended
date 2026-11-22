@@ -101,6 +101,9 @@ static void test_backend_policy()
   caps.vulkan_ready = true;
   clay.active_proxy_particles = 20000;
   plan = choose_solver(clay,caps);
+  assert(plan.device == SolverDevice::CPU);
+  caps.vulkan_volume_ready = true;
+  plan = choose_solver(clay,caps);
   assert(plan.device == SolverDevice::VulkanCompute);
 
   SolverRequest mud;
