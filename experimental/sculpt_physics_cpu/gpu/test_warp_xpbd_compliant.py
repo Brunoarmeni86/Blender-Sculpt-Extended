@@ -7,6 +7,7 @@ NVIDIA hardware parity (not run in CI): --device cuda
 The legacy target_mode='hard' remains unchanged and is tested separately.
 """
 import argparse
+import subprocess
 import numpy as np
 
 from warp_xpbd_local import LocalXpbdSession
@@ -101,6 +102,27 @@ def parity():
     isolated_compliant_solution("warp-cpu")
 
 
+def cpp_world_parity(executable):
+    """Compare same one-substep XPBD graph against the independent C++ World."""
+    result=subprocess.run([executable],check=True,capture_output=True,text=True)
+    positions=np.array([[float(v) for v in line.split()]
+                        for line in result.stdout.strip().splitlines()],
+                       dtype=np.float64)
+    assert positions.shape==(3,3),result.stdout
+    p=np.array([[0,0,0],[1,0,0],[2,0,0]],dtype=np.float32)
+    inv=np.array([0,1,1],dtype=np.float32)
+    edges=np.array([[0,1],[1,2]],dtype=np.int32)
+    solver=LocalXpbdSession(
+        p,inv,edges,compliance=[0,1.0e-5],
+        target_mode="compliant",device="warp-cpu")
+    solver.set_targets([2],[[2,0.8,0]],target_compliance=1.0e-4)
+    solver.solve(dt=1.0/60.0,iterations=12)
+    got=solver.read_positions([0,1,2]).astype(np.float64)
+    assert np.allclose(got,positions,atol=5.0e-4,rtol=5.0e-4), (
+        "C++ World XPBD and Warp CPU disagree",positions,got
+    )
+
+
 def cuda_parity():
     cpu=sample("cpu")
     cuda=sample("cuda")
@@ -111,9 +133,15 @@ def cuda_parity():
 if __name__=="__main__":
     parser=argparse.ArgumentParser()
     parser.add_argument("--device",choices=("cpu","warp-cpu","cuda"),default="cpu")
+    parser.add_argument("--cpp-reference",default=None,
+                        help="path to optional C++ World XPBD reference executable")
     args=parser.parse_args()
     if args.device=="warp-cpu":
         parity()
+        if args.cpp_reference:
+            cpp_world_parity(args.cpp_reference)
+    elif args.cpp_reference:
+        raise ValueError("--cpp-reference requires --device warp-cpu")
     elif args.device=="cuda":
         cuda_parity()
     else:
