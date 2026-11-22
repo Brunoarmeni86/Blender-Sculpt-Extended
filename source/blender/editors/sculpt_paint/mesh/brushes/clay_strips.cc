@@ -357,7 +357,16 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
   const float3 offset = plane_normal * ss.cache->bstrength * ss.cache->radius;
 
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
-  if (physics_v15::requested() && pbvh.type()==bke::pbvh::Type::Mesh) {
+  // The existing Clay Strips layer-detail projection must not be bypassed
+  // by a base-mesh XPBD writer which has no layer-delta implementation.
+  const bool v15_layer_detail=layer_detail_v01::state().active;
+  if (physics_v15::requested() && v15_layer_detail &&
+      ss.cache->xpbd_v15_active_logged) {
+    ss.cache->xpbd_v15_failed=true;
+    return; // freeze an already physical stroke; do not mix editors
+  }
+  if (physics_v15::requested() && !v15_layer_detail &&
+      pbvh.type()==bke::pbvh::Type::Mesh) {
     Mesh &mesh=*id_cast<Mesh *>(object.data);
     const PositionDeformData pos(depsgraph,object,true);
     const MeshAttributeData attributes(mesh);
