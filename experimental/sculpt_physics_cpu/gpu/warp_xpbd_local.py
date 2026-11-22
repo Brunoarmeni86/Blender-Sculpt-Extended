@@ -76,7 +76,11 @@ if wp is not None:
 
 def _checked_indices(ids, count):
     vals = np.asarray(ids)
-    if vals.ndim != 1 or not np.issubdtype(vals.dtype,np.integer):
+    if vals.ndim != 1:
+        raise ValueError("vertex IDs must be 1-D")
+    if len(vals) == 0:
+        return np.empty(0,dtype=np.int32)
+    if not np.issubdtype(vals.dtype,np.integer):
         raise ValueError("expected integer vertex IDs")
     if np.any(vals < 0) or np.any(vals >= count):
         raise IndexError("vertex ID outside local proxy")
