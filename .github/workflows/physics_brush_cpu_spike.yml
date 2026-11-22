@@ -67,6 +67,8 @@ jobs:
         run: python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_local.py --device warp-cpu
       - name: Validate compliant XPBD artist-target Warp kernel
         run: python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_compliant.py --device warp-cpu
+      - name: Compare real Warp CPU graph capture with direct XPBD launches
+        run: python experimental/sculpt_physics_cpu/gpu/test_warp_graph_capture.py --device warp-cpu
       - name: Build independent native C++ World XPBD reference fixture
         run: |
           cmake -S experimental/sculpt_physics_cpu -B build-xpbd-interop -DCMAKE_BUILD_TYPE=Release -DSCULPT_PHYSICS_BUILD_INTEROP_TESTS=ON
