@@ -23,6 +23,7 @@ def run(device):
     out=solver.read_positions([0,1,2])
     assert np.allclose(out[0],vertices[0],atol=2.0e-5)
     assert out[1,0]>1.0 and out[2,0]>2.0
+    assert np.allclose(out[2], [2.6,0,0], atol=1e-6), "last color moved hard brush target"
     assert np.allclose(vertices[:,0],[0,1,2]) # input remains unchanged
     assert solver.transfer_bytes[0]==baseline[0] # geometry never re-uploaded
 
@@ -30,6 +31,7 @@ def run(device):
     solver.solve(iterations=4)
     second=solver.read_positions([1,2])
     assert np.isfinite(second).all()
+    assert np.allclose(second[1], [2.2,0,0],atol=1e-6)
     assert solver.transfer_bytes[0]==baseline[0]
 
     before=solver.read_positions([0,1,2])
