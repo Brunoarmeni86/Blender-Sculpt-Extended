@@ -76,6 +76,40 @@ an actual connected distance bond crossing a fixed non-Undo halo boundary.
 Both tests use one substep to compare the same quasistatic equations,
 not additional unimplemented dynamics or long-term plastic evolution.
 
+## Per-dab editor writeback acknowledgment (new)
+
+`IPhysicsExecutor` now has **two** complementary kinds of staging.
+`download_dirty()` returns every change relative to the **beginning of
+the full stroke**, for safe Undo/cancellation. `stage_incremental()` returns
+only changes since the last acknowledged native editor writeback, tagged
+with a monotonically increasing `revision`.
+
+```cpp
+executor->set_targets(new_dab_targets);
+executor->step(dt, substeps, iterations);
+const ExecutorWriteBatch batch = executor->stage_incremental();
+
+// Native code must stage and validate real PBVH/Multires/Undo writes.
+// A failed write MUST trigger the editor's native Undo rollback AND
+// executor->cancel(), not an acknowledgment of this batch.
+apply_all_editor_writes_transactionally(batch.writes);
+executor->acknowledge_incremental(batch.revision);
+```
+
+A stale `revision` (i.e., a newer `step`/`upload_dirty` happened)
+is rejected, so an old callback cannot acknowledge later geometry.
+Acknowledgment **does not erase full-stroke history**. The CPU reference
+currently scans its local island for changes; a future generation-stamped
+dirty list may reduce that cost after correctness is established.
+
+The CPU executor also now reuses `scratch_positions_`,
+`scratch_bond_lambda_` and `scratch_target_lambda_` capacities across
+dabs. It solves on the separate scratch positions, publishing the result
+only after an entire successful step. Test: 100 consecutive dabs with
+changing target counts, acknowledgments and cancellation. This change
+removes repeated scratch allocation pressure, but does **not** avoid
+copying the local island positions each step or prove a frame-rate gain.
+
 ## Explicit backend boundaries
 
 - `make_native_executor(CPU)` returns a real C++ local XPBD executor;
