@@ -109,6 +109,10 @@ static void test_granular()
   try { (void)plan_granular_contacts(wet, {0, 3}, config); }
   catch (const std::out_of_range &) { rejected = true; }
   assert(rejected);
+  rejected = false;
+  try { (void)plan_granular_contacts(wet, {42}, config); }
+  catch (const std::out_of_range &) { rejected = true; }
+  assert(rejected);
 }
 
 static void test_multires()
