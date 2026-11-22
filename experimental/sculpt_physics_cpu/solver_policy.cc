@@ -55,8 +55,28 @@ SolverPlan choose_solver(const SolverRequest &r, const AvailablePhysics &a)
   if (plan.implementation_available && r.prefer_gpu &&
       r.gpu_break_even_particles > 0 &&
       r.active_proxy_particles >= r.gpu_break_even_particles) {
-    if (a.warp_cuda_ready) plan.device = SolverDevice::WarpCUDA;
-    else if (a.vulkan_ready) plan.device = SolverDevice::VulkanCompute;
+    bool warp_family = false;
+    bool vulkan_family = false;
+    switch (plan.family) {
+      case SolverFamily::XPBDSurface:
+        warp_family = a.warp_surface_ready;
+        vulkan_family = a.vulkan_surface_ready;
+        break;
+      case SolverFamily::XPBDVolume:
+        warp_family = a.warp_volume_ready;
+        vulkan_family = a.vulkan_volume_ready;
+        break;
+      case SolverFamily::DEMGrains:
+        warp_family = a.warp_dem_ready;
+        vulkan_family = a.vulkan_dem_ready;
+        break;
+      case SolverFamily::MPMContinuum:
+        warp_family = a.warp_mpm_ready;
+        vulkan_family = a.vulkan_mpm_ready;
+        break;
+    }
+    if (a.warp_cuda_ready && warp_family) plan.device = SolverDevice::WarpCUDA;
+    else if (a.vulkan_ready && vulkan_family) plan.device = SolverDevice::VulkanCompute;
   }
   return plan;
 }
