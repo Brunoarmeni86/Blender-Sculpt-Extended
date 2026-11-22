@@ -98,9 +98,12 @@ executor->acknowledge_incremental(batch.revision);
 
 A stale `revision` (i.e., a newer `step`/`upload_dirty` happened)
 is rejected, so an old callback cannot acknowledge later geometry.
-Acknowledgment **does not erase full-stroke history**. The CPU reference
-currently scans its local island for changes; a future generation-stamped
-dirty list may reduce that cost after correctness is established.
+Acknowledgment **does not erase full-stroke history**. The CPU reference now maintains a persistent dirty-ID set; incremental
+staging is O(K log K) for sorted global output and acknowledgment is O(K),
+where K is the number of unique changed vertices since the last ACK.
+The reference still copies the complete local positions into its isolated
+scratch buffer for a failure-atomic physics step. Full-stroke baseline
+staging and snapshot creation remain O(N) when explicitly requested.
 
 The CPU executor also now reuses `scratch_positions_`,
 `scratch_bond_lambda_` and `scratch_target_lambda_` capacities across
