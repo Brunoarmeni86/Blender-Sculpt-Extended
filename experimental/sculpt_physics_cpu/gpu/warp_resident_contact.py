@@ -119,8 +119,12 @@ class ResidentContactSession:
 
     def _indices(self, indices):
         ids = np.asarray(indices)
-        if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer):
-            raise ValueError("particle indices must be a 1-D integer array")
+        if ids.ndim != 1:
+            raise ValueError("particle indices must be a 1-D array")
+        if len(ids) == 0:
+            return np.empty(0, dtype=np.int32)
+        if not np.issubdtype(ids.dtype, np.integer):
+            raise ValueError("particle indices must contain integers")
         if np.any(ids < 0) or np.any(ids >= self._n):
             raise IndexError("particle index outside persistent contact island")
         if len(np.unique(ids)) != len(ids):
