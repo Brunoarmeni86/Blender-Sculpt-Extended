@@ -36,6 +36,14 @@ struct ExecutorEdit {
   Vec3 position{};
 };
 
+/* Incremental editor-writeback handshake. A staged batch does not mutate the
+ * executor: acknowledge only AFTER native PBVH/CCG writeback succeeded.
+ * An out-of-date revision can never acknowledge a newer simulation state. */
+struct ExecutorWriteBatch {
+  std::uint64_t revision = 0;
+  std::vector<GpuProxyChange> writes;
+};
+
 class IPhysicsExecutor {
  public:
   virtual ~IPhysicsExecutor() = default;
@@ -68,6 +76,13 @@ class IPhysicsExecutor {
    * beginning of this stroke. Host/editor must then validate its own
    * PBVH/CCG transaction before calling commit(). */
   virtual std::vector<GpuProxyChange> download_dirty(double epsilon = 1e-12) const = 0;
+
+  /* Only changes since the last successfully acknowledged editor writeback.
+   * Earlier full-stroke baseline remains intact for cancellation.
+   * Initial reference checks all local particles; a generation-stamped dirty
+   * set is a later optimization. */
+  virtual ExecutorWriteBatch stage_incremental(double epsilon = 1e-12) const = 0;
+  virtual void acknowledge_incremental(std::uint64_t revision) = 0;
 
   /* Commit only the ISOLATED proxy state; it does not write Blender geometry.
    * Cancel reverts all dabs to the snapshot taken by begin_stroke(). */
