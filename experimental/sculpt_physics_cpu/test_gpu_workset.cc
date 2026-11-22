@@ -129,7 +129,9 @@ int main()
   for (int i=0;i<8;++i) boundary.add_particle({double(i),0.0,0.0});
   for (int i=1;i<8;++i) boundary.add_bond(i-1,i,1e-6);
   const GpuTopologyBondIndex boundary_index(boundary,82);
-  const auto strict=boundary_index.build(boundary,{3},{2,4},{3},82,false);
+  const auto halo_auto=boundary_index.one_ring_halo(boundary,{3},82);
+  assert(halo_auto == std::vector<std::size_t>({2,4}));
+  const auto strict=boundary_index.build(boundary,{3},halo_auto,{3},82,false);
   assert(strict.global_ids.size()==3);
   assert(strict.crossing_bonds==0);
   assert(strict.ignored_fixed_crossings==2);
