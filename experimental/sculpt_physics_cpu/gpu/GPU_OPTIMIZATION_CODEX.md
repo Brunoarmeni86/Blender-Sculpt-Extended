@@ -16,6 +16,20 @@ implementations** under `experimental/sculpt_physics_cpu/gpu/`:
 | `bench_warp_backend.py` | p50/p95 total standalone dab, initial upload and transfer counts | Run on NVIDIA workstation |
 | `warp_granular_probe.py` | Minimal original reference for one-off contact projection | Nothing: retained as a baseline |
 
+## C++ native workset bridge (new)
+
+- `../gpu_workset.hh/.cc` builds a compact local physics island from
+  active PBVH proxy IDs, a surrounding halo and native Undo-covered IDs.
+  Non-covered halo vertices are pinned, and crossings to omitted bonds are
+  rejected unless approximate truncation is explicitly requested.
+- `../test_gpu_workset.cc` validates global↔local ID mapping, pins,
+  missing boundary bonds, finite output and staged sparse GPU writeback.
+- **This does not launch CUDA.** It is the missing typed data-transfer
+  contract for a future native C++ `IPhysicsExecutor`. Codex should
+  map `GpuLocalIsland` positions, masses and bonds to `LocalXpbdSession`
+  buffers, then replace the Python runtime with native Warp AOT/CUDA
+  integration after device validation.
+
 ## Why these optimizations matter
 
 ### 1 — Persistent GPU arrays
