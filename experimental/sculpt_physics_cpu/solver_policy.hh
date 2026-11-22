@@ -13,7 +13,7 @@ enum class SolverDevice { CPU, WarpCUDA, VulkanCompute };
 
 struct AvailablePhysics {
   bool cpu_xpbd = true;       // existing CPU World
-  bool cpu_volume = true;     // experimental tetra constraint reference
+  bool cpu_volume = false;    // tetra reference exists, but NO integrated volume executor yet
   bool cpu_dem = true;        // simplified granular target planner
   bool mpm_ready = false;     // not integrated: never assume ready
   bool warp_cuda_ready = false; // device/driver/backend initialized
