@@ -6,6 +6,15 @@ This is the **single starting point for Codex**. The aim is a maintainable,
 single physics architecture for *existing* Blender Sculpt brushes rather than
 unrelated brush-specific solvers.
 
+**Additional verified contracts (November 22):** `IPhysicsExecutor`
+now offers revision-checked `stage_incremental()`/
+`acknowledge_incremental()` while retaining complete Undo rollback
+history, and reuses isolated CPU solver scratch between dabs.
+The Warp XPBD experiment has a separate `target_mode="compliant"` that
+projects the same form of soft artist targets as `World`, with
+CPU-oracle and Warp-CPU JIT tests. The readback API returns owned copies
+instead of aliases to recycled Warp buffers.
+
 **New native executor boundary:** [`PHYSICS_EXECUTOR_CODEX.md`](PHYSICS_EXECUTOR_CODEX.md)
 defines the first actual `IPhysicsExecutor` C++ interface and a working
 `CpuXpbdExecutor` reference for **compliant XPBD target/bond constraints**.
