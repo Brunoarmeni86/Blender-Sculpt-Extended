@@ -138,6 +138,15 @@ static void test_granular_plan_and_backend_fail_closed()
 
   request.prefer_gpu=false;
   request.volume_cage_available=true;
+  // Merely having a volume cage does NOT enable the separate volume
+  // reference. Without a registered executor, fall back to surface XPBD.
+  session.begin(request,available);
+  assert(session.plan().family == SolverFamily::XPBDSurface);
+  session.cancel();
+
+  // Simulate a future explicit volume registration: the old CpuStrokePipeline
+  // still refuses it, because it currently executes only surface/DEM.
+  available.cpu_volume=true;
   rejected=false;
   try {session.begin(request,available);}
   catch (const std::logic_error &) {rejected=true;}
