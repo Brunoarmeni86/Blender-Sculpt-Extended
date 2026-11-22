@@ -44,3 +44,21 @@ jobs:
           python experimental/sculpt_physics_cpu/gpu/test_warp_resident_contact.py --device cpu
           python -m py_compile experimental/sculpt_physics_cpu/gpu/warp_xpbd_local.py
           python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_local.py --device cpu
+
+  warp-kernel-cpu:
+    # Run actual Warp JIT kernels on its CPU device to catch Warp API,
+    # kernel type and launch issues even without NVIDIA hardware.
+    # This is NOT a substitute for an NVIDIA CUDA parity/performance gate.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Warp kernel runtime and numerical oracle
+        run: python -m pip install numpy warp-lang
+      - name: Execute Warp XPBD kernel and compare with NumPy
+        run: python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_local.py --device warp-cpu
+      - name: Execute Warp HashGrid DEM contact kernel and compare with NumPy
+        run: python experimental/sculpt_physics_cpu/gpu/test_warp_resident_contact.py --device warp-cpu
