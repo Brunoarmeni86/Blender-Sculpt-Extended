@@ -70,4 +70,42 @@ PreparedNativeGrabDab prepare_cpu_native_grab_dab(
     const std::function<Vec3(std::size_t)> &current_position,
     const NativeGrabDab &dab);
 
+/* V15 common path for sculpt brushes which already calculated their
+ * EXACT native deformation, including falloff, strength, pressure, masking,
+ * texture, silhouette or specialized smooth/clay-plane geometry.
+ * The value is a finished translation, not a raw direction or strength.
+ * Never reapply factor/strength inside the XPBD adapter. */
+enum class NativeSculptBrushKind { Clay, ClayStrips, Smooth, Draw, Nudge, Gravity };
+
+struct NativeBrushTranslation {
+  std::size_t global_index = 0;
+  Vec3 translation{}; // fully factored original Blender displacement
+};
+
+struct NativeBrushDab {
+  NativeSculptBrushKind kind = NativeSculptBrushKind::Clay;
+  double compliance = 1.0e-6;
+  double dt = 1.0 / 60.0;
+  int substeps = 2;
+  int iterations = 5;
+  std::uint64_t topology_generation = 0;
+};
+
+using PreparedNativeBrushDab = PreparedNativeGrabDab;
+
+/* Isolated numerical solve for the selected unique IDs, + pinned one-ring.
+ * Strictly validates samples and topology, performs no editor writes.
+ * Input translations MUST be fully computed by the original native brush.
+ * For smoothing, the caller supplies its ORIGINAL smoothed displacement,
+ * not the uniform brush_targets Smooth approximation.
+ *
+ * An empty/zero set is a no-op. Invalid, duplicate and pinned samples are
+ * rejected or skipped safely, with no editor change. */
+PreparedNativeBrushDab prepare_cpu_native_brush_dab(
+    const World &rest_world,
+    const GpuTopologyBondIndex &topology,
+    const std::vector<NativeBrushTranslation> &samples,
+    const std::function<Vec3(std::size_t)> &current_position,
+    const NativeBrushDab &dab);
+
 }  // namespace sculpt_physics
