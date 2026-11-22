@@ -283,4 +283,14 @@ std::unique_ptr<IPhysicsExecutor> make_native_executor(SolverDevice device)
   return make_cpu_xpbd_executor();
 }
 
+
+std::unique_ptr<IPhysicsExecutor> make_native_executor(const SolverPlan &plan)
+{
+  if (!plan.implementation_available || plan.device != SolverDevice::CPU ||
+      plan.family != SolverFamily::XPBDSurface) {
+    throw std::logic_error("No verified native executor for requested solver family/device");
+  }
+  return make_cpu_xpbd_executor();
+}
+
 }  // namespace sculpt_physics
