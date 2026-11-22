@@ -1,5 +1,7 @@
 # Sculpt Physics CPU Reference Prototype (experimental, standalone)
 
+**For Codex: start with [CODEX_START_HERE.md](CODEX_START_HERE.md).** It is the current source map, execution contract, recommended order, and verification checklist. This README also retains historical research notes from the standalone CPU prototype.
+
 This is **working standalone C++17 prototype code**, not a shipped Blender feature or a compiled Blender module. It is deliberately decoupled from Geometry Nodes and the editor to provide a small, testable starting contract for future native integration. Do **not** use as a general collision solver or production-ready volume simulation.
 
 ## Build and test
