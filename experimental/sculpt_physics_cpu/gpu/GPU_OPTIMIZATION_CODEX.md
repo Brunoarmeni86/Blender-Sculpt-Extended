@@ -30,6 +30,38 @@ implementations** under `experimental/sculpt_physics_cpu/gpu/`:
   buffers, then replace the Python runtime with native Warp AOT/CUDA
   integration after device validation.
 
+## Focused performance and correctness audit (22 November, follow-up)
+
+New native C++ and Warp improvements:
+
+| Change | Implementation | Why it matters |
+| --- | --- | --- |
+| Indexed local worksets | `GpuTopologyBondIndex` in `../gpu_workset.hh/.cc` | CSR bond incidence is built once per topology generation; a local dab visits only adjacent bonds, rather than scanning ALL mesh bonds |
+| Workset parity and invalidation | `../test_gpu_workset.cc` | Indexed vs full-scan equality, incomplete halo behavior, incorrect generations and cross-world use are checked |
+| Precision far from origin | `pack_gpu_island_relative`, `stage_gpu_relative_writes` | Converts a compact proxy to float32 relative to an island-local double origin; rejects changes to fixed halo and avoids writing back float32 rounding noise |
+| Explicit plastic/rest state | `LocalXpbdSession(..., rest_lengths=...)` | Uses native C++ XPBD bond rest lengths instead of silently rebuilding them from already deformed positions |
+| Hard-target drift fix | `warp_xpbd_local.py` | Reapplies kinematic target constraints after each bond-color iteration, preserving requested target position |
+| CPU workset benchmark | `../bench_gpu_workset.cc` | Separate index construction latency from complete local island packing; measure p50/p95 on the same host |
+
+The CPU workset benchmark is included in the optional CMake benchmark target.
+Its output is NOT evidence of a CUDA GPU speedup. The local CSR index
+must be invalidated after topology changes. Fracture state can be filtered
+without rebuilding the incidence list if bond indices remain stable.
+
+**Important integration requirement:** the production path should convert
+`GpuLocalFloatPack::relative_positions` into Warp `wp.vec3` float32
+buffers, keep `GpuLocalFloatPack::origin` stable for the lifetime of that
+device island, and reconstruct world-space doubles only for dirty output
+vertices. Current Warp scripts operate on already-local positions. The
+C++ contract is tested, but a native CPU-to-CUDA upload bridge remains TODO.
+
+```bash
+cmake -S experimental/sculpt_physics_cpu -B build-gpu-perf \
+  -DCMAKE_BUILD_TYPE=Release -DSCULPT_PHYSICS_BUILD_BENCHMARKS=ON
+cmake --build build-gpu-perf --target bench_gpu_workset --parallel
+./build-gpu-perf/bench_gpu_workset 125000 100
+```
+
 ## Why these optimizations matter
 
 ### 1 — Persistent GPU arrays
