@@ -79,8 +79,9 @@ class IPhysicsExecutor {
 
   /* Only changes since the last successfully acknowledged editor writeback.
    * Earlier full-stroke baseline remains intact for cancellation.
-   * Initial reference checks all local particles; a generation-stamped dirty
-   * set is a later optimization. */
+   * A persistent dirty-ID set avoids scanning the complete local island:
+   * stage costs O(K log K) to return sorted global IDs; acknowledgment
+   * updates O(K) positions for K changed vertices. */
   virtual ExecutorWriteBatch stage_incremental(double epsilon = 1e-12) const = 0;
   virtual void acknowledge_incremental(std::uint64_t revision) = 0;
 
