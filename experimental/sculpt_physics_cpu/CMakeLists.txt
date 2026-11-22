@@ -181,3 +181,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_multiphysics_volume PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_multiphysics_volume_and_backend_tests COMMAND test_multiphysics_volume)
+
+# Cohesive CPU execution path: native callers pass PBVH/mask-selected inputs,
+# World stores state, and the pipeline returns sparse staged writes only.
+# No Blender editor, CCG or real CUDA API is linked by this reference target.
+target_sources(sculpt_physics_reference PRIVATE sculpt_physics_pipeline.cc)
+add_executable(test_sculpt_physics_pipeline test_sculpt_physics_pipeline.cc)
+target_link_libraries(test_sculpt_physics_pipeline PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_sculpt_physics_pipeline PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_physics_pipeline_integration_tests
+         COMMAND test_sculpt_physics_pipeline)
