@@ -35,7 +35,7 @@ def check(device: str, mode: str) -> None:
     ]
     for ids, goals, iters, dt in steps:
         for session in (direct, captured):
-            session.set_targets(ids, goals,
+            session.set_targets(ids, goals if ids else np.empty((0,3), dtype=np.float32),
                                 target_compliance=0.0005 if mode == "compliant" else 0.0)
             session.solve(iterations=iters, dt=dt)
         a = direct.read_positions([0, 1, 2, 3, 4])
