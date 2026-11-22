@@ -203,3 +203,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_gpu_workset PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_gpu_workset_integrity_tests COMMAND test_gpu_workset)
+
+# Benchmark sparse GPU workset preparation: measures CPU CSR query/packing,
+# NOT CUDA launch time or end-to-end Blender viewport latency.
+if(SCULPT_PHYSICS_BUILD_BENCHMARKS)
+  add_executable(bench_gpu_workset bench_gpu_workset.cc)
+  target_link_libraries(bench_gpu_workset PRIVATE sculpt_physics_reference)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(bench_gpu_workset PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  endif()
+endif()
