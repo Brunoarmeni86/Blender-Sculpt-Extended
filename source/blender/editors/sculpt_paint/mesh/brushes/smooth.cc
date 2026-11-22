@@ -27,6 +27,9 @@
 #include "editors/sculpt_paint/mesh/sculpt_smooth.hh"
 
 #include "bmesh.hh"
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+#  include "physics_brush_v15.hh"
+#endif
 #include "editors/sculpt_paint/mesh/sculpt_layer_delta_smooth_v01.hh"
 
 namespace blender::ed::sculpt_paint::brushes {
@@ -89,6 +92,81 @@ BLI_NOINLINE static void apply_positions_faces(const Sculpt &sd,
   clip_and_lock_translations(sd, ss, position_data.eval, verts, translations);
   position_data.deform(translations, verts);
 }
+
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+/* Reuse the SAME native Smooth interior-neighbor averaging and per-iteration
+ * strengths. XPBD changes how finished Smooth targets satisfy material bonds;
+ * it does not replace Blender's Smooth brush with uniform Laplacian targets.
+ * Active Sculpt Layer delta isolation is NOT supported in this first preview. */
+static bool try_smooth_physics_v15(const Depsgraph &depsgraph,
+                                  const Sculpt &sd,
+                                  const Brush &brush,
+                                  Object &object,
+                                  const IndexMask &node_mask,
+                                  const float brush_strength)
+{
+  if (!physics_v15::requested()) return false;
+  const SculptSession &ss=*object.runtime->sculpt_session;
+  bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
+  if (pbvh.type()!=bke::pbvh::Type::Mesh) return false;
+  const auto &delta=layer_delta_smooth_v01::state();
+  // Layer delta smoothing requires a separate Multires/SculptLayer writer.
+  if (delta.object==&object && delta.mesh_l0) return false;
+  Mesh &mesh=*id_cast<Mesh *>(object.data);
+  const OffsetIndices faces=mesh.faces();
+  const Span<int> corner_verts=mesh.corner_verts();
+  const GroupedSpan<int> vert_to_face_map=mesh.vert_to_face_map();
+  const MeshAttributeData attributes(mesh);
+  const PositionDeformData pos(depsgraph,object);
+  const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
+  MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
+
+  for (const float strength : iteration_strengths(brush_strength)) {
+    LocalData tls;
+    std::vector<sculpt_physics::NativeBrushTranslation> native;
+    node_mask.foreach_index([&](const int ni) {
+      const bke::pbvh::MeshNode &node=nodes[ni];
+      const Span<int> verts=node.verts();
+      calc_factors_common_mesh_indexed(
+          depsgraph,brush,object,attributes,pos.eval,normals,node,
+          tls.factors,tls.distances);
+      scale_factors(tls.factors,strength);
+      const GroupedSpan<int> neighbors=calc_vert_neighbors_interior(
+          faces,corner_verts,vert_to_face_map,
+          ss.boundary_info_cache->verts,
+          ss.boundary_info_cache->edges,
+          attributes.hide_poly,verts,tls.factors,
+          tls.neighbor_offsets,tls.neighbor_data);
+      tls.new_positions.resize(verts.size());
+      smooth::neighbor_data_average_mesh_check_loose(
+          pos.eval,verts,neighbors,tls.new_positions);
+      tls.translations.resize(verts.size());
+      translations_from_new_positions(
+          tls.new_positions,verts,pos.eval,tls.translations);
+      if (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE) {
+        for (const int j : verts.index_range()) {
+          smooth_preserve_shape_translation(
+              tls.translations[j],normals[verts[j]]);
+        }
+      }
+      scale_translations(tls.translations,tls.factors);
+      for (const int j : verts.index_range()) {
+        const float3 v=tls.translations[j];
+        native.push_back({std::size_t(verts[j]),
+                          {double(v.x),double(v.y),double(v.z)}});
+      }
+    });
+    if (!physics_v15::try_apply(
+            sd,object,node_mask,pos,
+            sculpt_physics::NativeSculptBrushKind::Smooth,native)) {
+      return false; // V15 not activated; stock mesh smoothing takes over
+    }
+    // The native PBVH writer runs synchronously in try_apply; the next
+    // iteration therefore reads the updated mesh, like the stock brush.
+  }
+  return true;
+}
+#endif
 
 BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
                                               const Sculpt &sd,
@@ -426,6 +504,15 @@ void do_smooth_brush(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
 
   boundary::ensure_boundary_info(object);
+
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if (try_smooth_physics_v15(
+          depsgraph,sd,brush,object,node_mask,brush_strength)) {
+    pbvh.tag_positions_changed(node_mask);
+    pbvh.update_bounds(depsgraph,object);
+    return;
+  }
+#endif
 
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh:
