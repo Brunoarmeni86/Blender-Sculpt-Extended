@@ -224,3 +224,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_physics_executor PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_physics_executor_contract_tests COMMAND test_physics_executor)
+
+# Optional C++ World golden fixture for actual Warp kernel numerical parity.
+# Kept distinct from benchmark targets; no Blender editor/CUDA dependency.
+option(SCULPT_PHYSICS_BUILD_INTEROP_TESTS "Build C++ XPBD fixture for Warp parity" OFF)
+if(SCULPT_PHYSICS_BUILD_INTEROP_TESTS)
+  add_executable(emit_xpbd_reference emit_xpbd_reference.cc)
+  target_link_libraries(emit_xpbd_reference PRIVATE sculpt_physics_reference)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(emit_xpbd_reference PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  endif()
+endif()
