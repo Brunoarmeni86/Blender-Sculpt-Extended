@@ -1,0 +1,29 @@
+name: Physics brush experimental CPU checks
+
+on:
+  push:
+    branches:
+      - experiment/physics-brushes-warp-multires-granular-20261122
+  workflow_dispatch:
+
+jobs:
+  cpu-reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure standalone solver
+        run: cmake -S experimental/sculpt_physics_cpu -B build-physics -DCMAKE_BUILD_TYPE=Debug
+      - name: Build CPU reference and new brush tests
+        run: cmake --build build-physics -j 2
+      - name: Run actual CPU reference tests
+        run: ctest --test-dir build-physics --output-on-failure
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install NumPy
+        run: python -m pip install numpy
+      - name: Compile and smoke-test CPU fallback (no CUDA required)
+        run: |
+          python -m py_compile experimental/sculpt_physics_cpu/gpu/warp_granular_probe.py
+          python experimental/sculpt_physics_cpu/gpu/warp_granular_probe.py --device cpu --self-test
