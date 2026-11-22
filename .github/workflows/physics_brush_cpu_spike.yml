@@ -8,15 +8,19 @@ on:
 
 jobs:
   cpu-reference:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Configure standalone solver
         run: cmake -S experimental/sculpt_physics_cpu -B build-physics -DCMAKE_BUILD_TYPE=Debug
       - name: Build CPU reference and new brush tests
-        run: cmake --build build-physics -j 2
+        run: cmake --build build-physics --config Debug --parallel 2
       - name: Run actual CPU reference tests
-        run: ctest --test-dir build-physics --output-on-failure
+        run: ctest --test-dir build-physics -C Debug --output-on-failure
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
