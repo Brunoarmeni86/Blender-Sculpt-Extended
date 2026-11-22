@@ -88,6 +88,10 @@ static void test_backend_policy()
   plan = choose_solver(clay,caps);
   assert(plan.device == SolverDevice::CPU); // no GPU implied by user preference
   caps.warp_cuda_ready = true;
+  // CUDA device availability alone does not make XPBD volume runnable.
+  plan = choose_solver(clay,caps);
+  assert(plan.device == SolverDevice::CPU);
+  caps.warp_volume_ready = true;
   plan = choose_solver(clay,caps);
   assert(plan.device == SolverDevice::WarpCUDA);
   clay.active_proxy_particles = 100;
