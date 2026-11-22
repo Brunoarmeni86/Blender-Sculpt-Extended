@@ -6,6 +6,13 @@ This is the **single starting point for Codex**. The aim is a maintainable,
 single physics architecture for *existing* Blender Sculpt brushes rather than
 unrelated brush-specific solvers.
 
+**New native executor boundary:** [`PHYSICS_EXECUTOR_CODEX.md`](PHYSICS_EXECUTOR_CODEX.md)
+defines the first actual `IPhysicsExecutor` C++ interface and a working
+`CpuXpbdExecutor` reference for **compliant XPBD target/bond constraints**.
+It now owns a complete isolated stroke transaction and refuses GPU devices
+until a verified native executor is linked. This is the required contract
+for a future compiled Warp CUDA bridge; it does not yet write to Blender.
+
 **GPU optimization update:** There are now persistent local CUDA/Warp
 prototype executors for XPBD bonds and DEM contacts. Read
 [`gpu/GPU_OPTIMIZATION_CODEX.md`](gpu/GPU_OPTIMIZATION_CODEX.md)
