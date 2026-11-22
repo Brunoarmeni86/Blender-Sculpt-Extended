@@ -50,6 +50,18 @@ inline bool requested()
   return value && value[0]=='1' && value[1]=='\0';
 }
 
+/* If Blender's geometry mode changes after this physical brush has
+ * already applied any dab, DO NOT mix in stock brush's different evaluator.
+ * Return true to finish this stroke without changing geometry. */
+inline bool freeze_if_mode_changed(Object &object, const bke::pbvh::Tree &pbvh)
+{
+  if (!requested() || pbvh.type()==bke::pbvh::Type::Mesh) return false;
+  StrokeCache &cache=*object.runtime->sculpt_session->cache;
+  if (!cache.xpbd_v15_active_logged) return false;
+  cache.xpbd_v15_failed=true;
+  return true;
+}
+
 inline bool try_apply(const Sculpt &sd,
                       Object &object,
                       const IndexMask &node_mask,
