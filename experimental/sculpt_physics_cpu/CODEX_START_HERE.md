@@ -6,6 +6,12 @@ This is the **single starting point for Codex**. The aim is a maintainable,
 single physics architecture for *existing* Blender Sculpt brushes rather than
 unrelated brush-specific solvers.
 
+**C++/Warp parity gate:** `emit_xpbd_reference.cc` produces the
+authoritative C++ World solution for a pinned-boundary compliant brush
+case, and `gpu/test_warp_xpbd_compliant.py --cpp-reference` compares it
+with the actual Warp CPU JIT kernel. This one-substep graph test is
+already in GitHub Actions, independently of NumPy oracle checks.
+
 **Additional verified contracts (November 22):** `IPhysicsExecutor`
 now offers revision-checked `stage_incremental()`/
 `acknowledge_incremental()` while retaining complete Undo rollback
