@@ -108,7 +108,9 @@ static bool try_smooth_physics_v15(const Depsgraph &depsgraph,
   if (!physics_v15::requested()) return false;
   const SculptSession &ss=*object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
-  if (pbvh.type()!=bke::pbvh::Type::Mesh) return false;
+  if (pbvh.type()!=bke::pbvh::Type::Mesh) {
+    return physics_v15::freeze_if_mode_changed(object,pbvh);
+  }
   const auto &delta=layer_delta_smooth_v01::state();
   // Layer delta smoothing requires a separate Multires/SculptLayer writer.
   if (delta.object==&object && delta.mesh_l0) return false;
