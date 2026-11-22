@@ -319,6 +319,37 @@ void test_repeated_dabs_with_reused_solver_scratch()
   exec->cancel();
 }
 
+void test_sparse_ack_on_large_proxy()
+{
+  World world;
+  for (std::size_t i=0;i<5000;++i) {
+    world.add_particle({static_cast<double>(i),0,0});
+  }
+  // No bonds: deliberately isolate sparse upload/ack cost from XPBD solving.
+  const std::vector<std::size_t> selected{10,300,4000};
+  auto exec=make_cpu_xpbd_executor();
+  exec->allocate_island(build_gpu_local_island(
+      world,selected,{},{10,300,4000},52,false));
+  exec->begin_stroke();
+  exec->upload_dirty({{4000,{4000,0.3,0}},{10,{10,0.1,0}}});
+  auto first=exec->stage_incremental();
+  assert(first.writes.size()==2);
+  assert(first.writes[0].global_index==10 &&
+         first.writes[1].global_index==4000);
+  exec->acknowledge_incremental(first.revision);
+  assert(exec->stage_incremental().writes.empty());
+  exec->upload_dirty({{300,{300,0.2,0}}});
+  auto second=exec->stage_incremental();
+  assert(second.writes.size()==1 && second.writes[0].global_index==300);
+  exec->acknowledge_incremental(second.revision);
+  assert(exec->stage_incremental().writes.empty());
+  assert(exec->download_dirty().size()==3);
+  exec->cancel();
+  exec->begin_stroke();
+  assert(exec->download_dirty().empty());
+  exec->cancel();
+}
+
 void test_target_strength_and_atomic_step()
 {
   World world;
@@ -356,5 +387,6 @@ int main()
   test_target_strength_and_atomic_step();
   test_incremental_editor_ack_protocol();
   test_repeated_dabs_with_reused_solver_scratch();
+  test_sparse_ack_on_large_proxy();
   return 0;
 }
