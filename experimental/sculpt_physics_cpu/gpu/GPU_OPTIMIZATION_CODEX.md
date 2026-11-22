@@ -16,6 +16,48 @@ implementations** under `experimental/sculpt_physics_cpu/gpu/`:
 | `bench_warp_backend.py` | p50/p95 total standalone dab, initial upload and transfer counts | Run on NVIDIA workstation |
 | `warp_granular_probe.py` | Minimal original reference for one-off contact projection | Nothing: retained as a baseline |
 
+## Opt-in XPBD CUDA Graph replay (22 November 2026)
+
+The independent `LocalXpbdSession` prototype now supports
+`graph_capture=True` on real Warp backends (`device="warp-cpu"` for CI
+or `device="cuda"` on an NVIDIA workstation). This does **not** enable
+the feature in Blender's native C++ executor.
+
+- The **first** solver call runs normally to compile kernels outside capture.
+  From the second call, a Warp `ScopedCapture` records the fixed sequence:
+  clear bond/target lambda buffers, project compliant or hard artist targets,
+  iterate edge-colored XPBD bonds, restore hard targets where applicable.
+- The cache key contains `dt²`, solver iteration count and the **number**
+  of active targets. New target IDs and positions with the same count update
+  resident input buffers, so graph replay does not freeze brush goals.
+- At most four graph variants are retained per island; new target buffer
+  allocation invalidates the graph cache and, on CUDA, first synchronizes
+  queued work to prevent use-after-free. Different topology means **create
+  a new session**; do not reuse captured pointer data across proxy rebuilds.
+- `graph_capture=False` remains the default. NumPy CPU oracle explicitly
+  rejects capture. `graph_stats` exposes capture/replay/cache counts.
+  CUDA hardware/performance is not yet verified on an NVIDIA workstation.
+- `test_warp_graph_capture.py` compares **actual captured Warp kernels**
+  against uncaptured launches on an identical mutable proxy in hard and
+  compliant modes, with changing target IDs, counts, dt, and iterations.
+  The Warp CPU variant runs in CI; CUDA remains an explicit manual gate.
+
+Usage:
+
+```bash
+python experimental/sculpt_physics_cpu/gpu/test_warp_graph_capture.py --device warp-cpu
+python experimental/sculpt_physics_cpu/gpu/test_warp_graph_capture.py --device cuda
+python experimental/sculpt_physics_cpu/gpu/bench_warp_backend.py --solver xpbd --device cuda --particles 20000 --dabs 60
+python experimental/sculpt_physics_cpu/gpu/bench_warp_backend.py --solver xpbd --device cuda --particles 20000 --dabs 60 --graph
+```
+
+Compare two benchmark runs on the **same warmed device**, record p50/p95,
+total init cost, sustained performance and VRAM. A graph is NOT guaranteed to
+be faster: short batches, varying topology, target sizes and expensive
+readback may outweigh saved launch overhead. Benchmarks remain standalone
+proxy measurements and omit native PBVH, CCG, Sculpt Layers and Undo.
+Reference: [Warp 1.19 graph capture docs](https://nvidia.github.io/warp/v1.19/user_guide/runtime.html#graphs).
+
 ## C++ native workset bridge (new)
 
 - `../gpu_workset.hh/.cc` builds a compact local physics island from
