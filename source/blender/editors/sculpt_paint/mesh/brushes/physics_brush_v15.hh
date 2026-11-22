@@ -172,6 +172,14 @@ inline bool try_apply(const Sculpt &sd,
           return {double(p.x),double(p.y),double(p.z)};
         },dab);
 
+    // True zero-impact dab: don't traverse, clip or rewrite every PBVH
+    // node with zero translations. Blender's ordinary smoothing/plane
+    // clipping may otherwise modify stationary coordinates unexpectedly.
+    if (!result.has_solver()) {
+      cache.xpbd_v15_state=state;
+      return true;
+    }
+
     std::unordered_map<std::size_t,float3> changes;
     changes.reserve(result.writes().size());
     for (const auto &w : result.writes()) {
