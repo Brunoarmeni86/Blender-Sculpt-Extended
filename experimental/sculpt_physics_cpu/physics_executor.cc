@@ -305,6 +305,11 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   void commit() override
   {
     require_active();
+    // A successful editor transaction MUST acknowledge every changed proxy
+    // vertex before this isolated state can become the new baseline.
+    if (!dirty_ids_.empty()) {
+      throw std::logic_error("Native XPBD commit refused: pending unacknowledged editor writes");
+    }
     // Positions and baseline are equal-length, so this assignment does not
     // require reallocation. Editor MUST have written an Undo-covered transaction.
     island_.positions=positions_;
