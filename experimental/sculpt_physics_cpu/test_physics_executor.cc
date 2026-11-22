@@ -221,6 +221,65 @@ void test_fixed_halo_matches_world_bond_projection()
   }
 }
 
+void test_incremental_editor_ack_protocol()
+{
+  World world;
+  world.add_particle({0,0,0},0.0);
+  world.add_particle({1,0,0});
+  world.add_particle({2,0,0});
+  world.add_bond(0,1);
+  world.add_bond(1,2);
+
+  auto exec=make_cpu_xpbd_executor();
+  exec->allocate_island(build_gpu_local_island(world,{1,2},{0},{1,2},99,false));
+  exec->begin_stroke();
+  assert(exec->stage_incremental().writes.empty());
+  exec->upload_dirty({{1,{1,0.1,0}}});
+  const auto first=exec->stage_incremental();
+  assert(first.writes.size()==1 && first.writes[0].global_index==1);
+  assert(first.revision!=0);
+  exec->acknowledge_incremental(first.revision);
+  assert(exec->stage_incremental().writes.empty());
+  // Full-stroke history remains available even after per-dab acknowledgment.
+  assert(exec->download_dirty().size()==1);
+
+  exec->set_targets({{2,{2,0.5,0},1e-6}});
+  exec->step(1.0/60.0,1,6);
+  const auto second=exec->stage_incremental();
+  assert(second.revision>first.revision && !second.writes.empty());
+  bool rejected=false;
+  try {exec->acknowledge_incremental(first.revision);}
+  catch(const std::logic_error &) {rejected=true;}
+  assert(rejected && exec->stage_incremental().writes.size()==second.writes.size());
+  exec->acknowledge_incremental(second.revision);
+  assert(exec->stage_incremental().writes.empty());
+  assert(!exec->download_dirty().empty());
+
+  // An invalid input cannot advance the revision or falsely acknowledge.
+  rejected=false;
+  try {exec->upload_dirty({{0,{0,1,0}}});}
+  catch(const std::logic_error &) {rejected=true;}
+  assert(rejected);
+  assert(exec->stage_incremental().revision==second.revision);
+  rejected=false;
+  try {(void)exec->stage_incremental(-1.0);}
+  catch(const std::invalid_argument &) {rejected=true;}
+  assert(rejected);
+
+  exec->cancel();
+  exec->begin_stroke();
+  assert(exec->download_dirty().empty());
+  assert(exec->stage_incremental().writes.empty());
+  exec->upload_dirty({{2,{2,0.3,0}}});
+  const auto third=exec->stage_incremental();
+  exec->acknowledge_incremental(third.revision);
+  exec->commit();
+  exec->begin_stroke();
+  assert(exec->stage_incremental().writes.empty());
+  assert(exec->download_dirty().empty());
+  exec->cancel();
+}
+
 void test_target_strength_and_atomic_step()
 {
   World world;
@@ -256,5 +315,6 @@ int main()
   test_compliant_targets_match_native_world();
   test_fixed_halo_matches_world_bond_projection();
   test_target_strength_and_atomic_step();
+  test_incremental_editor_ack_protocol();
   return 0;
 }
