@@ -10,7 +10,7 @@
  * Still research: no Blender full-source build, true native Undo rollback
  * on a partially applied node batch, Multires CCG or CUDA has been verified.
  */
-#ifdef WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
 
 #  include "native_grab_executor_adapter.hh"
 
@@ -19,6 +19,7 @@
 #  include "BKE_object_types.hh"
 #  include "BKE_paint_bvh.hh"
 #  include "DNA_scene_types.h"
+#  include "BLI_math_vector.hh"
 
 #  include "editors/sculpt_paint/mesh/mesh_brush_common.hh"
 #  include "editors/sculpt_paint/mesh/sculpt_intern.hh"
