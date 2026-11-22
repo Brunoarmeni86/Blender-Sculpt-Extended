@@ -170,6 +170,9 @@ class LocalXpbdSession:
         self._sparse_h2d=0
         self._sparse_d2h=0
         self._initial_h2d=0
+        self._target_capacity=0
+        self._read_capacity=0
+        self._sparse_device_allocations=0
         if self._warp:
             wp.init()
             self._dev="cuda:0" if self._cuda else "cpu"
@@ -198,6 +201,38 @@ class LocalXpbdSession:
     def transfer_bytes(self):
         return (self._initial_h2d,self._sparse_h2d,self._sparse_d2h)
 
+    def _reserve_targets(self, count):
+        # Target IDs remain intact while read_positions() performs independent
+        # readback operations. Do NOT share this index buffer with readback.
+        if not self._warp or count <= self._target_capacity:
+            return
+        cap=max(8,count,self._target_capacity*2)
+        ids_gpu=wp.empty(cap,dtype=wp.int32,device=self._dev)
+        goals_gpu=wp.empty(cap,dtype=wp.vec3,device=self._dev)
+        self._ids_gpu=ids_gpu
+        self._goals_gpu=goals_gpu
+        self._target_capacity=cap
+        self._sparse_device_allocations+=2
+
+    def _reserve_readback(self, count):
+        if not self._warp or count <= self._read_capacity:
+            return
+        cap=max(8,count,self._read_capacity*2)
+        ids_gpu=wp.empty(cap,dtype=wp.int32,device=self._dev)
+        output_gpu=wp.empty(cap,dtype=wp.vec3,device=self._dev)
+        self._read_ids_gpu=ids_gpu
+        self._readback_gpu=output_gpu
+        self._read_capacity=cap
+        self._sparse_device_allocations+=2
+
+    @property
+    def sparse_device_allocations(self):
+        return self._sparse_device_allocations
+
+    @property
+    def scratch_capacities(self):
+        return (self._target_capacity,self._read_capacity)
+
     def set_targets(self, indices, goals):
         ids=_checked_indices(indices,self._n)
         xyz=np.asarray(goals,dtype=np.float32)
@@ -206,11 +241,12 @@ class LocalXpbdSession:
         if len(ids) and np.any(self._inv[ids]<=0):
             raise ValueError("cannot target a pinned local vertex")
         if self._warp and len(ids):
-            # O(K) upload per dab, not O(N); persistent geometry/bonds stay put.
-            new_ids=wp.array(ids,dtype=wp.int32,device=self._dev)
-            new_goals=wp.array(xyz,dtype=wp.vec3,device=self._dev)
-            self._ids_gpu=new_ids
-            self._goals_gpu=new_goals
+            # Keep geometry and sparse target buffers resident between dabs.
+            self._reserve_targets(len(ids))
+            wp.copy(self._ids_gpu,
+                    wp.array(ids,dtype=wp.int32,device="cpu"),count=len(ids))
+            wp.copy(self._goals_gpu,
+                    wp.array(xyz,dtype=wp.vec3,device="cpu"),count=len(ids))
             if self._cuda:
                 self._sparse_h2d+=ids.nbytes+xyz.nbytes
         self._goals_ids=ids.copy()
@@ -276,12 +312,13 @@ class LocalXpbdSession:
             return np.empty((0,3),dtype=np.float32)
         if not self._warp:
             return self._x_cpu[ids].copy()
-        gpu_ids=wp.array(ids,dtype=wp.int32,device=self._dev)
-        out_gpu=wp.empty(len(ids),dtype=wp.vec3,device=self._dev)
+        self._reserve_readback(len(ids))
+        wp.copy(self._read_ids_gpu,
+                wp.array(ids,dtype=wp.int32,device="cpu"),count=len(ids))
         wp.launch(_read_local_vertices,dim=len(ids),
-                  inputs=[self._x,gpu_ids],outputs=[out_gpu],
-                  device=self._dev)
-        out=out_gpu.numpy()
+                  inputs=[self._x,self._read_ids_gpu],
+                  outputs=[self._readback_gpu],device=self._dev)
+        out=self._readback_gpu[:len(ids)].numpy()
         if self._cuda:
             self._sparse_h2d+=ids.nbytes
             self._sparse_d2h+=out.nbytes
