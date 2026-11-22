@@ -1,5 +1,10 @@
 # Sculpt Physics CPU Reference Prototype (experimental, standalone)
 
+**Native solver executor contract (new):**
+[`PHYSICS_EXECUTOR_CODEX.md`](PHYSICS_EXECUTOR_CODEX.md) describes a typed
+`IPhysicsExecutor` API, the standalone CPU XPBD implementation and
+full-stroke rollback/commit tests. Native CUDA/Vulkan remain unavailable.
+
 **GPU implementation (experimental):**
 [`gpu/GPU_OPTIMIZATION_CODEX.md`](gpu/GPU_OPTIMIZATION_CODEX.md)
 documents persistent CUDA local XPBD and granular contact executors,
