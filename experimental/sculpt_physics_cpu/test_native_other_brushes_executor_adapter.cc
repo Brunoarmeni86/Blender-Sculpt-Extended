@@ -115,6 +115,50 @@ int main()
     assert(editor[5].y==source[5].y && editor[10].y==source[10].y);
   }
 
+  // Profiles are opt-in. On a single active point between fixed neighbors,
+  // following native target edge lengths should eliminate unwanted elastic
+  // return toward the initial surface. This is a numerical fidelity test,
+  // not a claim of enclosed-volume conservation.
+  editor=source;
+  for (auto kind : {NativeSculptBrushKind::Clay,NativeSculptBrushKind::ClayStrips,
+                    NativeSculptBrushKind::Smooth,NativeSculptBrushKind::Draw}) {
+    NativeBrushDab settings;
+    settings.kind=kind;
+    settings.topology_generation=114;
+    const double dy=kind==NativeSculptBrushKind::Smooth ? -0.6 : 0.6;
+    const std::vector<NativeBrushTranslation> input{{5,{0,dy,0}},
+                                                    {10,{0,1,0}}};
+    auto legacy=prepare_cpu_native_brush_dab(rest,topology,input,position,settings);
+    assert(legacy.writes().size()==1);
+    const Vec3 old=legacy.writes()[0].position;
+    legacy.cancel();
+    const auto profile=experimental_native_brush_profile(kind);
+    settings.compliance=profile.target_compliance;
+    settings.material=profile.material;
+    auto tuned=prepare_cpu_native_brush_dab(rest,topology,input,position,settings);
+    assert(tuned.writes().size()==1 && tuned.writes()[0].global_index==5);
+    const Vec3 p=tuned.writes()[0].position;
+    assert(std::hypot(p.x-5,p.y-dy,p.z)<std::hypot(old.x-5,old.y-dy,old.z));
+    tuned.cancel();
+    assert(rest.particles()[5].position.y==0.0);
+  }
+  // Full rest-follow matches the finished native geometry even with stiff
+  // bonds, and a coincident goal is handled with positive rest length.
+  NativeBrushDab follow;
+  follow.topology_generation=114;
+  follow.material={0.0,1.0};
+  auto exact=prepare_cpu_native_brush_dab(
+      rest,topology,{{5,{0,0.6,0}}},position,follow);
+  assert(exact.writes().size()==1);
+  assert(std::abs(exact.writes()[0].position.y-0.6)<1e-4);
+  exact.cancel();
+  auto coincident=prepare_cpu_native_brush_dab(
+      rest,topology,{{5,{1,0,0}}},position,follow);
+  for (const auto &w : coincident.writes()) {
+    assert(w.global_index==5 && std::isfinite(w.position.x));
+  }
+  coincident.cancel();
+
   auto cfg=NativeBrushDab{};
   cfg.topology_generation=114;
   auto none=prepare_cpu_native_brush_dab(rest,topology,{},position,cfg);
@@ -146,6 +190,14 @@ int main()
     rejects({{5,{0,0.1,0}}},cfg);
   }
   cfg.assist=1.0;
+  for (auto material : {NativeMaterialResponse{-1,0},
+                        NativeMaterialResponse{1,1.1},
+                        NativeMaterialResponse{1,-0.1},
+                        NativeMaterialResponse{std::numeric_limits<double>::infinity(),0}}) {
+    cfg.material=material;
+    rejects({{5,{0,0.1,0}}},cfg);
+  }
+  cfg.material={};
   cfg.kind=static_cast<NativeSculptBrushKind>(999);
   rejects({{5,{0,0.1,0}}},cfg);
 
