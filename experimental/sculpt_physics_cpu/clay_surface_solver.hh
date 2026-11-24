@@ -294,7 +294,10 @@ inline void shape_clay_transport(
     }
     return true;
   };
-  const double amount=std::min(.28*dab.radius,travel*(.35+1.65*mobility));
+  // Qualitative tool compliance; keep V24 unchanged. Cohesion and
+  // stiffness attenuate plastic tool response, not the geometric mask.
+  const double resistance=dab.tool_v25?(1-.45*dab.stiffness)*(1-.30*dab.cohesion):1;
+  const double amount=std::min(.28*dab.radius,travel*(.35+1.65*mobility)*resistance);
   const double drag=amount*dab.friction;
   const auto smooth=[](double t){t=std::clamp(t,0.0,1.0);return t*t*(3-2*t);};
   const bool press=dab.action==ClaySurfaceAction::Press;
@@ -359,7 +362,7 @@ inline void shape_clay_transport(
       }
       delta[i]=w[i]*(sum/count-h[i])*
           (1-std::exp(-amount/dab.radius*(smear?5.0:8.0)))*
-          (dab.tool_v25&&smear?1.0-.7*dab.detail_retention:1.0);
+          (dab.tool_v25&&smear?(1.0-.7*dab.detail_retention)*(.5+dab.fusion):1.0);
       if(smear) {
         double z=h[i];
         if(trace(p,dir*(-dab.sign*drag*.5),z))
