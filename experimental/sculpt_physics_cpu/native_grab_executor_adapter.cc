@@ -213,16 +213,12 @@ PreparedNativeGrabDab prepare_cpu_native_grab_dab(
   return PreparedNativeGrabDab(std::move(executor),std::move(batch));
 }
 
-PreparedNativeBrushDab prepare_cpu_native_brush_dab(
-    const World &rest_world,
-    const GpuTopologyBondIndex &topology,
-    const std::vector<NativeBrushTranslation> &samples,
-    const std::function<Vec3(std::size_t)> &current_position,
-    const NativeBrushDab &dab)
+namespace {
+void validate_native_brush_dab(const NativeBrushDab &dab)
 {
   // Validate first. This shared path must not multiply existing native
   // Blender brush factors or silently substitute other material solvers.
-  if (!current_position || !std::isfinite(dab.assist) ||
+  if (!std::isfinite(dab.assist) ||
       dab.assist<0.0 || dab.assist>1.0 ||
       !std::isfinite(dab.compliance) ||
       dab.compliance<0.0 || !std::isfinite(dab.dt) || dab.dt<=0.0 ||
@@ -242,6 +238,18 @@ PreparedNativeBrushDab prepare_cpu_native_brush_dab(
       throw std::invalid_argument("Unsupported native physical brush kind");
   }
   validate_material(dab.material);
+}
+} // namespace
+
+PreparedNativeBrushDab prepare_cpu_native_brush_dab(
+    const World &rest_world,
+    const GpuTopologyBondIndex &topology,
+    const std::vector<NativeBrushTranslation> &samples,
+    const std::function<Vec3(std::size_t)> &current_position,
+    const NativeBrushDab &dab)
+{
+  if (!current_position) throw std::invalid_argument("Missing current position callback");
+  validate_native_brush_dab(dab);
   std::vector<NativeBrushTranslation> selected;
   selected.reserve(samples.size());
   for (const NativeBrushTranslation &sample : samples) {
@@ -284,6 +292,56 @@ PreparedNativeBrushDab prepare_cpu_native_brush_dab(
     }
     island.positions[i]=position;
   }
+  return prepare_cpu_native_brush_island(std::move(island),selected,dab);
+}
+
+PreparedNativeBrushDab prepare_cpu_native_brush_island(
+    GpuLocalIsland island,
+    const std::vector<NativeBrushTranslation> &samples,
+    const NativeBrushDab &dab)
+{
+  validate_native_brush_dab(dab);
+  const std::size_t n=island.global_ids.size();
+  if (island.topology_generation!=dab.topology_generation ||
+      island.positions.size()!=n || island.inverse_masses.size()!=n ||
+      island.writable.size()!=n || island.radii.size()!=n ||
+      island.crossing_bonds!=0 ||
+      !std::is_sorted(island.global_ids.begin(),island.global_ids.end()) ||
+      std::adjacent_find(island.global_ids.begin(),island.global_ids.end())!=island.global_ids.end()) {
+    throw std::invalid_argument("Invalid native brush island");
+  }
+  std::vector<NativeBrushTranslation> selected;
+  selected.reserve(samples.size());
+  for (const auto &sample : samples) {
+    if (!finite(sample.translation)) throw std::invalid_argument("Invalid native translation");
+    // The full reference may supply masked samples outside this island.
+    if (std::hypot(sample.translation.x,sample.translation.y,sample.translation.z)>1e-15 &&
+        std::binary_search(island.global_ids.begin(),island.global_ids.end(),sample.global_index)) {
+      selected.push_back(sample);
+    }
+  }
+  std::sort(selected.begin(),selected.end(),
+            [](const auto &a,const auto &b) {return a.global_index<b.global_index;});
+  for (std::size_t i=1;i<selected.size();++i) {
+    if (selected[i-1].global_index==selected[i].global_index)
+      throw std::invalid_argument("Duplicate island translation");
+  }
+  std::vector<std::size_t> active;
+  active.reserve(selected.size());
+  for (std::size_t i=0;i<n;++i) {
+    if (!finite(island.positions[i]) || !std::isfinite(island.inverse_masses[i]) ||
+        island.inverse_masses[i]<0.0 || !std::isfinite(island.radii[i]) ||
+        island.radii[i]<=0.0 || (!island.writable[i] && island.inverse_masses[i]!=0.0)) {
+      throw std::invalid_argument("Invalid native island particle");
+    }
+    if (island.inverse_masses[i]>0.0) active.push_back(island.global_ids[i]);
+  }
+  for (const auto &bond : island.bonds) {
+    if (bond.a>=n || bond.b>=n || bond.a==bond.b ||
+        !std::isfinite(bond.rest_length) || bond.rest_length<=0.0 ||
+        !std::isfinite(bond.compliance) || bond.compliance<0.0)
+      throw std::invalid_argument("Invalid native island bond");
+  }
   std::vector<ExecutorTarget> goals;
   goals.reserve(active.size());
   for (const auto &sample : selected) {
@@ -298,6 +356,7 @@ PreparedNativeBrushDab prepare_cpu_native_brush_dab(
     if (!finite(goal)) throw std::invalid_argument("Native brush goal overflow");
     goals.push_back({sample.global_index,goal,dab.compliance});
   }
+  if (goals.size()!=active.size()) throw std::logic_error("Mobile island vertex lacks native target");
   if (goals.empty()) return {};
   if (dab.assist>0.0) apply_material(island,goals,dab.material);
 
