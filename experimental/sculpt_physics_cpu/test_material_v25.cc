@@ -64,7 +64,8 @@ static void overlapping_v26(ClaySurfaceAction action)
   std::vector<ClaySurfaceTriangle> t;
   for(int y=0;y<n;++y)for(int x=0;x<n;++x){
     const double px=2.0*x/(n-1)-1,py=2.0*y/(n-1)-1;
-    v.push_back({{px,py,0},0});
+    const bool flat=action==ClaySurfaceAction::Press || action==ClaySurfaceAction::Scrape || action==ClaySurfaceAction::Gather;
+    v.push_back({{px,py,flat?0:.025*std::sin(12*px)*std::cos(8*py)},0});
   }
   for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
     const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
@@ -83,7 +84,7 @@ static void overlapping_v26(ClaySurfaceAction action)
       const double r2=(x*x+y*y)/(dab.radius*dab.radius);
       p.influence=r2<1 && p.position.y>-.25?std::pow(1-r2,2):0;
     }
-    const auto full=solve_material_transport_v21(v,t,dab,4,true);
+    const auto full=solve_material_transport_v21(v,t,dab,4,true,false);
     const auto fast=solve_material_transport_v21(v,t,dab,4,false);
     double l1=0;
     for(std::size_t i=0;i<v.size();++i){
@@ -95,15 +96,23 @@ static void overlapping_v26(ClaySurfaceAction action)
       l1+=std::abs(d.z);v[i].position+=d;
     }
     if(l1>1e-7)++moving;
-    if(action!=ClaySurfaceAction::Scrape)assert(std::abs(fast.surface.signed_swept_volume)<1e-8);
+    if(action!=ClaySurfaceAction::Scrape && action!=ClaySurfaceAction::Buildup &&
+       action!=ClaySurfaceAction::FusionDeposit && action!=ClaySurfaceAction::Compact)
+      assert(std::abs(fast.surface.signed_swept_volume)<1e-8);
   }
-  assert(moving>=3);
+  std::cout<<"V26 overlap action="<<int(action)<<" moving_dabs="<<moving<<std::endl;
+  if(action==ClaySurfaceAction::Press || action==ClaySurfaceAction::Scrape || action==ClaySurfaceAction::Gather)
+    assert(moving>=3);
 }
 int main(){
   assert(progressive_press_depth_v26(.07,0)==.07);
   assert(progressive_press_depth_v26(.07,.5)>progressive_press_depth_v26(.07,.1));
   assert(progressive_press_depth_v26(.24,100)<=.25);
-  for(auto action:{ClaySurfaceAction::Press,ClaySurfaceAction::Scrape,ClaySurfaceAction::Gather})overlapping_v26(action);
+  for(auto action:{ClaySurfaceAction::Buildup,ClaySurfaceAction::Push,ClaySurfaceAction::Gather,
+      ClaySurfaceAction::Spread,ClaySurfaceAction::FusionDeposit,ClaySurfaceAction::Compress,
+      ClaySurfaceAction::Compact,ClaySurfaceAction::Press,ClaySurfaceAction::PressureFlow,
+      ClaySurfaceAction::HybridFlow,ClaySurfaceAction::Melt,ClaySurfaceAction::Smear,
+      ClaySurfaceAction::Scrape})overlapping_v26(action);
   for(int n:{33,65,129}){
     trial(n,ClaySurfaceAction::Push);
     trial(n,ClaySurfaceAction::Push,.7853981633974483);

@@ -20,7 +20,8 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     const std::vector<ClaySurfaceTriangle> &triangles,
     ClaySurfaceDab dab,
     int substeps=4,
-    bool diagnose_refinement=true)
+    bool diagnose_refinement=true,
+    bool reuse_topology=true)
 {
   if(substeps<1 || substeps>16 || !std::isfinite(dab.dose) ||
      dab.dose<0 || dab.dose>1)
@@ -40,8 +41,10 @@ inline MaterialTransportV21Result solve_material_transport_v21(
   auto work=vertices;
   MaterialTransportV21Result out;
   out.surface.displacement.resize(vertices.size());
+  ClaySurfaceEdges dab_edges;
+  const bool cache_topology=dab.tool_v26 && reuse_topology;
   for(int k=0;k<substeps;++k) {
-    const auto step=solve_clay_surface(work,triangles,dab);
+    const auto step=solve_clay_surface(work,triangles,dab,cache_topology?&dab_edges:nullptr);
     if(k==0) out.surface.projected_area=step.projected_area;
     out.surface.active=std::max(out.surface.active,step.active);
     out.surface.transport_nodes=std::max(out.surface.transport_nodes,step.transport_nodes);
@@ -59,7 +62,8 @@ inline MaterialTransportV21Result solve_material_transport_v21(
   if(!diagnose_refinement) return out;
   // Diagnose local resolution demand, not a native topology operation.
   // Count unique long or steep edges with at least one active endpoint.
-  std::vector<std::array<std::size_t,2>> edges;
+  ClaySurfaceEdges &edges=dab_edges;
+  if(!cache_topology){
   for(const auto &t:triangles)
     for(int j=0;j<3;++j) {
       auto a=t[j],b=t[(j+1)%3];
@@ -68,6 +72,7 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     }
   std::sort(edges.begin(),edges.end());
   edges.erase(std::unique(edges.begin(),edges.end()),edges.end());
+  }
   const auto norm=[](Vec3 v){return std::hypot(v.x,v.y,v.z);};
   for(const auto &e:edges) {
     const auto a=e[0],b=e[1];

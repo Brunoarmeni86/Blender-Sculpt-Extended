@@ -418,10 +418,15 @@ inline void shape_clay_transport(
   out.transport_nodes=bins.size()+large_triangles.size();
 }
 
+using ClaySurfaceEdges=std::vector<std::array<std::size_t,2>>;
+
+// Optional per-dab topology cache, populated only from validated triangles.
+// Callers must clear it when changing the local vertex/triangle indexing.
 inline ClaySurfaceResult solve_clay_surface(
     const std::vector<ClaySurfaceVertex> &vertices,
     const std::vector<ClaySurfaceTriangle> &triangles,
-    const ClaySurfaceDab &dab)
+    const ClaySurfaceDab &dab,
+    ClaySurfaceEdges *dab_edges=nullptr)
 {
   const auto norm=[](Vec3 a){return std::hypot(a.x,a.y,a.z);};
   const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
@@ -482,8 +487,10 @@ inline ClaySurfaceResult solve_clay_surface(
       }
     }
   }
-  std::vector<std::array<std::size_t,2>> edges;
-  edges.reserve(triangles.size()*3);
+  ClaySurfaceEdges local_edges;
+  auto &edges=dab_edges?*dab_edges:local_edges;
+  const bool build_edges=edges.empty();
+  if(build_edges)edges.reserve(triangles.size()*3);
   for(const auto &t:triangles) {
     if(t[0]>=n || t[1]>=n || t[2]>=n ||
        t[0]==t[1] || t[1]==t[2] || t[0]==t[2])
@@ -501,14 +508,16 @@ inline ClaySurfaceResult solve_clay_surface(
     } else {
       for(auto i:t) out.projected_area[i]+=projected/3.0;
     }
-    for(int j=0;j<3;++j) {
+    if(build_edges)for(int j=0;j<3;++j) {
       auto a=t[j],b=t[(j+1)%3];
       if(a>b) std::swap(a,b);
       edges.push_back({a,b});
     }
   }
-  std::sort(edges.begin(),edges.end());
-  edges.erase(std::unique(edges.begin(),edges.end()),edges.end());
+  if(build_edges){
+    std::sort(edges.begin(),edges.end());
+    edges.erase(std::unique(edges.begin(),edges.end()),edges.end());
+  }
   std::size_t seed=n;
   double nearest=std::numeric_limits<double>::infinity();
   for(std::size_t i=0;i<n;++i) {
