@@ -167,7 +167,7 @@ inline bool try_apply(const Sculpt &sd,
     // later in that same stroke if the geometry configuration changes.
     std::fprintf(stderr,
                  "[V16 physical brush] fallback: pbvh=%d deform=%d shape=%d multires=%d symmetry=%d tile=%d radial=%d mirror=%d\n",
-                 int(pbvh.type()),int(ss.deform_modifiers_active),int(ss.shapekey_active),
+                 int(pbvh.type()),int(ss.deform_modifiers_active),int(ss.shapekey_active != nullptr),
                  int(bke::multires_layers::base_modifier(object)!=nullptr),
                  int(unsupported_symmetry),int(cache.tile_pass),
                  int(cache.radial_symmetry_pass),int(cache.mirror_symmetry_pass));
