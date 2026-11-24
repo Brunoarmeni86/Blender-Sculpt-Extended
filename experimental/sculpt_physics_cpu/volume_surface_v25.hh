@@ -13,6 +13,8 @@ using VolumeTriangleV25=std::array<std::size_t,3>;
 struct VolumeSurfaceV25 {
   std::vector<Vec3> positions;
   std::vector<VolumeTriangleV25> triangles;
+  // Approximate particle provenance, not source mesh UV/corner ownership.
+  std::vector<std::size_t> particle_source;
 };
 inline double volume_dot_v25(Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 inline Vec3 volume_cross_v25(Vec3 a,Vec3 b){
@@ -114,13 +116,17 @@ inline VolumeSurfaceV25 extract_volume_v25(const std::vector<Vec3>&points,
   if(points.size()>50000000/(diameter*diameter*diameter))
     throw std::length_error("Extraction splat work exceeds preview budget");
   std::vector<double> field(l.count,radius+spacing);
-  for(auto p:points){
+  std::vector<std::size_t> owner(l.count,points.size());
+  for(std::size_t pi=0;pi<points.size();++pi){
+    const auto p=points[pi];
     const Vec3 q=(p-l.origin)/spacing;
     const int cx=int(std::floor(q.x)),cy=int(std::floor(q.y)),cz=int(std::floor(q.z));
     for(int z=std::max(0,cz-reach);z<=std::min(l.size[2]-1,cz+reach);++z)
       for(int y=std::max(0,cy-reach);y<=std::min(l.size[1]-1,cy+reach);++y)
         for(int x=std::max(0,cx-reach);x<=std::min(l.size[0]-1,cx+reach);++x){
-          auto &f=field[l.index(x,y,z)];f=std::min(f,volume_norm_v25(l.point(x,y,z)-p)-radius);
+          const auto i=l.index(x,y,z);
+          const double distance=volume_norm_v25(l.point(x,y,z)-p)-radius;
+          if(distance<field[i]){field[i]=distance;owner[i]=pi;}
         }
   }
   // Move exact iso-node ties slightly outside to avoid degenerate facets.
@@ -144,6 +150,11 @@ inline VolumeSurfaceV25 extract_volume_v25(const std::vector<Vec3>&points,
         const auto it=edge_vertices.find(key);if(it!=edge_vertices.end())return it->second;
         const double t=field[id[a]]/(field[id[a]]-field[id[b]]);
         const auto v=out.positions.size();out.positions.push_back(p[a]+(p[b]-p[a])*t);
+        // Use the inside endpoint's support owner: deterministic local
+        // provenance candidate. No claim of nearest point at the iso-edge.
+        const auto source=owner[field[id[a]]<0?id[a]:id[b]];
+        if(source>=points.size())throw std::runtime_error("Missing particle provenance");
+        out.particle_source.push_back(source);
         edge_vertices.emplace(key,v);return v;
       };
       for(const auto &t:tet){
