@@ -85,6 +85,11 @@ class CompactBrushTopology {
     return out;
   }
 
+  void validate_vertex(std::size_t id) const
+  {
+    if (id >= vertices_) throw std::out_of_range("Invalid compact brush vertex");
+  }
+
   std::size_t storage_bytes() const
   {
     return (offsets_.capacity() + incident_.capacity()) * sizeof(std::uint32_t);
