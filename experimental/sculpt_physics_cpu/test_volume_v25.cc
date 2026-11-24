@@ -43,6 +43,9 @@ int main(){
     }
     auto result=reconstruct_volume_v25(after,.10,.25);
     validate_closed_volume_v25(result);
+    assert(result.particle_source.size()==result.positions.size());
+    const auto count=backend==VolumeBackendV25::LiquidPBF?after.liquid.size():after.clay.size();
+    for(auto id:result.particle_source)assert(id<count);
     std::cout<<"backend="<<int(backend)<<" z_before="<<average_z(before)
              <<" z_after="<<average_z(after)<<" vertices="<<result.positions.size()
              <<" faces="<<result.triangles.size()<<std::endl;
