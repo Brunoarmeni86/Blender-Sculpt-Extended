@@ -629,8 +629,18 @@ inline bool try_apply(const Sculpt &sd,
 
 // V17-B is an explicit Clay/Clay Strips behavior choice. Existing V2/V3
 // modes retain their exact path, and no other brush is silently upgraded.
+inline bool density_v22_requested()
+{
+  static const bool enabled=[]() {
+    const char *v=std::getenv("BLENDER_SCULPT_DENSITY_V22");
+    return v && v[0]=='1' && v[1]=='\0';
+  }();
+  return enabled;
+}
+
 inline bool material_v21_requested()
 {
+  if (density_v22_requested()) return true;
   static const bool enabled=[]() {
     const char *v=std::getenv("BLENDER_SCULPT_MATERIAL_V21");
     return v && v[0]=='1' && v[1]=='\0';
@@ -727,8 +737,9 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
     // Print sparse diagnostics at a fixed cadence, not once per vertex.
     static thread_local unsigned int count=0;
     if (count++%64==0) {
-      std::fprintf(stderr,"[V21 material] substeps=%d refinement_edges=%zu active=%zu\n",
-                   integrated.substeps,integrated.refinement_edges,result.active);
+      std::fprintf(stderr,"[%s material] substeps=%d refinement_edges=%zu active=%zu proxy_nodes=%zu\n",
+                   dab.density_independent?"V22":"V21",integrated.substeps,
+                   integrated.refinement_edges,result.active,result.transport_nodes);
     }
   }
   else result=solve_clay_surface(vertices,triangles,dab);
@@ -839,6 +850,7 @@ inline bool try_apply_intent(
         clay.yield_slope=0.05;
         if (material_v21_requested()) {
           clay.extended_material=true;
+          clay.density_independent=density_v22_requested();
           // Preserve existing preset/RNA controls; remaining settings are
           // process-local tuning knobs until material UI is validated.
           clay.plasticity=cache.xpbd_v16_clay_plasticity;
@@ -877,7 +889,7 @@ inline bool try_apply_intent(
           std::chrono::steady_clock::now()-plan_start).count();
       if (!cache.xpbd_v15_active_logged) {
         std::fprintf(stderr,"[%s clay surface] action=%d active=%zu target_volume=%.9g transport=%.9g scale=%.4f plan_ms=%.3f\n",
-                     material_v21_requested() && surface_v20 ? "V21" : surface_v20 ? "V20" : "V19",int(clay.action),planned.active,planned.signed_swept_volume,
+                     clay.density_independent ? "V22" : material_v21_requested() && surface_v20 ? "V21" : surface_v20 ? "V20" : "V19",int(clay.action),planned.active,planned.signed_swept_volume,
                      planned.transported_volume,planned.accepted_scale,plan_ms);
       }
     }
