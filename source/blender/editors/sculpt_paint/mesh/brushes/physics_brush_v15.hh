@@ -717,11 +717,14 @@ inline bool try_apply_intent(
       else clay.action=ClaySurfaceAction::Push;
       const Mesh &mesh=*id_cast<Mesh *>(object.data);
       if (position_data.eval.size()!=mesh.verts_num) return false;
+      const auto plan_start=std::chrono::steady_clock::now();
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals);
+      const double plan_ms=std::chrono::duration<double,std::milli>(
+          std::chrono::steady_clock::now()-plan_start).count();
       if (!cache.xpbd_v15_active_logged && !goals.empty()) {
-        std::fprintf(stderr,"[V19 clay surface] action=%d active=%zu target_volume=%.9g transport=%.9g scale=%.4f\n",
+        std::fprintf(stderr,"[V19 clay surface] action=%d active=%zu target_volume=%.9g transport=%.9g scale=%.4f plan_ms=%.3f\n",
                      int(clay.action),planned.active,planned.signed_swept_volume,
-                     planned.transported_volume,planned.accepted_scale);
+                     planned.transported_volume,planned.accepted_scale,plan_ms);
       }
     }
     else goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
