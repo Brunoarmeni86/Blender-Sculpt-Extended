@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "physics_executor.hh"
+#include "constraint_batches.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -57,6 +58,8 @@ void validate_island(const GpuLocalIsland &island)
 
 class CpuXpbdExecutor final : public IPhysicsExecutor {
  public:
+  explicit CpuXpbdExecutor(bool colored=false) : colored_(colored) {}
+
   ExecutorCapabilities capabilities() const override
   {
     return {SolverDevice::CPU,SolverFamily::XPBDSurface,true,true};
@@ -74,7 +77,16 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     std::vector<unsigned char> dirty_flags(island.positions.size(),0);
     std::vector<std::size_t> dirty_ids;
     dirty_ids.reserve(island.positions.size());
+    ConstraintBatches batches;
+    if (colored_) {
+      batches=build_constraint_batches(island.global_ids.size(),island.bonds.size(),
+          [&](std::size_t i) {
+            const auto &b=island.bonds[i];
+            return std::pair<std::size_t,std::size_t>{b.a,b.b};
+          });
+    }
     island_ = std::move(staged);
+    batches_=std::move(batches);
     positions_.swap(positions);
     acknowledged_.swap(acknowledged);
     dirty_flags_.swap(dirty_flags);
@@ -218,7 +230,17 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
       if (!std::isfinite(alpha) || !std::isfinite(denominator) ||
           denominator<=0.0) throw std::runtime_error("Bond XPBD denominator invalid");
       scratch_bond_coefficients_[k]={alpha,denominator,w0,w1};
-      scratch_active_bonds_.push_back(k);
+      if (!colored_) scratch_active_bonds_.push_back(k);
+    }
+    if (colored_) {
+      // Flatten batches in color order. CPU reference intentionally runs
+      // serially; no endpoint is shared within any batch.
+      for (const auto k : batches_.bond_ids) {
+        const auto &bond=island_.bonds[k];
+        if (island_.inverse_masses[bond.a]>0.0 || island_.inverse_masses[bond.b]>0.0) {
+          scratch_active_bonds_.push_back(k);
+        }
+      }
     }
     scratch_bond_lambda_.resize(island_.bonds.size());
     scratch_target_lambda_.resize(targets_.size());
@@ -400,6 +422,8 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     return static_cast<std::size_t>(it-island_.global_ids.begin());
   }
 
+  const bool colored_;
+  ConstraintBatches batches_;
   GpuLocalIsland island_;
   std::vector<Vec3> positions_;
   std::vector<Vec3> snapshot_;
@@ -426,6 +450,11 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
 std::unique_ptr<IPhysicsExecutor> make_cpu_xpbd_executor()
 {
   return std::make_unique<CpuXpbdExecutor>();
+}
+
+std::unique_ptr<IPhysicsExecutor> make_cpu_colored_xpbd_executor()
+{
+  return std::make_unique<CpuXpbdExecutor>(true);
 }
 
 std::unique_ptr<IPhysicsExecutor> make_native_executor(SolverDevice device)
