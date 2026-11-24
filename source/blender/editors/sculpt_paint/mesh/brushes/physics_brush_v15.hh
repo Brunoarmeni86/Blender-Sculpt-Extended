@@ -88,9 +88,8 @@ inline bool freeze_if_mode_changed(Object &object, const bke::pbvh::Tree &pbvh)
 {
   if (!requested() || pbvh.type()==bke::pbvh::Type::Mesh) return false;
   StrokeCache &cache=*object.runtime->sculpt_session->cache;
-  if (!cache.xpbd_v15_active_logged) return false;
   cache.xpbd_v15_failed=true;
-  return true;
+  return cache.xpbd_v15_active_logged;
 }
 
 inline bool try_apply(const Sculpt &sd,
@@ -105,13 +104,19 @@ inline bool try_apply(const Sculpt &sd,
   StrokeCache &cache=*ss.cache;
   if (cache.xpbd_v15_failed) return cache.xpbd_v15_active_logged;
   bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
-  const ePaintSymmetryFlags sym=ePaintSymmetryFlags(
-      PAINT_SYMM_X | PAINT_SYMM_Y | PAINT_SYMM_Z |
-      PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z);
+  const Mesh &mesh=*id_cast<Mesh *>(object.data);
+  // Check the actual dispatcher configuration BEFORE its first pass.
+  // Object mirror axes are not stored in Paint::symmetry_flags in this fork.
+  const bool unsupported_symmetry =
+      stroke_symmetry_xyz_get(object)!=PAINT_SYMM_NONE ||
+      cache.reference_symmetry || cache.reference_combined ||
+      mesh.radial_symmetry[0]!=1 || mesh.radial_symmetry[1]!=1 ||
+      mesh.radial_symmetry[2]!=1 ||
+      (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))!=0;
   if (pbvh.type()!=bke::pbvh::Type::Mesh ||
       ss.deform_modifiers_active || ss.shapekey_active ||
       bke::multires_layers::base_modifier(object)!=nullptr ||
-      (sd.paint.symmetry_flags & sym)!=PAINT_SYMM_NONE ||
+      unsupported_symmetry ||
       cache.tile_pass!=0 || cache.radial_symmetry_pass!=0 ||
       cache.mirror_symmetry_pass!=0) {
     // A previously active physical stroke must not switch abruptly to the
@@ -121,7 +126,6 @@ inline bool try_apply(const Sculpt &sd,
     cache.xpbd_v15_failed=true;
     return cache.xpbd_v15_active_logged;
   }
-  const Mesh &mesh=*id_cast<Mesh *>(object.data);
   if (mesh.verts_num<=0 || position_data.eval.size()!=mesh.verts_num) {
     cache.xpbd_v15_failed=true;
     return cache.xpbd_v15_active_logged;
@@ -360,7 +364,7 @@ inline bool try_apply(const Sculpt &sd,
   result.finish_editor_success();
   cache.xpbd_v15_state=state;
   if (!cache.xpbd_v15_active_logged) {
-    std::fprintf(stderr,"[V15 physical brush] CPU XPBD %s preview ACTIVE\n",
+    std::fprintf(stderr,"[V16 physical brush] CPU XPBD %s preview ACTIVE\n",
                  state->compact ? "compact" : "reference");
     cache.xpbd_v15_active_logged=true;
   }
