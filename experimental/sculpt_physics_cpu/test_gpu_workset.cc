@@ -176,6 +176,23 @@ int main()
   catch (const std::logic_error &) {rejected=true;}
   assert(rejected);
 
+  // Packing an exact double into a float must not perturb an untouched axis
+  // when the device changes only another coordinate.
+  World precise;
+  precise.add_particle({0,0,0});
+  precise.add_particle({0.123456789012345,0,0});
+  precise.add_particle({2,0,0});
+  precise.add_bond(0,1);
+  precise.add_bond(1,2);
+  const auto precise_island=build_gpu_local_island(precise,{1},{0,2},{1},55,false);
+  const auto precise_pack=pack_gpu_island_relative(precise_island);
+  auto precise_solved=precise_pack.relative_positions;
+  precise_solved[1].y+=0.25f;
+  const auto precise_writes=stage_gpu_relative_writes(precise_island,precise_pack,precise_solved);
+  assert(precise_writes.size()==1);
+  assert(precise_writes[0].position.x==precise_island.positions[1].x);
+  assert(precise_writes[0].position.y==0.25);
+
   // Float32 absolute coordinates at 1e12 cannot represent a 2mm change.
   // The GPU workset must pack origin-relative values and reconstruct only
   // genuine edits, without flagging float32 roundoff on pinned halo vertices.
