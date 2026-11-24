@@ -28,6 +28,11 @@ inline MaterialTransportV21Result solve_material_transport_v21(
   dab.surface_contact=true;
   // Divide the total requested dose, not the strength. Reevaluate
   // accepted local geometry and tool potential between increments.
+  if(dab.smooth_proxy) {
+    // Native dabs with small travel need fewer repeated transfers.
+    // This is a bounded heuristic, not a complete CFL estimator.
+    substeps=std::clamp(int(std::ceil(dab.dose*std::clamp(dab.proxy_cells_per_radius,4,16)*4)),1,substeps);
+  }
   dab.dose/=double(substeps);
   auto work=vertices;
   MaterialTransportV21Result out;
