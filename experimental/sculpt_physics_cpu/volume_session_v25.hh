@@ -40,12 +40,15 @@ struct VolumeFrameV25 {
   bool tool_enabled=false;
   Vec3 tool_start{},tool_end{};
   double tool_radius=.2;
+  bool floor_enabled=false;
+  double floor_z=0.0;
 };
 inline VolumeSessionV25 stage_volume_frame_v25(const VolumeSessionV25 &before,
                                                 const VolumeFrameV25 &f){
   const auto interval=[](double v){return std::isfinite(v)&&v>=0&&v<=1;};
   if(!std::isfinite(f.dt)||f.dt<=0||f.dt>.1||f.substeps<1||f.substeps>64||
      !interval(f.softening)||!interval(f.liquid_viscosity)||
+     (f.floor_enabled&&!std::isfinite(f.floor_z))||
      !std::isfinite(volume_norm_v25(f.gravity))||
      !std::isfinite(before.particle_spacing)||before.particle_spacing<=1e-9||
      !std::isfinite(before.density)||before.density<=0||
@@ -69,12 +72,14 @@ inline VolumeSessionV25 stage_volume_frame_v25(const VolumeSessionV25 &before,
       s.rest_density=before.density;s.dt=dt;s.gravity=f.gravity;
       s.viscosity=f.liquid_viscosity;s.tool_enabled=f.tool_enabled;
       s.tool_center=center;s.tool_radius=f.tool_radius;
+      s.floor_enabled=f.floor_enabled;s.floor_z=f.floor_z;
       out.liquid=step_fluid_v23(out.liquid,s).particles;
     }else if(out.backend==VolumeBackendV25::ViscoplasticMPM){
       MaterialPointSettingsV21 s;s.spacing=2*dx;s.dt=dt;s.gravity=f.gravity;
       s.bulk=20;s.shear=8*(1-.95*f.softening);
       s.cohesion=.5*(1-f.softening);s.friction=.5*(1-.8*f.softening);
       s.viscosity=.1+.4*f.softening;
+      s.floor_enabled=f.floor_enabled;s.floor_z=f.floor_z;
       MaterialPointToolV21 tool;tool.enabled=f.tool_enabled;
       tool.center=center;tool.velocity=velocity;tool.radius=f.tool_radius;
       out.clay=step_material_points_v21(out.clay,s,tool).particles;
