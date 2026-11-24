@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "material_transport_v21.hh"
+#include "fluid_pbf_v23.hh"
+#include "adaptive_material_topology.hh"
 #ifdef NDEBUG
 #  undef NDEBUG
 #endif
@@ -71,4 +73,36 @@ int main()
   for(std::size_t i=0;i<flow.motion.size();++i)
     difference+=std::abs(flow.motion[i].z-smear.motion[i].z);
   assert(difference>1e-6);
+
+  // Liquid compression resolves by separating samples, not by removing
+  // particles. Gravity advances free liquid and the sphere is a collider.
+  FluidSettingsV23 liquid;
+  liquid.gravity={};
+  std::vector<FluidParticleV23> particles{{{-.1,0,0},{}},{{.1,0,0},{}}};
+  const auto relaxed=step_fluid_v23(particles,liquid);
+  assert(relaxed.mass==2 && relaxed.particles.size()==2);
+  assert(relaxed.particles[1].position.x-relaxed.particles[0].position.x>.2);
+  assert(std::abs(relaxed.particles[0].position.x+relaxed.particles[1].position.x)<1e-12);
+  liquid.gravity={0,0,-9.81};
+  const auto falling=step_fluid_v23({{{0,0,1},{}}},liquid);
+  assert(falling.particles[0].position.z<1);
+  liquid.gravity={};liquid.tool_enabled=true;
+  const auto collision=step_fluid_v23({{{.1,0,0},{}}},liquid);
+  assert(collision.particles[0].position.x>=liquid.tool_radius-1e-12);
+
+  MaterialPatch patch;
+  patch.vertices={{{0,0,0},0},{{1,0,0},0},{{0,1,0},0},{{1,1,0},0}};
+  MaterialPatchFace a,b;
+  a.vertex={0,1,2};a.uv={UV2{0,0},UV2{1,0},UV2{0,1}};
+  b.vertex={2,1,3};b.uv={UV2{2,2},UV2{3,2},UV2{3,3}};
+  patch.faces={a,b};
+  std::vector<Vec3> rest;
+  for(const auto &v:patch.vertices)rest.push_back(v.position);
+  assert(!stage_material_tear_v23(patch,rest,{true,false},.2).separated);
+  patch.vertices[1].position.x=2;
+  auto tear=stage_material_tear_v23(patch,rest,{true,false},.2);
+  assert(tear.separated && tear.boundary_edges==1 && tear.patch.vertices.size()==6);
+  assert(tear.patch.faces[0].vertex[1]!=tear.patch.faces[1].vertex[1]);
+  assert(tear.patch.faces[0].uv[1].u==1 && tear.patch.faces[1].uv[1].u==3);
+  assert(patch.vertices.size()==4);
 }
