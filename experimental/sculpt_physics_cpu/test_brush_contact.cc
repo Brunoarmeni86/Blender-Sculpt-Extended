@@ -63,6 +63,19 @@ int main()
   assert(contact_triangle_scale(tri)==1);
   tri.motion={Vec3{},Vec3{0,0,0.5},Vec3{0,0,-0.5}};
   assert(contact_triangle_scale(tri)==1);
+  // Expansion is not a collapse. The old absolute-coefficient bound
+  // suppressed this recovery even though area increases monotonically.
+  tri.motion={Vec3{},Vec3{4,0,0},Vec3{0,3,0}};
+  assert(contact_triangle_scale(tri)==1);
+  // Both axes reverse, so the final orientation looks positive; the
+  // intermediate trajectory still collapses and must be rejected.
+  tri.motion={Vec3{},Vec3{-3,0,0},Vec3{0,-3,0}};
+  const double transient=contact_triangle_scale(tri);
+  assert(transient>0 && transient<1.0/3.0);
+  for(int i=0;i<=100;++i) {
+    const double t=transient*i/100.0;
+    assert((1-3*t)*(1-3*t)>=0.35-1e-10);
+  }
   tri.position[2]=tri.position[1];
   assert(contact_triangle_scale(tri)==0);
 }
