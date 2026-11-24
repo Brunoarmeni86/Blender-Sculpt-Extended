@@ -133,9 +133,9 @@ static void offset_positions(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
 
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
-  if (physics_v15::freeze_if_mode_changed(object,pbvh)) return;
+  if (physics_v15::freeze_if_mode_changed(object,pbvh,brush)) return;
 
-  if (physics_v15::requested() && pbvh.type()==bke::pbvh::Type::Mesh) {
+  if (physics_v15::requested(object,brush) && pbvh.type()==bke::pbvh::Type::Mesh) {
     const Mesh &mesh=*id_cast<Mesh *>(object.data);
     const MeshAttributeData attributes(mesh);
     const PositionDeformData pos(depsgraph,object,true);
