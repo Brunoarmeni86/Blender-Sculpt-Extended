@@ -24,7 +24,7 @@ struct ClaySurfaceVertex {
   double influence=0.0;
 };
 using ClaySurfaceTriangle=std::array<std::size_t,3>;
-enum class ClaySurfaceAction { Buildup, Push, Gather, Spread, FusionDeposit, Compress, Compact, Press, PressureFlow, HybridFlow, Melt, Smear };
+enum class ClaySurfaceAction { Buildup, Push, Gather, Spread, FusionDeposit, Compress, Compact, Press, PressureFlow, HybridFlow, Melt, Smear, Scrape };
 struct ClaySurfaceDab {
   ClaySurfaceAction action=ClaySurfaceAction::Buildup;
   Vec3 center{};
@@ -41,6 +41,10 @@ struct ClaySurfaceDab {
   bool flow_fusion=false; // V20 Flow: weak relief blending alongside directed transport
   bool extended_material=false;
   bool density_independent=false; // V22 brush-scale transfer chart
+  bool tool_v25=false; // V25 distinct contact and directional fold
+  bool has_tool_plane=false;
+  double tool_plane_height=0.0; // relative to chart center, along chart axis
+  double fold_gain=0.22, detail_retention=0.85, tool_depth=0.07;
   bool shape_transport=false; // V24 native-height remap and distinct contact operators
   bool smooth_proxy=false; // V23 positive quadratic B-spline transfer
   int proxy_cells_per_radius=8; // independent of native mesh density
@@ -294,15 +298,23 @@ inline void shape_clay_transport(
   const double drag=amount*dab.friction;
   const auto smooth=[](double t){t=std::clamp(t,0.0,1.0);return t*t*(3-2*t);};
   const bool press=dab.action==ClaySurfaceAction::Press;
+  const bool scrape=dab.action==ClaySurfaceAction::Scrape;
   const bool compact=dab.action==ClaySurfaceAction::Compact;
   const bool compress=dab.action==ClaySurfaceAction::Compress;
   std::vector<double> rim(w.size(),0.0);
   double removed=0,receiver=0,peak_rim=0;
   for(std::size_t i=0;i<w.size();++i)if(w[i]>0) {
     const auto p=xy[i];const double r=norm(p)/dab.radius;
-    if(press||compact||compress) {
+    if(scrape) {
+      // A unilateral cutter removes only material beyond its plane.
+      const double plane=dab.has_tool_plane?dab.tool_plane_height:-dab.sign*dab.tool_depth*dab.radius;
+      const double penetration=std::max(0.0,dab.sign*(h[i]-plane));
+      delta[i]=-dab.sign*w[i]*std::min(penetration,amount*.60);
+    }
+    else if(press||compact||compress) {
       const double inner=1-smooth((r-.42)/.29);
-      const double depth=press?std::max(0.0,dab.sign*h[i]+.065*dab.radius):amount*.30;
+      const double plane=dab.has_tool_plane?dab.tool_plane_height:-dab.sign*(dab.tool_v25?dab.tool_depth:.065)*dab.radius;
+      const double depth=press?std::max(0.0,dab.sign*(h[i]-plane)):amount*.30;
       delta[i]=-dab.sign*w[i]*inner*std::min(depth,amount*.55);
       rim[i]=w[i]*smooth((r-.50)/.25);
       peak_rim=std::max(peak_rim,rim[i]);
@@ -311,6 +323,16 @@ inline void shape_clay_transport(
     else if(dab.action==ClaySurfaceAction::Push) {
       double z=h[i];
       if(trace(p,dir*(-dab.sign*drag),z))delta[i]=w[i]*(z-h[i]);
+      if(dab.tool_v25 && norm(dir)>0) {
+        // Signed front/back contact lobes: a rounded tool ploughs even
+        // perfectly flat clay. Compact support and final signed budget
+        // avoid a net source. Advection remains a separate component.
+        const double u=dot(p,dir)/dab.radius;
+        const double lateral=dot(p,across)/dab.radius;
+        const double front=std::exp(-std::pow((u-.35)/.24,2)-std::pow(lateral/.45,2));
+        const double rear=std::exp(-std::pow((u+.24)/.32,2)-std::pow(lateral/.45,2));
+        delta[i]+=dab.sign*w[i]*amount*dab.fold_gain*(front-rear)*dab.friction;
+      }
     }
     else if(dab.action==ClaySurfaceAction::Gather) {
       double z=h[i];
@@ -336,7 +358,8 @@ inline void shape_clay_transport(
         if(trace(p,offset,z)){sum+=z;++count;}
       }
       delta[i]=w[i]*(sum/count-h[i])*
-          (1-std::exp(-amount/dab.radius*(smear?5.0:8.0)));
+          (1-std::exp(-amount/dab.radius*(smear?5.0:8.0)))*
+          (dab.tool_v25&&smear?1.0-.7*dab.detail_retention:1.0);
       if(smear) {
         double z=h[i];
         if(trace(p,dir*(-dab.sign*drag*.5),z))
@@ -357,7 +380,7 @@ inline void shape_clay_transport(
     for(std::size_t i=0;i<w.size();++i)
       delta[i]=delta[i]*((1-fraction)+fraction*accepted)+
                accepted*coefficient*rim[i];
-  } else {
+  } else if(!scrape) {
     // Balance both signs without adding an artificial broad offset or
     // changing pinned vertices. A one-sided remap is rejected.
     double positive=0,negative=0;
@@ -398,7 +421,9 @@ inline ClaySurfaceResult solve_clay_surface(
       !interval(dab.friction) || !interval(dab.viscosity) ||
       !interval(dab.cohesion) || !interval(dab.stiffness) ||
       !interval(dab.plasticity) || !interval(dab.volume_preservation) ||
-      !interval(dab.fusion) || dab.proxy_cells_per_radius<4 || dab.proxy_cells_per_radius>16) throw std::invalid_argument("Invalid clay surface dab");
+      !interval(dab.fusion) || !interval(dab.fold_gain) || !interval(dab.detail_retention) ||
+      !interval(dab.tool_depth) || !std::isfinite(dab.tool_plane_height) ||
+      (dab.tool_v25&&!dab.shape_transport) || dab.proxy_cells_per_radius<4 || dab.proxy_cells_per_radius>16) throw std::invalid_argument("Invalid clay surface dab");
   switch(dab.action) {
     case ClaySurfaceAction::Buildup: case ClaySurfaceAction::Push:
     case ClaySurfaceAction::Gather: case ClaySurfaceAction::Spread:
@@ -406,6 +431,9 @@ inline ClaySurfaceResult solve_clay_surface(
     case ClaySurfaceAction::Compact: case ClaySurfaceAction::Press:
     case ClaySurfaceAction::PressureFlow: case ClaySurfaceAction::HybridFlow:
     case ClaySurfaceAction::Melt: case ClaySurfaceAction::Smear: break;
+    case ClaySurfaceAction::Scrape:
+      if(!dab.tool_v25)throw std::invalid_argument("Scrape requires V25 tool path");
+      break;
     default: throw std::invalid_argument("Invalid clay surface action");
   }
   const Vec3 axis=dab.axis/norm(dab.axis);
