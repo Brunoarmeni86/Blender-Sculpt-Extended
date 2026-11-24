@@ -17,6 +17,9 @@
 #  include "physical_brush_intent.hh"
 
 #  include "BKE_mesh.hh"
+#  include "BKE_brush.hh"
+#  include "BKE_colortools.hh"
+#  include "BKE_paint.hh"
 #  include "BKE_mesh_types.hh"
 #  include "DNA_brush_types.h"
 #  include "BKE_multires_sculpt_layers.hh"
@@ -541,12 +544,21 @@ inline bool try_apply_intent(
       return {double(v.x),double(v.y),double(v.z)};
     };
     intent.center=convert(center);
-    intent.normal=convert(normal)*(cache.bstrength<0.0f ? -1.0 : 1.0);
-    intent.stroke_direction=convert(delta)*(cache.bstrength<0.0f ? -1.0 : 1.0);
+    const double sign=std::signbit(cache.bstrength) ? -1.0 : 1.0;
+    intent.normal=convert(normal)*sign;
+    intent.stroke_direction=convert(delta)*sign;
     intent.radius=double(cache.radius);
-    // bstrength is already pressure/strength adjusted by Blender.
-    // Assist is the independent action gain, not an extra native blend.
-    intent.intensity=std::clamp(std::abs(double(cache.bstrength)),0.0,1.0)*
+    // Native bstrength includes brush-specific multipliers and overlap
+    // attenuation. Do NOT use its magnitude on top of arc-length dose.
+    // Reuse the actual tablet strength curve once, with linear artist gain.
+    const Brush &brush=*BKE_paint_brush_for_read(&sd.paint);
+    const double strength=double(BKE_brush_alpha_get(&sd.paint,&brush));
+    const double pressure=BKE_brush_use_alpha_pressure(&brush) ?
+        double(BKE_curvemapping_evaluateF(brush.curve_strength,0,cache.pressure)) : 1.0;
+    if (!std::isfinite(strength) || !std::isfinite(pressure)) {
+      throw std::invalid_argument("Invalid autonomous strength/pressure");
+    }
+    intent.intensity=std::clamp(strength,0.0,1.0)*std::clamp(pressure,0.0,1.0)*
                      cache.xpbd_v16_assist;
     intent.dose=cache.xpbd_v17_intent_started ?
         std::clamp(double(math::length(delta))/std::max(intent.radius,1e-12),0.0,1.0) : 0.15;
