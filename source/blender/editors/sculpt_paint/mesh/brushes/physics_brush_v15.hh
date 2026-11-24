@@ -75,6 +75,18 @@ inline bool compact_requested()
   return value;
 }
 
+// Explicit experimental process overrides. Missing/invalid values keep
+// the selected brush profile. No dynamic UI or physical calibration implied.
+inline double material_override(const char *name, double fallback, double lo, double hi)
+{
+  const char *raw=std::getenv(name);
+  if (!raw || !raw[0]) return fallback;
+  char *end=nullptr;
+  const double value=std::strtod(raw,&end);
+  return end!=raw && *end=='\0' && std::isfinite(value) && value>=lo && value<=hi ?
+             value : fallback;
+}
+
 inline bool requested()
 {
   const char *value=std::getenv("BLENDER_SCULPT_XPBD_OTHER_BRUSHES_V15");
@@ -240,6 +252,17 @@ inline bool try_apply(const Sculpt &sd,
       dab.compliance=profile.target_compliance;
       dab.material=profile.material;
     }
+    // Read the overrides once per process. Artist tuning preserves the
+    // original brush pressure/falloff and changes only the physical solve.
+    static const double bond_override=material_override(
+        "BLENDER_SCULPT_XPBD_V16_BOND_SCALE",-1.0,0.0,1000.0);
+    static const double follow_override=material_override(
+        "BLENDER_SCULPT_XPBD_V16_REST_FOLLOW",-1.0,0.0,1.0);
+    static const double compliance_override=material_override(
+        "BLENDER_SCULPT_XPBD_V16_TARGET_COMPLIANCE",-1.0,0.0,1.0);
+    if (bond_override>=0.0) dab.material.bond_compliance_scale=bond_override;
+    if (follow_override>=0.0) dab.material.native_rest_follow=follow_override;
+    if (compliance_override>=0.0) dab.compliance=compliance_override;
     dab.topology_generation=1;
     std::vector<std::size_t> local_to_global;
     if (state->compact) {
