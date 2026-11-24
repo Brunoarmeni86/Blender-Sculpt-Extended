@@ -93,11 +93,11 @@ inline std::vector<NativeBrushTranslation> plan_drag_contact(
   return goals;
 }
 
-/* Bound the oriented area of every incident triangle throughout the linear
- * dab trajectory. For n(t)=n0+t*n1+t^2*n2, the conservative inequality
- * dot(n(t),unit(n0)) >= |n0|-t*abs(dot(n1,u))-t^2*abs(dot(n2,u))
- * holds at all t in [0,scale]. Common scale preserves linear flux budgets.
- * No claim of global collision detection or correction of pre-existing folds. */
+/* Preserve signed projected area throughout the linear dab trajectory.
+ * Unlike the absolute-coefficient bound, a triangle opening safely does
+ * not suppress motion. Check the endpoint and any interior minimum of
+ * the signed quadratic. Common scale preserves linear flux budgets.
+ * No global collision detection or repair of existing folds. */
 struct ContactTriangle {
   std::array<Vec3,3> position;
   std::array<Vec3,3> motion;
@@ -122,15 +122,26 @@ inline double contact_triangle_scale(const ContactTriangle &tri,double retained=
   if(!std::isfinite(area)) throw std::overflow_error("Contact triangle area overflow");
   if(area<=1e-24) return 0;
   const Vec3 u=n/area;
-  const double l=std::abs(dot(cross(da,b)+cross(a,db),u));
-  const double q=std::abs(dot(cross(da,db),u));
+  // Normalize by initial area: the constraint is dimensionless.
+  const double l=dot(cross(da,b)+cross(a,db),u)/area;
+  const double q=dot(cross(da,db),u)/area;
   if(!std::isfinite(l)||!std::isfinite(q)) throw std::overflow_error("Contact motion overflow");
-  const double budget=(1-retained)*area;
-  if(l+q<=budget) return 1;
+  const double budget=1-retained;
+  const auto safe=[&](double t) {
+    const double endpoint=t*(l+t*q);
+    if(!std::isfinite(endpoint)) return false;
+    double minimum=std::min(0.0,endpoint);
+    if(q>0 && l<0) {
+      const double critical=(-0.5*l)/q;
+      if(critical<t) minimum=std::min(minimum,critical*(l+critical*q));
+    }
+    return minimum>=-budget;
+  };
+  if(safe(1)) return 1;
   double lo=0,hi=1;
   for(int i=0;i<40;++i) {
     const double mid=(lo+hi)*0.5;
-    if(mid*l+mid*mid*q<=budget) lo=mid; else hi=mid;
+    if(safe(mid)) lo=mid; else hi=mid;
   }
   return lo;
 }
