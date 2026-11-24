@@ -63,6 +63,50 @@ int main()
   dab.action=ClaySurfaceAction::Spread;
   auto spread=solve_clay_surface(v,t,dab);
   assert(std::abs(spread.signed_swept_volume)<1e-12);
+  // V20 sequence: operate on the accepted output of the preceding brush,
+  // then repeat contact with overlapping footprints. Non-deposit transport
+  // must conserve the projected volume, and pinned vertices stay fixed.
+  auto layered=initial;
+  ClaySurfaceDab contact=dab;
+  contact.surface_contact=true;
+  contact.yield_slope=0.05;
+  contact.direction={1,0,0};
+  contact.action=ClaySurfaceAction::FusionDeposit;
+  const auto built=solve_clay_surface(layered,t,contact);
+  assert(built.signed_swept_volume>0 && built.transported_volume>0);
+  for(std::size_t i=0;i<layered.size();++i) layered[i].position+=built.displacement[i];
+  for(auto action:{ClaySurfaceAction::Push,ClaySurfaceAction::Compress,
+                   ClaySurfaceAction::Press,ClaySurfaceAction::PressureFlow,
+                   ClaySurfaceAction::HybridFlow,ClaySurfaceAction::Compact}) {
+    contact.action=action;
+    bool moved=false;
+    for(int k=0;k<12;++k) {
+      contact.center.x=0.025*(k%5-2);
+      const auto step=solve_clay_surface(layered,t,contact);
+      if(action==ClaySurfaceAction::Compact) assert(step.signed_swept_volume<=1e-12);
+      else assert(std::abs(step.signed_swept_volume)<1e-10);
+      for(std::size_t i=0;i<layered.size();++i) {
+        const auto d=step.displacement[i];
+        assert(d.x==0 && d.y==0 && std::isfinite(d.z));
+        if(layered[i].influence==0) assert(d.z==0);
+        moved|=std::abs(d.z)>1e-12;
+        layered[i].position+=d;
+      }
+    }
+    assert(moved);
+  }
+  // A flat surface with a graded tip pressure must respond by moving
+  // material from the center toward the rim, rather than moving XY vertices.
+  auto flat=initial;
+  for(auto &p:flat) p.position.z=0;
+  flat[12].influence=1;
+  for(std::size_t i=0;i<flat.size();++i)
+    if(i!=12 && flat[i].influence>0) flat[i].influence=.35;
+  contact.center={};
+  contact.action=ClaySurfaceAction::Compress;
+  const auto pressed=solve_clay_surface(flat,t,contact);
+  assert(pressed.displacement[12].z<0 && pressed.transported_volume>0);
+  assert(std::abs(pressed.signed_swept_volume)<1e-12);
   // A disconnected, oppositely wound sheet must never be modified.
   const auto first=v.size();
   v.push_back({{0,0,-0.05},1});
