@@ -17,19 +17,25 @@ import bpy
 CATALOGS = {
     "XPBD Sculpt": "bb859115-c806-45a9-a523-9558ec3e10a8",
     "Physical Brushes": "8b34ca0e-39e2-44a0-9335-748d3c7d9e2a",
+    "Physical Brushes/Build": "f9c4b635-56c3-4db2-982c-a71b96d282f1",
+    "Physical Brushes/Transport": "a66fa0fb-9bd8-44a4-9911-60ff10ad81e2",
+    "Physical Brushes/Compression": "2ca7a46a-20f6-4cf5-a0dc-7adfa89903f2",
+    "Physical Brushes/Thermal": "383a78b3-64ad-4ed4-8fbe-a395b12b618f",
 }
-# Name, Essentials base, mode, action, preview, assist, spread.
+# Name, Essentials base, mode, action, preview, assist, spread, catalog.
+# Legacy Directional/Pressure/Hybrid Flow remain in RNA for older assets.
+# No placeholder assets for unimplemented volumetric fluid or fracture.
 SPECS = (
-    ("Clay XPBD", "Clay", "ASSISTED", None, "clay", .65, .55),
-    ("Clay Strips XPBD", "Clay Strips", "ASSISTED", None, "strips", .65, .55),
-    ("Physical Deposit", "Clay", "MATERIAL", "AUTONOMOUS_DEPOSIT", "deposit", .8, .55),
-    ("Physical Flow", "Clay Strips", "MATERIAL", "FLOW", "flow", 1., 1.),
-    ("Physical Directional Flow", "Clay Strips", "MATERIAL", "AUTONOMOUS_FLOW", "direction", .8, .55),
-    ("Physical Compress", "Clay Strips", "MATERIAL", "AUTONOMOUS_COMPRESS", "compress", .75, .55),
-    ("Physical Compact", "Clay", "MATERIAL", "AUTONOMOUS_COMPACT", "compact", .75, .45),
-    ("Physical Press", "Clay Strips", "MATERIAL", "AUTONOMOUS_PRESS", "press", .75, .45),
-    ("Physical Pressure Flow", "Clay Strips", "MATERIAL", "AUTONOMOUS_PRESSURE_FLOW", "pressure", .75, .55),
-    ("Physical Hybrid Flow", "Clay Strips", "MATERIAL", "AUTONOMOUS_HYBRID_FLOW", "hybrid", .75, .55),
+    ("Clay XPBD", "Clay", "ASSISTED", None, "clay", .65, .55, "XPBD Sculpt"),
+    ("Clay Strips XPBD", "Clay Strips", "ASSISTED", None, "strips", .65, .55, "XPBD Sculpt"),
+    ("Physical Deposit", "Clay", "MATERIAL", "AUTONOMOUS_DEPOSIT", "deposit", .8, .55, "Physical Brushes/Build"),
+    ("Physical Flow", "Clay Strips", "MATERIAL", "FLOW", "flow", 1., 1., "Physical Brushes/Transport"),
+    ("Physical Gather", "Clay", "MATERIAL", "AUTONOMOUS_GATHER", "gather", .85, .75, "Physical Brushes/Transport"),
+    ("Physical Smear", "Clay Strips", "MATERIAL", "AUTONOMOUS_SMEAR", "smear", .85, .85, "Physical Brushes/Transport"),
+    ("Physical Compress", "Clay Strips", "MATERIAL", "AUTONOMOUS_COMPRESS", "compress", .75, .55, "Physical Brushes/Compression"),
+    ("Physical Compact", "Clay", "MATERIAL", "AUTONOMOUS_COMPACT", "compact", .75, .45, "Physical Brushes/Compression"),
+    ("Physical Press", "Clay Strips", "MATERIAL", "AUTONOMOUS_PRESS", "press", .75, .45, "Physical Brushes/Compression"),
+    ("Physical Melt (Surface)", "Clay", "MATERIAL", "AUTONOMOUS_MELT", "melt", 1., 1., "Physical Brushes/Thermal"),
 )
 
 def preview_height(kind, x, y):
@@ -48,6 +54,13 @@ def preview_height(kind, x, y):
     if kind == "deposit":
         # Three large, overlapping additive lumps.
         return .57*g(-.48,0,.35,.41)+.66*g(0,.05,.36,.43)+.58*g(.48,-.02,.36,.38)
+    if kind == "gather":
+        r = math.hypot(x,y)
+        return .68*g(0,0,.30,.30)-.17*math.exp(-((r-.53)/.16)**2)
+    if kind == "smear":
+        return .30*end*ridge(0,.45,v)+.35*g(-.30,.05,.33,.32)-.10*g(.5,-.35,.34,.18)
+    if kind == "melt":
+        return .23*g(-.34,.10,.55,.42)+.16*g(.30,-.20,.60,.37)
     if kind == "direction":
         return .54*end*ridge(0,.19,v)-.16*end*ridge(.30,.16,v)
     if kind == "flow":
@@ -92,7 +105,12 @@ def preview_mesh(kind):
             t = 2*math.pi*i/sides
             c, sn = math.cos(t), math.sin(t)
             x, y = .98*r*c, .72*r*sn
-            if kind in {"flow","direction","hybrid"}:
+            if kind == "melt":
+                x *= 1.13
+                y *= .90+.20*math.cos(3*t)
+            elif kind == "gather":
+                x,y=.83*r*c,.83*r*sn
+            elif kind in {"flow","direction","hybrid","smear"}:
                 x += .48*r*max(0.,c)**8
                 y += .24*r*max(0.,c)**5
                 y *= .72+.28*max(0.,c)
@@ -240,6 +258,10 @@ def main():
         raise RuntimeError(
             f"Experimental Brush RNA unavailable in {bpy.app.binary_path}: "
             + ", ".join(missing))
+    actions = set(props["sculpt_physics_clay_behavior"].enum_items.keys())
+    missing_actions = sorted({spec[3] for spec in SPECS if spec[3]}-actions)
+    if missing_actions:
+        raise RuntimeError("Install V23 build first; missing actions: "+", ".join(missing_actions))
     print("[BSE Physical Brushes] Brush RNA verified", flush=True)
     output = Path(args.output).expanduser().resolve()
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
@@ -262,7 +284,7 @@ def main():
             raise RuntimeError(f"Failed to load Essentials brush: {name}")
     print("[BSE Physical Brushes] Loaded base brushes: "+", ".join(names), flush=True)
     assets = set()
-    for name, base, mode, action, icon, assist, spread in SPECS:
+    for name, base, mode, action, icon, assist, spread, category in SPECS:
         brush = bases[base].copy()
         if brush.asset_data:
             brush.asset_clear()
@@ -282,7 +304,6 @@ def main():
         if mode == "MATERIAL":
             brush.stroke_method = "SPACE"
         brush.asset_mark()
-        category = "XPBD Sculpt" if mode=="ASSISTED" else "Physical Brushes"
         brush.asset_data.catalog_id = CATALOGS[category]
         brush.asset_data.description = (
             "Native sculpt target with XPBD assistance" if mode=="ASSISTED" else
@@ -305,7 +326,7 @@ def main():
                 raise RuntimeError("Written library is missing brush assets")
         os.replace(temp,target)
         (output/"blender_assets.cats.txt").write_text(
-            "VERSION 1\n\n"+"".join(f"{cid}:{name}:{name}\n" for name,cid in CATALOGS.items()),
+            "VERSION 1\n\n"+"".join(f"{cid}:{name}:{name.rsplit(chr(47),1)[-1]}\n" for name,cid in CATALOGS.items()),
             encoding="utf-8")
     finally:
         if temp.exists():
