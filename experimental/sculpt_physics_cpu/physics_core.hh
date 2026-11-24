@@ -154,6 +154,13 @@ class World {
 
   const std::vector<Particle> &particles() const;
   const std::vector<Bond> &bonds() const;
+  /* Read-only authoritative incidence: stable bond insertion order. */
+  const std::vector<std::size_t> &incident_bond_ids(std::size_t particle) const
+  {
+    return particle_bond_ids_.at(particle);
+  }
+  /* Reserve bulk topology storage before constructing a rest proxy. */
+  void reserve_topology(std::size_t particles, std::size_t bonds);
   const std::vector<std::size_t> &dirty_particles() const;
 
  private:
