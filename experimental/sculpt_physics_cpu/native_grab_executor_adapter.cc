@@ -390,6 +390,12 @@ void validate_native_brush_dab(const NativeBrushDab &dab)
       throw std::invalid_argument("Unsupported native physical brush kind");
   }
   validate_material(dab.material);
+  if (dab.stability.enabled) {
+    validate_material_stability(dab.stability);
+    if (dab.assist!=1.0 || dab.clay_material) {
+      throw std::invalid_argument("V18 stability requires full independent targets");
+    }
+  }
   if (!std::isfinite(dab.clay_yield) || dab.clay_yield<0.0 || dab.clay_yield>1.0 ||
       !std::isfinite(dab.clay_plasticity) || dab.clay_plasticity<0.0 || dab.clay_plasticity>1.0 ||
       !std::isfinite(dab.clay_spread) || dab.clay_spread<0.0 || dab.clay_spread>1.0 ||
@@ -524,6 +530,27 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
   }
   if (goals.size()!=active.size()) throw std::logic_error("Mobile island vertex lacks native target");
   if (goals.empty()) return {};
+  if (dab.stability.enabled) {
+    std::vector<Vec3> motion(n);
+    for (const auto &g : goals) {
+      const auto i=std::size_t(std::lower_bound(island.global_ids.begin(),
+          island.global_ids.end(),g.global_index)-island.global_ids.begin());
+      motion[i]=g.goal-island.positions[i];
+    }
+    stabilize_surface_motion(island,motion,dab.stability,true);
+    for (auto &g : goals) {
+      const auto i=std::size_t(std::lower_bound(island.global_ids.begin(),
+          island.global_ids.end(),g.global_index)-island.global_ids.begin());
+      g.goal=island.positions[i]+motion[i];
+    }
+    // Use the current geometry as rest for each independent increment.
+    // This avoids unwanted return to the stroke-start shape. It is not
+    // a persistent plastic rest state and stores no hidden mesh data.
+    for (auto &b : island.bonds) {
+      const Vec3 d=island.positions[b.b]-island.positions[b.a];
+      b.rest_length=std::max(1e-12,std::hypot(d.x,d.y,d.z));
+    }
+  }
   const bool clay=dab.assist>0.0 && dab.clay_material &&
       (dab.kind==NativeSculptBrushKind::Clay || dab.kind==NativeSculptBrushKind::ClayStrips);
   const auto native_goals=clay && dab.assist<1.0 ? goals : std::vector<ExecutorTarget>{};
@@ -585,6 +612,32 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
     }
     // Acknowledge the actual blended editor positions, not the raw solve.
     executor->upload_dirty(blended);
+  }
+  if (dab.stability.enabled) {
+    // XPBD can modify the safe input goals. Enforce the same incremental
+    // edge bound on the final solved displacement before staging writes.
+    const auto solved=executor->stage_incremental(0.0);
+    std::vector<Vec3> motion(n);
+    for (const auto &w : solved.writes) {
+      const auto it=std::lower_bound(island.global_ids.begin(),island.global_ids.end(),
+                                     w.global_index);
+      if (it==island.global_ids.end() || *it!=w.global_index) {
+        throw std::logic_error("Unknown V18 solved vertex");
+      }
+      const auto i=std::size_t(it-island.global_ids.begin());
+      motion[i]=w.position-island.positions[i];
+    }
+    stabilize_surface_motion(island,motion,dab.stability,false);
+    std::vector<ExecutorEdit> stable;
+    stable.reserve(goals.size());
+    for (const auto &g : goals) {
+      const auto i=std::size_t(std::lower_bound(island.global_ids.begin(),
+          island.global_ids.end(),g.global_index)-island.global_ids.begin());
+      const Vec3 p=island.positions[i]+motion[i];
+      if (!finite(p)) throw std::overflow_error("Invalid V18 stable write");
+      stable.push_back({g.global_index,p});
+    }
+    executor->upload_dirty(stable);
   }
   ExecutorWriteBatch batch=executor->stage_incremental();
   for (const GpuProxyChange &write:batch.writes) {
