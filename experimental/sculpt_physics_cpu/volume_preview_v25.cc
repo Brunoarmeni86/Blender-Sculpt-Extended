@@ -53,7 +53,7 @@ static void write_obj(const VolumeSurfaceV25 &mesh,const std::string &path){
   }catch(...){std::filesystem::remove(temp);throw;}
 }
 int main(int argc,char **argv){
-  if(argc!=9){
+  if(argc!=9&&argc!=10){
     std::cerr<<"Usage: volume_preview_v25 input.obj output.obj pbf|mpm spacing frames frame_dt softening gravity_z\n";
     return 2;
   }
