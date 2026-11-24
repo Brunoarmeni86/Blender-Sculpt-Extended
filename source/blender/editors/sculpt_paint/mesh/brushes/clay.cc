@@ -201,6 +201,8 @@ void do_clay_brush(const Depsgraph &depsgraph,
     const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
     MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
     std::vector<sculpt_physics::NativeBrushTranslation> native;
+    std::vector<sculpt_physics::PhysicalBrushIntentSample> intent_samples;
+    const bool autonomous=physics_v15::autonomous_requested(*ss.cache);
     Vector<float> factors;
     Vector<float> distances;
     Vector<float3> translations;
@@ -216,6 +218,10 @@ void do_clay_brush(const Depsgraph &depsgraph,
                                        node,
                                        factors,
                                        distances);
+      if (autonomous) {
+        physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors);
+        return;
+      }
       translations.resize(verts.size());
       // Reuse Clay's OWN plane projection, strength and final brush factors.
       // The physical executor receives finished goals and never reapplies
@@ -231,7 +237,11 @@ void do_clay_brush(const Depsgraph &depsgraph,
                           {double(value.x),double(value.y),double(value.z)}});
       }
     });
-    if (physics_v15::try_apply(sd,object,node_mask,pos,
+    if (autonomous ?
+        physics_v15::try_apply_intent(sd,object,node_mask,pos,
+                                    sculpt_physics::NativeSculptBrushKind::Clay,
+                                    intent_samples,area_no) :
+        physics_v15::try_apply(sd,object,node_mask,pos,
                               sculpt_physics::NativeSculptBrushKind::Clay,native)) {
       return;
     }
