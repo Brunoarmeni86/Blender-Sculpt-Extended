@@ -13,6 +13,7 @@
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
 
 #  include "native_grab_executor_adapter.hh"
+#  include "compact_brush_topology.hh"
 
 #  include "BKE_mesh.hh"
 #  include "BKE_multires_sculpt_layers.hh"
@@ -40,6 +41,10 @@ namespace blender::ed::sculpt_paint::brushes::physics_v15 {
 struct NativePhysicsStroke {
   sculpt_physics::World rest_world;
   std::unique_ptr<sculpt_physics::GpuTopologyBondIndex> topology;
+  std::unique_ptr<sculpt_physics::CompactBrushTopology> compact;
+  std::unordered_map<std::size_t, sculpt_physics::Vec3> original_positions;
+  const Mesh *mesh_identity = nullptr;
+  const int2 *edge_data = nullptr;
   int verts_num = 0;
   int edges_num = 0;
 };
@@ -57,6 +62,15 @@ inline double assist_influence()
     if (end==raw || *end!='\0' || !std::isfinite(result) ||
         result<0.0 || result>1.0) return 0.0;
     return result;
+  }();
+  return value;
+}
+
+inline bool compact_requested()
+{
+  static const bool value=[]() {
+    const char *raw=std::getenv("BLENDER_SCULPT_XPBD_V16_COMPACT");
+    return raw && raw[0]=='1' && raw[1]=='\0';
   }();
   return value;
 }
@@ -109,7 +123,10 @@ inline bool try_apply(const Sculpt &sd,
     return false;
   }
   const Mesh &mesh=*id_cast<Mesh *>(object.data);
-  if (mesh.verts_num<=0 || position_data.eval.size()!=mesh.verts_num) return false;
+  if (mesh.verts_num<=0 || position_data.eval.size()!=mesh.verts_num) {
+    cache.xpbd_v15_failed=true;
+    return cache.xpbd_v15_active_logged;
+  }
 
   MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
   const Span<float3> current=position_data.eval;
@@ -122,37 +139,11 @@ inline bool try_apply(const Sculpt &sd,
   std::shared_ptr<NativePhysicsStroke> state;
   try {
     state=std::static_pointer_cast<NativePhysicsStroke>(cache.xpbd_v15_state);
+    const Span<int2> edges=mesh.edges();
     if (state && (state->verts_num!=mesh.verts_num ||
-                  state->edges_num!=mesh.edges_num)) {
+                  state->edges_num!=mesh.edges_num ||
+                  state->mesh_identity!=&mesh || state->edge_data!=edges.data())) {
       throw std::logic_error("V15 topology count changed during a native stroke");
-    }
-    if (!state) {
-      state=std::make_shared<NativePhysicsStroke>();
-      state->verts_num=mesh.verts_num;
-      state->edges_num=mesh.edges_num;
-      state->rest_world.reserve_topology(std::size_t(mesh.verts_num),
-                                         std::size_t(mesh.edges_num));
-      const MeshAttributeData attributes(mesh);
-      for (const int i : current.index_range()) {
-        const float3 p=current[i];
-        const bool hidden=!attributes.hide_vert.is_empty() && attributes.hide_vert[i];
-        const float mask=attributes.mask.is_empty() ? 0.0f : attributes.mask[i];
-        // Final native translation already contains mask attenuation. Only
-        // pin fully masked/hidden vertices; do not apply partial mask twice.
-        const double inv=hidden || mask>=0.999f ? 0.0 : 1.0;
-        state->rest_world.add_particle({double(p.x),double(p.y),double(p.z)},inv);
-      }
-      for (const int2 edge : mesh.edges()) {
-        try {
-          state->rest_world.add_bond(
-              std::size_t(edge[0]),std::size_t(edge[1]),1.0e-5);
-        }
-        catch (const std::invalid_argument &) {
-          // Degenerate edges cannot define physical rest-length constraints.
-        }
-      }
-      state->topology=std::make_unique<sculpt_physics::GpuTopologyBondIndex>(
-          state->rest_world,1);
     }
 
     // PBVH boundary nodes may repeat a global vertex. Prefer the largest
@@ -178,7 +169,55 @@ inline bool try_apply(const Sculpt &sd,
     }
     std::vector<sculpt_physics::NativeBrushTranslation> samples;
     samples.reserve(dedup.size());
-    for (const auto &item : dedup) samples.push_back({item.first,item.second});
+    for (const auto &item : dedup) {
+      const auto &v=item.second;
+      if (std::hypot(v.x,v.y,v.z)>1.0e-15) samples.push_back({item.first,v});
+    }
+    if (samples.empty()) return true;
+    const auto edge_at=[&](std::size_t id) {
+      const int2 edge=edges[int(id)];
+      return std::pair<std::size_t,std::size_t>{std::size_t(edge[0]),std::size_t(edge[1])};
+    };
+    const auto current_position=[&](std::size_t id)->sculpt_physics::Vec3 {
+      if (id>=std::size_t(current.size())) throw std::out_of_range("V15 stale vertex ID");
+      const float3 p=current[int(id)];
+      return {double(p.x),double(p.y),double(p.z)};
+    };
+    const MeshAttributeData attributes(mesh);
+    const auto inverse_mass=[&](std::size_t id) {
+      const int i=int(id);
+      const bool hidden=!attributes.hide_vert.is_empty() && attributes.hide_vert[i];
+      const float mask=attributes.mask.is_empty() ? 0.0f : attributes.mask[i];
+      return hidden || mask>=0.999f ? 0.0 : 1.0;
+    };
+    if (!state) {
+      state=std::make_shared<NativePhysicsStroke>();
+      state->verts_num=mesh.verts_num;
+      state->edges_num=mesh.edges_num;
+      state->mesh_identity=&mesh;
+      state->edge_data=edges.data();
+      if (compact_requested()) {
+        state->compact=std::make_unique<sculpt_physics::CompactBrushTopology>(
+            std::size_t(mesh.verts_num),std::size_t(mesh.edges_num),edge_at);
+      }
+      else {
+        state->rest_world.reserve_topology(std::size_t(mesh.verts_num),
+                                           std::size_t(mesh.edges_num));
+        for (const int i : current.index_range()) {
+          state->rest_world.add_particle(current_position(i),inverse_mass(i));
+        }
+        for (const int2 edge : edges) {
+          try {
+            state->rest_world.add_bond(std::size_t(edge[0]),std::size_t(edge[1]),1.0e-5);
+          }
+          catch (const std::invalid_argument &) {
+            // Degenerate edges cannot define physical rest-length constraints.
+          }
+        }
+        state->topology=std::make_unique<sculpt_physics::GpuTopologyBondIndex>(
+            state->rest_world,1);
+      }
+    }
     sculpt_physics::NativeBrushDab dab;
     dab.kind=kind;
     dab.assist=assist_influence();
@@ -194,13 +233,64 @@ inline bool try_apply(const Sculpt &sd,
       dab.material=profile.material;
     }
     dab.topology_generation=1;
-    result=sculpt_physics::prepare_cpu_native_brush_dab(
-        state->rest_world,*state->topology,samples,
-        [&](const std::size_t id)->sculpt_physics::Vec3 {
-          if (id>=std::size_t(current.size())) throw std::out_of_range("V15 stale vertex ID");
-          const float3 p=current[int(id)];
-          return {double(p.x),double(p.y),double(p.z)};
-        },dab);
+    std::vector<std::size_t> local_to_global;
+    if (state->compact) {
+      // The compact path stores connectivity only, and snapshots original
+      // coordinates on first actual write. Untouched vertices retain their
+      // stroke-start coordinates. No full-mesh physics World is allocated.
+      std::vector<std::size_t> active;
+      active.reserve(samples.size());
+      for (const auto &sample : samples) {
+        if (inverse_mass(sample.global_index)>0.0) active.push_back(sample.global_index);
+      }
+      std::sort(active.begin(),active.end());
+      if (active.empty()) {
+        cache.xpbd_v15_state=state;
+        return true;
+      }
+      auto region=state->compact->gather(active,edge_at);
+      local_to_global=std::move(region.vertices);
+      const auto local_id=[&](std::size_t global) {
+        const auto it=std::lower_bound(local_to_global.begin(),local_to_global.end(),global);
+        if (it==local_to_global.end() || *it!=global) {
+          throw std::logic_error("Missing compact brush vertex");
+        }
+        return std::size_t(it-local_to_global.begin());
+      };
+      sculpt_physics::World local_world;
+      local_world.reserve_topology(local_to_global.size(),region.edges.size());
+      for (const std::size_t id : local_to_global) {
+        const auto original=state->original_positions.find(id);
+        const auto rest=original==state->original_positions.end() ?
+                            current_position(id) : original->second;
+        local_world.add_particle(rest,std::binary_search(active.begin(),active.end(),id) ?
+                                         inverse_mass(id) : 0.0);
+      }
+      for (const auto edge_id : region.edges) {
+        const auto [a,b]=edge_at(edge_id);
+        try {
+          local_world.add_bond(local_id(a),local_id(b),1.0e-5);
+        }
+        catch (const std::invalid_argument &) {
+          // Same degenerate-rest-edge policy as the full World reference.
+        }
+      }
+      std::vector<sculpt_physics::NativeBrushTranslation> local_samples;
+      local_samples.reserve(active.size());
+      for (const auto &sample : samples) {
+        if (std::binary_search(active.begin(),active.end(),sample.global_index)) {
+          local_samples.push_back({local_id(sample.global_index),sample.translation});
+        }
+      }
+      const sculpt_physics::GpuTopologyBondIndex local_topology(local_world,1);
+      result=sculpt_physics::prepare_cpu_native_brush_dab(
+          local_world,local_topology,local_samples,
+          [&](std::size_t id) { return current_position(local_to_global.at(id)); },dab);
+    }
+    else {
+      result=sculpt_physics::prepare_cpu_native_brush_dab(
+          state->rest_world,*state->topology,samples,current_position,dab);
+    }
 
     // True zero-impact dab: don't traverse, clip or rewrite every PBVH
     // node with zero translations. Blender's ordinary smoothing/plane
@@ -217,7 +307,9 @@ inline bool try_apply(const Sculpt &sd,
     std::unordered_map<std::size_t,float3> changes;
     changes.reserve(result.writes().size());
     for (const auto &w : result.writes()) {
-      const float3 p=current[int(w.global_index)];
+      const std::size_t global_id=state->compact ? local_to_global.at(w.global_index) :
+                                                 w.global_index;
+      const float3 p=current[int(global_id)];
       const float3 displacement{
           float(w.position.x-double(p.x)),
           float(w.position.y-double(p.y)),
@@ -227,7 +319,7 @@ inline bool try_apply(const Sculpt &sd,
           !std::isfinite(displacement.z)) {
         throw std::runtime_error("V15 physics displacement out of float32 range");
       }
-      changes.emplace(w.global_index,displacement);
+      changes.emplace(global_id,displacement);
     }
 
     std::unordered_set<std::size_t> covered;
@@ -262,6 +354,20 @@ inline bool try_apply(const Sculpt &sd,
     if (covered.size()!=changes.size()) {
       throw std::logic_error("V15 physics writes outside native PBVH Undo nodes");
     }
+    if (state->compact) {
+      // Record only vertices actually about to move, before any editor write.
+      // This also covers tiny corrections produced by native clipping.
+      for (const PreparedNode &node : editor_writes) {
+        const Span<int> verts=nodes[node.id].verts();
+        for (const int i : verts.index_range()) {
+          const float3 t=node.translations[i];
+          if (t.x!=0.0f || t.y!=0.0f || t.z!=0.0f) {
+            const std::size_t id=std::size_t(verts[i]);
+            state->original_positions.try_emplace(id,current_position(id));
+          }
+        }
+      }
+    }
   }
   catch (const std::exception &ex) {
     std::fprintf(stderr,"[V15 physical brush] disabled before write: %s\n",ex.what());
@@ -283,7 +389,8 @@ inline bool try_apply(const Sculpt &sd,
   result.finish_editor_success();
   cache.xpbd_v15_state=state;
   if (!cache.xpbd_v15_active_logged) {
-    std::fprintf(stderr,"[V15 physical brush] CPU XPBD translation preview ACTIVE\n");
+    std::fprintf(stderr,"[V15 physical brush] CPU XPBD %s preview ACTIVE\n",
+                 state->compact ? "compact" : "reference");
     cache.xpbd_v15_active_logged=true;
   }
   return true;
