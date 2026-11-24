@@ -329,7 +329,7 @@ struct Brush {
   float sculpt_physics_yield = 0.035f;
   float sculpt_physics_plasticity = 0.65f;
   float sculpt_physics_spread = 0.55f;
-  /** 0=V2 reference, 1=Deposit, 2=Compress, 3=Flow. */
+  /** 0=V2 reference, 1–3=V3 Deposit/Compress/Flow, 4–6=V17 independent equivalents. */
   int sculpt_physics_clay_behavior = 1;
 
 
