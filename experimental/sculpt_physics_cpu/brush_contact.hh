@@ -146,4 +146,70 @@ inline double contact_triangle_scale(const ContactTriangle &tri,double retained=
   return lo;
 }
 
+
+/* Local motion limiter. Only existing writable targets may change.
+ * A bounded Gauss-Seidel pass reduces the motion of the three vertices
+ * of each unsafe triangle; shared vertices may invalidate another face,
+ * so finish with a common safety factor on the resulting patch.
+ * The conservative clay flux path must continue using a uniform factor
+ * alone: these unequal weights do not preserve its volume budget. */
+struct LocalContactResult {
+  double minimum_scale=1.0;
+  double final_scale=1.0;
+  std::size_t limited_vertices=0;
+};
+
+inline LocalContactResult limit_local_contact(
+    const std::vector<Vec3> &positions,
+    const std::vector<std::array<std::size_t,3>> &triangles,
+    std::vector<Vec3> &motion,
+    bool uniform_only=false)
+{
+  if(positions.size()!=motion.size())
+    throw std::invalid_argument("Contact position/motion size mismatch");
+  for(const auto &t:triangles)
+    for(auto v:t) if(v>=positions.size())
+      throw std::out_of_range("Contact triangle index");
+  std::vector<double> weights(motion.size(),1.0);
+  const auto triangle=[&](const auto &ids) {
+    ContactTriangle tri{};
+    for(int j=0;j<3;++j) {
+      const auto i=ids[j];
+      tri.position[j]=positions[i];
+      tri.motion[j]=motion[i]*weights[i];
+    }
+    return tri;
+  };
+  if(!uniform_only) {
+    for(int pass=0;pass<6;++pass) {
+      bool changed=false;
+      for(const auto &t:triangles) {
+        const double scale=contact_triangle_scale(triangle(t));
+        if(scale>=1) continue;
+        // Leave numerical headroom for shared-face and float32 writeback.
+        for(auto i:t) if(weights[i]>0 &&
+            std::hypot(motion[i].x,motion[i].y,motion[i].z)>0) {
+          weights[i]*=scale*0.98;
+          changed=true;
+        }
+      }
+      if(!changed) break;
+    }
+  }
+  LocalContactResult out;
+  for(const auto &t:triangles)
+    out.final_scale=std::min(out.final_scale,contact_triangle_scale(triangle(t)));
+  // Account for every incident triangle before committing any change.
+  if(out.final_scale<1) out.final_scale*=0.98;
+  for(std::size_t i=0;i<motion.size();++i) {
+    const double scale=weights[i]*out.final_scale;
+    if(std::hypot(motion[i].x,motion[i].y,motion[i].z)>0) {
+      if(scale<0.999999) ++out.limited_vertices;
+      out.minimum_scale=std::min(out.minimum_scale,scale);
+    }
+    motion[i]=motion[i]*scale;
+  }
+  return out;
+}
+
 } // namespace sculpt_physics
