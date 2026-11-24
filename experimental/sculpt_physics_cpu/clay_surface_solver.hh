@@ -38,6 +38,11 @@ struct ClaySurfaceDab {
   double relative_slope_limit=0.35;
   bool surface_contact=false; // V20: recovery-friendly slope bound, native footprint
   bool flow_fusion=false; // V20 Flow: weak relief blending alongside directed transport
+  bool extended_material=false;
+  // Dimensionless artist controls, not calibrated rheological constants.
+  double friction=0.7, viscosity=0.4, cohesion=0.6, stiffness=0.5;
+  double plasticity=0.85, volume_preservation=0.9;
+  double fusion=0.5;
 
 };
 struct ClaySurfaceResult {
@@ -65,7 +70,11 @@ inline ClaySurfaceResult solve_clay_surface(
       !interval(dab.dose) || !interval(dab.intensity) || !interval(dab.mobility) ||
       (dab.sign!=1 && dab.sign!=-1) ||
       !interval(dab.yield_slope) || !interval(dab.relative_slope_limit) ||
-      dab.relative_slope_limit==0) throw std::invalid_argument("Invalid clay surface dab");
+      dab.relative_slope_limit==0 ||
+      !interval(dab.friction) || !interval(dab.viscosity) ||
+      !interval(dab.cohesion) || !interval(dab.stiffness) ||
+      !interval(dab.plasticity) || !interval(dab.volume_preservation) ||
+      !interval(dab.fusion)) throw std::invalid_argument("Invalid clay surface dab");
   switch(dab.action) {
     case ClaySurfaceAction::Buildup: case ClaySurfaceAction::Push:
     case ClaySurfaceAction::Gather: case ClaySurfaceAction::Spread:
@@ -154,6 +163,12 @@ inline ClaySurfaceResult solve_clay_surface(
   // Does not represent physical mass below the visible surface.
   floor-=0.12*dab.radius;
   const double travel=dab.radius*dab.dose*dab.intensity;
+  const double mobility=dab.mobility*(dab.extended_material ?
+      (0.25+0.75*dab.plasticity)/(1.0+2.0*dab.viscosity) : 1.0);
+  const double yield=dab.yield_slope+(dab.extended_material ?
+      0.10*dab.cohesion+0.08*dab.stiffness : 0.0);
+  const double drag_gain=dab.extended_material?dab.friction:1.0;
+  const double pressure_gain=dab.extended_material?(1.0-0.6*dab.stiffness):1.0;
   if(!std::isfinite(travel)) throw std::overflow_error("Invalid clay travel");
   if(dab.action==ClaySurfaceAction::Buildup) {
     for(std::size_t i=0;i<n;++i) if(w[i]>0)
@@ -178,7 +193,8 @@ inline ClaySurfaceResult solve_clay_surface(
       if(compact) {
         // Compressible preset: unlike volume-preserving Compress, allow
         // a bounded loss of projected volume. Ctrl reverses the sink.
-        delta[i]=-dab.sign*std::min(travel*0.035*w[i],
+        delta[i]=-dab.sign*(dab.extended_material?1.0-dab.volume_preservation:1.0)*
+            std::min(travel*0.035*w[i],
                                   0.15*std::max(0.0,h[i]-floor));
       }
       volume[i]=std::max(0.0,h[i]+delta[i]-floor)*out.projected_area[i];
@@ -189,7 +205,7 @@ inline ClaySurfaceResult solve_clay_surface(
                           dab.action==ClaySurfaceAction::HybridFlow ? 0.12 : 0.10;
         const double penetration=dab.action==ClaySurfaceAction::Press ?
             std::max(0.0,h[i]+0.08*dab.radius) : gain*dab.radius;
-        potential[i]+=dab.sign*penetration*w[i];
+        potential[i]+=dab.sign*penetration*w[i]*pressure_gain;
       }
     }
     for(const auto &e:edges) {
@@ -206,29 +222,29 @@ inline ClaySurfaceResult solve_clay_surface(
       double f=0;
       if(dab.action==ClaySurfaceAction::Spread || fusion || contact) {
         const double slope=potential[a]-potential[b];
-        const double excess=std::max(0.0,std::abs(slope)-dab.yield_slope*len);
+        const double excess=std::max(0.0,std::abs(slope)-yield*len);
         // Conductance bounded by local spacing for a stable explicit
         // transport step. Fusion is weaker than the dedicated pressure
         // actions and does not apply an ordinary position Laplacian.
-        const double rate=fusion?0.35:1.0;
+        const double rate=fusion?(dab.extended_material?dab.fusion:0.35):1.0;
         f=std::copysign(excess,slope)*width*
-             std::min(travel*dab.mobility*envelope*rate,len*(dab.surface_contact?0.20:0.25));
+             std::min(travel*mobility*envelope*rate,len*(dab.surface_contact?0.20:0.25));
         if(dab.action==ClaySurfaceAction::HybridFlow) {
           const double align=std::clamp(dot(unit(tangent(dab.direction))*dab.sign,line/len),-1.0,1.0);
           const double thickness=align>=0?volume[a]/aa:volume[b]/ab;
-          f+=0.45*align*thickness*width*travel*dab.mobility*envelope;
+          f+=0.45*align*thickness*width*travel*mobility*envelope*drag_gain;
         }
       } else {
         const Vec3 field=dab.action==ClaySurfaceAction::Gather ?
           unit((xy[a]+xy[b])*(-0.5))*dab.sign : unit(tangent(dab.direction))*dab.sign;
         const double alignment=std::clamp(dot(field,line/len),-1.0,1.0);
         const double thickness=alignment>=0 ? volume[a]/aa:volume[b]/ab;
-        f=alignment*thickness*width*travel*dab.mobility*envelope;
+        f=alignment*thickness*width*travel*mobility*envelope*drag_gain;
         if(dab.surface_contact && dab.flow_fusion && dab.action==ClaySurfaceAction::Push) {
           const double dh=h[a]-h[b];
-          const double excess=std::max(0.0,std::abs(dh)-dab.yield_slope*len);
+          const double excess=std::max(0.0,std::abs(dh)-yield*len);
           f+=std::copysign(excess,dh)*width*
-              std::min(travel*dab.mobility*envelope*0.20,len*0.10);
+              std::min(travel*mobility*envelope*(dab.extended_material?0.4*dab.fusion:0.20),len*0.10);
         }
       }
       if(!std::isfinite(f)) throw std::overflow_error("Clay surface flux overflow");
@@ -238,7 +254,7 @@ inline ClaySurfaceResult solve_clay_surface(
     }
     for(const auto &f:flux) {
       if(!std::isfinite(outgoing[f.a])) throw std::overflow_error("Clay outgoing overflow");
-      const double cap=volume[f.a]*0.25;
+      const double cap=volume[f.a]*(dab.extended_material?0.12:0.25);
       const double scale=outgoing[f.a]>cap?cap/outgoing[f.a]:1.0;
       const double v=f.v*scale;
       sent[f.a]+=v;received[f.b]+=v;out.transported_volume+=v;
