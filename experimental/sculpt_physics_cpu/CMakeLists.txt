@@ -298,3 +298,13 @@ elseif(MSVC)
   target_compile_options(test_constraint_batches PRIVATE /UNDEBUG)
 endif()
 add_test(NAME sculpt_constraint_batches_tests COMMAND test_constraint_batches)
+
+# Mirror-pass collection contract, not yet wired into native editor dispatch.
+add_executable(test_symmetry_dab_targets test_symmetry_dab_targets.cc)
+target_compile_features(test_symmetry_dab_targets PRIVATE cxx_std_17)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_symmetry_dab_targets PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+elseif(MSVC)
+  target_compile_options(test_symmetry_dab_targets PRIVATE /UNDEBUG)
+endif()
+add_test(NAME sculpt_symmetry_dab_targets_tests COMMAND test_symmetry_dab_targets)
