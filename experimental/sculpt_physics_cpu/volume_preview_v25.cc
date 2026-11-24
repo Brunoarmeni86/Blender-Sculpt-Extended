@@ -54,7 +54,7 @@ static void write_obj(const VolumeSurfaceV25 &mesh,const std::string &path){
 }
 int main(int argc,char **argv){
   if(argc!=9&&argc!=10){
-    std::cerr<<"Usage: volume_preview_v25 input.obj output.obj pbf|mpm spacing frames frame_dt softening gravity_z\n";
+    std::cerr<<"Usage: volume_preview_v25 input.obj output.obj pbf|mpm spacing frames frame_dt softening gravity_z [floor_z]\n";
     return 2;
   }
   try{
@@ -64,6 +64,7 @@ int main(int argc,char **argv){
     if(frames<0||frames>100)throw std::invalid_argument("Frame count must be 0 to 100");
     VolumeFrameV25 f;f.dt=std::stod(argv[6]);f.softening=std::stod(argv[7]);
     f.gravity={0,0,std::stod(argv[8])};f.substeps=4;
+    if(argc==10){f.floor_enabled=true;f.floor_z=std::stod(argv[9]);}
     const auto mesh=read_obj(argv[1]);
     auto s=begin_volume_v25(mesh,mode=="pbf"?VolumeBackendV25::LiquidPBF:
                            VolumeBackendV25::ViscoplasticMPM,dx);
