@@ -120,6 +120,12 @@ struct NativeBrushDab {
   double clay_yield = 0.035;
   double clay_plasticity = 0.65;
   double clay_spread = 0.55;
+  // 0=V2 reference, 1=deposit, 2=compress, 3=flow.
+  int clay_behavior = 0;
+  Vec3 clay_center{};
+  double clay_radius = 0.0; // object-space brush footprint
+  Vec3 clay_stroke_delta{};
+
 };
 
 using PreparedNativeBrushDab = PreparedNativeGrabDab;
