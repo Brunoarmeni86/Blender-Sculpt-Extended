@@ -16,6 +16,7 @@
 #  include "compact_native_brush_adapter.hh"
 #  include "physical_brush_intent.hh"
 #  include "clay_surface_solver.hh"
+#  include "material_transport_v21.hh"
 #  include "brush_contact.hh"
 
 #  include "BKE_mesh.hh"
@@ -628,8 +629,18 @@ inline bool try_apply(const Sculpt &sd,
 
 // V17-B is an explicit Clay/Clay Strips behavior choice. Existing V2/V3
 // modes retain their exact path, and no other brush is silently upgraded.
+inline bool material_v21_requested()
+{
+  static const bool enabled=[]() {
+    const char *v=std::getenv("BLENDER_SCULPT_MATERIAL_V21");
+    return v && v[0]=='1' && v[1]=='\0';
+  }();
+  return enabled;
+}
+
 inline bool surface_contact_v20_requested()
 {
+  if (material_v21_requested()) return true;
   static const bool enabled=[]() {
     const char *v=std::getenv("BLENDER_SCULPT_SURFACE_V20");
     return v && v[0]=='1' && v[1]=='\0';
@@ -708,7 +719,19 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
                            add_vertex(std::size_t(corners[tri[2]]))});
     }
   }
-  auto result=solve_clay_surface(vertices,triangles,dab);
+  ClaySurfaceResult result;
+  if (dab.extended_material) {
+    const int substeps=int(material_override("BLENDER_SCULPT_V21_SUBSTEPS",4.0,1.0,16.0));
+    auto integrated=solve_material_transport_v21(vertices,triangles,dab,substeps);
+    result=std::move(integrated.surface);
+    // Print sparse diagnostics at a fixed cadence, not once per vertex.
+    static thread_local unsigned int count=0;
+    if (count++%64==0) {
+      std::fprintf(stderr,"[V21 material] substeps=%d refinement_edges=%zu active=%zu\n",
+                   integrated.substeps,integrated.refinement_edges,result.active);
+    }
+  }
+  else result=solve_clay_surface(vertices,triangles,dab);
   goals.reserve(vertices.size());
   for (std::size_t i=0;i<vertices.size();++i) {
     const auto &v=result.displacement[i];
@@ -814,6 +837,18 @@ inline bool try_apply_intent(
         clay.surface_contact=true;
         clay.flow_fusion=original_action==3;
         clay.yield_slope=0.05;
+        if (material_v21_requested()) {
+          clay.extended_material=true;
+          // Preserve existing preset/RNA controls; remaining settings are
+          // process-local tuning knobs until material UI is validated.
+          clay.plasticity=cache.xpbd_v16_clay_plasticity;
+          clay.friction=material_override("BLENDER_SCULPT_V21_FRICTION",0.85,0.0,1.0);
+          clay.viscosity=material_override("BLENDER_SCULPT_V21_VISCOSITY",0.2,0.0,1.0);
+          clay.cohesion=material_override("BLENDER_SCULPT_V21_COHESION",0.35,0.0,1.0);
+          clay.stiffness=material_override("BLENDER_SCULPT_V21_STIFFNESS",0.25,0.0,1.0);
+          clay.volume_preservation=material_override("BLENDER_SCULPT_V21_VOLUME",0.75,0.0,1.0);
+          clay.fusion=material_override("BLENDER_SCULPT_V21_FUSION",0.6,0.0,1.0);
+        }
         switch(action) {
           case 4: clay.action=ClaySurfaceAction::FusionDeposit; break;
           case 5: clay.action=ClaySurfaceAction::Compress; break;
@@ -842,7 +877,7 @@ inline bool try_apply_intent(
           std::chrono::steady_clock::now()-plan_start).count();
       if (!cache.xpbd_v15_active_logged) {
         std::fprintf(stderr,"[%s clay surface] action=%d active=%zu target_volume=%.9g transport=%.9g scale=%.4f plan_ms=%.3f\n",
-                     surface_v20 ? "V20" : "V19",int(clay.action),planned.active,planned.signed_swept_volume,
+                     material_v21_requested() && surface_v20 ? "V21" : surface_v20 ? "V20" : "V19",int(clay.action),planned.active,planned.signed_swept_volume,
                      planned.transported_volume,planned.accepted_scale,plan_ms);
       }
     }
