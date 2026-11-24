@@ -172,8 +172,9 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
       throw std::invalid_argument("Invalid XPBD step budget");
     }
     const double h=dt/static_cast<double>(substeps);
-    if (!std::isfinite(h) || h<=0.0 ||
-        h*h<std::numeric_limits<double>::min()) {
+    const double h2=h*h;
+    if (!std::isfinite(h) || h<=0.0 || !std::isfinite(h2) ||
+        h2<std::numeric_limits<double>::min()) {
       throw std::invalid_argument("Invalid XPBD substep square");
     }
     if (targets_.empty()) return; // Local sculpt dab missed the proxy.
@@ -182,8 +183,40 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     // Reuse allocations across dabs. Positions are still copied into a
     // separate scratch buffer so a failed solve cannot corrupt the stroke.
     scratch_positions_.assign(positions_.begin(),positions_.end());
-    scratch_bond_lambda_.assign(island_.bonds.size(),0.0);
-    scratch_target_lambda_.assign(targets_.size(),Vec3{});
+    // The inverse masses, compliance and time step are invariant throughout
+    // this quasistatic solve. Prepare the coefficients once per dab rather
+    // than repeating divisions and denominator validation in every iteration.
+    // Keep the original constraint order and divide by the denominator (not
+    // a pre-rounded reciprocal), to preserve the reference projection math.
+    scratch_target_coefficients_.resize(targets_.size());
+    for (std::size_t t=0;t<targets_.size();++t) {
+      const LocalTarget &target=targets_[t];
+      const double w=island_.inverse_masses[target.id];
+      const double alpha=target.compliance/h2;
+      const double denominator=w+alpha;
+      if (!std::isfinite(alpha) || !std::isfinite(denominator) ||
+          denominator<=0.0) throw std::runtime_error("Target XPBD denominator invalid");
+      scratch_target_coefficients_[t]={alpha,denominator,w,0.0};
+    }
+    scratch_active_bonds_.clear();
+    scratch_active_bonds_.reserve(island_.bonds.size());
+    scratch_bond_coefficients_.resize(island_.bonds.size());
+    for (std::size_t k=0;k<island_.bonds.size();++k) {
+      const GpuLocalBond &bond=island_.bonds[k];
+      const double w0=island_.inverse_masses[bond.a];
+      const double w1=island_.inverse_masses[bond.b];
+      // A fixed-fixed halo bond cannot move either endpoint and has no
+      // coupling to other constraints. Do not evaluate it in the hot loop.
+      if (w0==0.0 && w1==0.0) continue;
+      const double alpha=bond.compliance/h2;
+      const double denominator=w0+w1+alpha;
+      if (!std::isfinite(alpha) || !std::isfinite(denominator) ||
+          denominator<=0.0) throw std::runtime_error("Bond XPBD denominator invalid");
+      scratch_bond_coefficients_[k]={alpha,denominator,w0,w1};
+      scratch_active_bonds_.push_back(k);
+    }
+    scratch_bond_lambda_.resize(island_.bonds.size());
+    scratch_target_lambda_.resize(targets_.size());
     auto &next=scratch_positions_;
     auto &bond_lambda=scratch_bond_lambda_;
     auto &target_lambda=scratch_target_lambda_;
@@ -193,11 +226,10 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
       for (int iter=0;iter<iterations;++iter) {
         for (std::size_t t=0;t<targets_.size();++t) {
           const LocalTarget &target=targets_[t];
-          const double w=island_.inverse_masses[target.id];
-          const double alpha=target.compliance/(h*h);
-          const double denominator=w+alpha;
-          if (!std::isfinite(alpha) || !std::isfinite(denominator) ||
-              denominator<=0.0) throw std::runtime_error("Target XPBD denominator invalid");
+          const Coefficients &coeff=scratch_target_coefficients_[t];
+          const double w=coeff.w0;
+          const double alpha=coeff.alpha;
+          const double denominator=coeff.denominator;
           const Vec3 c=next[target.id]-target.goal;
           const Vec3 delta=(c*(-1.0)-target_lambda[t]*alpha)/denominator;
           if (!finite(delta)) throw std::runtime_error("Target XPBD diverged");
@@ -207,20 +239,17 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
             throw std::runtime_error("Target position/multiplier overflow");
           }
         }
-        for (std::size_t k=0;k<island_.bonds.size();++k) {
+        for (const std::size_t k : scratch_active_bonds_) {
           const GpuLocalBond &bond=island_.bonds[k];
           Vec3 diff=next[bond.b]-next[bond.a];
           const double dist=length(diff);
           if (!std::isfinite(dist)) throw std::runtime_error("Bond distance overflow");
           if (dist<=1e-12) continue;
-          const double alpha=bond.compliance/(h*h);
-          const double w0=island_.inverse_masses[bond.a];
-          const double w1=island_.inverse_masses[bond.b];
-          const double denominator=w0+w1+alpha;
-          if (!std::isfinite(alpha) || !std::isfinite(denominator)) {
-            throw std::runtime_error("Bond XPBD denominator overflow");
-          }
-          if (denominator<=0.0) continue; // All particles fixed.
+          const Coefficients &coeff=scratch_bond_coefficients_[k];
+          const double alpha=coeff.alpha;
+          const double w0=coeff.w0;
+          const double w1=coeff.w1;
+          const double denominator=coeff.denominator;
           const double delta=(-(dist-bond.rest_length)-alpha*bond_lambda[k])/denominator;
           if (!std::isfinite(delta) || !std::isfinite(bond_lambda[k]+delta)) {
             throw std::runtime_error("Bond XPBD multiplier overflow");
@@ -328,6 +357,13 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   }
 
  private:
+  struct Coefficients {
+    double alpha;
+    double denominator;
+    double w0;
+    double w1;
+  };
+
   struct LocalTarget {
     std::size_t id=0;
     Vec3 goal{};
@@ -368,6 +404,9 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   std::vector<Vec3> scratch_positions_;
   std::vector<double> scratch_bond_lambda_;
   std::vector<Vec3> scratch_target_lambda_;
+  std::vector<Coefficients> scratch_target_coefficients_;
+  std::vector<Coefficients> scratch_bond_coefficients_;
+  std::vector<std::size_t> scratch_active_bonds_;
   std::vector<unsigned char> dirty_flags_;
   std::vector<std::size_t> dirty_ids_;
   std::uint64_t revision_=0;
