@@ -542,7 +542,7 @@ inline bool try_apply_intent(
     };
     intent.center=convert(center);
     intent.normal=convert(normal)*(cache.bstrength<0.0f ? -1.0 : 1.0);
-    intent.stroke_direction=convert(delta);
+    intent.stroke_direction=convert(delta)*(cache.bstrength<0.0f ? -1.0 : 1.0);
     intent.radius=double(cache.radius);
     // bstrength is already pressure/strength adjusted by Blender.
     // Assist is the independent action gain, not an extra native blend.
