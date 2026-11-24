@@ -254,6 +254,15 @@ struct StrokeCache {
   std::shared_ptr<void> xpbd_v15_state;
   bool xpbd_v15_failed = false;
   bool xpbd_v15_active_logged = false;
+  bool xpbd_v16_settings_initialized = false;
+  bool xpbd_v16_enabled = false;
+  bool xpbd_v16_compact = false;
+  bool xpbd_v16_clay_material = false;
+  double xpbd_v16_assist = 0.0;
+  double xpbd_v16_clay_yield = 0.035;
+  double xpbd_v16_clay_plasticity = 0.65;
+  double xpbd_v16_clay_spread = 0.55;
+
   /* Invariants */
   float initial_radius = 0.0f;
   float3 scale = float3(0);
