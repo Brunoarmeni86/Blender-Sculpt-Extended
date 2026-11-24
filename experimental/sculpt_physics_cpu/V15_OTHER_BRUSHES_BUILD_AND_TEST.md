@@ -65,6 +65,32 @@ material controls independent from native strength, and benchmark
 first-dab versus continuation. Then move executor ownership to the stroke
 and connect a verified native GPU backend.
 
+## Artist-controlled physical correction
+
+V15 now accepts a process-level experimental parameter
+`BLENDER_SCULPT_XPBD_V15_ASSIST` in the range 0..1. It is read once
+per process; restart Blender to compare values.
+
+```powershell
+$env:BLENDER_SCULPT_XPBD_OTHER_BRUSHES_V15 = "1"
+$env:BLENDER_SCULPT_XPBD_V15_ASSIST = "0.25"
+```
+
+The final position is the native target plus the selected fraction of the
+difference between the XPBD solution and the native target. Native pressure,
+mask, alpha, and strength are not multiplied a second time. Zero bypasses
+the V15 editor path entirely; one (or an unset tuning variable) retains
+the previous fully assisted response. Invalid explicit values disable V15.
+This applies to Clay, Clay Strips, Smooth, Draw, Nudge and Gravity, not
+incremental Grab V14. No saved brush UI/DNA settings yet.
+
+Compare 0, 0.25, 0.5 and 1 on the same brush and mesh before assigning
+per-brush presets. Measure stroke depth, silhouette, surface roughness,
+boundary continuity and viewport latency; use Undo between trials.
+The adapter regression covers all six kinds, interpolated coordinates,
+pinned samples and invalid values. Full native Blender compile/visual tests
+remain separate requirements.
+
 ## Core code
 
 - `experimental/sculpt_physics_cpu/native_grab_executor_adapter.hh/.cc`
