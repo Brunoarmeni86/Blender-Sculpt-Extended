@@ -348,9 +348,15 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
 
   /* Note: This return has to happen *after* the call to calc_brush_plane for now, as
    * the method is not idempotent and sets variables inside the stroke cache. */
-  if (math::is_zero(ss.cache->grab_delta_symm)) {
-    return;
-  }
+  const bool stationary=math::is_zero(ss.cache->grab_delta_symm);
+  bool allow_stationary=false;
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  allow_stationary=physics_v15::requested(object,brush) &&
+      physics_v15::autonomous_requested(*ss.cache) &&
+      ss.cache->xpbd_v16_clay_behavior>=7 &&
+      pbvh.type()==bke::pbvh::Type::Mesh && !layer_detail_v01::state().active;
+#endif
+  if (stationary && !allow_stationary) return;
 
   const float4x4 mat = clay_strips::calc_local_matrix(
       brush, *ss.cache, plane_normal, plane_center, flip);
@@ -406,7 +412,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
           depsgraph,object,ss.cache->automasking.get(),node,verts,factors);
       calc_brush_texture_factors(ss,brush,pos.eval,verts,factors);
       if (autonomous) {
-        physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors);
+        physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors,normals);
         return;
       }
       tls.translations.resize(verts.size());
@@ -429,6 +435,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
   }
 #endif
 
+  if (stationary) return; // no degenerate native fallback after stationary trial
   threading::EnumerableThreadSpecific<LocalData> all_tls;
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
@@ -601,6 +608,14 @@ float4x4 calc_local_matrix(const Brush &brush,
 {
   float4x4 mat = float4x4::identity();
   mat.x_axis() = math::cross(plane_normal, cache.grab_delta_symm);
+  if (math::is_zero(float3(mat.x_axis()))) {
+    // A stationary experimental stamp has no gesture orientation.
+    // Choose a deterministic nonparallel axis; legacy callers still
+    // reject zero-delta dabs before invoking this function.
+    const float3 reference=std::abs(plane_normal.z)<0.9f ?
+                               float3(0,0,1) : float3(0,1,0);
+    mat.x_axis()=math::cross(plane_normal,reference);
+  }
   mat.y_axis() = math::cross(plane_normal, mat.x_axis());
   mat.z_axis() = plane_normal;
 
@@ -671,7 +686,14 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
   plane_normal = tilt_apply_to_normal(plane_normal, *ss.cache, brush.tilt_strength_factor);
   plane_center += plane_normal * ss.cache->scale * displace;
 
-  if (math::is_zero(ss.cache->grab_delta_symm) || math::is_zero(plane_normal)) {
+  bool independent_contact=false;
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  independent_contact=brush.sculpt_physics_mode==3 &&
+      brush.sculpt_physics_clay_behavior>=7 && brush.sculpt_physics_clay_behavior<=10 &&
+      pbvh.type()==bke::pbvh::Type::Mesh && !isolated;
+#endif
+  if ((!independent_contact && math::is_zero(ss.cache->grab_delta_symm)) ||
+      math::is_zero(plane_normal)) {
     /* The brush local matrix is degenerate: return an empty index mask. */
     return {IndexMask(), plane_center, plane_normal};
   }
@@ -679,6 +701,11 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
   const float4x4 mat = calc_local_matrix(brush, *ss.cache, plane_normal, plane_center, flip);
 
   sampling_location.restore();
+  if (independent_contact) {
+    // Native plane-box depth culling would discard pressure contact dabs.
+    // Retain conservative cursor nodes; exact XY, mask and alpha follow.
+    return {initial_node_mask,plane_center,plane_normal};
+  }
   if (isolated) {
     /* Candidate bounds belong to the composed surface, while the plane is private.
      * Keep the conservative cursor region; per-vertex brush factors clip the footprint. */
