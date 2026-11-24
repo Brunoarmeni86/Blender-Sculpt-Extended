@@ -579,7 +579,7 @@ inline void append_intent_samples(
     const double f=double(factors[j]);
     // Negative alpha is not supported by this first autonomous preview.
     // Do not turn invalid factors into unmasked targets.
-    if (!std::isfinite(f)) throw std::invalid_argument("Non-finite brush factor");
+    if (!std::isfinite(f)) continue; // fail closed for this sample
     samples.push_back({std::size_t(id),{double(p.x),double(p.y),double(p.z)},
                        std::clamp(f,0.0,1.0),1.0,f>0.0});
   }
