@@ -15,6 +15,7 @@
 #  include "native_grab_executor_adapter.hh"
 #  include "compact_native_brush_adapter.hh"
 #  include "physical_brush_intent.hh"
+#  include "clay_surface_solver.hh"
 
 #  include "BKE_mesh.hh"
 #  include "BKE_brush.hh"
@@ -139,7 +140,8 @@ inline bool try_apply(const Sculpt &sd,
                       const PositionDeformData &position_data,
                       const sculpt_physics::NativeSculptBrushKind kind,
                       const std::vector<sculpt_physics::NativeBrushTranslation> &native_translations,
-                      const bool autonomous=false)
+                      const bool autonomous=false,
+                      const bool conservative_clay=false)
 {
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
@@ -352,6 +354,14 @@ inline bool try_apply(const Sculpt &sd,
         }
       }
     }
+    if (conservative_clay) {
+      // The new solver already limits the entire patch with one common
+      // scale. XPBD/relaxation would independently alter its flux budget.
+      // Reuse the validated compact writer but stage exact target positions.
+      dab.assist=0.0;
+      dab.clay_material=false;
+      dab.stability.enabled=false;
+    }
     dab.topology_generation=1;
     std::vector<std::size_t> local_to_global;
     const auto solve_start=std::chrono::steady_clock::now();
@@ -421,7 +431,7 @@ inline bool try_apply(const Sculpt &sd,
       }
       std::fprintf(stderr,
           "[%s physics trial] targets=%zu writes=%zu prepare_ms=%.3f target_max=%.6g physical_max=%.6g deviation_ratio=%.3f\n",
-          autonomous ? "V17" : "V16",samples.size(),changes.size(),prepare_ms,max_native,max_change,
+          conservative_clay ? "V19" : autonomous ? "V17" : "V16",samples.size(),changes.size(),prepare_ms,max_native,max_change,
           max_native>0.0 ? max_deviation/max_native : 0.0);
     }
 
@@ -450,7 +460,8 @@ inline bool try_apply(const Sculpt &sd,
           throw std::runtime_error("V15 clipping changed stationary vertex");
         }
         const float tol=1e-6f*(1.0f+math::length(wanted));
-        if (!std::isfinite(got.x) || !std::isfinite(got.y) ||
+        if ((conservative_clay && (got.x!=wanted.x || got.y!=wanted.y || got.z!=wanted.z)) ||
+            !std::isfinite(got.x) || !std::isfinite(got.y) ||
             !std::isfinite(got.z) ||
             std::abs(got.x-wanted.x)>tol ||
             std::abs(got.y-wanted.y)>tol ||
@@ -537,6 +548,70 @@ inline bool autonomous_requested(const StrokeCache &cache)
          cache.xpbd_v16_clay_behavior<=10;
 }
 
+// Explicit opt-in while tuning the new solver; no RNA/DNA change.
+inline bool conservative_clay_requested()
+{
+  static const bool value=[]() {
+    const char *v=std::getenv("BLENDER_SCULPT_CLAY_V19");
+    return v && v[0]=='1' && v[1]=='\0';
+  }();
+  return value;
+}
+
+inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
+    const Mesh &mesh, const Span<float3> positions,
+    const std::vector<sculpt_physics::PhysicalBrushIntentSample> &samples,
+    const sculpt_physics::ClaySurfaceDab &dab,
+    std::vector<sculpt_physics::NativeBrushTranslation> &goals)
+{
+  using namespace sculpt_physics;
+  const auto convert=[](const float3 &v)->Vec3 {
+    return {double(v.x),double(v.y),double(v.z)};
+  };
+  const auto vertex_faces=mesh.vert_to_face_map();
+  const auto faces=mesh.faces();
+  const auto corners=mesh.corner_verts();
+  const auto tris=mesh.corner_tris();
+  std::vector<ClaySurfaceVertex> vertices;
+  std::vector<std::size_t> global;
+  std::vector<ClaySurfaceTriangle> triangles;
+  std::unordered_map<std::size_t,std::size_t> local;
+  std::vector<int> face_ids;
+  const auto add_vertex=[&](std::size_t id) {
+    if (id>=std::size_t(positions.size())) throw std::out_of_range("Stale clay vertex");
+    const auto found=local.find(id);
+    if (found!=local.end()) return found->second;
+    const auto i=vertices.size();
+    local.emplace(id,i);
+    global.push_back(id);
+    vertices.push_back({convert(positions[int(id)]),0.0});
+    return i;
+  };
+  for (const auto &s:samples) {
+    if (!s.writable || s.envelope<=0.0) continue;
+    const auto i=add_vertex(s.global_index);
+    vertices[i].influence=s.envelope;
+    for (const int f:vertex_faces[int(s.global_index)]) face_ids.push_back(f);
+  }
+  std::sort(face_ids.begin(),face_ids.end());
+  face_ids.erase(std::unique(face_ids.begin(),face_ids.end()),face_ids.end());
+  for (const int f:face_ids) {
+    for (const int t:bke::mesh::face_triangles_range(faces,f)) {
+      const int3 tri=tris[t];
+      triangles.push_back({add_vertex(std::size_t(corners[tri[0]])),
+                           add_vertex(std::size_t(corners[tri[1]])),
+                           add_vertex(std::size_t(corners[tri[2]]))});
+    }
+  }
+  auto result=solve_clay_surface(vertices,triangles,dab);
+  goals.reserve(vertices.size());
+  for (std::size_t i=0;i<vertices.size();++i) {
+    const auto &v=result.displacement[i];
+    if (std::hypot(v.x,v.y,v.z)>1e-15) goals.push_back({global[i],v});
+  }
+  return result;
+}
+
 inline bool try_apply_intent(
     const Sculpt &sd, Object &object, const IndexMask &node_mask,
     const PositionDeformData &position_data,
@@ -582,7 +657,11 @@ inline bool try_apply_intent(
     intent.dose=cache.xpbd_v17_intent_started ?
         std::clamp(double(math::length(delta))/std::max(intent.radius,1e-12),0.0,1.0) : 0.15;
     const int action=cache.xpbd_v16_clay_behavior;
-    if (action>=7 && brush.stroke_method==BRUSH_STROKE_AIRBRUSH &&
+    const bool conservative=conservative_clay_requested() &&
+        kind==sculpt_physics::NativeSculptBrushKind::Clay &&
+        (action==4 || action==6 || action==9 || action==10) &&
+        cache.xpbd_v16_compact;
+    if ((action>=7 || conservative) && brush.stroke_method==BRUSH_STROKE_AIRBRUSH &&
         cache.xpbd_v17_intent_started) {
       // Native timer dispatch already provides repeated stationary dabs.
       // Use nominal timer seconds, not wall-clock/frame time or cursor
@@ -607,8 +686,38 @@ inline bool try_apply_intent(
       case 10: intent.action=Action::HybridFlow; break;
       default: throw std::invalid_argument("Unknown autonomous action");
     }
-    auto goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
-    const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true);
+    std::vector<sculpt_physics::NativeBrushTranslation> goals;
+    if (conservative) {
+      using namespace sculpt_physics;
+      ClaySurfaceDab clay;
+      clay.center=intent.center;
+      clay.axis=convert(normal);
+      clay.direction=convert(delta);
+      clay.radius=intent.radius;
+      clay.intensity=intent.intensity;
+      clay.dose=intent.dose;
+      clay.mobility=intent.spread;
+      clay.sign=sign;
+      if (action==4) clay.action=ClaySurfaceAction::Buildup;
+      else if (action==9) {
+        clay.action=sign<0 ? ClaySurfaceAction::Gather : ClaySurfaceAction::Spread;
+        clay.sign=1.0;
+      }
+      else if (action==10 && math::length(delta)<=1e-8f) {
+        clay.action=ClaySurfaceAction::Gather;
+      }
+      else clay.action=ClaySurfaceAction::Push;
+      const Mesh &mesh=*id_cast<Mesh *>(object.data);
+      if (position_data.eval.size()!=mesh.verts_num) return false;
+      auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals);
+      if (!cache.xpbd_v15_active_logged && !goals.empty()) {
+        std::fprintf(stderr,"[V19 clay surface] action=%d active=%zu target_volume=%.9g transport=%.9g scale=%.4f\n",
+                     int(clay.action),planned.active,planned.signed_swept_volume,
+                     planned.transported_volume,planned.accepted_scale);
+      }
+    }
+    else goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
+    const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,conservative);
     if (handled) {
       cache.xpbd_v17_intent_started=true;
       cache.xpbd_v17_last_center=center;
