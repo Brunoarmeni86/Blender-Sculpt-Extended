@@ -101,4 +101,22 @@ inline VolumeSurfaceV25 reconstruct_volume_v25(const VolumeSessionV25 &s,
   }else throw std::invalid_argument("Unknown volume backend");
   return extract_volume_v25(points,spacing,radius);
 }
+
+/* A host can commit both values only after the simulation AND extraction
+ * succeed. Returning a staged result does not mutate the input session or
+ * an editor-owned mesh. Particle provenance is stable within this session.
+ * A caller must still transfer mesh attributes and implement editor Undo. */
+struct VolumePreviewV25 {
+  VolumeSessionV25 session;
+  VolumeSurfaceV25 surface;
+};
+inline VolumePreviewV25 stage_volume_preview_v25(const VolumeSessionV25 &before,
+                                                  const VolumeFrameV25 &frame,
+                                                  double surface_spacing,
+                                                  double support_radius)
+{
+  auto after=stage_volume_frame_v25(before,frame);
+  auto surface=reconstruct_volume_v25(after,surface_spacing,support_radius);
+  return {std::move(after),std::move(surface)};
+}
 } // namespace sculpt_physics
