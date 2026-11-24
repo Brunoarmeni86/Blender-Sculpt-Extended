@@ -14,6 +14,7 @@
 
 #  include "native_grab_executor_adapter.hh"
 #  include "compact_native_brush_adapter.hh"
+#  include "physical_brush_intent.hh"
 
 #  include "BKE_mesh.hh"
 #  include "BKE_mesh_types.hh"
@@ -50,6 +51,9 @@ struct NativePhysicsStroke {
   const int2 *edge_data = nullptr;
   int verts_num = 0;
   int edges_num = 0;
+  std::size_t autonomous_dabs = 0;
+  double autonomous_peak_sum = 0.0;
+  double autonomous_peak = 0.0;
 };
 
 // Process-level experimental tuning; immutable for the full stroke.
@@ -131,7 +135,8 @@ inline bool try_apply(const Sculpt &sd,
                       const IndexMask &node_mask,
                       const PositionDeformData &position_data,
                       const sculpt_physics::NativeSculptBrushKind kind,
-                      const std::vector<sculpt_physics::NativeBrushTranslation> &native_translations)
+                      const std::vector<sculpt_physics::NativeBrushTranslation> &native_translations,
+                      const bool autonomous=false)
 {
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
@@ -279,8 +284,8 @@ inline bool try_apply(const Sculpt &sd,
       return raw && raw[0]=='1' && raw[1]=='\0';
     }();
     dab.colored_order=colored;
-    dab.assist=cache.xpbd_v16_assist;
-    dab.clay_material=cache.xpbd_v16_clay_material;
+    dab.assist=autonomous ? 1.0 : cache.xpbd_v16_assist;
+    dab.clay_material=!autonomous && cache.xpbd_v16_clay_material;
     dab.clay_yield=cache.xpbd_v16_clay_yield;
     dab.clay_plasticity=cache.xpbd_v16_clay_plasticity;
     dab.clay_spread=cache.xpbd_v16_clay_spread;
@@ -317,6 +322,14 @@ inline bool try_apply(const Sculpt &sd,
     if (bond_override>=0.0) dab.material.bond_compliance_scale=bond_override;
     if (follow_override>=0.0) dab.material.native_rest_follow=follow_override;
     if (compliance_override>=0.0) dab.compliance=compliance_override;
+    if (autonomous) {
+      // Independent intent is already the full material-driving target.
+      // Never run V3 footprint redistribution a second time.
+      // Current rest-follow is a preview of compliant surface response,
+      // not persistent plastic strain. Retain a small elastic component.
+      dab.material={100.0,0.95};
+      dab.compliance=1.0e-8;
+    }
     dab.topology_generation=1;
     std::vector<std::size_t> local_to_global;
     const auto solve_start=std::chrono::steady_clock::now();
@@ -385,8 +398,8 @@ inline bool try_apply(const Sculpt &sd,
             std::hypot(double(t.x)-v.x,double(t.y)-v.y,double(t.z)-v.z));
       }
       std::fprintf(stderr,
-          "[V16 physics trial] targets=%zu writes=%zu prepare_ms=%.3f native_max=%.6g physical_max=%.6g deviation_ratio=%.3f\n",
-          samples.size(),changes.size(),prepare_ms,max_native,max_change,
+          "[%s physics trial] targets=%zu writes=%zu prepare_ms=%.3f target_max=%.6g physical_max=%.6g deviation_ratio=%.3f\n",
+          autonomous ? "V17" : "V16",samples.size(),changes.size(),prepare_ms,max_native,max_change,
           max_native>0.0 ? max_deviation/max_native : 0.0);
     }
 
@@ -462,10 +475,28 @@ inline bool try_apply(const Sculpt &sd,
   pbvh.flush_bounds_to_parents();
   result.finish_editor_success();
   cache.xpbd_v15_state=state;
+  if (autonomous) {
+    // Per-dab maxima accumulated only after the editor accepted the writes.
+    // Sum of maxima is a motion-budget diagnostic, not net displacement.
+    double peak=0.0;
+    for (const PreparedNode &node : editor_writes) {
+      for (const float3 &t : node.translations) {
+        peak=std::max(peak,std::hypot(double(t.x),double(t.y),double(t.z)));
+      }
+    }
+    ++state->autonomous_dabs;
+    state->autonomous_peak_sum+=peak;
+    state->autonomous_peak=std::max(state->autonomous_peak,peak);
+    if (state->autonomous_dabs==1 || state->autonomous_dabs%32==0) {
+      std::fprintf(stderr,
+          "[V17 autonomous stroke] dabs=%zu peak_sum=%.6g peak=%.6g last_peak=%.6g\n",
+          state->autonomous_dabs,state->autonomous_peak_sum,state->autonomous_peak,peak);
+    }
+  }
   if (!cache.xpbd_v15_active_logged) {
     std::fprintf(stderr,"[V16 physical brush] CPU XPBD %s %s preview ACTIVE\n",
                  state->compact ? "compact" : "reference",
-                 cache.xpbd_v16_clay_material &&
+                 autonomous ? "V17 Autonomous" : cache.xpbd_v16_clay_material &&
                      (kind==sculpt_physics::NativeSculptBrushKind::Clay ||
                       kind==sculpt_physics::NativeSculptBrushKind::ClayStrips) ?
                      (cache.xpbd_v16_clay_behavior==1 ? "Clay V3 Deposit" :
@@ -474,6 +505,84 @@ inline bool try_apply(const Sculpt &sd,
     cache.xpbd_v15_active_logged=true;
   }
   return true;
+}
+
+// V17-B is an explicit Clay/Clay Strips behavior choice. Existing V2/V3
+// modes retain their exact path, and no other brush is silently upgraded.
+inline bool autonomous_requested(const StrokeCache &cache)
+{
+  return cache.xpbd_v16_clay_material && cache.xpbd_v16_clay_behavior>=4 &&
+         cache.xpbd_v16_clay_behavior<=6;
+}
+
+inline bool try_apply_intent(
+    const Sculpt &sd, Object &object, const IndexMask &node_mask,
+    const PositionDeformData &position_data,
+    const sculpt_physics::NativeSculptBrushKind kind,
+    std::vector<sculpt_physics::PhysicalBrushIntentSample> &samples,
+    const float3 &normal)
+{
+  StrokeCache &cache=*object.runtime->sculpt_session->cache;
+  if (cache.xpbd_v15_failed) return cache.xpbd_v15_active_logged;
+  try {
+    // PBVH boundary duplicates must not double the impulse.
+    std::sort(samples.begin(),samples.end(),[](const auto &a,const auto &b) {
+      if (a.global_index!=b.global_index) return a.global_index<b.global_index;
+      return a.envelope>b.envelope;
+    });
+    samples.erase(std::unique(samples.begin(),samples.end(),[](const auto &a,const auto &b) {
+      return a.global_index==b.global_index;
+    }),samples.end());
+    const float3 center=cache.location_symm;
+    const float3 delta=cache.xpbd_v17_intent_started ?
+        center-cache.xpbd_v17_last_center : float3(0.0f);
+    sculpt_physics::PhysicalBrushIntentDab intent;
+    const auto convert=[](const float3 &v)->sculpt_physics::Vec3 {
+      return {double(v.x),double(v.y),double(v.z)};
+    };
+    intent.center=convert(center);
+    intent.normal=convert(normal)*(cache.bstrength<0.0f ? -1.0 : 1.0);
+    intent.stroke_direction=convert(delta);
+    intent.radius=double(cache.radius);
+    // bstrength is already pressure/strength adjusted by Blender.
+    // Assist is the independent action gain, not an extra native blend.
+    intent.intensity=std::clamp(std::abs(double(cache.bstrength)),0.0,1.0)*
+                     cache.xpbd_v16_assist;
+    intent.dose=cache.xpbd_v17_intent_started ?
+        std::clamp(double(math::length(delta))/std::max(intent.radius,1e-12),0.0,1.0) : 0.15;
+    intent.spread=cache.xpbd_v16_clay_spread;
+    intent.action=cache.xpbd_v16_clay_behavior==4 ? sculpt_physics::PhysicalBrushAction::Deposit :
+                  cache.xpbd_v16_clay_behavior==5 ? sculpt_physics::PhysicalBrushAction::Compress :
+                                                  sculpt_physics::PhysicalBrushAction::Flow;
+    auto goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
+    const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true);
+    if (handled) {
+      cache.xpbd_v17_intent_started=true;
+      cache.xpbd_v17_last_center=center;
+    }
+    return handled;
+  }
+  catch (const std::exception &ex) {
+    std::fprintf(stderr,"[V17 intent] rejected before write: %s\n",ex.what());
+    cache.xpbd_v15_failed=true;
+    return cache.xpbd_v15_active_logged;
+  }
+}
+
+inline void append_intent_samples(
+    std::vector<sculpt_physics::PhysicalBrushIntentSample> &samples,
+    const Span<int> verts,const Span<float3> positions,const Span<float> factors)
+{
+  for (const int j : verts.index_range()) {
+    const int id=verts[j];
+    const float3 p=positions[id];
+    const double f=double(factors[j]);
+    // Negative alpha is not supported by this first autonomous preview.
+    // Do not turn invalid factors into unmasked targets.
+    if (!std::isfinite(f)) throw std::invalid_argument("Non-finite brush factor");
+    samples.push_back({std::size_t(id),{double(p.x),double(p.y),double(p.z)},
+                       std::clamp(f,0.0,1.0),1.0,f>0.0});
+  }
 }
 
 }  // namespace blender::ed::sculpt_paint::brushes::physics_v15
