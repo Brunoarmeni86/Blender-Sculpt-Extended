@@ -3510,6 +3510,9 @@ static void rna_def_brush(BlenderRNA *brna)
       {1, "DEPOSIT", 0, "Deposit", "Redistribute deposited clay over the brush footprint"},
       {2, "COMPRESS", 0, "Compress", "Depress the center and build a rim using a local displacement budget"},
       {3, "FLOW", 0, "Flow", "Move clay in the direction of the stroke"},
+      {4, "AUTONOMOUS_DEPOSIT", 0, "Autonomous Deposit", "Deposit from brush radius and gesture, independent of native plane displacement"},
+      {5, "AUTONOMOUS_COMPRESS", 0, "Autonomous Compress", "Depress the center and redistribute along the brush footprint independently of native plane displacement"},
+      {6, "AUTONOMOUS_FLOW", 0, "Autonomous Flow", "Drag material tangentially according to stroke movement independently of native displacement"},
       {0, nullptr, 0, nullptr, nullptr},
   };
   prop = RNA_def_property(srna, "sculpt_physics_clay_behavior", PROP_ENUM, PROP_NONE);
