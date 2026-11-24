@@ -431,6 +431,34 @@ void test_invariant_coefficients_and_fixed_halo()
   a->cancel();
   b->cancel();
 }
+void test_colored_reference()
+{
+  World world;
+  for (int i=0;i<6;++i) world.add_particle({double(i),0,0},i==0 ? 0.0 : 1.0);
+  for (int i=1;i<6;++i) world.add_bond(i-1,i,1e-5);
+  const auto island=build_gpu_local_island(world,{1,2,3,4,5},{0},{1,2,3,4,5},25,false);
+  auto a=make_cpu_colored_xpbd_executor();
+  auto b=make_cpu_colored_xpbd_executor();
+  for (auto *e : {a.get(),b.get()}) {
+    e->allocate_island(island);
+    e->begin_stroke();
+    e->set_targets({{2,{2,0.25,0},1e-6},{4,{4,-0.25,0},1e-6}});
+    e->step(1.0/60.0,2,8);
+  }
+  const auto x=a->stage_incremental(),y=b->stage_incremental();
+  assert(!x.writes.empty() && x.writes.size()==y.writes.size());
+  for (std::size_t i=0;i<x.writes.size();++i) {
+    const auto &p=x.writes[i],&q=y.writes[i];
+    assert(p.global_index!=0 && p.global_index==q.global_index);
+    assert(std::isfinite(p.position.x) && std::isfinite(p.position.y) &&
+           std::isfinite(p.position.z));
+    assert(p.position.x==q.position.x && p.position.y==q.position.y &&
+           p.position.z==q.position.z);
+  }
+  a->acknowledge_incremental(x.revision);
+  a->commit();
+  b->cancel();
+}
 } // namespace
 
 int main()
@@ -443,5 +471,6 @@ int main()
   test_repeated_dabs_with_reused_solver_scratch();
   test_sparse_ack_on_large_proxy();
   test_invariant_coefficients_and_fixed_halo();
+  test_colored_reference();
   return 0;
 }
