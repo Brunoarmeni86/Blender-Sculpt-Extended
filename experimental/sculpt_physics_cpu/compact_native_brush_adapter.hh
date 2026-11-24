@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -41,8 +42,11 @@ CompactNativeBrushDab prepare_compact_native_brush_dab(
       throw std::invalid_argument("Non-finite compact brush translation");
     }
     topology.validate_vertex(sample.global_index);
-    if (std::hypot(v.x,v.y,v.z)>1.0e-15 &&
-        inverse_mass_at(sample.global_index)>0.0) {
+    const double mass=inverse_mass_at(sample.global_index);
+    if (!std::isfinite(mass) || mass<0.0) {
+      throw std::invalid_argument("Invalid compact target inverse mass");
+    }
+    if (std::hypot(v.x,v.y,v.z)>1.0e-15 && mass>0.0) {
       active.push_back(sample.global_index);
     }
   }
@@ -60,20 +64,45 @@ CompactNativeBrushDab prepare_compact_native_brush_dab(
     }
     return std::size_t(it-out.local_to_global.begin());
   };
-  World local_world;
-  local_world.reserve_topology(out.local_to_global.size(),region.edges.size());
-  for (const std::size_t id : out.local_to_global) {
-    local_world.add_particle(rest_at(id),std::binary_search(active.begin(),active.end(),id) ?
-                                         inverse_mass_at(id) : 0.0);
+  GpuLocalIsland island;
+  island.topology_generation=dab.topology_generation;
+  const std::size_t n=out.local_to_global.size();
+  if (n>std::numeric_limits<std::uint32_t>::max()) {
+    throw std::length_error("Compact island exceeds local index capacity");
   }
+  island.global_ids.reserve(n);
+  island.positions.reserve(n);
+  island.inverse_masses.reserve(n);
+  island.radii.reserve(n);
+  island.writable.reserve(n);
+  std::vector<Vec3> rest;
+  rest.reserve(n);
+  for (std::size_t i=0;i<n;++i) {
+    const std::size_t id=out.local_to_global[i];
+    const bool writable=std::binary_search(active.begin(),active.end(),id);
+    const double mass=writable ? inverse_mass_at(id) : 0.0;
+    const Vec3 p=rest_at(id);
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
+        !std::isfinite(mass) || mass<0.0) {
+      throw std::invalid_argument("Invalid compact island rest state");
+    }
+    rest.push_back(p);
+    island.global_ids.push_back(i);
+    island.positions.push_back(current_at(id));
+    island.inverse_masses.push_back(mass);
+    island.radii.push_back(0.05);
+    island.writable.push_back(writable);
+  }
+  island.bonds.reserve(region.edges.size());
   for (const auto edge_id : region.edges) {
     const auto [a,b]=edge_at(edge_id);
-    try {
-      local_world.add_bond(local_id(a),local_id(b),1.0e-5);
-    }
-    catch (const std::invalid_argument &) {
-      // Same degenerate-rest-edge policy as the full World reference.
-    }
+    const auto i=local_id(a),j=local_id(b);
+    const Vec3 p=rest[i]-rest[j];
+    const double length=std::hypot(p.x,p.y,p.z);
+    // Match World::add_bond degenerate/overflow rejection.
+    if (!std::isfinite(length) || length<1e-12 || i==j) continue;
+    island.bonds.push_back({static_cast<std::uint32_t>(i),
+                            static_cast<std::uint32_t>(j),length,1e-5});
   }
   std::vector<NativeBrushTranslation> local_samples;
   local_samples.reserve(active.size());
@@ -84,10 +113,7 @@ CompactNativeBrushDab prepare_compact_native_brush_dab(
       local_samples.push_back({local_id(sample.global_index),sample.translation});
     }
   }
-  const GpuTopologyBondIndex local_topology(local_world,dab.topology_generation);
-  out.prepared=prepare_cpu_native_brush_dab(
-      local_world,local_topology,local_samples,
-      [&](std::size_t id) { return current_at(out.local_to_global.at(id)); },dab);
+  out.prepared=prepare_cpu_native_brush_island(std::move(island),local_samples,dab);
   return out;
 }
 
