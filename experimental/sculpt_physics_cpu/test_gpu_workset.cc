@@ -32,6 +32,12 @@ int main()
   assert(!island.writable[0] && !island.writable[2]);
   assert(island.inverse_masses[0]==0 && island.inverse_masses[2]==0);
 
+  const auto covered_halo = build_gpu_local_island(world,{1},{0,2},{0,1,2},42,false);
+  assert(covered_halo.inverse_masses[0]==0.0 && covered_halo.inverse_masses[2]==0.0);
+  assert(!covered_halo.writable[0] && !covered_halo.writable[2]);
+  const GpuTopologyBondIndex covered_index(world,42);
+  const auto indexed_covered = covered_index.build(world,{1},{0,2},{0,1,2},42,false);
+  assert(indexed_covered.writable == covered_halo.writable);
   auto solved=island.positions;
   solved[1].y=0.2;
   const auto staged=stage_gpu_local_writes(island,solved);
