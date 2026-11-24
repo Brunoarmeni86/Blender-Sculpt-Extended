@@ -548,6 +548,9 @@ static void version_solid_color_width_height_defaults(Main &bmain)
 
 void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
 {
+  if (!DNA_struct_member_exists(fd->filesdna, "Brush", "int", "sculpt_physics_clay_behavior")) {
+    for (Brush &brush : bmain->brushes) brush.sculpt_physics_clay_behavior = 1;
+  }
   // Existing .blend files and shipped brush assets predate these fields.
   // Keep legacy mode off unless enabled by the experimental launch flags.
   if (!DNA_struct_member_exists(fd->filesdna, "Brush", "int", "sculpt_physics_mode")) {
