@@ -19,7 +19,8 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     const std::vector<ClaySurfaceVertex> &vertices,
     const std::vector<ClaySurfaceTriangle> &triangles,
     ClaySurfaceDab dab,
-    int substeps=4)
+    int substeps=4,
+    bool diagnose_refinement=true)
 {
   if(substeps<1 || substeps>16 || !std::isfinite(dab.dose) ||
      dab.dose<0 || dab.dose>1)
@@ -55,6 +56,7 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     }
     ++out.substeps;
   }
+  if(!diagnose_refinement) return out;
   // Diagnose local resolution demand, not a native topology operation.
   // Count unique long or steep edges with at least one active endpoint.
   std::vector<std::array<std::size_t,2>> edges;

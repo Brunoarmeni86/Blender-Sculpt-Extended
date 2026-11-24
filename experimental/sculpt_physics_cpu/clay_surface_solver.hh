@@ -42,6 +42,7 @@ struct ClaySurfaceDab {
   bool extended_material=false;
   bool density_independent=false; // V22 brush-scale transfer chart
   bool tool_v25=false; // V25 distinct contact and directional fold
+  bool tool_v26=false; // experimental surface response; explicit native opt-in
   bool has_tool_plane=false;
   double tool_plane_height=0.0; // relative to chart center, along chart axis
   double fold_gain=0.22, detail_retention=0.85, tool_depth=0.07;
@@ -54,6 +55,11 @@ struct ClaySurfaceDab {
   double fusion=0.5;
 
 };
+// Bounded local pressure target; cumulative dose is in brush-radius units.
+inline double progressive_press_depth_v26(double base,double cumulative_dose)
+{
+  return std::min(.25,base+.08*(1-std::exp(-3*std::max(0.0,cumulative_dose))));
+}
 struct ClaySurfaceResult {
   std::vector<Vec3> displacement;
   std::vector<double> projected_area;
@@ -186,6 +192,13 @@ inline void coarse_clay_transport(
         (smear?.30:dab.action==ClaySurfaceAction::HybridFlow?.45:
          dab.action==ClaySurfaceAction::PressureFlow?.15:1.0);
     }
+    // V26 surface-only Melt: gravity along the tangent chart in object coordinates.
+    // This is a coarse relief flux, not thermal or volumetric simulation.
+    if(melt && dab.tool_v26) {
+      const double downhill=dot(Vec3{0,0,-1},line);
+      const double thickness=downhill>=0?u.volume/u.area:v.volume/v.area;
+      f+=downhill*thickness*width*travel*mobility*envelope*.65;
+    }
     if(pressure||fusion||melt||smear||dab.action==ClaySurfaceAction::Spread||
        (dab.action==ClaySurfaceAction::Push&&dab.flow_fusion)) {
       const double diff=(u.height+u.source+u.pressure)-(v.height+v.source+v.pressure);
@@ -312,14 +325,14 @@ inline void shape_clay_transport(
       // A unilateral cutter removes only material beyond its plane.
       const double plane=dab.has_tool_plane?dab.tool_plane_height:-dab.sign*dab.tool_depth*dab.radius;
       const double penetration=std::max(0.0,dab.sign*(h[i]-plane));
-      delta[i]=-dab.sign*w[i]*std::min(penetration,amount*.60);
+      delta[i]=-dab.sign*w[i]*std::min(penetration,amount*(dab.tool_v26?.85:.60));
     }
     else if(press||compact||compress) {
-      const double inner=1-smooth((r-.42)/.29);
+      const double inner=1-smooth((r-.42)/(dab.tool_v26&&press?.37:.29));
       const double plane=dab.has_tool_plane?dab.tool_plane_height:-dab.sign*(dab.tool_v25?dab.tool_depth:.065)*dab.radius;
       const double depth=press?std::max(0.0,dab.sign*(h[i]-plane)):amount*.30;
-      delta[i]=-dab.sign*w[i]*inner*std::min(depth,amount*.55);
-      rim[i]=w[i]*smooth((r-.50)/.25);
+      delta[i]=-dab.sign*w[i]*inner*std::min(depth,amount*(dab.tool_v26&&press?.75:.55));
+      rim[i]=w[i]*smooth((r-(dab.tool_v26&&press?.38:.50))/.25);
       peak_rim=std::max(peak_rim,rim[i]);
       removed-=delta[i]*area[i];receiver+=rim[i]*area[i];
     }
@@ -339,10 +352,12 @@ inline void shape_clay_transport(
     }
     else if(dab.action==ClaySurfaceAction::Gather) {
       double z=h[i];
-      const Vec3 shift=unit(p)*std::min(drag*.7,norm(p)*.55)*dab.sign;
+      const double taper=dab.tool_v26?1-smooth((r-.55)/.45):1.0;
+      const Vec3 shift=unit(p)*std::min(drag*.7,norm(p)*.55)*dab.sign*taper;
       if(trace(p,shift,z))delta[i]=w[i]*(z-h[i]);
-      // Convergence of the material column can also gather flat clay.
-      delta[i]+=dab.sign*w[i]*amount*.22*(1-3*r*r);
+      // Smoothly extinguish the synthetic radial impulse at the brush boundary.
+      // Final signed budget still balances the two signs.
+      delta[i]+=dab.sign*w[i]*amount*.22*(1-3*r*r)*taper;
     }
     else {
       const bool smear=dab.action==ClaySurfaceAction::Smear ||
@@ -426,7 +441,7 @@ inline ClaySurfaceResult solve_clay_surface(
       !interval(dab.plasticity) || !interval(dab.volume_preservation) ||
       !interval(dab.fusion) || !interval(dab.fold_gain) || !interval(dab.detail_retention) ||
       !interval(dab.tool_depth) || !std::isfinite(dab.tool_plane_height) ||
-      (dab.tool_v25&&!dab.shape_transport) || dab.proxy_cells_per_radius<4 || dab.proxy_cells_per_radius>16) throw std::invalid_argument("Invalid clay surface dab");
+      (dab.tool_v26&&!dab.tool_v25) || (dab.tool_v25&&!dab.shape_transport) || dab.proxy_cells_per_radius<4 || dab.proxy_cells_per_radius>16) throw std::invalid_argument("Invalid clay surface dab");
   switch(dab.action) {
     case ClaySurfaceAction::Buildup: case ClaySurfaceAction::Push:
     case ClaySurfaceAction::Gather: case ClaySurfaceAction::Spread:
@@ -535,7 +550,8 @@ inline ClaySurfaceResult solve_clay_surface(
   if(dab.action==ClaySurfaceAction::Buildup) {
     for(std::size_t i=0;i<n;++i) if(w[i]>0)
       delta[i]=dab.sign*travel*0.10*w[i];
-  } else if(dab.shape_transport && dab.action!=ClaySurfaceAction::FusionDeposit) {
+  } else if(dab.shape_transport && dab.action!=ClaySurfaceAction::FusionDeposit &&
+            !(dab.tool_v26 && dab.action==ClaySurfaceAction::Melt && dab.density_independent)) {
     shape_clay_transport(xy,h,w,out.projected_area,triangles,dab,axis,travel,mobility,delta,out);
   } else if(dab.density_independent &&
             (dab.smooth_proxy || dab.action!=ClaySurfaceAction::Gather)) {

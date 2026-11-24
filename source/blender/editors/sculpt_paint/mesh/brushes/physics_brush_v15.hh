@@ -776,11 +776,13 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
   ClaySurfaceResult result;
   if (dab.extended_material) {
     const int substeps=int(material_override("BLENDER_SCULPT_V21_SUBSTEPS",4.0,1.0,16.0));
-    auto integrated=solve_material_transport_v21(vertices,triangles,dab,substeps);
-    result=std::move(integrated.surface);
-    // Print sparse diagnostics at a fixed cadence, not once per vertex.
+    // V26 avoids sorting diagnostic edges on unreported dabs.
     static thread_local unsigned int count=0;
-    if (count++%64==0) {
+    const bool report=count++%64==0;
+    auto integrated=solve_material_transport_v21(vertices,triangles,dab,substeps,
+                                                 !dab.tool_v26 || report);
+    result=std::move(integrated.surface);
+    if (report) {
       std::fprintf(stderr,"[%s material] substeps=%d refinement_edges=%zu active=%zu proxy_nodes=%zu\n",
                    dab.tool_v25?"V25":dab.shape_transport?"V24":dab.smooth_proxy?"V23":dab.density_independent?"V22":"V21",integrated.substeps,
                    integrated.refinement_edges,result.active,result.transport_nodes);
@@ -884,6 +886,7 @@ inline bool try_apply_intent(
       default: throw std::invalid_argument("Unknown autonomous action");
     }
     std::vector<sculpt_physics::NativeBrushTranslation> goals;
+    double pending_press_dose=cache.xpbd_v26_press_dose;
     if (conservative) {
       using namespace sculpt_physics;
       ClaySurfaceDab clay;
@@ -905,6 +908,8 @@ inline bool try_apply_intent(
           clay.smooth_proxy=v23;
           clay.shape_transport=v24;
           clay.tool_v25=v24 && (tool_v25_requested() || original_action==14);
+          const char *v26=std::getenv("BLENDER_SCULPT_TOOL_V26");
+          clay.tool_v26=clay.tool_v25 && v26 && v26[0]=='1' && v26[1]=='\0';
           if (clay.tool_v25) {
             clay.fold_gain=material_override("BLENDER_SCULPT_V25_FOLD",.22,0.0,1.0);
             clay.detail_retention=material_override("BLENDER_SCULPT_V25_DETAIL",.65,0.0,1.0);
@@ -964,6 +969,7 @@ inline bool try_apply_intent(
           material_override("BLENDER_SCULPT_V25_LOCK_PLANE",1.0,0.0,1.0)>0.5) {
         const float3 axis=math::normalize(normal);
         if (!cache.xpbd_v25_plane_valid) {
+          pending_press_dose=0.0;
           cache.xpbd_v25_plane_origin=center;
           cache.xpbd_v25_plane_normal=axis;
           cache.xpbd_v25_plane_valid=true;
@@ -973,14 +979,21 @@ inline bool try_apply_intent(
                                              cache.xpbd_v25_plane_normal));
         // A finite local plane, not a globally locked plane across a
         // highly curved object. Re-anchor when leaving its valid chart.
-        if (alignment<0.85 || std::abs(height)>clay.radius*.30) {
+        const bool reanchor=alignment<0.85 || std::abs(height)>clay.radius*.30;
+        if (reanchor) {
+          pending_press_dose=0.0;
           cache.xpbd_v25_plane_origin=center;
           cache.xpbd_v25_plane_normal=axis;
         }
-        else {
+        if (!reanchor || clay.tool_v26) {
+          double depth=clay.tool_depth;
+          if (clay.tool_v26 && action==8) {
+            pending_press_dose=std::min(1.0,pending_press_dose+clay.dose*clay.intensity);
+            depth=progressive_press_depth_v26(depth,pending_press_dose);
+          }
           clay.axis=convert(cache.xpbd_v25_plane_normal);
           clay.has_tool_plane=true;
-          clay.tool_plane_height=height-sign*clay.tool_depth*clay.radius;
+          clay.tool_plane_height=(reanchor?0.0:height)-sign*depth*clay.radius;
         }
       }
       const Mesh &mesh=*id_cast<Mesh *>(object.data);
@@ -1025,6 +1038,7 @@ inline bool try_apply_intent(
     if (handled) {
       cache.xpbd_v17_intent_started=true;
       cache.xpbd_v17_last_center=center;
+      cache.xpbd_v26_press_dose=pending_press_dose;
     }
     return handled;
   }

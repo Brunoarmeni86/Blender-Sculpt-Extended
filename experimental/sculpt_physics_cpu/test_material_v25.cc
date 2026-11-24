@@ -57,7 +57,53 @@ static ClaySurfaceResult trial(int n,ClaySurfaceAction action,double angle=0,
   if(action==ClaySurfaceAction::Press)assert(std::abs(net)<1e-9);
   return out;
 }
+static void overlapping_v26(ClaySurfaceAction action)
+{
+  constexpr int n=65;
+  std::vector<ClaySurfaceVertex> v;
+  std::vector<ClaySurfaceTriangle> t;
+  for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+    const double px=2.0*x/(n-1)-1,py=2.0*y/(n-1)-1;
+    v.push_back({{px,py,0},0});
+  }
+  for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+    const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
+    t.push_back({a,b,d});t.push_back({a,d,c});
+  }
+  ClaySurfaceDab dab;dab.action=action;dab.radius=.4;dab.dose=.15;dab.intensity=1;
+  dab.direction={1,0,0};dab.mobility=.85;dab.friction=.85;
+  dab.density_independent=true;dab.smooth_proxy=true;dab.shape_transport=true;
+  dab.tool_v25=true;dab.tool_v26=true;dab.has_tool_plane=true;
+  int moving=0;
+  for(int k=0;k<9;++k){
+    dab.center={-.24+.06*k,0,0};
+    dab.tool_plane_height=-(action==ClaySurfaceAction::Press?progressive_press_depth_v26(.07,(k+1)*.15):.07)*dab.radius;
+    for(auto &p:v){
+      const double x=p.position.x-dab.center.x,y=p.position.y;
+      const double r2=(x*x+y*y)/(dab.radius*dab.radius);
+      p.influence=r2<1 && p.position.y>-.25?std::pow(1-r2,2):0;
+    }
+    const auto full=solve_material_transport_v21(v,t,dab,4,true);
+    const auto fast=solve_material_transport_v21(v,t,dab,4,false);
+    double l1=0;
+    for(std::size_t i=0;i<v.size();++i){
+      const auto d=fast.surface.displacement[i];
+      assert(std::isfinite(d.z));
+      assert(d.z==full.surface.displacement[i].z);
+      if(v[i].influence==0)assert(d.z==0);
+      if(action==ClaySurfaceAction::Scrape)assert(d.z<=1e-12);
+      l1+=std::abs(d.z);v[i].position+=d;
+    }
+    if(l1>1e-7)++moving;
+    if(action!=ClaySurfaceAction::Scrape)assert(std::abs(fast.surface.signed_swept_volume)<1e-8);
+  }
+  assert(moving>=3);
+}
 int main(){
+  assert(progressive_press_depth_v26(.07,0)==.07);
+  assert(progressive_press_depth_v26(.07,.5)>progressive_press_depth_v26(.07,.1));
+  assert(progressive_press_depth_v26(.24,100)<=.25);
+  for(auto action:{ClaySurfaceAction::Press,ClaySurfaceAction::Scrape,ClaySurfaceAction::Gather})overlapping_v26(action);
   for(int n:{33,65,129}){
     trial(n,ClaySurfaceAction::Push);
     trial(n,ClaySurfaceAction::Push,.7853981633974483);
