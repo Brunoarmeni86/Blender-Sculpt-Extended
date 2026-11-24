@@ -140,9 +140,11 @@ def make_preview(brush, kind):
         shade.light = "MATCAP"
         shade.studio_light = matcaps[0]
         shade.color_type = "SINGLE"
-        shade.show_shadows = False
-        shade.show_cavity = False
-        shade.show_outline = False
+        # Optional presentation flags differ between Blender versions.
+        # Keep the official MatCap mandatory; omit unsupported cosmetic flags.
+        for flag in ("show_shadows", "show_cavity", "show_object_outline"):
+            if shade.bl_rna.properties.get(flag) is not None:
+                setattr(shade, flag, False)
         scene.render.resolution_x = 256
         scene.render.resolution_y = 256
         scene.render.resolution_percentage = 100
@@ -251,7 +253,9 @@ def main():
         brush.asset_data.author = "Blender Sculpt Extended"
         brush.asset_data.tags.new("BSE")
         if mode != "ASSISTED" or not copy_preview(bases[base],brush):
+            print(f"[BSE Physical Brushes] Rendering {name}", flush=True)
             make_preview(brush,icon)
+        print(f"[BSE Physical Brushes] Prepared {name}", flush=True)
         assets.add(brush)
     output.mkdir(parents=True,exist_ok=True)
     target = output/"bse_physical_brushes.blend"
