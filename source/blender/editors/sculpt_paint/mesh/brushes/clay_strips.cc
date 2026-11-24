@@ -384,6 +384,8 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
     std::vector<sculpt_physics::NativeBrushTranslation> native;
     std::vector<sculpt_physics::PhysicalBrushIntentSample> intent_samples;
     const bool autonomous=physics_v15::autonomous_requested(*ss.cache);
+    const bool round_contact=autonomous && physics_v15::shape_v24_requested() &&
+        ss.cache->xpbd_v16_clay_behavior!=1 && ss.cache->xpbd_v16_clay_behavior!=4;
     LocalData tls;
     node_mask.foreach_index([&](const int ni) {
       const bke::pbvh::MeshNode &node=nodes[ni];
@@ -405,7 +407,15 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       apply_plane_trim_factors(brush,tls.z_positions,factors);
       tls.distances.resize(verts.size());
       MutableSpan<float> distances=tls.distances;
-      calc_brush_cube_distances<float2>(brush,tls.xy_positions,distances);
+      if (round_contact) {
+        const float3 axis=math::normalize(plane_normal);
+        for (const int j:verts.index_range()) {
+          const float3 d=pos.eval[verts[j]]-ss.cache->location_symm;
+          const float3 tangent=d-axis*math::dot(d,axis);
+          distances[j]=math::length(tangent)/std::max(ss.cache->radius,1e-12f);
+        }
+      }
+      else calc_brush_cube_distances<float2>(brush,tls.xy_positions,distances);
       filter_distances_with_radius(1.0f,distances,factors);
       apply_hardness_to_distances(1.0f,ss.cache->hardness,distances);
       BKE_brush_calc_curve_factors(
@@ -692,7 +702,10 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
   bool independent_contact=false;
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
   independent_contact=brush.sculpt_physics_mode==3 &&
-      ((brush.sculpt_physics_clay_behavior>=7 && brush.sculpt_physics_clay_behavior<=13) ||
+      ((physics_v15::shape_v24_requested() &&
+        brush.sculpt_physics_clay_behavior>=2 && brush.sculpt_physics_clay_behavior<=13 &&
+        brush.sculpt_physics_clay_behavior!=4) ||
+       (brush.sculpt_physics_clay_behavior>=7 && brush.sculpt_physics_clay_behavior<=13) ||
        (physics_v15::drag_contact_requested() &&
         (brush.sculpt_physics_clay_behavior==2 || brush.sculpt_physics_clay_behavior==5))) &&
       pbvh.type()==bke::pbvh::Type::Mesh && !isolated;
