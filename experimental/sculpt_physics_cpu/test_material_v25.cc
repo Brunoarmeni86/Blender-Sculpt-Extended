@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "material_transport_v21.hh"
+#include "material_profiles_v25.hh"
 #ifdef NDEBUG
 # undef NDEBUG
 #endif
@@ -9,7 +10,8 @@
 using namespace sculpt_physics;
 
 static ClaySurfaceResult trial(int n,ClaySurfaceAction action,double angle=0,
-                              double sign=1,double plane=-.05,bool raised=false)
+                              double sign=1,double plane=-.05,bool raised=false,
+                              std::string_view profile={})
 {
   std::vector<ClaySurfaceVertex> v;
   std::vector<ClaySurfaceTriangle> t;
@@ -28,6 +30,13 @@ static ClaySurfaceResult trial(int n,ClaySurfaceAction action,double angle=0,
   dab.direction=dir;dab.mobility=.85;dab.friction=.85;
   dab.density_independent=true;dab.smooth_proxy=true;dab.shape_transport=true;dab.tool_v25=true;
   dab.has_tool_plane=true;dab.tool_plane_height=plane;dab.sign=sign;
+  if(!profile.empty()){
+    const auto p=surface_profile_v25(profile);
+    dab.friction=p.friction;dab.viscosity=p.viscosity;dab.cohesion=p.cohesion;
+    dab.stiffness=p.stiffness;dab.plasticity=p.plasticity;
+    dab.volume_preservation=p.volume_preservation;dab.fusion=p.fusion;
+    dab.detail_retention=p.detail_retention;
+  }
   const auto out=solve_material_transport_v21(v,t,dab,4).surface;
   double net=0,abs=0,moment=0,peak=0;
   for(std::size_t i=0;i<v.size();++i){
@@ -58,6 +67,9 @@ int main(){
   assert(cut.signed_swept_volume< -1e-6);
   const auto clear=trial(65,ClaySurfaceAction::Scrape,0,1,.10,true);
   assert(std::abs(clear.signed_swept_volume)<1e-12);
+  const auto soft=trial(65,ClaySurfaceAction::Push,0,1,-.05,false,"SOFT_CLAY");
+  const auto hard=trial(65,ClaySurfaceAction::Push,0,1,-.05,false,"HARD_CLAY");
+  assert(soft.transported_volume>hard.transported_volume);
   const auto press=trial(65,ClaySurfaceAction::Press);
   assert(press.transported_volume>1e-7);
 }
