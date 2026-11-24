@@ -160,6 +160,68 @@ int main()
   }
   coincident.cancel();
 
+  // Clay V2: pressure gradient creates a tangential response on an
+  // otherwise flat line, while pinned vertices remain untouched.
+  {
+    World clay_world;
+    std::vector<Vec3> points{{0,0,0},{1,0,0},{2,0,0}};
+    clay_world.add_particle(points[0]);
+    clay_world.add_particle(points[1]);
+    clay_world.add_particle(points[2],0.0);
+    clay_world.add_bond(0,1,1e-5);
+    clay_world.add_bond(1,2,1e-5);
+    GpuTopologyBondIndex clay_index(clay_world,23);
+    const auto at=[&](std::size_t i) {return points.at(i);};
+    const std::vector<NativeBrushTranslation> input{
+        {0,{0,0,0.4}}, {1,{0,0,0.2}}, {2,{0,0,1.0}}};
+    NativeBrushDab settings;
+    settings.kind=NativeSculptBrushKind::Clay;
+    settings.topology_generation=23;
+    settings.clay_material=true;
+    settings.compliance=0.0;
+    settings.material.bond_compliance_scale=1000.0;
+    settings.clay_spread=0.0;
+    auto no_spread=prepare_cpu_native_brush_dab(
+        clay_world,clay_index,input,at,settings);
+    assert(no_spread.writes().size()==2);
+    const auto baseline=no_spread.writes()[0].position;
+    no_spread.cancel();
+    settings.clay_spread=1.0;
+    auto physical=prepare_cpu_native_brush_dab(
+        clay_world,clay_index,input,at,settings);
+    assert(physical.writes().size()==2);
+    const auto p=physical.writes()[0].position;
+    assert(p.x<baseline.x-0.01);
+    for (const auto &write : physical.writes()) {
+      assert(write.global_index<2);
+      assert(std::isfinite(write.position.x) && std::isfinite(write.position.z));
+    }
+    physical.cancel();
+    settings.assist=0.5;
+    auto blended=prepare_cpu_native_brush_dab(
+        clay_world,clay_index,input,at,settings);
+    assert(blended.writes().size()==2);
+    const auto m=blended.writes()[0].position;
+    assert(std::abs(m.x-0.5*p.x)<1e-12);
+    assert(std::abs(m.z-0.5*(0.4+p.z))<1e-12);
+    blended.cancel();
+    settings.assist=0.0;
+    auto native=prepare_cpu_native_brush_dab(
+        clay_world,clay_index,input,at,settings);
+    assert(native.writes().size()==2);
+    assert(native.writes()[0].position.x==0.0);
+    assert(native.writes()[0].position.z==0.4);
+    native.cancel();
+    settings.clay_spread=1.1;
+    bool bad=false;
+    try {
+      (void)prepare_cpu_native_brush_dab(clay_world,clay_index,input,at,settings);
+    }
+    catch (const std::invalid_argument &) {bad=true;}
+    assert(bad);
+    assert(clay_world.particles()[2].position.x==2.0);
+  }
+
   auto cfg=NativeBrushDab{};
   cfg.topology_generation=114;
   auto none=prepare_cpu_native_brush_dab(rest,topology,{},position,cfg);
