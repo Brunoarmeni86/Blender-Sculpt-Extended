@@ -49,6 +49,12 @@ int main()
   dab.stroke_direction={1,0,1};
   auto flow=plan_physical_brush_intent(samples,dab);
   assert(flow.size()==2 && flow[0].translation.x>0 && flow[0].translation.z==0);
+  // Native cube footprint can legitimately contain projected r > 1.
+  const std::vector<PhysicalBrushIntentSample> cube{{9,{0.9,0.9,0},1,1,true}};
+  assert(plan_physical_brush_intent(cube,dab).empty());
+  dab.limit_to_projected_disk=false;
+  assert(plan_physical_brush_intent(cube,dab).size()==1);
+  dab.limit_to_projected_disk=true;
   dab.intensity=0;
   assert(plan_physical_brush_intent(samples,dab).empty());
   dab.intensity=1;
