@@ -261,6 +261,9 @@ struct StrokeCache {
   std::shared_ptr<void> xpbd_v19_contact_history;
   bool xpbd_v17_intent_started = false;
   float3 xpbd_v17_last_center = float3(0.0f);
+  bool xpbd_v25_plane_valid = false;
+  float3 xpbd_v25_plane_origin = float3(0.0f);
+  float3 xpbd_v25_plane_normal = float3(0.0f);
   int xpbd_v16_clay_behavior = 0;
   double xpbd_v16_assist = 0.0;
   double xpbd_v16_clay_yield = 0.035;
