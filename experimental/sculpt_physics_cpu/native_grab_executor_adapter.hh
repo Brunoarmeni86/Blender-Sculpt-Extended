@@ -127,6 +127,7 @@ struct NativeBrushDab {
   double clay_radius = 0.0; // object-space brush footprint
   Vec3 clay_stroke_delta{};
   MaterialStabilitySettings stability{}; // V18 opt-in shared motion constraint
+  bool current_rest = false; // Native XPBD sculpt: follow accepted geometry, not stroke-start springs
 
 };
 
