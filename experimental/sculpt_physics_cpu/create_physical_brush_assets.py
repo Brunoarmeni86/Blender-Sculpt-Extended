@@ -299,10 +299,23 @@ def main():
         if action == "FLOW":
             brush.sculpt_physics_yield = 1.
             brush.sculpt_physics_plasticity = 1.
-            brush.tip_roundness = .15
             brush.use_accumulate = True
         if mode == "MATERIAL":
             brush.stroke_method = "SPACE"
+            # Deposit remains the V23 control. Round material tips are
+            # independent of their original Clay/Clay Strips brush type.
+            if action != "AUTONOMOUS_DEPOSIT":
+                brush.tip_roundness = 1.0
+                brush.tip_scale_x = 1.0
+                brush.hardness = .15
+                brush.use_plane_trim = False
+                brush.sculpt_physics_assist = 1.0
+                brush.sculpt_physics_spread = .85
+                brush.sculpt_physics_plasticity = .95
+                brush.strength = 1.0
+                brush.spacing = 8
+                if "SMOOTH" in props["curve_distance_falloff_preset"].enum_items.keys():
+                    brush.curve_distance_falloff_preset = "SMOOTH"
         brush.asset_mark()
         brush.asset_data.catalog_id = CATALOGS[category]
         brush.asset_data.description = (
