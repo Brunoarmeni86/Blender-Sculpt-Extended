@@ -292,6 +292,10 @@ PreparedNativeBrushDab prepare_cpu_native_brush_dab(
     }
     island.positions[i]=position;
   }
+  selected.erase(std::remove_if(selected.begin(),selected.end(),
+      [&](const auto &sample) {
+        return !std::binary_search(active.begin(),active.end(),sample.global_index);
+      }),selected.end());
   return prepare_cpu_native_brush_island(std::move(island),selected,dab);
 }
 
@@ -314,9 +318,10 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
   selected.reserve(samples.size());
   for (const auto &sample : samples) {
     if (!finite(sample.translation)) throw std::invalid_argument("Invalid native translation");
-    // The full reference may supply masked samples outside this island.
-    if (std::hypot(sample.translation.x,sample.translation.y,sample.translation.z)>1e-15 &&
-        std::binary_search(island.global_ids.begin(),island.global_ids.end(),sample.global_index)) {
+    if (!std::binary_search(island.global_ids.begin(),island.global_ids.end(),sample.global_index)) {
+      throw std::out_of_range("Native target outside prepared island");
+    }
+    if (std::hypot(sample.translation.x,sample.translation.y,sample.translation.z)>1e-15) {
       selected.push_back(sample);
     }
   }
