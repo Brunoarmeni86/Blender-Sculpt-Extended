@@ -15,6 +15,7 @@
  * - Additional standard modifiers such as masking, brush strength, texture masking, etc.
  */
 
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
