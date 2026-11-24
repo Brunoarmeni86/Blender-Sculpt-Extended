@@ -3505,6 +3505,20 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Physical Mode", "Experimental coordinate-only sculpt physics; requires an enabled research build");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  static const EnumPropertyItem clay_behaviors[] = {
+      {0, "V2", 0, "V2 Reference", "Previous one-ring material approximation"},
+      {1, "DEPOSIT", 0, "Deposit", "Redistribute deposited clay over the brush footprint"},
+      {2, "COMPRESS", 0, "Compress", "Depress the center and build a rim using a local displacement budget"},
+      {3, "FLOW", 0, "Flow", "Move clay in the direction of the stroke"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_physics_clay_behavior", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_physics_clay_behavior");
+  RNA_def_property_enum_items(prop, clay_behaviors);
+  RNA_def_property_enum_default(prop, 1);
+  RNA_def_property_ui_text(prop, "Clay Behavior", "Experimental footprint material response");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   prop = RNA_def_property(srna, "sculpt_physics_assist", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "sculpt_physics_assist");
   RNA_def_property_range(prop, 0.0f, 1.0f);
