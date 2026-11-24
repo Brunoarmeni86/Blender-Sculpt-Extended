@@ -133,4 +133,12 @@ PreparedNativeBrushDab prepare_cpu_native_brush_dab(
     const std::function<Vec3(std::size_t)> &current_position,
     const NativeBrushDab &dab);
 
+/* Solve an already packed island, without reconstructing a World or CSR.
+ * Samples refer to island global_ids. All writable, mobile vertices must
+ * have exactly one nonzero native target; all other vertices are pinned. */
+PreparedNativeBrushDab prepare_cpu_native_brush_island(
+    GpuLocalIsland island,
+    const std::vector<NativeBrushTranslation> &samples,
+    const NativeBrushDab &dab);
+
 }  // namespace sculpt_physics
