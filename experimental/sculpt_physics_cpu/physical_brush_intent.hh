@@ -38,6 +38,8 @@ struct PhysicalBrushIntentDab {
   double intensity = 1.0; // normalized pressure * material action strength
   double dose = 0.0;      // normalized arc length or explicit dwell increment
   double spread = 0.55;
+  // Native callers already filtered the exact brush footprint (e.g. cube).
+  bool limit_to_projected_disk = true;
 };
 
 /* The increment is bounded by a fraction of the brush radius, not by edge
