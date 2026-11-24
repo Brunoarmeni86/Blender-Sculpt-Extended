@@ -79,7 +79,7 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
     acknowledged_.swap(acknowledged);
     dirty_flags_.swap(dirty_flags);
     dirty_ids_.swap(dirty_ids);
-    revision_ = 0;
+    // Keep the revision monotonic for the lifetime of this executor.
     snapshot_.clear();
     targets_.clear();
     ready_ = true;
@@ -96,13 +96,16 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   void begin_stroke() override
   {
     if (!ready_ || active_) throw std::logic_error("Executor stroke already active or no island");
+    if (revision_==std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error("Executor writeback revision exhausted");
+    }
     std::vector<Vec3> new_snapshot = positions_;
     std::vector<Vec3> acknowledged = positions_;
     snapshot_.swap(new_snapshot);
     acknowledged_.swap(acknowledged);
     for (std::size_t i : dirty_ids_) dirty_flags_[i]=0;
     dirty_ids_.clear();
-    revision_=0;
+    ++revision_;
     targets_.clear();
     active_=true;
   }
