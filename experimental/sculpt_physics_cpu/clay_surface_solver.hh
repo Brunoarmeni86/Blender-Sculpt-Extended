@@ -297,14 +297,15 @@ inline void shape_clay_transport(
   const bool compact=dab.action==ClaySurfaceAction::Compact;
   const bool compress=dab.action==ClaySurfaceAction::Compress;
   std::vector<double> rim(w.size(),0.0);
-  double removed=0,receiver=0;
+  double removed=0,receiver=0,peak_rim=0;
   for(std::size_t i=0;i<w.size();++i)if(w[i]>0) {
     const auto p=xy[i];const double r=norm(p)/dab.radius;
     if(press||compact||compress) {
       const double inner=1-smooth((r-.42)/.29);
       const double depth=press?std::max(0.0,dab.sign*h[i]+.065*dab.radius):amount*.30;
       delta[i]=-dab.sign*w[i]*inner*std::min(depth,amount*.55);
-      rim[i]=w[i]*smooth((r-.60)/.22);
+      rim[i]=w[i]*smooth((r-.50)/.25);
+      peak_rim=std::max(peak_rim,rim[i]);
       removed-=delta[i]*area[i];receiver+=rim[i]*area[i];
     }
     else if(dab.action==ClaySurfaceAction::Push) {
@@ -347,12 +348,15 @@ inline void shape_clay_transport(
   }
   if(press||compact||compress) {
     const double fraction=compact?dab.volume_preservation:1.0;
-    if(receiver>1e-24) {
-      for(std::size_t i=0;i<w.size();++i)delta[i]+=fraction*removed*rim[i]/receiver;
-    } else if(fraction>0) {
-      // No writable recipient: reject conservative compression.
-      for(double &d:delta)d*=1-fraction;
-    }
+    double coefficient=receiver>1e-24?fraction*removed/receiver:0.0;
+    const double peak=std::abs(coefficient)*peak_rim;
+    const double accepted=receiver<=1e-24?0.0:peak>amount*.65?amount*.65/peak:1.0;
+    // Preserve the unreturned compaction fraction; reduce only the
+    // conservative displacement when the receiving rim has no capacity.
+    // Prevent a narrow mask opening from generating a high berm.
+    for(std::size_t i=0;i<w.size();++i)
+      delta[i]=delta[i]*((1-fraction)+fraction*accepted)+
+               accepted*coefficient*rim[i];
   } else {
     // Balance both signs without adding an artificial broad offset or
     // changing pinned vertices. A one-sided remap is rejected.
@@ -424,8 +428,13 @@ inline ClaySurfaceResult solve_clay_surface(
       throw std::overflow_error("Invalid clay chart");
     // Explicit depth bound avoids gathering the back side of a thin mesh.
     if(std::abs(h[i])<=dab.radius*0.5 &&
-       ((dab.surface_contact && !dab.shape_transport) || norm(xy[i])<=dab.radius))
+       ((dab.surface_contact && !dab.shape_transport) || norm(xy[i])<=dab.radius)) {
       w[i]=vertices[i].influence;
+      if(dab.shape_transport) {
+        const double t=std::clamp((.5-std::abs(h[i])/dab.radius)/.15,0.0,1.0);
+        w[i]*=t*t*(3-2*t); // feather the chart depth boundary
+      }
+    }
   }
   std::vector<std::array<std::size_t,2>> edges;
   edges.reserve(triangles.size()*3);
