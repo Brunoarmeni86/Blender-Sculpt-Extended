@@ -629,8 +629,18 @@ inline bool try_apply(const Sculpt &sd,
 
 // V17-B is an explicit Clay/Clay Strips behavior choice. Existing V2/V3
 // modes retain their exact path, and no other brush is silently upgraded.
+inline bool shape_v24_requested()
+{
+  static const bool enabled=[]() {
+    const char *v=std::getenv("BLENDER_SCULPT_SHAPE_V24");
+    return v && v[0]=='1' && v[1]=='\0';
+  }();
+  return enabled;
+}
+
 inline bool smooth_v23_requested()
 {
+  if (shape_v24_requested()) return true;
   static const bool enabled=[]() {
     const char *v=std::getenv("BLENDER_SCULPT_SMOOTH_V23");
     return v && v[0]=='1' && v[1]=='\0';
@@ -754,7 +764,7 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
     static thread_local unsigned int count=0;
     if (count++%64==0) {
       std::fprintf(stderr,"[%s material] substeps=%d refinement_edges=%zu active=%zu proxy_nodes=%zu\n",
-                   dab.smooth_proxy?"V23":dab.density_independent?"V22":"V21",integrated.substeps,
+                   dab.shape_transport?"V24":dab.smooth_proxy?"V23":dab.density_independent?"V22":"V21",integrated.substeps,
                    integrated.refinement_edges,result.active,result.transport_nodes);
     }
   }
@@ -816,7 +826,9 @@ inline bool try_apply_intent(
     if (!std::isfinite(strength) || !std::isfinite(pressure)) {
       throw std::invalid_argument("Invalid autonomous strength/pressure");
     }
-    intent.intensity=std::clamp(strength,0.0,1.0)*std::clamp(pressure,0.0,1.0)*
+    const bool v24=shape_v24_requested() &&
+        cache.xpbd_v16_clay_behavior!=1 && cache.xpbd_v16_clay_behavior!=4;
+    intent.intensity=std::clamp(strength,0.0,v24?4.0:1.0)*std::clamp(pressure,0.0,1.0)*
                      cache.xpbd_v16_assist;
     intent.dose=cache.xpbd_v17_intent_started ?
         std::clamp(double(math::length(delta))/std::max(intent.radius,1e-12),0.0,1.0) : 0.15;
@@ -872,6 +884,7 @@ inline bool try_apply_intent(
           clay.extended_material=true;
           clay.density_independent=density_v22_requested() || v23;
           clay.smooth_proxy=v23;
+          clay.shape_transport=v24;
           if (v23) clay.proxy_cells_per_radius=int(material_override(
               "BLENDER_SCULPT_V23_CELLS",8.0,4.0,16.0));
           // Preserve existing preset/RNA controls; remaining settings are
@@ -913,9 +926,9 @@ inline bool try_apply_intent(
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals);
       const double plan_ms=std::chrono::duration<double,std::milli>(
           std::chrono::steady_clock::now()-plan_start).count();
-      if (!cache.xpbd_v15_active_logged) {
+      if (!cache.xpbd_v15_active_logged || (clay.shape_transport && planned.active==0)) {
         std::fprintf(stderr,"[%s clay surface] action=%d active=%zu target_volume=%.9g transport=%.9g scale=%.4f plan_ms=%.3f\n",
-                     clay.smooth_proxy ? "V23" : clay.density_independent ? "V22" : material_v21_requested() && surface_v20 ? "V21" : surface_v20 ? "V20" : "V19",int(clay.action),planned.active,planned.signed_swept_volume,
+                     clay.shape_transport ? "V24" : clay.smooth_proxy ? "V23" : clay.density_independent ? "V22" : material_v21_requested() && surface_v20 ? "V21" : surface_v20 ? "V20" : "V19",int(clay.action),planned.active,planned.signed_swept_volume,
                      planned.transported_volume,planned.accepted_scale,plan_ms);
       }
     }
