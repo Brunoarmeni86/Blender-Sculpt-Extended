@@ -3512,7 +3512,11 @@ static void rna_def_brush(BlenderRNA *brna)
       {3, "FLOW", 0, "Flow", "Move clay in the direction of the stroke"},
       {4, "AUTONOMOUS_DEPOSIT", 0, "Autonomous Deposit", "Deposit from brush radius and gesture, independent of native plane displacement"},
       {5, "AUTONOMOUS_COMPRESS", 0, "Autonomous Compress", "Depress the center and redistribute along the brush footprint independently of native plane displacement"},
-      {6, "AUTONOMOUS_FLOW", 0, "Autonomous Flow", "Drag material tangentially according to stroke movement independently of native displacement"},
+      {6, "AUTONOMOUS_FLOW", 0, "Autonomous Flow (Directional)", "Original movement-driven tangential action for comparison"},
+      {7, "AUTONOMOUS_COMPACT", 0, "Compact", "Indent the surface with limited lateral movement, without a forced rim"},
+      {8, "AUTONOMOUS_PRESS", 0, "Press", "Approximate flat tool contact; leave points below the advancing plane alone"},
+      {9, "AUTONOMOUS_PRESSURE_FLOW", 0, "Pressure Flow", "Radial tangential motion; Airbrush stroke method supports stationary pressure"},
+      {10, "AUTONOMOUS_HYBRID_FLOW", 0, "Hybrid Flow", "Gesture-directed flow plus radial pressure on stamps and stationary Airbrush dabs"},
       {0, nullptr, 0, nullptr, nullptr},
   };
   prop = RNA_def_property(srna, "sculpt_physics_clay_behavior", PROP_ENUM, PROP_NONE);
