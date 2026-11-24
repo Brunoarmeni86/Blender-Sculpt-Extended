@@ -124,14 +124,23 @@ float multires_texture_displacement_sample(const Mesh &mesh,
     if (uv_name.is_empty()) {
       uv_name = uv_names[0];
     }
-    const int uv_channel = uv_names.index_of(uv_name);
+    /* An explicitly selected UV map can be renamed or removed. index_of()
+     * assumes the key exists and cannot safely handle that case. */
+    const int uv_channel = uv_names.index_of_try(uv_name);
     if (uv_channel < 0) {
       return 0.0f;
     }
-  
+
     float2 uv;
     bke::subdiv::eval_face_varying(&subdiv, uv_channel, ptex_face_index, u, v, uv);
-    tex_co = float3(uv.x, uv.y, 0.0f);
+    if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) {
+      return 0.0f;
+    }
+    /* Match MOD_get_texture_coords() in MOD_util.cc. The legacy texture
+     * evaluator maps [-1, 1] back to image [0, 1]; passing UVs directly
+     * samples only the upper-right quarter of a flat image. Do not clamp:
+     * repeat/clip and UVs outside the unit tile belong to the texture. */
+    tex_co = float3(uv.x * 2.0f - 1.0f, uv.y * 2.0f - 1.0f, 0.0f);
   }
   else {
     /* Sample the undisplaced limit surface so live and bake share a stable
