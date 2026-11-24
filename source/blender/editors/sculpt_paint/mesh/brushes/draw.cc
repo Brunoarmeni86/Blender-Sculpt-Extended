@@ -136,7 +136,9 @@ static void offset_positions(const Depsgraph &depsgraph,
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
   if (physics_v15::freeze_if_mode_changed(object,pbvh,brush)) return;
 
-  if (physics_v15::requested(object,brush) && pbvh.type()==bke::pbvh::Type::Mesh) {
+  if (physics_v15::requested(object,brush) && pbvh.type()==bke::pbvh::Type::Mesh &&
+      !(brush_kind==OffsetBrushKind::Gravity &&
+        physics_v15::autonomous_requested(*object.runtime->sculpt_session->cache))) {
     const Mesh &mesh=*id_cast<Mesh *>(object.data);
     const MeshAttributeData attributes(mesh);
     const PositionDeformData pos(depsgraph,object,true);
