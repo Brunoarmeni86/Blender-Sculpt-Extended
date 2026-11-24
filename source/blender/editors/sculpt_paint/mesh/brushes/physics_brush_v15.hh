@@ -16,6 +16,8 @@
 #  include "compact_native_brush_adapter.hh"
 
 #  include "BKE_mesh.hh"
+#  include "BKE_mesh_types.hh"
+#  include "DNA_brush_types.h"
 #  include "BKE_multires_sculpt_layers.hh"
 #  include "BKE_object_types.hh"
 #  include "BKE_paint_bvh.hh"
@@ -41,7 +43,7 @@ namespace blender::ed::sculpt_paint::brushes::physics_v15 {
 struct NativePhysicsStroke {
   sculpt_physics::World rest_world;
   std::unique_ptr<sculpt_physics::GpuTopologyBondIndex> topology;
-  std::unique_ptr<sculpt_physics::CompactBrushTopology> compact;
+  std::shared_ptr<const sculpt_physics::CompactBrushTopology> compact;
   std::unordered_map<std::size_t, sculpt_physics::Vec3> original_positions;
   const Mesh *mesh_identity = nullptr;
   const int2 *edge_data = nullptr;
@@ -87,18 +89,36 @@ inline double material_override(const char *name, double fallback, double lo, do
              value : fallback;
 }
 
-inline bool requested()
+inline bool requested(Object &object,const Brush &brush)
 {
+  StrokeCache &cache=*object.runtime->sculpt_session->cache;
+  if (cache.xpbd_v16_settings_initialized) return cache.xpbd_v16_enabled;
+  cache.xpbd_v16_settings_initialized=true;
+  if (brush.sculpt_physics_mode==1) return false;
+  const bool explicit_mode=brush.sculpt_physics_mode==2 || brush.sculpt_physics_mode==3;
   const char *value=std::getenv("BLENDER_SCULPT_XPBD_OTHER_BRUSHES_V15");
-  return value && value[0]=='1' && value[1]=='\0' && assist_influence()>0.0;
+  const char *material=std::getenv("BLENDER_SCULPT_XPBD_V16_CLAY_MATERIAL");
+  cache.xpbd_v16_assist=explicit_mode ? double(brush.sculpt_physics_assist) : assist_influence();
+  cache.xpbd_v16_enabled=(explicit_mode || (value && value[0]=='1' && value[1]=='\0')) &&
+      std::isfinite(cache.xpbd_v16_assist) && cache.xpbd_v16_assist>0.0 &&
+      cache.xpbd_v16_assist<=1.0;
+  cache.xpbd_v16_compact=explicit_mode || compact_requested();
+  cache.xpbd_v16_clay_material=explicit_mode ? brush.sculpt_physics_mode==3 :
+      (material && material[0]=='1' && material[1]=='\0');
+  if (explicit_mode) {
+    cache.xpbd_v16_clay_yield=brush.sculpt_physics_yield;
+    cache.xpbd_v16_clay_plasticity=brush.sculpt_physics_plasticity;
+    cache.xpbd_v16_clay_spread=brush.sculpt_physics_spread;
+  }
+  return cache.xpbd_v16_enabled;
 }
 
 /* If Blender's geometry mode changes after this physical brush has
  * already applied any dab, DO NOT mix in stock brush's different evaluator.
  * Return true to finish this stroke without changing geometry. */
-inline bool freeze_if_mode_changed(Object &object, const bke::pbvh::Tree &pbvh)
+inline bool freeze_if_mode_changed(Object &object, const bke::pbvh::Tree &pbvh,const Brush &brush)
 {
-  if (!requested() || pbvh.type()==bke::pbvh::Type::Mesh) return false;
+  if (!requested(object,brush) || pbvh.type()==bke::pbvh::Type::Mesh) return false;
   StrokeCache &cache=*object.runtime->sculpt_session->cache;
   cache.xpbd_v15_failed=true;
   return cache.xpbd_v15_active_logged;
@@ -111,9 +131,9 @@ inline bool try_apply(const Sculpt &sd,
                       const sculpt_physics::NativeSculptBrushKind kind,
                       const std::vector<sculpt_physics::NativeBrushTranslation> &native_translations)
 {
-  if (!requested()) return false;
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
+  if (!cache.xpbd_v16_enabled) return false;
   if (cache.xpbd_v15_failed) return cache.xpbd_v15_active_logged;
   bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
   const Mesh &mesh=*id_cast<Mesh *>(object.data);
@@ -155,6 +175,11 @@ inline bool try_apply(const Sculpt &sd,
   try {
     state=std::static_pointer_cast<NativePhysicsStroke>(cache.xpbd_v15_state);
     const Span<int2> edges=mesh.edges();
+    auto &topology_cache=mesh.runtime->sculpt_physics_topology_cache;
+    if (state && state->compact &&
+        (!topology_cache.is_cached() || topology_cache.data().get()!=state->compact.get())) {
+      throw std::logic_error("Physical brush connectivity cache invalidated mid-stroke");
+    }
     if (state && (state->verts_num!=mesh.verts_num ||
                   state->edges_num!=mesh.edges_num ||
                   state->mesh_identity!=&mesh || state->edge_data!=edges.data())) {
@@ -211,9 +236,15 @@ inline bool try_apply(const Sculpt &sd,
       state->edges_num=mesh.edges_num;
       state->mesh_identity=&mesh;
       state->edge_data=edges.data();
-      if (compact_requested()) {
-        state->compact=std::make_unique<sculpt_physics::CompactBrushTopology>(
-            std::size_t(mesh.verts_num),std::size_t(mesh.edges_num),edge_at);
+      if (cache.xpbd_v16_compact) {
+        const bool warm=topology_cache.is_cached();
+        topology_cache.ensure([&](std::shared_ptr<const void> &data) {
+          data=std::make_shared<const sculpt_physics::CompactBrushTopology>(
+              std::size_t(mesh.verts_num),std::size_t(mesh.edges_num),edge_at);
+        });
+        state->compact=std::static_pointer_cast<const sculpt_physics::CompactBrushTopology>(
+            topology_cache.data());
+        std::fprintf(stderr,"[V16 physics topology] %s\n",warm ? "REUSED" : "BUILT");
       }
       else {
         state->rest_world.reserve_topology(std::size_t(mesh.verts_num),
@@ -240,14 +271,18 @@ inline bool try_apply(const Sculpt &sd,
       return raw && raw[0]=='1' && raw[1]=='\0';
     }();
     dab.colored_order=colored;
-    dab.assist=assist_influence();
+    dab.assist=cache.xpbd_v16_assist;
+    dab.clay_material=cache.xpbd_v16_clay_material;
+    dab.clay_yield=cache.xpbd_v16_clay_yield;
+    dab.clay_plasticity=cache.xpbd_v16_clay_plasticity;
+    dab.clay_spread=cache.xpbd_v16_clay_spread;
     dab.compliance=1.0e-6;
     // Compare against the old V15 baseline before enabling new profiles.
     static const bool profiles=[]() {
       const char *raw=std::getenv("BLENDER_SCULPT_XPBD_V15_PROFILES");
       return raw && raw[0]=='1' && raw[1]=='\0';
     }();
-    if (profiles) {
+    if (profiles || cache.xpbd_v16_clay_material) {
       const auto profile=sculpt_physics::experimental_native_brush_profile(kind);
       dab.compliance=profile.target_compliance;
       dab.material=profile.material;
