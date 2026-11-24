@@ -17,6 +17,7 @@
 #  include "physical_brush_intent.hh"
 #  include "clay_surface_solver.hh"
 #  include "material_transport_v21.hh"
+#  include "material_profiles_v25.hh"
 #  include "brush_contact.hh"
 
 #  include "BKE_mesh.hh"
@@ -128,12 +129,18 @@ inline bool requested(Object &object,const Brush &brush)
 /* If Blender's geometry mode changes after this physical brush has
  * already applied any dab, DO NOT mix in stock brush's different evaluator.
  * Return true to finish this stroke without changing geometry. */
+inline bool tool_v25_requested();
+
 inline bool freeze_if_mode_changed(Object &object, const bke::pbvh::Tree &pbvh,const Brush &brush)
 {
   if (!requested(object,brush) || pbvh.type()==bke::pbvh::Type::Mesh) return false;
   StrokeCache &cache=*object.runtime->sculpt_session->cache;
   cache.xpbd_v15_failed=true;
-  return cache.xpbd_v15_active_logged;
+  const bool strict_material=brush.sculpt_physics_mode==3 &&
+      (tool_v25_requested() || brush.sculpt_physics_clay_behavior==14);
+  if (strict_material && !cache.xpbd_v15_active_logged)
+    std::fprintf(stderr,"[V25] Material tools require supported Mesh topology; no stock fallback.\n");
+  return strict_material || cache.xpbd_v15_active_logged;
 }
 
 inline bool drag_contact_requested()
@@ -237,7 +244,8 @@ inline bool try_apply(const Sculpt &sd,
                  int(unsupported_symmetry),int(cache.tile_pass),
                  int(cache.radial_symmetry_pass),int(cache.mirror_symmetry_pass));
     cache.xpbd_v15_failed=true;
-    return cache.xpbd_v15_active_logged;
+    return (conservative_clay && (tool_v25_requested() || cache.xpbd_v16_clay_behavior==14)) ||
+           cache.xpbd_v15_active_logged;
   }
   if (mesh.verts_num<=0 || position_data.eval.size()!=mesh.verts_num) {
     cache.xpbd_v15_failed=true;
@@ -913,6 +921,20 @@ inline bool try_apply_intent(
           clay.stiffness=material_override("BLENDER_SCULPT_V21_STIFFNESS",0.25,0.0,1.0);
           clay.volume_preservation=material_override("BLENDER_SCULPT_V21_VOLUME",0.75,0.0,1.0);
           clay.fusion=material_override("BLENDER_SCULPT_V21_FUSION",0.6,0.0,1.0);
+          if (clay.tool_v25) {
+            const char *material=std::getenv("BLENDER_SCULPT_V25_MATERIAL");
+            if (material && material[0]) {
+              const auto p=surface_profile_v25(material);
+              clay.friction=material_override("BLENDER_SCULPT_V21_FRICTION",p.friction,0.0,1.0);
+              clay.viscosity=material_override("BLENDER_SCULPT_V21_VISCOSITY",p.viscosity,0.0,1.0);
+              clay.cohesion=material_override("BLENDER_SCULPT_V21_COHESION",p.cohesion,0.0,1.0);
+              clay.stiffness=material_override("BLENDER_SCULPT_V21_STIFFNESS",p.stiffness,0.0,1.0);
+              clay.plasticity=material_override("BLENDER_SCULPT_V25_PLASTICITY",p.plasticity,0.0,1.0);
+              clay.volume_preservation=material_override("BLENDER_SCULPT_V21_VOLUME",p.volume_preservation,0.0,1.0);
+              clay.fusion=material_override("BLENDER_SCULPT_V21_FUSION",p.fusion,0.0,1.0);
+              clay.detail_retention=material_override("BLENDER_SCULPT_V25_DETAIL",p.detail_retention,0.0,1.0);
+            }
+          }
         }
         switch(action) {
           case 4: clay.action=ClaySurfaceAction::FusionDeposit; break;
