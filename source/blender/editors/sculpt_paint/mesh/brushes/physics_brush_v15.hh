@@ -130,6 +130,8 @@ inline bool try_apply(const Sculpt &sd,
       state=std::make_shared<NativePhysicsStroke>();
       state->verts_num=mesh.verts_num;
       state->edges_num=mesh.edges_num;
+      state->rest_world.reserve_topology(std::size_t(mesh.verts_num),
+                                         std::size_t(mesh.edges_num));
       const MeshAttributeData attributes(mesh);
       for (const int i : current.index_range()) {
         const float3 p=current[i];
