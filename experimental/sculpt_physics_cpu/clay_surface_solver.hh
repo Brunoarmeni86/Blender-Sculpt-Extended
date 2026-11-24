@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <vector>
 
@@ -39,6 +40,7 @@ struct ClaySurfaceDab {
   bool surface_contact=false; // V20: recovery-friendly slope bound, native footprint
   bool flow_fusion=false; // V20 Flow: weak relief blending alongside directed transport
   bool extended_material=false;
+  bool density_independent=false; // V22 brush-scale transfer chart
   // Dimensionless artist controls, not calibrated rheological constants.
   double friction=0.7, viscosity=0.4, cohesion=0.6, stiffness=0.5;
   double plasticity=0.85, volume_preservation=0.9;
@@ -52,7 +54,152 @@ struct ClaySurfaceResult {
   double transported_volume=0.0;
   double accepted_scale=1.0;
   std::size_t active=0;
+  std::size_t transport_nodes=0;
 };
+
+/* Brush-scale finite-volume proxy. Each active vertex splats its
+ * projected area * influence into four bilinear chart nodes. The exact
+ * transpose of this transfer prolongates height increments. Thus
+ * sum(A_i * dh_i) == sum(A_grid * dh_grid), including partial masks.
+ * The grid spacing is a fraction of brush radius, never a mesh edge
+ * length. This is a coarse surface model, not a volumetric MPM grid.
+ * The caller supplies one connected, front-facing active chart. */
+inline void coarse_clay_transport(
+    const std::vector<Vec3> &xy,const std::vector<double> &h,
+    const std::vector<double> &w,const std::vector<double> &area,
+    const ClaySurfaceDab &dab,Vec3 axis,double floor,double travel,
+    double mobility,double yield,double drag_gain,double pressure_gain,
+    std::vector<double> &delta,ClaySurfaceResult &out)
+{
+  using Key=std::array<int,2>;
+  struct Node { double area=0,raw=0,height=0,source=0,pressure=0,volume=0,change=0,outgoing=0; };
+  struct Link {std::size_t a,b;double amount;};
+  struct Weight {std::size_t id=0;double value=0;};
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  const auto cross=[](Vec3 a,Vec3 b){return Vec3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};};
+  const auto unit=[](Vec3 p){const double l=std::hypot(p.x,p.y,p.z);return l>1e-12?p/l:Vec3{};};
+  const Vec3 ex=unit(cross(std::abs(axis.z)<0.9?Vec3{0,0,1}:Vec3{0,1,0},axis));
+  const Vec3 ey=cross(axis,ex);
+  const double spacing=dab.radius/8.0;
+  const bool fusion=dab.action==ClaySurfaceAction::FusionDeposit;
+  const bool compact=dab.action==ClaySurfaceAction::Compact;
+  const bool pressure=dab.action==ClaySurfaceAction::Compress ||
+      dab.action==ClaySurfaceAction::Press || dab.action==ClaySurfaceAction::PressureFlow ||
+      dab.action==ClaySurfaceAction::HybridFlow || compact;
+  std::map<Key,std::size_t> lookup;
+  std::vector<Node> nodes;
+  std::vector<std::array<Weight,4>> stencil(h.size());
+  std::vector<std::array<std::size_t,2>> edges;
+  const auto get=[&](Key key){
+    auto it=lookup.find(key);
+    if(it!=lookup.end())return it->second;
+    auto id=nodes.size();lookup.emplace(key,id);nodes.emplace_back();return id;
+  };
+  for(std::size_t i=0;i<h.size();++i) {
+    if(w[i]<=0)continue;
+    const double x=dot(xy[i],ex)/spacing,y=dot(xy[i],ey)/spacing;
+    if(!std::isfinite(x)||!std::isfinite(y)||std::abs(x)>64||std::abs(y)>64)
+      throw std::invalid_argument("Invalid coarse brush chart");
+    const int ix=int(std::floor(x)),iy=int(std::floor(y));
+    const double fx=x-ix,fy=y-iy;
+    double source=0,tool=0;
+    if(fusion)source=dab.sign*travel*.10*w[i];
+    if(compact)source=-dab.sign*(1-dab.volume_preservation)*
+        std::min(travel*.035*w[i],.15*std::max(0.0,h[i]-floor));
+    if(pressure) {
+      const double gain=dab.action==ClaySurfaceAction::Compress?.30:
+          dab.action==ClaySurfaceAction::PressureFlow?.22:
+          dab.action==ClaySurfaceAction::HybridFlow?.12:.10;
+      const double depth=dab.action==ClaySurfaceAction::Press?
+          std::max(0.0,h[i]+.08*dab.radius):gain*dab.radius;
+      tool=dab.sign*depth*w[i]*pressure_gain;
+    }
+    delta[i]=source; // add/sink at original resolution, transport on proxy
+    for(int j=0;j<4;++j) {
+      const int dx=j&1,dy=j>>1;
+      const double b=(dx?fx:1-fx)*(dy?fy:1-fy);
+      if(b<=1e-14)continue;
+      const auto id=get({ix+dx,iy+dy});
+      stencil[i][j]={id,b};
+      auto &g=nodes[id];
+      const double m=area[i]*w[i]*b;
+      g.area+=m;g.raw+=area[i]*b;
+      g.height+=m*h[i];g.source+=m*source;
+      g.pressure+=m*tool;
+    }
+    // Only connect nodes that share an active interpolation stencil.
+    // Neighboring masked/disconnected islands are not joined by a raw
+    // geometric nearest-neighbor search. Subcell holes are unresolved.
+    for(int a=0;a<4;++a)for(int b=a+1;b<4;++b) {
+      if((a^b)==3)continue; // axis-aligned faces of the proxy
+      const auto u=stencil[i][a],v=stencil[i][b];
+      if(u.value<=0||v.value<=0)continue;
+      edges.push_back({std::min(u.id,v.id),std::max(u.id,v.id)});
+    }
+  }
+  // Grid vertices with exactly aligned mesh samples need connections too.
+  // Connect only occupied adjacent cells touched by a mesh-connected
+  // chart. The host already isolated one connected active component.
+  for(const auto &entry:lookup) {
+    for(Key k:{Key{entry.first[0]+1,entry.first[1]},Key{entry.first[0],entry.first[1]+1}}) {
+      const auto it=lookup.find(k);
+      if(it!=lookup.end())edges.push_back({std::min(entry.second,it->second),std::max(entry.second,it->second)});
+    }
+  }
+  std::sort(edges.begin(),edges.end());
+  edges.erase(std::unique(edges.begin(),edges.end()),edges.end());
+  std::vector<Key> keys(nodes.size());
+  for(const auto &e:lookup)keys[e.second]=e.first;
+  for(auto &g:nodes) {
+    if(g.area<=0||!std::isfinite(g.area))throw std::overflow_error("Invalid proxy area");
+    g.height/=g.area;g.source/=g.area;g.pressure/=g.area;
+    g.volume=std::max(0.0,g.height+g.source-floor)*g.area;
+  }
+  const Vec3 dir=unit(dab.direction-axis*dot(dab.direction,axis))*dab.sign;
+  std::vector<Link> flux;
+  for(const auto &e:edges) {
+    auto a=e[0],b=e[1];
+    const auto &u=nodes[a],&v=nodes[b];
+    const double lo=std::min(u.area,v.area),hi=std::max(u.area,v.area);
+    const double width=(2*lo/(1+lo/hi))/spacing;
+    const double envelope=std::min(u.area/u.raw,v.area/v.raw);
+    const Vec3 line=ex*double(keys[b][0]-keys[a][0])+ey*double(keys[b][1]-keys[a][1]);
+    const double align=dot(dir,line);
+    const bool directed=dab.action==ClaySurfaceAction::Push||dab.action==ClaySurfaceAction::HybridFlow;
+    double f=0;
+    if(directed) {
+      const double thickness=align>=0?u.volume/u.area:v.volume/v.area;
+      f=align*thickness*width*travel*mobility*envelope*drag_gain*
+        (dab.action==ClaySurfaceAction::HybridFlow?.45:1.0);
+    }
+    if(pressure||fusion||dab.action==ClaySurfaceAction::Spread||
+       (dab.action==ClaySurfaceAction::Push&&dab.flow_fusion)) {
+      const double diff=(u.height+u.source+u.pressure)-(v.height+v.source+v.pressure);
+      const double excess=std::max(0.0,std::abs(diff)-yield*spacing);
+      const double rate=fusion?dab.fusion:
+          dab.action==ClaySurfaceAction::Push?.4*dab.fusion:1.0;
+      f+=std::copysign(excess,diff)*width*
+          std::min(travel*mobility*envelope*rate,spacing*.24);
+    }
+    if(!std::isfinite(f))throw std::overflow_error("Invalid proxy flux");
+    if(f==0)continue;
+    if(f<0){std::swap(a,b);f=-f;}
+    nodes[a].outgoing+=f;flux.push_back({a,b,f});
+  }
+  for(const auto &f:flux) {
+    auto &u=nodes[f.a];auto &v=nodes[f.b];
+    const double cap=u.volume*.25;
+    const double mass=f.amount*std::min(1.0,cap/u.outgoing);
+    u.change-=mass;v.change+=mass;out.transported_volume+=mass;
+  }
+  for(std::size_t i=0;i<h.size();++i) if(w[i]>0) {
+    double d=0;
+    for(const auto &b:stencil[i])if(b.value>0)
+      d+=b.value*nodes[b.id].change/nodes[b.id].area;
+    delta[i]+=w[i]*d;
+  }
+  out.transport_nodes=nodes.size();
+}
 
 inline ClaySurfaceResult solve_clay_surface(
     const std::vector<ClaySurfaceVertex> &vertices,
@@ -173,6 +320,10 @@ inline ClaySurfaceResult solve_clay_surface(
   if(dab.action==ClaySurfaceAction::Buildup) {
     for(std::size_t i=0;i<n;++i) if(w[i]>0)
       delta[i]=dab.sign*travel*0.10*w[i];
+  } else if(dab.density_independent &&
+            dab.action!=ClaySurfaceAction::Gather) {
+    coarse_clay_transport(xy,h,w,out.projected_area,dab,axis,floor,travel,
+                          mobility,yield,drag_gain,pressure_gain,delta,out);
   } else {
     struct Flux {std::size_t a,b; double v;};
     std::vector<Flux> flux;
@@ -265,7 +416,15 @@ inline ClaySurfaceResult solve_clay_surface(
   // One common acceptance factor preserves the transport balance.
   // Limit increment of slopes across all edges including pinned exterior.
   // No Laplacian on original positions: existing details are not erased.
-  for(const auto &e:edges) {
+  if(dab.density_independent) {
+    // Projected XY is unchanged: positive chart areas cannot invert in
+    // this solve. Bound physical height travel instead of the shortest
+    // fine-mesh edge. The editor still validates 3D incident triangles.
+    double peak=0;
+    for(double d:delta)peak=std::max(peak,std::abs(d));
+    if(peak>dab.radius*.08)out.accepted_scale=dab.radius*.08/peak;
+  }
+  else for(const auto &e:edges) {
     const double increment=delta[e[0]]-delta[e[1]];
     const double diff=std::abs(increment);
     const double len=norm(xy[e[0]]-xy[e[1]]);
