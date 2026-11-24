@@ -29,3 +29,19 @@ Multires/CCG and Sculpt Layers physics after ordinary dense meshes, symmetry and
 ## Acceptance and measurement
 
 Run standalone CMake/CTest in Debug (assertions enabled), especially workset, executor and native brush adapter tests; then Windows Blender build with the same V15 compile flags, runtime tests on 100k, 500k, 1M, 5M, 10M, 20M vertices. Vary brush footprint independently of mesh density. Measure first-dab latency, p50/p95/p99, topology setup, CPU solver, transfers, writeback, RAM/VRAM and symmetry error. Compare stock, old CPU, optimized CPU and CUDA. Target 16–33 ms per typical dab is aspirational, not measured. Preserve masks, native clipping, UV, topology, native Undo and fallback behavior. Confirm local V14 separation and Texture Displacement UV regressions separately. Document environment, commit and actual test results before promoting.
+
+## 2026-11-24 — compact stroke implementation
+
+Implemented on the experimental V16 branch:
+- Fix: Undo-covered halo vertices remain pinned unless explicitly active.
+- Fix: CPU executor revisions stay monotonic across stroke and island reuse.
+- Fix: avoid native/physical mixing following unsupported geometry fallback, reject clipping changes to stationary vertices.
+- Opt-in ordinary-mesh compact CPU path: `BLENDER_SCULPT_XPBD_V16_COMPACT=1`, in addition to the existing V15 build and runtime switches. A 32-bit edge incidence index replaces the full-mesh World in this path. Only the active region and its one-ring halo are instantiated as local physics particles/bonds for each dab. Global/local mapping is sorted, and the original coordinates of written vertices are captured before native writeback. The old CPU path remains the reference.
+- No-op dabs avoid rest-world initialization.
+- Shared compact adapter and moving-dab CPU parity regression are registered in standalone CTest.
+
+Actual verification: the standalone compact topology test was built with g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror -UNDEBUG and passed in the assistant's Linux environment. Source blob hashes verified against GitHub: compact topology ad182dc1c16c003410f5cbdbed3e222f7bce50d9; test bd5eb661cc54b0c0b501734fd4da0596e1da8445. On a synthetic 1M-vertex chain (999999 edges), the index reported 11999996 bytes; gathering two adjacent vertices visited four edge references and returned three unique edges/four vertices. This is NOT a Blender viewport or CPU/GPU speed benchmark.
+
+Not executed: full standalone CTest, compact numerical parity test, Windows Blender compilation, runtime, Undo, symmetry, CUDA. Direct repository checkout from the assistant's test environment failed (DNS/network unavailable); GitHub connector commits succeeded.
+
+Remaining limitations: topology indexing is still O(V+E) once per stroke, not persistent across strokes; memory for the sparse rest map grows with the touched region; per-dab World/executor allocation remains local but is not reused. Mesh identity, edge pointer/count and local incidence checks do not prove detection of all same-count in-place topology edits. Masks are sampled at each dab in the compact path, so test static-mask parity first. Fixed one-ring halo only; no unjournaled exterior writes. Keep the compact path opt-in until full parity and native editor gates pass. The symmetry guard remains intentionally enabled and no native CUDA executor has been registered. Do not replace the local V15.1 branch or lose the Multires Separate fix.
