@@ -112,7 +112,7 @@ inline std::vector<NativeBrushTranslation> plan_physical_brush_intent(
     const Vec3 offset=(s.position-dab.center)/dab.radius;
     const double radius=norm(offset-axis*dot(offset,axis));
     if (!std::isfinite(radius)) throw std::overflow_error("Invalid brush footprint");
-    if (radius>1.0) continue;
+    if (dab.limit_to_projected_disk && radius>1.0) continue;
     double rim=std::clamp((radius-0.25)/0.55,0.0,1.0);
     rim=rim*rim*(3.0-2.0*rim);
     const double w=(s.area/area_max)*s.envelope;
