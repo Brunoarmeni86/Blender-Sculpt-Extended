@@ -12,11 +12,15 @@ using namespace sculpt_physics;
 int main()
 {
   World world;
+  world.reserve_topology(3, 2);
   world.add_particle({0,0,0});
   world.add_particle({1,0,0});
   world.add_particle({2,0,0});
   world.add_bond(0,1);
   world.add_bond(1,2);
+  assert(world.incident_bond_ids(0) == std::vector<std::size_t>({0}));
+  assert(world.incident_bond_ids(1) == std::vector<std::size_t>({0, 1}));
+  assert(world.incident_bond_ids(2) == std::vector<std::size_t>({1}));
 
   const auto island = build_gpu_local_island(
       world,{1},{2,0},{1},42,false);
@@ -93,9 +97,10 @@ int main()
   catch(const std::logic_error &) { rejected = true; }
   assert(rejected);
 
-  // Larger connected topology and repeated local dabs: a CSR query visits
+  // Larger connected topology and repeated local dabs: an incidence query visits
   // only bonds adjacent to its active/halo IDs, not all distant bonds.
   World large;
+  large.reserve_topology(120, 119);
   for (std::size_t i = 0; i < 120; ++i) {
     large.add_particle({static_cast<double>(i), 0.0, 0.0});
   }
@@ -114,6 +119,16 @@ int main()
       assert(slow.bonds[j].b == quick.bonds[j].b);
     }
   }
+  // Reserving capacity does not change the graph or invalidate a view.
+  large.reserve_topology(240, 240);
+  assert(fast.one_ring_halo(large, {5}, 7) ==
+         std::vector<std::size_t>({4, 6}));
+  large.begin_stroke();
+  rejected = false;
+  try { large.reserve_topology(300, 300); }
+  catch (const std::logic_error &) { rejected = true; }
+  large.cancel_stroke();
+  assert(rejected);
   // Adding a bond invalidates the old graph even if caller passes generation 7.
   large.add_bond(0,119);
   rejected = false;
