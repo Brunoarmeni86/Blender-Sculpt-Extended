@@ -23,7 +23,7 @@ struct ClaySurfaceVertex {
   double influence=0.0;
 };
 using ClaySurfaceTriangle=std::array<std::size_t,3>;
-enum class ClaySurfaceAction { Buildup, Push, Gather, Spread };
+enum class ClaySurfaceAction { Buildup, Push, Gather, Spread, FusionDeposit, Compress, Compact, Press, PressureFlow, HybridFlow };
 struct ClaySurfaceDab {
   ClaySurfaceAction action=ClaySurfaceAction::Buildup;
   Vec3 center{};
@@ -36,6 +36,8 @@ struct ClaySurfaceDab {
   double sign=1.0;
   double yield_slope=0.10;
   double relative_slope_limit=0.35;
+  bool surface_contact=false; // V20: recovery-friendly slope bound, native footprint
+
 };
 struct ClaySurfaceResult {
   std::vector<Vec3> displacement;
@@ -65,7 +67,10 @@ inline ClaySurfaceResult solve_clay_surface(
       dab.relative_slope_limit==0) throw std::invalid_argument("Invalid clay surface dab");
   switch(dab.action) {
     case ClaySurfaceAction::Buildup: case ClaySurfaceAction::Push:
-    case ClaySurfaceAction::Gather: case ClaySurfaceAction::Spread: break;
+    case ClaySurfaceAction::Gather: case ClaySurfaceAction::Spread:
+    case ClaySurfaceAction::FusionDeposit: case ClaySurfaceAction::Compress:
+    case ClaySurfaceAction::Compact: case ClaySurfaceAction::Press:
+    case ClaySurfaceAction::PressureFlow: case ClaySurfaceAction::HybridFlow: break;
     default: throw std::invalid_argument("Invalid clay surface action");
   }
   const Vec3 axis=dab.axis/norm(dab.axis);
@@ -87,7 +92,7 @@ inline ClaySurfaceResult solve_clay_surface(
     if(!std::isfinite(h[i]) || !std::isfinite(norm(xy[i])))
       throw std::overflow_error("Invalid clay chart");
     // Explicit depth bound avoids gathering the back side of a thin mesh.
-    if(std::abs(h[i])<=dab.radius*0.5 && norm(xy[i])<=dab.radius)
+    if(std::abs(h[i])<=dab.radius*0.5 && (dab.surface_contact || norm(xy[i])<=dab.radius))
       w[i]=vertices[i].influence;
   }
   std::vector<std::array<std::size_t,2>> edges;
@@ -156,8 +161,36 @@ inline ClaySurfaceResult solve_clay_surface(
     struct Flux {std::size_t a,b; double v;};
     std::vector<Flux> flux;
     std::vector<double> outgoing(n,0.0),volume(n,0.0),sent(n,0.0),received(n,0.0);
-    for(std::size_t i=0;i<n;++i) if(w[i]>0)
-      volume[i]=std::max(0.0,h[i]-floor)*out.projected_area[i];
+    // V20 uses the geometry already produced by ANY preceding brush.
+    // The projected height is the visible state, not a stale per-stroke
+    // rest mesh or a hidden volume inventory. Pressure is a local
+    // virtual tool potential, not calibrated physical pressure.
+    const bool fusion=dab.action==ClaySurfaceAction::FusionDeposit;
+    const bool compact=dab.action==ClaySurfaceAction::Compact;
+    const bool contact=dab.action==ClaySurfaceAction::Compress ||
+        dab.action==ClaySurfaceAction::Press ||
+        dab.action==ClaySurfaceAction::PressureFlow ||
+        dab.action==ClaySurfaceAction::HybridFlow || compact;
+    std::vector<double> potential=h;
+    for(std::size_t i=0;i<n;++i) if(w[i]>0) {
+      if(fusion) delta[i]=dab.sign*travel*0.10*w[i];
+      if(compact) {
+        // Compressible preset: unlike volume-preserving Compress, allow
+        // a bounded loss of projected volume. Ctrl reverses the sink.
+        delta[i]=-dab.sign*std::min(travel*0.035*w[i],
+                                  0.15*std::max(0.0,h[i]-floor));
+      }
+      volume[i]=std::max(0.0,h[i]+delta[i]-floor)*out.projected_area[i];
+      potential[i]=h[i]+delta[i];
+      if(contact) {
+        const double gain=dab.action==ClaySurfaceAction::Compress ? 0.30 :
+                          dab.action==ClaySurfaceAction::PressureFlow ? 0.22 :
+                          dab.action==ClaySurfaceAction::HybridFlow ? 0.12 : 0.10;
+        const double penetration=dab.action==ClaySurfaceAction::Press ?
+            std::max(0.0,h[i]+0.08*dab.radius) : gain*dab.radius;
+        potential[i]+=dab.sign*penetration*w[i];
+      }
+    }
     for(const auto &e:edges) {
       const auto a=e[0],b=e[1];
       if(w[a]==0 || w[b]==0) continue;
@@ -170,11 +203,20 @@ inline ClaySurfaceResult solve_clay_surface(
       const double width=dual/len; // positive dual-interface approximation
       const double envelope=std::min(w[a],w[b]);
       double f=0;
-      if(dab.action==ClaySurfaceAction::Spread) {
-        const double excess=std::max(0.0,std::abs(h[a]-h[b])-dab.yield_slope*len);
-        // Diffusive flux: flow only above yield slope, lower mobility = stiffer clay.
-        f=std::copysign(excess,h[a]-h[b])*width*
-             std::min(travel*dab.mobility*envelope,len*0.25);
+      if(dab.action==ClaySurfaceAction::Spread || fusion || contact) {
+        const double slope=potential[a]-potential[b];
+        const double excess=std::max(0.0,std::abs(slope)-dab.yield_slope*len);
+        // Conductance bounded by local spacing for a stable explicit
+        // transport step. Fusion is weaker than the dedicated pressure
+        // actions and does not apply an ordinary position Laplacian.
+        const double rate=fusion?0.35:1.0;
+        f=std::copysign(excess,slope)*width*
+             std::min(travel*dab.mobility*envelope*rate,len*(dab.surface_contact?0.20:0.25));
+        if(dab.action==ClaySurfaceAction::HybridFlow) {
+          const double align=std::clamp(dot(unit(tangent(dab.direction))*dab.sign,line/len),-1.0,1.0);
+          const double thickness=align>=0?volume[a]/aa:volume[b]/ab;
+          f+=0.45*align*thickness*width*travel*dab.mobility*envelope;
+        }
       } else {
         const Vec3 field=dab.action==ClaySurfaceAction::Gather ?
           unit((xy[a]+xy[b])*(-0.5))*dab.sign : unit(tangent(dab.direction))*dab.sign;
@@ -195,16 +237,24 @@ inline ClaySurfaceResult solve_clay_surface(
       sent[f.a]+=v;received[f.b]+=v;out.transported_volume+=v;
     }
     for(std::size_t i=0;i<n;++i) if(w[i]>0)
-      delta[i]=(received[i]-sent[i])/out.projected_area[i];
+      delta[i]+=(received[i]-sent[i])/out.projected_area[i];
   }
   // One common acceptance factor preserves the transport balance.
   // Limit increment of slopes across all edges including pinned exterior.
   // No Laplacian on original positions: existing details are not erased.
   for(const auto &e:edges) {
-    const double diff=std::abs(delta[e[0]]-delta[e[1]]);
+    const double increment=delta[e[0]]-delta[e[1]];
+    const double diff=std::abs(increment);
     const double len=norm(xy[e[0]]-xy[e[1]]);
-    if(diff>0) out.accepted_scale=std::min(out.accepted_scale,
-                                           dab.relative_slope_limit*len/diff);
+    if(diff>0) {
+      const double existing=h[e[0]]-h[e[1]];
+      // Allow reduction of existing slope without treating it as a new
+      // instability. Still bound any increase of absolute height slope.
+      const double recovery=dab.surface_contact && existing*increment<0 ?
+          2.0*std::abs(existing):0.0;
+      out.accepted_scale=std::min(out.accepted_scale,
+                                 (recovery+dab.relative_slope_limit*len)/diff);
+    }
   }
   for(std::size_t i=0;i<n;++i) {
     const double d=delta[i]*out.accepted_scale;
