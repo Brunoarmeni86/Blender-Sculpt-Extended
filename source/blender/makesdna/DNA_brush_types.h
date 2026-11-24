@@ -322,6 +322,15 @@ struct Brush {
 
   float autosmooth_factor = 0.0f;
 
+  /** Experimental surface physics. 0=inherit launch flags, 1=native,
+   * 2=assisted XPBD, 3=material XPBD. No topology or UV changes. */
+  int sculpt_physics_mode = 0;
+  float sculpt_physics_assist = 0.75f;
+  float sculpt_physics_yield = 0.035f;
+  float sculpt_physics_plasticity = 0.65f;
+  float sculpt_physics_spread = 0.55f;
+
+
   float tilt_strength_factor = 0;
 
   float topology_rake_factor = 0.0f;
