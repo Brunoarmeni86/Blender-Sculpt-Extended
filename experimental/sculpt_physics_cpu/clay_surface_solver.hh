@@ -37,6 +37,7 @@ struct ClaySurfaceDab {
   double yield_slope=0.10;
   double relative_slope_limit=0.35;
   bool surface_contact=false; // V20: recovery-friendly slope bound, native footprint
+  bool flow_fusion=false; // V20 Flow: weak relief blending alongside directed transport
 
 };
 struct ClaySurfaceResult {
@@ -223,6 +224,12 @@ inline ClaySurfaceResult solve_clay_surface(
         const double alignment=std::clamp(dot(field,line/len),-1.0,1.0);
         const double thickness=alignment>=0 ? volume[a]/aa:volume[b]/ab;
         f=alignment*thickness*width*travel*dab.mobility*envelope;
+        if(dab.surface_contact && dab.flow_fusion && dab.action==ClaySurfaceAction::Push) {
+          const double dh=h[a]-h[b];
+          const double excess=std::max(0.0,std::abs(dh)-dab.yield_slope*len);
+          f+=std::copysign(excess,dh)*width*
+              std::min(travel*dab.mobility*envelope*0.20,len*0.10);
+        }
       }
       if(!std::isfinite(f)) throw std::overflow_error("Clay surface flux overflow");
       if(f==0) continue;
@@ -251,7 +258,7 @@ inline ClaySurfaceResult solve_clay_surface(
       // Allow reduction of existing slope without treating it as a new
       // instability. Still bound any increase of absolute height slope.
       const double recovery=dab.surface_contact && existing*increment<0 ?
-          2.0*std::abs(existing):0.0;
+          std::abs(existing):0.0;
       out.accepted_scale=std::min(out.accepted_scale,
                                  (recovery+dab.relative_slope_limit*len)/diff);
     }
