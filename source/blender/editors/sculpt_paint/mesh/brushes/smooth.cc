@@ -141,7 +141,7 @@ static bool try_smooth_physics_v15(const Depsgraph &depsgraph,
           tls.neighbor_offsets,tls.neighbor_data);
       tls.new_positions.resize(verts.size());
       smooth::neighbor_data_average_mesh_check_loose(
-          pos.eval,verts,neighbors,tls.new_positions);
+          pos.eval,verts,neighbors,tls.new_positions.as_mutable_span());
       tls.translations.resize(verts.size());
       translations_from_new_positions(
           tls.new_positions,verts,pos.eval,tls.translations);
