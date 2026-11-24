@@ -175,7 +175,11 @@ inline bool try_apply(const Sculpt &sd,
     // True zero-impact dab: don't traverse, clip or rewrite every PBVH
     // node with zero translations. Blender's ordinary smoothing/plane
     // clipping may otherwise modify stationary coordinates unexpectedly.
-    if (!result.has_solver()) {
+    if (result.writes().empty()) {
+      // A solver can also legitimately return an empty batch (e.g. all
+      // motion below writeback precision). Acknowledge it without touching
+      // native geometry or invalidating PBVH caches.
+      result.finish_editor_success();
       cache.xpbd_v15_state=state;
       return true;
     }
