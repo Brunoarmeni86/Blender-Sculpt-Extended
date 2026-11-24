@@ -628,11 +628,22 @@ inline bool try_apply(const Sculpt &sd,
 
 // V17-B is an explicit Clay/Clay Strips behavior choice. Existing V2/V3
 // modes retain their exact path, and no other brush is silently upgraded.
+inline bool surface_contact_v20_requested()
+{
+  static const bool enabled=[]() {
+    const char *v=std::getenv("BLENDER_SCULPT_SURFACE_V20");
+    return v && v[0]=='1' && v[1]=='\0';
+  }();
+  return enabled;
+}
+
 inline bool autonomous_requested(const StrokeCache &cache)
 {
   return cache.xpbd_v16_clay_material &&
       ((cache.xpbd_v16_clay_behavior>=4 && cache.xpbd_v16_clay_behavior<=10) ||
-       (drag_contact_requested() && cache.xpbd_v16_clay_behavior==2));
+       (drag_contact_requested() && cache.xpbd_v16_clay_behavior==2) ||
+       (surface_contact_v20_requested() && cache.xpbd_v16_clay_behavior>=1 &&
+        cache.xpbd_v16_clay_behavior<=3));
 }
 
 // Explicit opt-in while tuning the new solver; no RNA/DNA change.
@@ -714,11 +725,14 @@ inline bool try_apply_intent(
     const float3 &normal)
 {
   StrokeCache &cache=*object.runtime->sculpt_session->cache;
-  const bool conservative=conservative_clay_requested() &&
+  const bool surface_v20=surface_contact_v20_requested() && cache.xpbd_v16_compact &&
+      cache.xpbd_v16_clay_material && cache.xpbd_v16_clay_behavior>=1 &&
+      cache.xpbd_v16_clay_behavior<=10;
+  const bool conservative=surface_v20 || (conservative_clay_requested() &&
       kind==sculpt_physics::NativeSculptBrushKind::Clay &&
       (cache.xpbd_v16_clay_behavior==4 || cache.xpbd_v16_clay_behavior==6 ||
        cache.xpbd_v16_clay_behavior==9 || cache.xpbd_v16_clay_behavior==10) &&
-      cache.xpbd_v16_compact;
+      cache.xpbd_v16_compact);
   if (cache.xpbd_v15_failed) return conservative || cache.xpbd_v15_active_logged;
   try {
     // PBVH boundary duplicates must not double the impulse.
@@ -755,8 +769,10 @@ inline bool try_apply_intent(
                      cache.xpbd_v16_assist;
     intent.dose=cache.xpbd_v17_intent_started ?
         std::clamp(double(math::length(delta))/std::max(intent.radius,1e-12),0.0,1.0) : 0.15;
-    const int action=drag_contact_requested() && cache.xpbd_v16_clay_behavior==2 ?
-                         5 : cache.xpbd_v16_clay_behavior;
+    const int original_action=cache.xpbd_v16_clay_behavior;
+    const int action=surface_v20 && original_action>=1 && original_action<=3 ?
+                         original_action+3 :
+                     drag_contact_requested() && original_action==2 ? 5 : original_action;
     if ((action>=7 || conservative || drag_contact_requested()) && brush.stroke_method==BRUSH_STROKE_AIRBRUSH &&
         cache.xpbd_v17_intent_started) {
       // Native timer dispatch already provides repeated stationary dabs.
@@ -794,7 +810,21 @@ inline bool try_apply_intent(
       clay.dose=intent.dose;
       clay.mobility=intent.spread;
       clay.sign=sign;
-      if (action==4) clay.action=ClaySurfaceAction::Buildup;
+      if (surface_v20) {
+        clay.surface_contact=true;
+        clay.yield_slope=0.05;
+        switch(action) {
+          case 4: clay.action=ClaySurfaceAction::FusionDeposit; break;
+          case 5: clay.action=ClaySurfaceAction::Compress; break;
+          case 6: clay.action=ClaySurfaceAction::Push; break;
+          case 7: clay.action=ClaySurfaceAction::Compact; break;
+          case 8: clay.action=ClaySurfaceAction::Press; break;
+          case 9: clay.action=ClaySurfaceAction::PressureFlow; break;
+          case 10: clay.action=ClaySurfaceAction::HybridFlow; break;
+          default: throw std::invalid_argument("Unknown V20 material action");
+        }
+      }
+      else if (action==4) clay.action=ClaySurfaceAction::Buildup;
       else if (action==9) {
         clay.action=sign<0 ? ClaySurfaceAction::Gather : ClaySurfaceAction::Spread;
         clay.sign=1.0;
@@ -809,9 +839,9 @@ inline bool try_apply_intent(
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals);
       const double plan_ms=std::chrono::duration<double,std::milli>(
           std::chrono::steady_clock::now()-plan_start).count();
-      if (!cache.xpbd_v15_active_logged && !goals.empty()) {
-        std::fprintf(stderr,"[V19 clay surface] action=%d active=%zu target_volume=%.9g transport=%.9g scale=%.4f plan_ms=%.3f\n",
-                     int(clay.action),planned.active,planned.signed_swept_volume,
+      if (!cache.xpbd_v15_active_logged) {
+        std::fprintf(stderr,"[%s clay surface] action=%d active=%zu target_volume=%.9g transport=%.9g scale=%.4f plan_ms=%.3f\n",
+                     surface_v20 ? "V20" : "V19",int(clay.action),planned.active,planned.signed_swept_volume,
                      planned.transported_volume,planned.accepted_scale,plan_ms);
       }
     }
