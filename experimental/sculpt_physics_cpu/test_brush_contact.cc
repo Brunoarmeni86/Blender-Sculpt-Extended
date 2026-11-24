@@ -78,4 +78,26 @@ int main()
   }
   tri.position[2]=tri.position[1];
   assert(contact_triangle_scale(tri)==0);
+
+  // One collapsed patch must not block independent healthy material.
+  std::vector<Vec3> p{{0,0,0},{1,0,0},{0,1,0},{3,0,0},{4,0,0},{3,1,0}};
+  const std::vector<std::array<std::size_t,3>> faces{{0,1,2},{3,4,5}};
+  std::vector<Vec3> m{{},{-3,0,0},{0,-2,0},{0,0,.1},{0,0,.1},{0,0,.1}};
+  auto uniform=m;
+  auto local=limit_local_contact(p,faces,m);
+  assert(local.limited_vertices==2 && local.final_scale==1);
+  assert(m[3].z==.1 && m[4].z==.1 && m[5].z==.1);
+  assert(m[0].x==0 && m[0].y==0 && m[0].z==0);
+  assert(contact_triangle_scale({{p[0],p[1],p[2]},{m[0],m[1],m[2]}})==1);
+  auto common=limit_local_contact(p,faces,uniform,true);
+  assert(common.final_scale<1 && uniform[3].z<.1);
+  // Shared faces: recheck all of them after unequal local reductions.
+  const std::vector<std::array<std::size_t,3>> connected{{0,1,2},{1,3,2},{3,4,5}};
+  m={{},{-3,0,0},{0,-2,0},{-.5,0,.2},{0,0,.1},{0,0,.1}};
+  limit_local_contact(p,connected,m);
+  for(const auto &f:connected) {
+    ContactTriangle check{{p[f[0]],p[f[1]],p[f[2]]},
+                          {m[f[0]],m[f[1]],m[f[2]]}};
+    assert(contact_triangle_scale(check)>=1-1e-9);
+  }
 }
