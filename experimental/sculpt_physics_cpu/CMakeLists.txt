@@ -288,3 +288,13 @@ elseif(MSVC)
   target_compile_options(test_compact_native_brush_adapter PRIVATE /UNDEBUG)
 endif()
 add_test(NAME sculpt_compact_native_brush_adapter_tests COMMAND test_compact_native_brush_adapter)
+
+# Device-independent constraint scheduling for future colored CPU/CUDA XPBD.
+add_executable(test_constraint_batches test_constraint_batches.cc)
+target_compile_features(test_constraint_batches PRIVATE cxx_std_17)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_constraint_batches PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+elseif(MSVC)
+  target_compile_options(test_constraint_batches PRIVATE /UNDEBUG)
+endif()
+add_test(NAME sculpt_constraint_batches_tests COMMAND test_constraint_batches)
