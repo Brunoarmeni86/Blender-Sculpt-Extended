@@ -563,6 +563,7 @@ inline bool try_apply_intent(
     intent.dose=cache.xpbd_v17_intent_started ?
         std::clamp(double(math::length(delta))/std::max(intent.radius,1e-12),0.0,1.0) : 0.15;
     intent.spread=cache.xpbd_v16_clay_spread;
+    intent.limit_to_projected_disk=false; // factors already encode native brush shape
     intent.action=cache.xpbd_v16_clay_behavior==4 ? sculpt_physics::PhysicalBrushAction::Deposit :
                   cache.xpbd_v16_clay_behavior==5 ? sculpt_physics::PhysicalBrushAction::Compress :
                                                   sculpt_physics::PhysicalBrushAction::Flow;
