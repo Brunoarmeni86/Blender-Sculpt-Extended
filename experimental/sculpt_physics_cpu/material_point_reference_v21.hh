@@ -27,6 +27,8 @@ struct MaterialPointSettingsV21 {
   double spacing=1.0,dt=0.01;
   double bulk=20.0,shear=8.0,cohesion=0.5,friction=0.5,viscosity=0.1;
   Vec3 gravity{};
+  bool floor_enabled=false;
+  double floor_z=0.0, floor_friction=.35;
 };
 struct MaterialPointToolV21 {
   bool enabled=false;
@@ -52,6 +54,7 @@ inline MaterialPointStepV21 step_material_points_v21(
   if(!positive(s.spacing)||!positive(s.dt)||!nonnegative(s.bulk)||
      !nonnegative(s.shear)||!nonnegative(s.cohesion)||!nonnegative(s.friction)||
      !nonnegative(s.viscosity)||!std::isfinite(norm(s.gravity))||
+     (s.floor_enabled&&(!std::isfinite(s.floor_z)||!nonnegative(s.floor_friction)||s.floor_friction>1))||
      (tool.enabled&&(!positive(tool.radius)||!nonnegative(tool.friction)||
                      !std::isfinite(norm(tool.center))||!std::isfinite(norm(tool.velocity)))))
     throw std::invalid_argument("Invalid material point settings");
@@ -129,6 +132,9 @@ inline MaterialPointStepV21 step_material_points_v21(
         }
       }
     }
+    if(s.floor_enabled && entry.first[2]*s.spacing<=s.floor_z+s.spacing*.5 && n.velocity.z<0){
+      n.velocity.x*=1-s.floor_friction;n.velocity.y*=1-s.floor_friction;n.velocity.z=0;
+    }
     if(!std::isfinite(norm(n.velocity)))throw std::overflow_error("Invalid MPM grid velocity");
   }
   out.grid_nodes=grid.size();
@@ -147,6 +153,9 @@ inline MaterialPointStepV21 step_material_points_v21(
        norm(velocity)*s.dt>s.spacing*0.5)
       throw std::runtime_error("MPM trial needs smaller substeps");
     p.velocity=velocity;p.position+=velocity*s.dt;
+    if(s.floor_enabled&&p.position.z<s.floor_z){
+      p.position.z=s.floor_z;p.velocity.z=std::max(0.0,p.velocity.z);
+    }
     p.volume*=std::exp(div*s.dt);
     const double pressure=-s.bulk*std::log(p.volume/p.rest_volume);
     double magnitude=0;
