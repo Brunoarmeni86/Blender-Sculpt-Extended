@@ -236,7 +236,10 @@ inline void shape_clay_transport(
   const Vec3 ey=cross(axis,ex);
   const Vec3 dir=unit(dab.direction-axis*dot(dab.direction,axis));
   const Vec3 across=cross(axis,dir);
-  const double spacing=dab.radius/double(dab.proxy_cells_per_radius);
+  // The acceleration index may refine with mesh density; the physical
+  // sampling distance does not. Keep triangle searches local on dense meshes.
+  const double spacing=dab.radius/std::clamp(std::sqrt(double(out.active))*.5,8.0,512.0);
+  const double trace_spacing=dab.radius/24.0;
   using Key=std::array<int,2>;
   const auto key=[&](Vec3 p)->Key{
     return {int(std::floor(dot(p,ex)/spacing)),int(std::floor(dot(p,ey)/spacing))};
@@ -271,7 +274,7 @@ inline void shape_clay_transport(
     return found;
   };
   const auto trace=[&](Vec3 p,Vec3 shift,double &value) {
-    const int steps=std::max(1,int(std::ceil(norm(shift)/(spacing*.5))));
+    const int steps=std::max(1,int(std::ceil(norm(shift)/trace_spacing)));
     for(int k=1;k<=steps;++k)if(!sample(p+shift*(double(k)/steps),value))return false;
     return true;
   };
