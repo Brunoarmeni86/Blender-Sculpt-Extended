@@ -53,6 +53,14 @@ int main(){
     try{stage_volume_frame_v25(after,frame);}catch(const std::invalid_argument&){rejected=true;}
     assert(rejected&&after.time==.002);
   }
+  FluidSettingsV23 fluid;fluid.floor_enabled=true;fluid.floor_z=0;
+  const auto grounded=step_fluid_v23({{{0,0,.001},{0,0,-.2}}},fluid);
+  assert(grounded.particles[0].position.z>=0);
+  MaterialPointV21 particle;particle.position={.25,.25,.001};
+  particle.velocity={0,0,-.2};
+  MaterialPointSettingsV21 material;material.floor_enabled=true;material.floor_z=0;
+  const auto solid=step_material_points_v21({particle},material);
+  assert(solid.particles[0].position.z>=0);
   mesh.triangles.pop_back();
   bool rejected=false;
   try{seed_volume_v25(mesh,.25);}catch(const std::invalid_argument&){rejected=true;}
