@@ -9,7 +9,6 @@ import math
 import os
 from pathlib import Path
 import sys
-import uuid
 import bpy
 
 CATALOGS = {
@@ -42,7 +41,9 @@ def preview_height(kind, x, y):
         return .17*end*sum(ridge(k,.085) for k in (-.20,0,.20))
     if kind == "deposit":
         return .28*end*ridge(0,.25)*(1+.10*math.cos(19*x))
-    if kind in {"flow","direction","hybrid"}:
+    if kind == "direction":
+        return end*(.18*ridge(0,.19)+.10*ridge(.19,.12)-.06*ridge(-.21,.13))
+    if kind in {"flow","hybrid"}:
         bump = math.exp(-((x-.43)/.22)**2)
         return end*(.12*ridge(-.12,.25)+(.11+.24*bump)*ridge(.12,.14)
                     -(.07 if kind=="hybrid" else .035)*ridge(-.25,.15))
