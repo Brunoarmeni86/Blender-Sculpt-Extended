@@ -98,6 +98,11 @@ class IPhysicsExecutor {
  * features. Future GPU backends must pass the same interface tests. */
 std::unique_ptr<IPhysicsExecutor> make_cpu_xpbd_executor();
 
+/* Experimental colored Gauss-Seidel order, evaluated serially on CPU.
+ * Independent constraints in each batch can later execute in parallel.
+ * This is a numerical reference, not a CUDA or threaded executor. */
+std::unique_ptr<IPhysicsExecutor> make_cpu_colored_xpbd_executor();
+
 /* Fail closed: non-CPU devices are not registered simply because Warp's
  * Python kernel compiled on CPU or a CUDA device is installed. */
 std::unique_ptr<IPhysicsExecutor> make_native_executor(SolverDevice device);
