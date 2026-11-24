@@ -31,7 +31,9 @@ inline MaterialTransportV21Result solve_material_transport_v21(
   if(dab.smooth_proxy) {
     // Native dabs with small travel need fewer repeated transfers.
     // This is a bounded heuristic, not a complete CFL estimator.
-    substeps=std::clamp(int(std::ceil(dab.dose*std::clamp(dab.proxy_cells_per_radius,4,16)*4)),1,substeps);
+    const double intensity=dab.shape_transport?std::clamp(dab.intensity,0.0,4.0):1.0;
+    if(!std::isfinite(intensity)) throw std::invalid_argument("Invalid material intensity");
+    substeps=std::clamp(int(std::ceil(dab.dose*intensity*std::clamp(dab.proxy_cells_per_radius,4,16)*4)),1,substeps);
   }
   dab.dose/=double(substeps);
   auto work=vertices;
