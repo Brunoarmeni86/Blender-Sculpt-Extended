@@ -33,30 +33,40 @@ SPECS = (
 )
 
 def preview_height(kind, x, y):
-    # A sweeping clay stroke, shaded with a common neutral material.
-    v = y - .17 * math.sin(2.8*x) - .12*x
-    end = math.exp(-((x+.05)/.73)**8)
-    def ridge(c, width):
+    # Broad exaggerated sculpt forms read at 32-48 px. These depict
+    # intended brush behavior, not solver output.
+    def g(cx, cy, sx, sy):
+        return math.exp(-((x-cx)/sx)**2-((y-cy)/sy)**2)
+    def ridge(c, width, v=y):
         return math.exp(-((v-c)/width)**2)
+    end = math.exp(-((x+.05)/.82)**8)
+    v = y - .20*math.sin(3*x)
     if kind == "clay":
-        return .21*end*ridge(0,.29)
+        return .46*end*ridge(0,.33,v)
     if kind == "strips":
-        return .17*end*sum(ridge(k,.085) for k in (-.20,0,.20))
+        return .36*end*sum(ridge(k,.11,v) for k in (-.24,0,.24))
     if kind == "deposit":
-        return .28*end*ridge(0,.25)*(1+.10*math.cos(19*x))
+        # Three large, overlapping additive lumps.
+        return .57*g(-.48,0,.35,.41)+.66*g(0,.05,.36,.43)+.58*g(.48,-.02,.36,.38)
     if kind == "direction":
-        return end*(.18*ridge(0,.19)+.10*ridge(.19,.12)-.06*ridge(-.21,.13))
-    if kind in {"flow","hybrid"}:
-        bump = math.exp(-((x-.43)/.22)**2)
-        return end*(.12*ridge(-.12,.25)+(.11+.24*bump)*ridge(.12,.14)
-                    -(.07 if kind=="hybrid" else .035)*ridge(-.25,.15))
+        return .54*end*ridge(0,.19,v)-.16*end*ridge(.30,.16,v)
+    if kind == "flow":
+        return .65*g(.50,0,.37,.40)+.31*end*ridge(0,.27,v)-.12*g(-.5,-.3,.36,.21)
+    if kind == "hybrid":
+        return .56*end*ridge(0,.20,v)+.52*g(.40,.19,.32,.29)-.23*end*ridge(-.29,.17,v)
     if kind == "compress":
-        return end*(-.22*ridge(0,.24)+.10*(ridge(-.32,.11)+ridge(.32,.11)))
+        return end*(-.33*ridge(0,.24)+.37*(ridge(-.35,.14)+ridge(.35,.14)))
     if kind == "compact":
-        return -.24*end*ridge(0,.28)
+        # Wide flattened center with a single rounded shoulder.
+        r = math.hypot(x/.69,y/.48)
+        return -.36*math.exp(-r**6)+.15*math.exp(-((r-1.05)/.22)**2)
     if kind == "press":
-        return -.21*end*math.exp(-(v/.27)**8)
-    return end*(-.11*ridge(0,.25)+.13*(ridge(-.29,.14)+ridge(.29,.14)))
+        # Flat rectangular impression, strongly defined corners.
+        return -.42*math.exp(-(x/.57)**8-(y/.32)**8)+.16*end*(ridge(-.42,.12)+ridge(.42,.12))
+    # Pressure spreads out around a circular depression.
+    r = math.hypot(x/.55,y/.43)
+    return -.38*math.exp(-(r/.65)**4)+.35*math.exp(-((r-1.)/.26)**2)
+
 
 def copy_preview(source, target):
     src = source.preview
@@ -72,22 +82,40 @@ def copy_preview(source, target):
 
 
 def preview_mesh(kind):
-    # Sculpt a rounded clay patch, not a rectangular heightmap or a glyph.
-    # Each effect has a readable silhouette and broad, smooth forms.
+    # Distinct silhouettes: not eight nearly identical oval medallions.
+    # Keep a smooth, solid clay surface and use shape rather than text.
     rings, sides = 64, 128
-    verts = [(0., 0., .22 + preview_height(kind, 0., 0.))]
+    verts = [(0., 0., .15 + preview_height(kind, 0., 0.))]
     for j in range(1, rings+1):
         r = j/rings
         for i in range(sides):
             t = 2*math.pi*i/sides
-            x = .94*r*math.cos(t)
-            y = .74*r*math.sin(t)
-            # Flow pulls the leading edge out of the original silhouette.
+            c, sn = math.cos(t), math.sin(t)
+            x, y = .98*r*c, .72*r*sn
             if kind in {"flow","direction","hybrid"}:
-                x += .17*r*max(0.,math.cos(t))**4
-                y += .10*r*max(0.,math.cos(t))**3
-            dome = .22*math.sqrt(max(0.,1-r*r))
-            blend = min(1.,max(0.,(1-r)/.16))
+                x += .48*r*max(0.,c)**8
+                y += .24*r*max(0.,c)**5
+                y *= .72+.28*max(0.,c)
+                if kind == "hybrid":
+                    y += .18*r*math.sin(2*t)
+            elif kind == "deposit":
+                y *= 1+.12*math.cos(6*t)
+                x *= 1+.07*math.cos(6*t)
+            elif kind == "pressure":
+                x, y = .88*r*c,.83*r*sn
+                x *= 1+.13*math.cos(4*t)
+                y *= 1+.13*math.cos(4*t)
+            elif kind == "press":
+                # Rounded rectangle, unlike the circular pressure pad.
+                x = .91*r*math.copysign(abs(c)**.55,c)
+                y = .64*r*math.copysign(abs(sn)**.55,sn)
+            elif kind == "compress":
+                y *= 1+.18*abs(c)
+            elif kind == "compact":
+                x *= .88
+                y *= 1.10
+            dome = .15*math.sqrt(max(0.,1-r*r))
+            blend = min(1.,max(0.,(1-r)/.19))
             blend = blend*blend*(3-2*blend)
             z = dome + blend*preview_height(kind,x,y)
             verts.append((x,y,z))
@@ -126,14 +154,23 @@ def make_preview(brush, kind):
         mesh = preview_mesh(kind)
         obj = bpy.data.objects.new("BSE Thumbnail Clay",mesh)
         scene.collection.objects.link(obj)
-        obj.rotation_euler.z = math.radians(30)
+        obj.rotation_euler.z = math.radians(38 if kind in {"flow","direction","hybrid","deposit"} else 24)
         camera_data = bpy.data.cameras.new("BSE Thumbnail Camera")
         camera = bpy.data.objects.new("BSE Thumbnail Camera",camera_data)
         scene.collection.objects.link(camera)
         camera.location = (0.,-2.8,4.8)
         camera.rotation_euler = (Vector((0.,0.,.04))-camera.location).to_track_quat("-Z","Y").to_euler()
         camera_data.type = "ORTHO"
-        camera_data.ortho_scale = 2.45
+        # Fit the actual projected silhouette: at least one dimension fills
+        # 90% of the image, regardless of stroke shape or orientation.
+        rot = camera.rotation_euler.to_matrix()
+        inv = rot.transposed()
+        obj_rot = obj.rotation_euler.to_matrix()
+        projected = [inv @ (obj_rot @ v.co) for v in mesh.vertices]
+        left, right = min(v.x for v in projected), max(v.x for v in projected)
+        bottom, top = min(v.y for v in projected), max(v.y for v in projected)
+        camera.location += rot @ Vector(((left+right)*.5,(bottom+top)*.5,0.))
+        camera_data.ortho_scale = max(right-left,top-bottom)/.90
         scene.camera = camera
         scene.render.engine = "BLENDER_WORKBENCH"
         shade = scene.display.shading
