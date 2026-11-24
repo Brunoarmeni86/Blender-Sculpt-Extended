@@ -328,3 +328,7 @@ add_test(NAME sculpt_clay_surface_solver_tests COMMAND test_clay_surface_solver)
 add_executable(test_brush_contact test_brush_contact.cc)
 target_link_libraries(test_brush_contact PRIVATE sculpt_physics_reference)
 add_test(NAME sculpt_brush_contact_tests COMMAND test_brush_contact)
+
+add_executable(test_material_v21 test_material_v21.cc)
+target_link_libraries(test_material_v21 PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_material_v21_tests COMMAND test_material_v21)
