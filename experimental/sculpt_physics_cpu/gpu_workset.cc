@@ -275,9 +275,10 @@ std::vector<GpuProxyChange> stage_gpu_relative_writes(
     if (!island.writable[i] || island.inverse_masses[i] <= 0.0) {
       throw std::logic_error("GPU changed pinned vertex in rebased island");
     }
-    const Vec3 world{packed.origin.x + static_cast<double>(cur.x),
-                     packed.origin.y + static_cast<double>(cur.y),
-                     packed.origin.z + static_cast<double>(cur.z)};
+    // Apply only the actual GPU delta to the authoritative double position.
+    // Reconstructing origin+cur introduces the initial float32 packing
+    // error on every axis, including axes never moved by the kernel.
+    const Vec3 world=island.positions[i]+d;
     if (!finite(world)) throw std::invalid_argument("GPU world-space result overflow");
     const Vec3 change = world - island.positions[i];
     if (std::hypot(change.x,change.y,change.z) > movement_epsilon) {
