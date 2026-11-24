@@ -24,7 +24,7 @@ struct ClaySurfaceVertex {
   double influence=0.0;
 };
 using ClaySurfaceTriangle=std::array<std::size_t,3>;
-enum class ClaySurfaceAction { Buildup, Push, Gather, Spread, FusionDeposit, Compress, Compact, Press, PressureFlow, HybridFlow };
+enum class ClaySurfaceAction { Buildup, Push, Gather, Spread, FusionDeposit, Compress, Compact, Press, PressureFlow, HybridFlow, Melt, Smear };
 struct ClaySurfaceDab {
   ClaySurfaceAction action=ClaySurfaceAction::Buildup;
   Vec3 center{};
@@ -41,6 +41,8 @@ struct ClaySurfaceDab {
   bool flow_fusion=false; // V20 Flow: weak relief blending alongside directed transport
   bool extended_material=false;
   bool density_independent=false; // V22 brush-scale transfer chart
+  bool smooth_proxy=false; // V23 positive quadratic B-spline transfer
+  int proxy_cells_per_radius=8; // independent of native mesh density
   // Dimensionless artist controls, not calibrated rheological constants.
   double friction=0.7, viscosity=0.4, cohesion=0.6, stiffness=0.5;
   double plasticity=0.85, volume_preservation=0.9;
@@ -58,7 +60,7 @@ struct ClaySurfaceResult {
 };
 
 /* Brush-scale finite-volume proxy. Each active vertex splats its
- * projected area * influence into four bilinear chart nodes. The exact
+ * projected area * influence into bilinear or quadratic B-spline chart nodes. The exact
  * transpose of this transfer prolongates height increments. Thus
  * sum(A_i * dh_i) == sum(A_grid * dh_grid), including partial masks.
  * The grid spacing is a fraction of brush radius, never a mesh edge
@@ -80,15 +82,18 @@ inline void coarse_clay_transport(
   const auto unit=[](Vec3 p){const double l=std::hypot(p.x,p.y,p.z);return l>1e-12?p/l:Vec3{};};
   const Vec3 ex=unit(cross(std::abs(axis.z)<0.9?Vec3{0,0,1}:Vec3{0,1,0},axis));
   const Vec3 ey=cross(axis,ex);
-  const double spacing=dab.radius/8.0;
+  const double spacing=dab.radius/double(dab.proxy_cells_per_radius);
   const bool fusion=dab.action==ClaySurfaceAction::FusionDeposit;
   const bool compact=dab.action==ClaySurfaceAction::Compact;
+  const bool melt=dab.action==ClaySurfaceAction::Melt;
+  const bool smear=dab.action==ClaySurfaceAction::Smear;
+  const bool gather=dab.action==ClaySurfaceAction::Gather;
   const bool pressure=dab.action==ClaySurfaceAction::Compress ||
       dab.action==ClaySurfaceAction::Press || dab.action==ClaySurfaceAction::PressureFlow ||
       dab.action==ClaySurfaceAction::HybridFlow || compact;
   std::map<Key,std::size_t> lookup;
   std::vector<Node> nodes;
-  std::vector<std::array<Weight,4>> stencil(h.size());
+  std::vector<std::array<Weight,9>> stencil(h.size());
   std::vector<std::array<std::size_t,2>> edges;
   const auto get=[&](Key key){
     auto it=lookup.find(key);
@@ -100,8 +105,16 @@ inline void coarse_clay_transport(
     const double x=dot(xy[i],ex)/spacing,y=dot(xy[i],ey)/spacing;
     if(!std::isfinite(x)||!std::isfinite(y)||std::abs(x)>64||std::abs(y)>64)
       throw std::invalid_argument("Invalid coarse brush chart");
-    const int ix=int(std::floor(x)),iy=int(std::floor(y));
+    const int ix=int(std::floor(x-(dab.smooth_proxy?.5:0.0)));
+    const int iy=int(std::floor(y-(dab.smooth_proxy?.5:0.0)));
     const double fx=x-ix,fy=y-iy;
+    const auto weights=[&](double f) {
+      if(!dab.smooth_proxy)return std::array<double,3>{1-f,f,0};
+      return std::array<double,3>{.5*(1.5-f)*(1.5-f),
+                                  .75-(f-1)*(f-1),
+                                  .5*(f-.5)*(f-.5)};
+    };
+    const auto wx=weights(fx),wy=weights(fy);
     double source=0,tool=0;
     if(fusion)source=dab.sign*travel*.10*w[i];
     if(compact)source=-dab.sign*(1-dab.volume_preservation)*
@@ -115,9 +128,9 @@ inline void coarse_clay_transport(
       tool=dab.sign*depth*w[i]*pressure_gain;
     }
     delta[i]=source; // add/sink at original resolution, transport on proxy
-    for(int j=0;j<4;++j) {
-      const int dx=j&1,dy=j>>1;
-      const double b=(dx?fx:1-fx)*(dy?fy:1-fy);
+    for(int j=0;j<9;++j) {
+      const int dx=j%3,dy=j/3;
+      const double b=wx[dx]*wy[dy];
       if(b<=1e-14)continue;
       const auto id=get({ix+dx,iy+dy});
       stencil[i][j]={id,b};
@@ -155,25 +168,27 @@ inline void coarse_clay_transport(
     const double width=(2*lo/(1+lo/hi))/spacing;
     const double envelope=std::min(u.area/u.raw,v.area/v.raw);
     const Vec3 line=ex*double(keys[b][0]-keys[a][0])+ey*double(keys[b][1]-keys[a][1]);
-    const double align=dot(dir,line);
-    const bool directed=dab.action==ClaySurfaceAction::Push||
+    const Vec3 midpoint=ex*(.5*(keys[a][0]+keys[b][0])*spacing)+
+                        ey*(.5*(keys[a][1]+keys[b][1])*spacing);
+    const double align=dot(gather?unit(midpoint*(-1.0))*dab.sign:dir,line);
+    const bool directed=gather||smear||dab.action==ClaySurfaceAction::Push||
         dab.action==ClaySurfaceAction::HybridFlow||dab.action==ClaySurfaceAction::PressureFlow;
     double f=0;
     if(directed) {
       const double thickness=align>=0?u.volume/u.area:v.volume/v.area;
       f=align*thickness*width*travel*mobility*envelope*drag_gain*
-        (dab.action==ClaySurfaceAction::HybridFlow?.45:
+        (smear?.30:dab.action==ClaySurfaceAction::HybridFlow?.45:
          dab.action==ClaySurfaceAction::PressureFlow?.15:1.0);
     }
-    if(pressure||fusion||dab.action==ClaySurfaceAction::Spread||
+    if(pressure||fusion||melt||smear||dab.action==ClaySurfaceAction::Spread||
        (dab.action==ClaySurfaceAction::Push&&dab.flow_fusion)) {
       const double diff=(u.height+u.source+u.pressure)-(v.height+v.source+v.pressure);
       // The tool applies external forcing. Do not use the full
       // quiescent yield threshold against the relatively weak pressure
       // potential: that made Press/Compact nearly inert on smooth clay.
-      const double contact_yield=pressure?yield*.25:yield;
+      const double contact_yield=melt?0.0:smear?yield*.15:pressure?yield*.25:yield;
       const double excess=std::max(0.0,std::abs(diff)-contact_yield*spacing);
-      const double rate=fusion?dab.fusion:
+      const double rate=melt?2.0:smear?1.5:fusion?dab.fusion:
           dab.action==ClaySurfaceAction::Push?.4*dab.fusion:1.0;
       f+=std::copysign(excess,diff)*width*
           std::min(travel*mobility*envelope*rate,spacing*.24);
@@ -218,13 +233,14 @@ inline ClaySurfaceResult solve_clay_surface(
       !interval(dab.friction) || !interval(dab.viscosity) ||
       !interval(dab.cohesion) || !interval(dab.stiffness) ||
       !interval(dab.plasticity) || !interval(dab.volume_preservation) ||
-      !interval(dab.fusion)) throw std::invalid_argument("Invalid clay surface dab");
+      !interval(dab.fusion) || dab.proxy_cells_per_radius<4 || dab.proxy_cells_per_radius>16) throw std::invalid_argument("Invalid clay surface dab");
   switch(dab.action) {
     case ClaySurfaceAction::Buildup: case ClaySurfaceAction::Push:
     case ClaySurfaceAction::Gather: case ClaySurfaceAction::Spread:
     case ClaySurfaceAction::FusionDeposit: case ClaySurfaceAction::Compress:
     case ClaySurfaceAction::Compact: case ClaySurfaceAction::Press:
-    case ClaySurfaceAction::PressureFlow: case ClaySurfaceAction::HybridFlow: break;
+    case ClaySurfaceAction::PressureFlow: case ClaySurfaceAction::HybridFlow:
+    case ClaySurfaceAction::Melt: case ClaySurfaceAction::Smear: break;
     default: throw std::invalid_argument("Invalid clay surface action");
   }
   const Vec3 axis=dab.axis/norm(dab.axis);
@@ -318,10 +334,12 @@ inline ClaySurfaceResult solve_clay_surface(
     for(std::size_t i=0;i<n;++i) if(w[i]>0)
       delta[i]=dab.sign*travel*0.10*w[i];
   } else if(dab.density_independent &&
-            dab.action!=ClaySurfaceAction::Gather) {
+            (dab.smooth_proxy || dab.action!=ClaySurfaceAction::Gather)) {
     coarse_clay_transport(xy,h,w,out.projected_area,dab,axis,floor,travel,
                           mobility,yield,drag_gain,pressure_gain,delta,out);
   } else {
+    if(dab.action==ClaySurfaceAction::Melt || dab.action==ClaySurfaceAction::Smear)
+      throw std::invalid_argument("New material action needs V23 proxy");
     struct Flux {std::size_t a,b; double v;};
     std::vector<Flux> flux;
     std::vector<double> outgoing(n,0.0),volume(n,0.0),sent(n,0.0),received(n,0.0);
