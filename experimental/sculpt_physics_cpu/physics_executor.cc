@@ -113,7 +113,8 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   void upload_dirty(const std::vector<ExecutorEdit> &edits) override
   {
     require_active();
-    std::vector<std::pair<std::size_t,Vec3>> accepted;
+    auto &accepted=scratch_edits_;
+    accepted.clear();
     accepted.reserve(edits.size());
     for (const ExecutorEdit &e : edits) {
       const std::size_t id = local_id(e.global_index);
@@ -144,7 +145,8 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   void set_targets(const std::vector<ExecutorTarget> &targets) override
   {
     require_active();
-    std::vector<LocalTarget> validated;
+    auto &validated=scratch_targets_;
+    validated.clear();
     validated.reserve(targets.size());
     for (const ExecutorTarget &target : targets) {
       const std::size_t id=local_id(target.global_index);
@@ -414,6 +416,8 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
   std::vector<std::size_t> dirty_ids_;
   std::uint64_t revision_=0;
   std::vector<LocalTarget> targets_;
+  std::vector<LocalTarget> scratch_targets_;
+  std::vector<std::pair<std::size_t,Vec3>> scratch_edits_;
   bool ready_=false;
   bool active_=false;
 };
