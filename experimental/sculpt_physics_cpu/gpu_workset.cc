@@ -135,29 +135,10 @@ GpuTopologyBondIndex::GpuTopologyBondIndex(const World &world,
       particle_count_(world.particles().size()),
       bond_count_(world.bonds().size())
 {
-  if (particle_count_ == std::numeric_limits<std::size_t>::max() ||
-      bond_count_ > std::numeric_limits<std::size_t>::max() / 2) {
-    throw std::length_error("GPU topology too large for CSR indexing");
-  }
-  offsets_.assign(particle_count_ + 1, 0);
-  for (const Bond &bond : world.bonds()) {
-    if (bond.a >= particle_count_ || bond.b >= particle_count_ ||
-        bond.a == bond.b) {
-      throw std::invalid_argument("Invalid bond endpoint in GPU CSR topology");
-    }
-    ++offsets_[bond.a + 1];
-    ++offsets_[bond.b + 1];
-  }
-  for (std::size_t i = 1; i < offsets_.size(); ++i) {
-    offsets_[i] += offsets_[i - 1];
-  }
-  incident_bonds_.resize(offsets_.back());
-  std::vector<std::size_t> cursor = offsets_;
-  for (std::size_t i = 0; i < world.bonds().size(); ++i) {
-    const Bond &bond = world.bonds()[i];
-    incident_bonds_[cursor[bond.a]++] = i;
-    incident_bonds_[cursor[bond.b]++] = i;
-  }
+  // World::add_bond maintains authoritative undirected incidence in
+  // insertion order. Reuse it rather than allocating a second O(V+E) graph
+  // at the beginning of every Blender stroke. The generation and count
+  // checks below still guard against invalidated topology.
 }
 
 GpuLocalIsland GpuTopologyBondIndex::build(
@@ -173,7 +154,7 @@ GpuLocalIsland GpuTopologyBondIndex::build(
   if (world_ != &world || topology_generation != generation_ ||
       world.particles().size() != particle_count_ ||
       world.bonds().size() != bond_count_) {
-    throw std::logic_error("Stale GPU CSR index: rebuild after topology change");
+    throw std::logic_error("Stale GPU topology index: rebuild after topology change");
   }
   const auto active = validated_set(active_ids, particle_count_);
   const auto halo = validated_set(halo_ids, particle_count_);
@@ -186,9 +167,8 @@ GpuLocalIsland GpuTopologyBondIndex::build(
   // full Sculpt mesh. Sorting retains original stable bond insertion order.
   std::vector<std::size_t> bond_ids;
   for (std::size_t id : included) {
-    for (std::size_t k = offsets_[id]; k < offsets_[id + 1]; ++k) {
-      bond_ids.push_back(incident_bonds_[k]);
-    }
+    const auto &incident = world.incident_bond_ids(id);
+    bond_ids.insert(bond_ids.end(), incident.begin(), incident.end());
   }
   std::sort(bond_ids.begin(), bond_ids.end());
   bond_ids.erase(std::unique(bond_ids.begin(), bond_ids.end()), bond_ids.end());
@@ -205,13 +185,13 @@ std::vector<std::size_t> GpuTopologyBondIndex::one_ring_halo(
   if (world_ != &world || topology_generation != generation_ ||
       world.particles().size() != particle_count_ ||
       world.bonds().size() != bond_count_) {
-    throw std::logic_error("Stale GPU CSR index: rebuild halo after topology change");
+    throw std::logic_error("Stale GPU topology index: rebuild halo after topology change");
   }
   const auto active = validated_set(active_ids, particle_count_);
   std::vector<std::size_t> halo;
   for (const std::size_t id : active) {
-    for (std::size_t k = offsets_[id]; k < offsets_[id + 1]; ++k) {
-      const Bond &bond = world.bonds()[incident_bonds_[k]];
+    for (const std::size_t bond_id : world.incident_bond_ids(id)) {
+      const Bond &bond = world.bonds()[bond_id];
       if (bond.broken) continue;
       const std::size_t neighbor = bond.a == id ? bond.b : bond.a;
       if (!std::binary_search(active.begin(), active.end(), neighbor)) {
