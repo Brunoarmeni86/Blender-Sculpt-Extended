@@ -58,6 +58,7 @@ struct ClaySurfaceResult {
   double accepted_scale=1.0;
   std::size_t active=0;
   std::size_t transport_nodes=0;
+  std::size_t trace_attempts=0,trace_rejected=0;
 };
 
 /* Brush-scale finite-volume proxy. Each active vertex splats its
@@ -245,6 +246,7 @@ inline void shape_clay_transport(
     return {int(std::floor(dot(p,ex)/spacing)),int(std::floor(dot(p,ey)/spacing))};
   };
   std::map<Key,std::vector<std::size_t>> bins;
+  std::vector<std::size_t> large_triangles;
   const bool remap=dab.action==ClaySurfaceAction::Push || dab.action==ClaySurfaceAction::Gather ||
       dab.action==ClaySurfaceAction::Smear || dab.action==ClaySurfaceAction::Melt ||
       dab.action==ClaySurfaceAction::Spread || dab.action==ClaySurfaceAction::HybridFlow ||
@@ -255,12 +257,15 @@ inline void shape_clay_transport(
     const auto a=key(xy[t[0]]),b=key(xy[t[1]]),c=key(xy[t[2]]);
     const int x0=std::min({a[0],b[0],c[0]}),x1=std::max({a[0],b[0],c[0]});
     const int y0=std::min({a[1],b[1],c[1]}),y1=std::max({a[1],b[1],c[1]});
-    for(int x=x0;x<=x1;++x)for(int y=y0;y<=y1;++y)bins[{x,y}].push_back(i);
+    if(std::size_t(x1-x0+1)*std::size_t(y1-y0+1)>64)large_triangles.push_back(i);
+    else for(int x=x0;x<=x1;++x)for(int y=y0;y<=y1;++y)bins[{x,y}].push_back(i);
   }
   const auto sample=[&](Vec3 p,double &value) {
-    const auto it=bins.find(key(p));if(it==bins.end())return false;
+    const auto it=bins.find(key(p));
     bool found=false;
-    for(auto id:it->second) {
+    bool ambiguous=false;
+    const auto scan=[&](const std::vector<std::size_t> &ids) {
+    for(auto id:ids) {
       const auto &t=triangles[id];const auto a=xy[t[0]],b=xy[t[1]]-a,c=xy[t[2]]-a,d=p-a;
       const double det=dot(cross(b,c),axis);
       if(det<=1e-24)continue;
@@ -268,14 +273,21 @@ inline void shape_clay_transport(
       if(u< -1e-9||v< -1e-9||u+v>1+1e-9)continue;
       const double z=(1-u-v)*h[t[0]]+u*h[t[1]]+v*h[t[2]];
       // Reject overlapping projected sheets with inconsistent heights.
-      if(found && std::abs(z-value)>1e-7*dab.radius)return false;
+      if(found && std::abs(z-value)>1e-7*dab.radius){ambiguous=true;return;}
       value=z;found=true;
     }
-    return found;
+    };
+    if(it!=bins.end())scan(it->second);
+    if(!ambiguous)scan(large_triangles);
+    return found&&!ambiguous;
   };
   const auto trace=[&](Vec3 p,Vec3 shift,double &value) {
+    if(norm(shift)<=1e-12)return false;
+    ++out.trace_attempts;
     const int steps=std::max(1,int(std::ceil(norm(shift)/trace_spacing)));
-    for(int k=1;k<=steps;++k)if(!sample(p+shift*(double(k)/steps),value))return false;
+    for(int k=1;k<=steps;++k)if(!sample(p+shift*(double(k)/steps),value)){
+      ++out.trace_rejected;return false;
+    }
     return true;
   };
   const double amount=std::min(.28*dab.radius,travel*(.35+1.65*mobility));
@@ -312,13 +324,17 @@ inline void shape_clay_transport(
       const double reach=dab.radius*(smear?.20:.16);
       const Vec3 t=smear && norm(dir)>0?dir:ex;
       const Vec3 b=smear && norm(dir)>0?across:ey;
-      double sum=0,count=0;
-      for(const Vec3 offset:{t*reach,t*(-reach),b*(reach*(smear?.25:1)),
-                             b*(-reach*(smear?.25:1))}) {
+      // Multi-directional positive quadrature. Blend with the current
+      // height to avoid four isolated copies of a narrow peak.
+      double sum=2*h[i],count=2;
+      for(int k=0;k<8;++k) {
+        constexpr double pi=3.14159265358979323846;
+        const double angle=pi*.25*k;
+        const Vec3 offset=t*(reach*std::cos(angle))+b*(reach*(smear?.25:1)*std::sin(angle));
         double z=h[i];
         if(trace(p,offset,z)){sum+=z;++count;}
       }
-      if(count>0)delta[i]=w[i]*(sum/count-h[i])*
+      delta[i]=w[i]*(sum/count-h[i])*
           (1-std::exp(-amount/dab.radius*(smear?5.0:8.0)));
       if(smear) {
         double z=h[i];
@@ -354,7 +370,7 @@ inline void shape_clay_transport(
     const double v=area[i]*delta[i];pos+=std::max(0.0,v);neg+=std::max(0.0,-v);
   }
   out.transported_volume=std::min(pos,neg);
-  out.transport_nodes=bins.size();
+  out.transport_nodes=bins.size()+large_triangles.size();
 }
 
 inline ClaySurfaceResult solve_clay_surface(
