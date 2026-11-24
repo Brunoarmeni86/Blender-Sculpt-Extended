@@ -2,6 +2,7 @@
 #pragma once
 
 #include "physics_executor.hh"
+#include "material_stability.hh"
 
 #include <cstddef>
 #include <cstdint>
@@ -125,6 +126,7 @@ struct NativeBrushDab {
   Vec3 clay_center{};
   double clay_radius = 0.0; // object-space brush footprint
   Vec3 clay_stroke_delta{};
+  MaterialStabilitySettings stability{}; // V18 opt-in shared motion constraint
 
 };
 
