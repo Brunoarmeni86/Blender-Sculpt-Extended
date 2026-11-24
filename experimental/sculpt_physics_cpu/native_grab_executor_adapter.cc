@@ -65,6 +65,75 @@ void apply_material(GpuLocalIsland &island,
   }
 }
 
+// Local yield/pressure approximation. The native targets remain authoritative
+// for assist=0. No new vertices, corner edits, volume or contact simulation.
+// Adapt rest lengths after yield and redistribute differential brush pressure
+// along existing edges, only between writable vertices.
+void apply_clay_material(GpuLocalIsland &island,
+                         std::vector<ExecutorTarget> &goals,
+                         const NativeBrushDab &dab)
+{
+  const std::size_t n=island.positions.size();
+  const std::size_t missing=std::numeric_limits<std::size_t>::max();
+  std::vector<std::size_t> target(n,missing);
+  std::vector<Vec3> motion(n), spread(n);
+  std::vector<double> pressure(n,0.0);
+  std::vector<unsigned int> degree(n,0);
+  const auto norm=[](Vec3 v) { return std::hypot(v.x,v.y,v.z); };
+  for (std::size_t k=0;k<goals.size();++k) {
+    const auto it=std::lower_bound(island.global_ids.begin(),island.global_ids.end(),
+                                   goals[k].global_index);
+    const auto i=std::size_t(it-island.global_ids.begin());
+    target[i]=k;
+    motion[i]=goals[k].goal-island.positions[i];
+    pressure[i]=norm(motion[i]);
+  }
+  for (auto &bond : island.bonds) {
+    const auto a=bond.a,b=bond.b;
+    if (target[a]==missing && target[b]==missing) continue;
+    const Vec3 edge=island.positions[b]-island.positions[a];
+    const double length=norm(edge);
+    const double predicted=norm(edge+motion[b]-motion[a]);
+    if (!std::isfinite(length) || !std::isfinite(predicted)) {
+      throw std::overflow_error("Clay material edge overflow");
+    }
+    // Current geometry carries previous deformation. This is a per-dab
+    // yield approximation, NOT a stored constitutive plastic-strain tensor.
+    const double rest=bond.rest_length;
+    const double strain=(predicted-rest)/rest;
+    const double excess=std::max(0.0,std::abs(strain)-dab.clay_yield);
+    const double change=std::copysign(std::min(excess,0.25),strain);
+    bond.rest_length=rest*(1.0+dab.clay_plasticity*change);
+    if (target[a]==missing || target[b]==missing || length<=1e-12) continue;
+    // Equal/opposite pressure redistribution along the surface edge.
+    // Project away the local mean brush-motion direction to favor lateral
+    // flow. Bound every pair by the smaller native displacement.
+    Vec3 tangent=edge*(1.0/length);
+    const Vec3 mean=motion[a]+motion[b];
+    const double mean_len=norm(mean);
+    if (mean_len>1e-12) {
+      const Vec3 normal=mean*(1.0/mean_len);
+      const double d=tangent.x*normal.x+tangent.y*normal.y+tangent.z*normal.z;
+      tangent=tangent-normal*d;
+    }
+    const double tlen=norm(tangent);
+    if (tlen<=1e-12) continue;
+    const double amount=dab.clay_spread*std::clamp(
+        pressure[a]-pressure[b],-0.5*std::min(pressure[a],pressure[b]),
+                                 0.5*std::min(pressure[a],pressure[b]));
+    const Vec3 offset=tangent*(amount/tlen);
+    spread[a]=spread[a]-offset;
+    spread[b]=spread[b]+offset;
+    ++degree[a]; ++degree[b];
+  }
+  for (std::size_t i=0;i<n;++i) {
+    if (target[i]==missing || degree[i]==0) continue;
+    const Vec3 correction=spread[i]*(1.0/double(degree[i]));
+    goals[target[i]].goal=goals[target[i]].goal+correction;
+    if (!finite(goals[target[i]].goal)) throw std::overflow_error("Clay goal overflow");
+  }
+}
+
 }  // namespace
 
 NativeBrushProfile experimental_native_brush_profile(NativeSculptBrushKind kind)
@@ -238,6 +307,11 @@ void validate_native_brush_dab(const NativeBrushDab &dab)
       throw std::invalid_argument("Unsupported native physical brush kind");
   }
   validate_material(dab.material);
+  if (!std::isfinite(dab.clay_yield) || dab.clay_yield<0.0 || dab.clay_yield>1.0 ||
+      !std::isfinite(dab.clay_plasticity) || dab.clay_plasticity<0.0 || dab.clay_plasticity>1.0 ||
+      !std::isfinite(dab.clay_spread) || dab.clay_spread<0.0 || dab.clay_spread>1.0) {
+    throw std::invalid_argument("Invalid Clay V2 settings");
+  }
 }
 } // namespace
 
@@ -363,7 +437,17 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
   }
   if (goals.size()!=active.size()) throw std::logic_error("Mobile island vertex lacks native target");
   if (goals.empty()) return {};
-  if (dab.assist>0.0) apply_material(island,goals,dab.material);
+  const bool clay=dab.assist>0.0 && dab.clay_material &&
+      (dab.kind==NativeSculptBrushKind::Clay || dab.kind==NativeSculptBrushKind::ClayStrips);
+  const auto native_goals=clay && dab.assist<1.0 ? goals : std::vector<ExecutorTarget>{};
+  if (dab.assist>0.0) {
+    if (clay) {
+      apply_clay_material(island,goals,dab);
+      // Do not erase the yielded rest lengths with the legacy rest-follow.
+      apply_material(island,goals,{dab.material.bond_compliance_scale,0.0});
+    }
+    else apply_material(island,goals,dab.material);
+  }
 
   auto executor=dab.colored_order ? make_cpu_colored_xpbd_executor() :
                                     make_native_executor(SolverDevice::CPU);
@@ -380,7 +464,8 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
     std::vector<ExecutorEdit> blended;
     blended.reserve(goals.size());
     std::size_t changed=0;
-    for (const auto &goal : goals) {
+    const auto &blend_goals=native_goals.empty() ? goals : native_goals;
+    for (const auto &goal : blend_goals) {
       while (changed<physical.writes.size() &&
              physical.writes[changed].global_index<goal.global_index) {
         ++changed;
