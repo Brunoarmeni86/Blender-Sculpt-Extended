@@ -69,7 +69,9 @@ static GpuLocalIsland build_gpu_local_island_impl(
         p.inverse_mass < 0.0 || !std::isfinite(p.radius) || p.radius <= 0.0) {
       throw std::invalid_argument("Invalid GPU proxy particle attributes");
     }
-    const bool writeable = std::binary_search(covered.begin(), covered.end(), id);
+    // Undo coverage is necessary but never sufficient for mobility. Halo
+    // vertices remain pinned even when a surrounding PBVH node is journaled.
+    const bool writeable = std::binary_search(active.begin(), active.end(), id);
     island.positions.push_back(p.position);
     island.inverse_masses.push_back(writeable ? p.inverse_mass : 0.0);
     island.radii.push_back(p.radius);
