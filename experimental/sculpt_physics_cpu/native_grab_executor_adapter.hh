@@ -115,6 +115,11 @@ struct NativeBrushDab {
   double assist = 1.0;
   NativeMaterialResponse material{};
   bool colored_order = false;
+  // V16-B material preview, independently opt-in. Coordinate-only.
+  bool clay_material = false;
+  double clay_yield = 0.035;
+  double clay_plasticity = 0.65;
+  double clay_spread = 0.55;
 };
 
 using PreparedNativeBrushDab = PreparedNativeGrabDab;
