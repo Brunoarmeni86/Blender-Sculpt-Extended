@@ -219,7 +219,7 @@ void do_clay_brush(const Depsgraph &depsgraph,
                                        factors,
                                        distances);
       if (autonomous) {
-        physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors);
+        physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors,normals);
         return;
       }
       translations.resize(verts.size());
