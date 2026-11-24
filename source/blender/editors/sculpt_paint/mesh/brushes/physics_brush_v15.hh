@@ -181,6 +181,16 @@ inline bool try_apply(const Sculpt &sd,
     dab.kind=kind;
     dab.assist=assist_influence();
     dab.compliance=1.0e-6;
+    // Compare against the old V15 baseline before enabling new profiles.
+    static const bool profiles=[]() {
+      const char *raw=std::getenv("BLENDER_SCULPT_XPBD_V15_PROFILES");
+      return raw && raw[0]=='1' && raw[1]=='\0';
+    }();
+    if (profiles) {
+      const auto profile=sculpt_physics::experimental_native_brush_profile(kind);
+      dab.compliance=profile.target_compliance;
+      dab.material=profile.material;
+    }
     dab.topology_generation=1;
     result=sculpt_physics::prepare_cpu_native_brush_dab(
         state->rest_world,*state->topology,samples,
