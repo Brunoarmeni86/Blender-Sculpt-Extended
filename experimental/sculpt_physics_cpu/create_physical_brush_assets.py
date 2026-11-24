@@ -190,8 +190,18 @@ def main():
     parser.add_argument("--output",required=True)
     parser.add_argument("--source")
     args = parser.parse_args(sys.argv[sys.argv.index("--")+1:] if "--" in sys.argv else [])
-    if not hasattr(bpy.types.Brush,"sculpt_physics_mode"):
-        raise RuntimeError("Run with Blender Sculpt Extended experimental build")
+    # Built-in RNA properties belong to instances; hasattr on bpy.types.Brush
+    # does not reliably detect them. Inspect the registered RNA schema.
+    required = ("sculpt_physics_mode", "sculpt_physics_clay_behavior",
+                "sculpt_physics_assist", "sculpt_physics_spread",
+                "sculpt_physics_yield", "sculpt_physics_plasticity")
+    props = bpy.types.Brush.bl_rna.properties
+    missing = [name for name in required if props.get(name) is None]
+    if missing:
+        raise RuntimeError(
+            f"Experimental Brush RNA unavailable in {bpy.app.binary_path}: "
+            + ", ".join(missing))
+    print("[BSE Physical Brushes] Brush RNA verified", flush=True)
     output = Path(args.output).expanduser().resolve()
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise RuntimeError("Choose a new empty dedicated asset library folder")
