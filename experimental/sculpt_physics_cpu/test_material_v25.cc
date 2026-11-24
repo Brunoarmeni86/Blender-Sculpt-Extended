@@ -1,3 +1,4 @@
+#include "stroke_context_v27.hh"
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "material_transport_v21.hh"
 #include "material_profiles_v25.hh"
@@ -110,7 +111,28 @@ static void overlapping_v26(ClaySurfaceAction action)
   if(action==ClaySurfaceAction::Press || action==ClaySurfaceAction::Scrape || action==ClaySurfaceAction::Gather)
     assert(moving>=3);
 }
+static void stroke_context_v27_tests(){
+  StrokeContextV27 a,b;
+  a=stage_stroke_v27(a,{0,0,0},{0,0,1},1,1).next;
+  b=a;
+  const auto whole=stage_stroke_v27(a,{.8,0,0},{0,0,1},1,1);
+  double dose=0;
+  for(int i=1;i<=8;++i){
+    const auto part=stage_stroke_v27(b,{.1*i,0,0},{0,0,1},1,1);
+    dose+=part.dose;b=part.next;
+  }
+  assert(std::abs(whole.dose-dose)<1e-12);
+  assert(std::abs(whole.next.path_length-b.path_length)<1e-12);
+  assert(a.samples==1); // staging does not mutate committed history
+  const auto still=stage_stroke_v27(b,b.center,{0,0,1},1,1);
+  assert(still.dose==0);
+  assert(stage_stroke_v27(b,{3,0,0},{0,0,1},1,1).gap);
+  assert(std::abs(swept_distance_squared_v27({.5,.2,0},{0,0,0},{1,0,0})-.04)<1e-12);
+  assert(swept_distance_squared_v27({2,0,0},{0,0,0},{1,0,0})==1);
+  assert(swept_distance_squared_v27({1,0,0},{0,0,0},{0,0,0})==1);
+}
 int main(){
+  stroke_context_v27_tests();
   assert(progressive_press_depth_v26(.07,0)==.07);
   assert(progressive_press_depth_v26(.07,.5)>progressive_press_depth_v26(.07,.1));
   assert(progressive_press_depth_v26(.24,100)<=.25);

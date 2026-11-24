@@ -47,6 +47,17 @@ int main()
     auto full=prepare_cpu_native_brush_dab(reference,reference_index,samples,current_at,dab);
     auto small=prepare_compact_native_brush_dab(
         compact,samples,edge_at,rest_at,current_at,mass,dab);
+    if(dab.assist==0.0){
+      auto direct=prepare_compact_native_brush_dab(compact,samples,edge_at,rest_at,current_at,mass,dab,true);
+      assert(!direct.prepared.has_solver());
+      assert(direct.prepared.writes().size()==small.prepared.writes().size());
+      for(std::size_t i=0;i<direct.prepared.writes().size();++i){
+        const auto &x=direct.prepared.writes()[i],&y=small.prepared.writes()[i];
+        assert(direct.local_to_global.at(x.global_index)==small.local_to_global.at(y.global_index));
+        assert(x.position.x==y.position.x && x.position.y==y.position.y && x.position.z==y.position.z);
+      }
+      direct.prepared.finish_editor_success();
+    }
     assert(full.writes().size()==small.prepared.writes().size());
     for (std::size_t i=0;i<full.writes().size();++i) {
       const auto &a=full.writes()[i];

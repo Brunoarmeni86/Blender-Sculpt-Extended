@@ -31,7 +31,8 @@ CompactNativeBrushDab prepare_compact_native_brush_dab(
     RestAt rest_at,
     CurrentAt current_at,
     InverseMassAt inverse_mass_at,
-    const NativeBrushDab &dab)
+    const NativeBrushDab &dab,
+    bool direct_surface=false)
 {
   CompactNativeBrushDab out;
   std::vector<std::size_t> active;
@@ -55,6 +56,32 @@ CompactNativeBrushDab prepare_compact_native_brush_dab(
     throw std::invalid_argument("Duplicate compact brush target");
   }
   if (active.empty()) return out;
+  // Only for already solved conservative targets. No physical executor
+  // state is created: native contact, clipping, Undo coverage and writeback
+  // still run in the caller, exactly as with the original compact path.
+  if (direct_surface && dab.assist==0.0 && !dab.stability.enabled && !dab.clay_material) {
+    out.local_to_global=active;
+    ExecutorWriteBatch batch;
+    batch.writes.reserve(active.size());
+    for (const auto &sample:samples) {
+      const auto it=std::lower_bound(active.begin(),active.end(),sample.global_index);
+      if(it==active.end() || *it!=sample.global_index ||
+         std::hypot(sample.translation.x,sample.translation.y,sample.translation.z)<=1e-15) continue;
+      const Vec3 p=current_at(sample.global_index);
+      const Vec3 goal=p+sample.translation;
+      const Vec3 motion=goal-p;
+      const double length=std::hypot(motion.x,motion.y,motion.z);
+      if(!std::isfinite(std::hypot(p.x,p.y,p.z)) ||
+         !std::isfinite(std::hypot(goal.x,goal.y,goal.z)) || !std::isfinite(length))
+        throw std::invalid_argument("Invalid direct surface target");
+      if(length>1e-12)batch.writes.push_back({std::size_t(it-active.begin()),goal});
+    }
+    std::sort(batch.writes.begin(),batch.writes.end(),[](const auto &x,const auto &y){
+      return x.global_index<y.global_index;
+    });
+    out.prepared=PreparedNativeBrushDab(nullptr,std::move(batch));
+    return out;
+  }
   auto region=topology.gather(active,edge_at);
   out.local_to_global=std::move(region.vertices);
   const auto local_id=[&](std::size_t global) {

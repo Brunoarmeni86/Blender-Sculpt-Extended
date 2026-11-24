@@ -19,6 +19,7 @@
 #  include "material_transport_v21.hh"
 #  include "material_profiles_v25.hh"
 #  include "brush_contact.hh"
+#  include "stroke_context_v27.hh"
 
 #  include "BKE_mesh.hh"
 #  include "BKE_brush.hh"
@@ -66,6 +67,11 @@ struct NativePhysicsStroke {
 inline bool fast_v26b_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_TOOL_V26B");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+inline bool stroke_v27_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_STROKE_V27");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
 inline bool profile_v26b_requested()
@@ -317,7 +323,10 @@ inline bool try_apply(const Sculpt &sd,
       const auto &v=item.second;
       if (std::hypot(v.x,v.y,v.z)>1.0e-15) samples.push_back({item.first,v});
     }
-    if (samples.empty()) return true;
+    if (samples.empty()) {
+      if(profile)std::fprintf(stderr,"[V27 no_write] stage=targets action=%d targets=0\n",cache.xpbd_v16_clay_behavior);
+      return true;
+    }
     const auto edge_at=[&](std::size_t id) {
       const int2 edge=edges[int(id)];
       return std::pair<std::size_t,std::size_t>{std::size_t(edge[0]),std::size_t(edge[1])};
@@ -474,7 +483,7 @@ inline bool try_apply(const Sculpt &sd,
             const auto original=state->original_positions.find(id);
             return original==state->original_positions.end() ?
                        current_position(id) : original->second;
-          },current_position,inverse_mass,dab);
+          },current_position,inverse_mass,dab,stroke_v27_requested() && conservative_clay);
       local_to_global=std::move(prepared.local_to_global);
       result=std::move(prepared.prepared);
     }
@@ -491,6 +500,7 @@ inline bool try_apply(const Sculpt &sd,
     // node with zero translations. Blender's ordinary smoothing/plane
     // clipping may otherwise modify stationary coordinates unexpectedly.
     if (result.writes().empty()) {
+      if(profile)std::fprintf(stderr,"[V27 no_write] stage=executor action=%d targets=%zu\n",cache.xpbd_v16_clay_behavior,samples.size());
       // A solver can also legitimately return an empty batch (e.g. all
       // motion below writeback precision). Acknowledge it without touching
       // native geometry or invalidating PBVH caches.
@@ -882,6 +892,18 @@ inline bool try_apply_intent(
     intent.dose=cache.xpbd_v17_intent_started ?
         std::clamp(double(math::length(delta))/std::max(intent.radius,1e-12),0.0,1.0) : 0.15;
     const int original_action=cache.xpbd_v16_clay_behavior;
+    const bool v27=stroke_v27_requested() && conservative;
+    std::shared_ptr<sculpt_physics::StrokeContextV27> stroke;
+    sculpt_physics::StrokeStepV27 stroke_step;
+    if(v27){
+      stroke=std::static_pointer_cast<sculpt_physics::StrokeContextV27>(cache.xpbd_v27_stroke);
+      if(!stroke)stroke=std::make_shared<sculpt_physics::StrokeContextV27>();
+      stroke_step=sculpt_physics::stage_stroke_v27(*stroke,convert(center),convert(normal),
+                                                  intent.radius,pressure);
+      // Deposit remains a behavior-control reference; only direct writes
+      // are optimized. Other actions use radius-averaged segment dose.
+      if(original_action!=1 && original_action!=4)intent.dose=stroke_step.dose;
+    }
     const int action=surface_v20 && original_action>=1 && original_action<=3 ?
                          original_action+3 :
                      drag_contact_requested() && original_action==2 ? 5 : original_action;
@@ -920,7 +942,7 @@ inline bool try_apply_intent(
       using namespace sculpt_physics;
       ClaySurfaceDab clay;
       clay.center=intent.center;
-      clay.axis=convert(normal);
+      clay.axis=v27 && v24 ? stroke_step.next.axis : convert(normal);
       clay.direction=convert(delta);
       clay.radius=intent.radius;
       clay.intensity=intent.intensity;
@@ -998,7 +1020,7 @@ inline bool try_apply_intent(
       else clay.action=ClaySurfaceAction::Push;
       if (clay.tool_v25 && (action==8 || action==14) &&
           material_override("BLENDER_SCULPT_V25_LOCK_PLANE",1.0,0.0,1.0)>0.5) {
-        const float3 axis=math::normalize(normal);
+        const float3 axis=v27 ? float3(float(clay.axis.x),float(clay.axis.y),float(clay.axis.z)) : math::normalize(normal);
         if (!cache.xpbd_v25_plane_valid) {
           pending_press_dose=0.0;
           cache.xpbd_v25_plane_origin=center;
@@ -1033,6 +1055,7 @@ inline bool try_apply_intent(
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals);
       const double plan_ms=std::chrono::duration<double,std::milli>(
           std::chrono::steady_clock::now()-plan_start).count();
+      if(v27 && profile_v26b_requested())std::fprintf(stderr,"[V27 stroke] action=%d samples=%zu path=%.8g dose=%.6f gap=%d goals=%zu\n",action,stroke_step.next.samples,stroke_step.next.path_length,clay.dose,int(stroke_step.gap),goals.size());
       if(profile_v26b_requested())std::fprintf(stderr,"[V26 plan] action=%d active=%zu plan_ms=%.3f dose=%.5f scale=%.6f traces=%zu rejected=%zu\n",int(clay.action),planned.active,plan_ms,clay.dose,planned.accepted_scale,planned.trace_attempts,planned.trace_rejected);
       if (clay.shape_transport && (!cache.xpbd_v15_active_logged || planned.active==0)) {
         std::fprintf(stderr,"[V24 gesture] strength=%.3f dose=%.4f trace_attempts=%zu trace_rejected=%zu\n",
@@ -1071,6 +1094,7 @@ inline bool try_apply_intent(
       cache.xpbd_v17_intent_started=true;
       cache.xpbd_v17_last_center=center;
       cache.xpbd_v26_press_dose=pending_press_dose;
+      if(v27){*stroke=stroke_step.next;cache.xpbd_v27_stroke=stroke;}
     }
     return handled;
   }
