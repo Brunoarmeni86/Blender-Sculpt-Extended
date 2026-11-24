@@ -534,7 +534,7 @@ inline bool try_apply(const Sculpt &sd,
 inline bool autonomous_requested(const StrokeCache &cache)
 {
   return cache.xpbd_v16_clay_material && cache.xpbd_v16_clay_behavior>=4 &&
-         cache.xpbd_v16_clay_behavior<=6;
+         cache.xpbd_v16_clay_behavior<=10;
 }
 
 inline bool try_apply_intent(
@@ -581,11 +581,32 @@ inline bool try_apply_intent(
                      cache.xpbd_v16_assist;
     intent.dose=cache.xpbd_v17_intent_started ?
         std::clamp(double(math::length(delta))/std::max(intent.radius,1e-12),0.0,1.0) : 0.15;
+    const int action=cache.xpbd_v16_clay_behavior;
+    if (action>=7 && brush.stroke_method==BRUSH_STROKE_AIRBRUSH &&
+        cache.xpbd_v17_intent_started) {
+      // Native timer dispatch already provides repeated stationary dabs.
+      // Use nominal timer seconds, not wall-clock/frame time or cursor
+      // jitter. No timer is created by this bridge.
+      const double rate=double(brush.rate);
+      if (!std::isfinite(rate) || rate<=0.0) {
+        throw std::invalid_argument("Invalid physical airbrush rate");
+      }
+      intent.dose=std::clamp(rate*1.5,0.0,1.0);
+    }
+    intent.radial_sign=sign;
     intent.spread=cache.xpbd_v16_clay_spread;
     intent.limit_to_projected_disk=false; // factors already encode native brush shape
-    intent.action=cache.xpbd_v16_clay_behavior==4 ? sculpt_physics::PhysicalBrushAction::Deposit :
-                  cache.xpbd_v16_clay_behavior==5 ? sculpt_physics::PhysicalBrushAction::Compress :
-                                                  sculpt_physics::PhysicalBrushAction::Flow;
+    using Action=sculpt_physics::PhysicalBrushAction;
+    switch (action) {
+      case 4: intent.action=Action::Deposit; break;
+      case 5: intent.action=Action::Compress; break;
+      case 6: intent.action=Action::Flow; break;
+      case 7: intent.action=Action::Compact; break;
+      case 8: intent.action=Action::Press; break;
+      case 9: intent.action=Action::PressureFlow; break;
+      case 10: intent.action=Action::HybridFlow; break;
+      default: throw std::invalid_argument("Unknown autonomous action");
+    }
     auto goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
     const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true);
     if (handled) {
@@ -603,7 +624,8 @@ inline bool try_apply_intent(
 
 inline void append_intent_samples(
     std::vector<sculpt_physics::PhysicalBrushIntentSample> &samples,
-    const Span<int> verts,const Span<float3> positions,const Span<float> factors)
+    const Span<int> verts,const Span<float3> positions,const Span<float> factors,
+    const Span<float3> normals)
 {
   for (const int j : verts.index_range()) {
     const int id=verts[j];
@@ -612,8 +634,10 @@ inline void append_intent_samples(
     // Negative alpha is not supported by this first autonomous preview.
     // Do not turn invalid factors into unmasked targets.
     if (!std::isfinite(f)) continue; // fail closed for this sample
+    const float3 n=normals[id];
     samples.push_back({std::size_t(id),{double(p.x),double(p.y),double(p.z)},
-                       std::clamp(f,0.0,1.0),1.0,f>0.0});
+                       std::clamp(f,0.0,1.0),1.0,f>0.0,
+                       {double(n.x),double(n.y),double(n.z)}});
   }
 }
 
