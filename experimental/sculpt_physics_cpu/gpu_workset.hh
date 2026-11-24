@@ -53,8 +53,9 @@ GpuLocalIsland build_gpu_local_island(
     std::uint64_t topology_generation,
     bool allow_truncated_graph = false);
 
-/* Persistent compressed-sparse-row (CSR) incidence index.
- * Build once for a fixed topology generation and reuse on many dabs.
+/* Persistent topology view over World's authoritative bond incidence.
+ * Bind once for a fixed topology generation and reuse on many dabs without
+ * allocating a duplicate full-mesh incidence graph.
  * Including broken bonds in this index is intentional: we query their
  * current broken flag on every workset build, so breakage is safe.
  *
@@ -79,7 +80,7 @@ class GpuTopologyBondIndex {
   /* For a strictly local quasistatic brush: include all immediate
    * neighbors of each writable vertex as fixed boundary particles.
    * Outgoing bonds from these fixed halo vertices may be omitted without
-   * affecting the interior. Costs O(sum degree(active)) for cached CSR. */
+   * affecting the interior. Costs O(sum degree(active)) using World incidence. */
   std::vector<std::size_t> one_ring_halo(
       const World &world,
       const std::vector<std::size_t> &active_ids,
@@ -93,8 +94,6 @@ class GpuTopologyBondIndex {
   std::uint64_t generation_;
   std::size_t particle_count_;
   std::size_t bond_count_;
-  std::vector<std::size_t> offsets_; // N+1 CSR offsets
-  std::vector<std::size_t> incident_bonds_; // 2*B bond IDs
 };
 
 /* Device-friendly float32 proxy coordinates relative to a stable double
