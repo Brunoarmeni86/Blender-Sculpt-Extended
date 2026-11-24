@@ -98,6 +98,29 @@ int main()
   for (const auto &change : mixed.writes()) assert(change.global_index==5);
   mixed.cancel();
 
+  // Independent material compliance: a stiffer anchored edge resists
+  // stretching more strongly at identical cursor movement/falloff.
+  World anchored;
+  anchored.add_particle({0,0,0},0.0);
+  anchored.add_particle({1,0,0});
+  anchored.add_bond(0,1,1e-5);
+  GpuTopologyBondIndex anchored_index(anchored,42);
+  auto anchored_pos=[&](std::size_t id){return anchored.particles().at(id).position;};
+  NativeGrabDab stretch{{0.5,0,0},1e-5,1.0/60.0,2,8,42};
+  stretch.material.bond_compliance_scale=0.01;
+  auto rigid=prepare_cpu_native_grab_dab(
+      anchored,anchored_index,{{1,1}},anchored_pos,stretch);
+  assert(rigid.writes().size()==1 && rigid.writes()[0].global_index==1);
+  const double rigid_x=rigid.writes()[0].position.x;
+  rigid.cancel();
+  stretch.material.bond_compliance_scale=10.0;
+  auto soft=prepare_cpu_native_grab_dab(
+      anchored,anchored_index,{{1,1}},anchored_pos,stretch);
+  assert(soft.writes().size()==1 && soft.writes()[0].global_index==1);
+  assert(soft.writes()[0].position.x>rigid_x);
+  soft.cancel();
+  assert(anchored.particles()[1].position.x==1.0);
+
   auto rejects=[&](const std::vector<NativeGrabSample> &samples,
                    const NativeGrabDab &config) {
     bool rejected=false;
@@ -118,6 +141,8 @@ int main()
   stale=settings; stale.dt=0.0;
   rejects({{7,1.0}},stale);
   stale=settings; stale.compliance=-1.0;
+  rejects({{7,1.0}},stale);
+  stale=settings; stale.material.bond_compliance_scale=-1;
   rejects({{7,1.0}},stale);
 
   bool rejected=false;
