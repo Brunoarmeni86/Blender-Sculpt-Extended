@@ -548,6 +548,18 @@ static void version_solid_color_width_height_defaults(Main &bmain)
 
 void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
 {
+  // Existing .blend files and shipped brush assets predate these fields.
+  // Keep legacy mode off unless enabled by the experimental launch flags.
+  if (!DNA_struct_member_exists(fd->filesdna, "Brush", "int", "sculpt_physics_mode")) {
+    for (Brush &brush : bmain->brushes) {
+      brush.sculpt_physics_mode = 0;
+      brush.sculpt_physics_assist = 0.75f;
+      brush.sculpt_physics_yield = 0.035f;
+      brush.sculpt_physics_plasticity = 0.65f;
+      brush.sculpt_physics_spread = 0.55f;
+    }
+  }
+
   /* Custom Multires builds share the Blender version number. Test the file schema so that
    * older nearest-surface setups keep their behavior and gain standard Project defaults. */
   if (!DNA_struct_member_exists(fd->filesdna,
