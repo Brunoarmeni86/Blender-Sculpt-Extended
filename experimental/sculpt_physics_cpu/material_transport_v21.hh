@@ -36,6 +36,7 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     const auto step=solve_clay_surface(work,triangles,dab);
     if(k==0) out.surface.projected_area=step.projected_area;
     out.surface.active=std::max(out.surface.active,step.active);
+    out.surface.transport_nodes=std::max(out.surface.transport_nodes,step.transport_nodes);
     out.surface.accepted_scale=std::min(out.surface.accepted_scale,step.accepted_scale);
     out.surface.transported_volume+=step.transported_volume;
     out.surface.signed_swept_volume+=step.signed_swept_volume;
