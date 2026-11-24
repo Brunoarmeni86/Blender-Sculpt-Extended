@@ -45,6 +45,9 @@
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 
 #include "bmesh.hh"
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+#  include "physics_brush_v15.hh"
+#endif
 #include "editors/sculpt_paint/mesh/sculpt_layer_detail_v01.hh"
 
 
@@ -338,6 +341,9 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
   SculptSession &ss = *object.runtime->sculpt_session;
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if (physics_v15::freeze_if_mode_changed(object,pbvh)) return;
+#endif
   const bool flip = (ss.cache->bstrength < 0.0f);
 
   /* Note: This return has to happen *after* the call to calc_brush_plane for now, as
@@ -349,6 +355,66 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
   const float4x4 mat = clay_strips::calc_local_matrix(
       brush, *ss.cache, plane_normal, plane_center, flip);
   const float3 offset = plane_normal * ss.cache->bstrength * ss.cache->radius;
+
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  // The existing Clay Strips layer-detail projection must not be bypassed
+  // by a base-mesh XPBD writer which has no layer-delta implementation.
+  const bool v15_layer_detail=layer_detail_v01::state().active;
+  if (physics_v15::requested() && v15_layer_detail &&
+      ss.cache->xpbd_v15_active_logged) {
+    ss.cache->xpbd_v15_failed=true;
+    return; // freeze an already physical stroke; do not mix editors
+  }
+  if (physics_v15::requested() && !v15_layer_detail &&
+      pbvh.type()==bke::pbvh::Type::Mesh) {
+    Mesh &mesh=*id_cast<Mesh *>(object.data);
+    const PositionDeformData pos(depsgraph,object,true);
+    const MeshAttributeData attributes(mesh);
+    const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
+    MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
+    std::vector<sculpt_physics::NativeBrushTranslation> native;
+    LocalData tls;
+    node_mask.foreach_index([&](const int ni) {
+      const bke::pbvh::MeshNode &node=nodes[ni];
+      const Span<int> verts=node.verts();
+      tls.factors.resize(verts.size());
+      MutableSpan<float> factors=tls.factors;
+      fill_factor_from_hide_and_mask(attributes.hide_vert,attributes.mask,verts,factors);
+      filter_region_clip_factors(ss,pos.eval,verts,factors);
+      if (brush.flag & BRUSH_FRONTFACE) {
+        calc_front_face(ss.cache->view_normal_symm,normals,verts,factors);
+      }
+      tls.xy_positions.resize(verts.size());
+      tls.z_positions.resize(verts.size());
+      calc_local_positions(pos.eval,verts,mat,tls.xy_positions,tls.z_positions);
+      apply_z_axis_factors(tls.z_positions,factors);
+      apply_plane_trim_factors(brush,tls.z_positions,factors);
+      tls.distances.resize(verts.size());
+      MutableSpan<float> distances=tls.distances;
+      calc_brush_cube_distances<float2>(brush,tls.xy_positions,distances);
+      filter_distances_with_radius(1.0f,distances,factors);
+      apply_hardness_to_distances(1.0f,ss.cache->hardness,distances);
+      BKE_brush_calc_curve_factors(
+          eBrushCurvePreset(brush.curve_distance_falloff_preset),
+          brush.curve_distance_falloff,distances,1.0f,factors);
+      auto_mask::calc_vert_factors(
+          depsgraph,object,ss.cache->automasking.get(),node,verts,factors);
+      calc_brush_texture_factors(ss,brush,pos.eval,verts,factors);
+      tls.translations.resize(verts.size());
+      translations_from_offset_and_factors(offset,factors,tls.translations);
+      for (const int j : verts.index_range()) {
+        const float3 value=tls.translations[j];
+        native.push_back({std::size_t(verts[j]),
+                          {double(value.x),double(value.y),double(value.z)}});
+      }
+    });
+    if (physics_v15::try_apply(sd,object,node_mask,pos,
+                              sculpt_physics::NativeSculptBrushKind::ClayStrips,
+                              native)) {
+      return;
+    }
+  }
+#endif
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;
   switch (pbvh.type()) {

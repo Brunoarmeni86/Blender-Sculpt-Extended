@@ -24,6 +24,9 @@
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 
 #include "bmesh.hh"
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+#  include "physics_brush_v15.hh"
+#endif
 
 namespace blender::ed::sculpt_paint::brushes {
 
@@ -118,14 +121,62 @@ static void calc_bmesh(const Depsgraph &depsgraph,
 
 }  // namespace draw_cc
 
+enum class OffsetBrushKind { Draw, Nudge, Gravity };
 static void offset_positions(const Depsgraph &depsgraph,
                              const Sculpt &sd,
                              Object &object,
                              const float3 &offset,
-                             const IndexMask &node_mask)
+                             const IndexMask &node_mask,
+                             [[maybe_unused]] const OffsetBrushKind brush_kind)
 {
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
+
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if (physics_v15::freeze_if_mode_changed(object,pbvh)) return;
+
+  if (physics_v15::requested() && pbvh.type()==bke::pbvh::Type::Mesh) {
+    const Mesh &mesh=*id_cast<Mesh *>(object.data);
+    const MeshAttributeData attributes(mesh);
+    const PositionDeformData pos(depsgraph,object,true);
+    const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
+    MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
+    std::vector<sculpt_physics::NativeBrushTranslation> native;
+    Vector<float> factors;
+    Vector<float> distances;
+    node_mask.foreach_index([&](const int ni) {
+      const bke::pbvh::MeshNode &node=nodes[ni];
+      const Span<int> verts=node.verts();
+      calc_factors_common_mesh_indexed(depsgraph,
+                                       brush,
+                                       object,
+                                       attributes,
+                                       pos.eval,
+                                       normals,
+                                       node,
+                                       factors,
+                                       distances);
+      for (const int j : verts.index_range()) {
+        const float factor=factors[j];
+        if (!std::isfinite(factor) || factor==0.0f) continue;
+        const float3 translation=offset*factor;
+        native.push_back({std::size_t(verts[j]),
+                          {double(translation.x),
+                           double(translation.y),
+                           double(translation.z)}});
+      }
+    });
+    const auto physical_kind =
+        brush_kind == OffsetBrushKind::Nudge ?
+            sculpt_physics::NativeSculptBrushKind::Nudge :
+        brush_kind == OffsetBrushKind::Gravity ?
+            sculpt_physics::NativeSculptBrushKind::Gravity :
+            sculpt_physics::NativeSculptBrushKind::Draw;
+    if (physics_v15::try_apply(sd,object,node_mask,pos,physical_kind,native)) {
+      return;
+    }
+  }
+#endif
 
   threading::EnumerableThreadSpecific<LocalData> all_tls;
   switch (pbvh.type()) {
@@ -196,7 +247,7 @@ void do_draw_brush(const Depsgraph &depsgraph,
   const float3 offset = effective_normal * ss.cache->radius * ss.cache->scale *
                         ss.cache->bstrength;
 
-  offset_positions(depsgraph, sd, object, offset, node_mask);
+  offset_positions(depsgraph, sd, object, offset, node_mask, OffsetBrushKind::Draw);
 }
 
 void do_nudge_brush(const Depsgraph &depsgraph,
@@ -211,7 +262,8 @@ void do_nudge_brush(const Depsgraph &depsgraph,
       math::cross(ss.cache->sculpt_normal_symm, ss.cache->grab_delta_symm),
       ss.cache->sculpt_normal_symm);
 
-  offset_positions(depsgraph, sd, object, offset * ss.cache->bstrength, node_mask);
+  offset_positions(depsgraph, sd, object, offset * ss.cache->bstrength, node_mask,
+                   OffsetBrushKind::Nudge);
 }
 
 void do_gravity_brush(const Depsgraph &depsgraph,
@@ -225,7 +277,7 @@ void do_gravity_brush(const Depsgraph &depsgraph,
   const float3 offset = ss.cache->gravity_direction_symm * -ss.cache->radius_squared *
                         ss.cache->scale * sd.gravity_factor;
 
-  offset_positions(depsgraph, sd, object, offset, node_mask);
+  offset_positions(depsgraph, sd, object, offset, node_mask, OffsetBrushKind::Gravity);
 }
 
 }  // namespace blender::ed::sculpt_paint::brushes

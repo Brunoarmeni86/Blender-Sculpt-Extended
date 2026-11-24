@@ -1,0 +1,80 @@
+name: Physics brush experimental CPU checks
+
+on:
+  push:
+    branches:
+      - experiment/physics-brushes-warp-multires-granular-20261122
+  workflow_dispatch:
+
+jobs:
+  cpu-reference:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate default-OFF V15 Blender source wiring (static, not a full build)
+        run: python experimental/sculpt_physics_cpu/test_native_v15_wiring.py
+      - name: Configure standalone solver
+        run: cmake -S experimental/sculpt_physics_cpu -B build-physics -DCMAKE_BUILD_TYPE=Debug
+      - name: Build CPU reference and new brush tests
+        run: cmake --build build-physics --config Debug --parallel 2
+      - name: Run actual CPU reference tests
+        run: ctest --test-dir build-physics -C Debug --output-on-failure
+      - name: Configure optimized GPU-island preparation benchmark (Linux)
+        if: runner.os == 'Linux'
+        run: cmake -S experimental/sculpt_physics_cpu -B build-workset-bench -DCMAKE_BUILD_TYPE=Release -DSCULPT_PHYSICS_BUILD_BENCHMARKS=ON
+      - name: Compile and run GPU-island CSR-vs-full-scan smoke (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake --build build-workset-bench --target bench_gpu_workset --parallel 2
+          ./build-workset-bench/bench_gpu_workset 12000 30
+          ./build-workset-bench/bench_gpu_workset 125000 100
+          cmake --build build-workset-bench --target bench_executor_writeback --parallel 2
+          ./build-workset-bench/bench_executor_writeback 50000 30
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install NumPy
+        run: python -m pip install numpy
+      - name: Compile and smoke-test CPU fallback (no CUDA required)
+        run: |
+          python -m py_compile experimental/sculpt_physics_cpu/gpu/warp_granular_probe.py
+          python experimental/sculpt_physics_cpu/gpu/warp_granular_probe.py --device cpu --self-test
+          python -m py_compile experimental/sculpt_physics_cpu/gpu/warp_resident_contact.py
+          python experimental/sculpt_physics_cpu/gpu/test_warp_resident_contact.py --device cpu
+          python -m py_compile experimental/sculpt_physics_cpu/gpu/warp_xpbd_local.py
+          python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_local.py --device cpu
+          python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_compliant.py --device cpu
+
+  warp-kernel-cpu:
+    # Run actual Warp JIT kernels on its CPU device to catch Warp API,
+    # kernel type and launch issues even without NVIDIA hardware.
+    # This is NOT a substitute for an NVIDIA CUDA parity/performance gate.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Warp kernel runtime and numerical oracle
+        run: python -m pip install numpy 'warp-lang==1.19.0'
+      - name: Execute Warp XPBD kernel and compare with NumPy
+        run: python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_local.py --device warp-cpu
+      - name: Validate compliant XPBD artist-target Warp kernel
+        run: python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_compliant.py --device warp-cpu
+      - name: Compare real Warp CPU graph capture with direct XPBD launches
+        run: python experimental/sculpt_physics_cpu/gpu/test_warp_graph_capture.py --device warp-cpu
+      - name: Build independent native C++ World XPBD reference fixture
+        run: |
+          cmake -S experimental/sculpt_physics_cpu -B build-xpbd-interop -DCMAKE_BUILD_TYPE=Release -DSCULPT_PHYSICS_BUILD_INTEROP_TESTS=ON
+          cmake --build build-xpbd-interop --target emit_xpbd_reference --parallel 2
+      - name: Compare actual Warp XPBD kernel with native C++ World
+        run: |
+          python experimental/sculpt_physics_cpu/gpu/test_warp_xpbd_compliant.py --device warp-cpu --cpp-reference ./build-xpbd-interop/emit_xpbd_reference
+      - name: Execute Warp HashGrid DEM contact kernel and compare with NumPy
+        run: python experimental/sculpt_physics_cpu/gpu/test_warp_resident_contact.py --device warp-cpu

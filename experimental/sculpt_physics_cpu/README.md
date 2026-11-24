@@ -1,5 +1,30 @@
 # Sculpt Physics CPU Reference Prototype (experimental, standalone)
 
+**Native Clay, Clay Strips, Smooth, Draw/Nudge/Gravity V15 (experimental):**
+[`V15_OTHER_BRUSHES_BUILD_AND_TEST.md`](V15_OTHER_BRUSHES_BUILD_AND_TEST.md)
+explains the OFF-by-default source hooks, exact stock translation
+preservation, shared CPU XPBD adapter, standalone Linux/MSVC tests,
+and missing full Blender/viewport/Undo/CUDA validation.
+
+**Blender Grab V14 native CPU integration (experimental):**
+[`V14_NATIVE_GRAB_EXECUTOR_BUILD_AND_TEST.md`](V14_NATIVE_GRAB_EXECUTOR_BUILD_AND_TEST.md)
+describes two separate opt-in flags, the actual source callback,
+persistent rest-graph CSR, pinned one-ring dabs, native test matrix and
+the **unverified full Blender VS2022 compile**. Not a CUDA or Multires
+implementation.
+
+**Native solver executor contract (new):**
+[`PHYSICS_EXECUTOR_CODEX.md`](PHYSICS_EXECUTOR_CODEX.md) describes a typed
+`IPhysicsExecutor` API, the standalone CPU XPBD implementation and
+full-stroke rollback/commit tests. Native CUDA/Vulkan remain unavailable.
+
+**GPU implementation (experimental):**
+[`gpu/GPU_OPTIMIZATION_CODEX.md`](gpu/GPU_OPTIMIZATION_CODEX.md)
+documents persistent CUDA local XPBD and granular contact executors,
+CPU tests, sparse transfers and benchmarks. CUDA remains unverified on hardware.
+
+**For Codex: start with [CODEX_START_HERE.md](CODEX_START_HERE.md).** It is the current source map, execution contract, recommended order, and verification checklist. This README also retains historical research notes from the standalone CPU prototype.
+
 This is **working standalone C++17 prototype code**, not a shipped Blender feature or a compiled Blender module. It is deliberately decoupled from Geometry Nodes and the editor to provide a small, testable starting contract for future native integration. Do **not** use as a general collision solver or production-ready volume simulation.
 
 ## Build and test

@@ -146,3 +146,126 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_native_brush_targets PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_native_brush_contract_tests COMMAND test_native_brush_targets)
+
+# Opt-in experimental brush target, granular contact and Multires dirty-tile
+# planning modules. They are standalone CPU reference code, not editor callbacks.
+target_sources(sculpt_physics_reference PRIVATE
+  brush_targets.cc
+  granular_contacts.cc
+  multires_dirty_map.cc
+)
+add_executable(test_brush_materials test_brush_materials.cc)
+target_link_libraries(test_brush_materials PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_brush_materials PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_physical_brush_and_granular_tests COMMAND test_brush_materials)
+
+# Protect PhysicalAssist blend semantics and finite editor geometry.
+add_executable(test_assist_strength test_assist_strength.cc)
+target_link_libraries(test_assist_strength PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_assist_strength PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_assist_strength_tests COMMAND test_assist_strength)
+
+# Solver-family experiment: XPBD tetra volume constraint and backend planner.
+# Explicitly not a Blender editor/CCG integration.
+target_sources(sculpt_physics_reference PRIVATE
+  volume_constraints.cc
+  solver_policy.cc
+)
+add_executable(test_multiphysics_volume test_multiphysics_volume.cc)
+target_link_libraries(test_multiphysics_volume PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_multiphysics_volume PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_multiphysics_volume_and_backend_tests COMMAND test_multiphysics_volume)
+
+# Cohesive CPU execution path: native callers pass PBVH/mask-selected inputs,
+# World stores state, and the pipeline returns sparse staged writes only.
+# No Blender editor, CCG or real CUDA API is linked by this reference target.
+target_sources(sculpt_physics_reference PRIVATE sculpt_physics_pipeline.cc)
+add_executable(test_sculpt_physics_pipeline test_sculpt_physics_pipeline.cc)
+target_link_libraries(test_sculpt_physics_pipeline PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_sculpt_physics_pipeline PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_physics_pipeline_integration_tests
+         COMMAND test_sculpt_physics_pipeline)
+
+# Backend-neutral GPU island bridge. It packs proxy topology and validates
+# sparse outputs without CUDA/Warp dependencies in the core C++ build.
+target_sources(sculpt_physics_reference PRIVATE gpu_workset.cc)
+add_executable(test_gpu_workset test_gpu_workset.cc)
+target_link_libraries(test_gpu_workset PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_gpu_workset PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_gpu_workset_integrity_tests COMMAND test_gpu_workset)
+
+# Benchmark sparse GPU workset preparation: measures CPU CSR query/packing,
+# NOT CUDA launch time or end-to-end Blender viewport latency.
+if(SCULPT_PHYSICS_BUILD_BENCHMARKS)
+  add_executable(bench_gpu_workset bench_gpu_workset.cc)
+  target_link_libraries(bench_gpu_workset PRIVATE sculpt_physics_reference)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(bench_gpu_workset PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  endif()
+endif()
+
+# Native backend-neutral executor: production CUDA/Vulkan is NOT registered yet.
+# CPU XPBD implementation follows the same sparse staging/transaction API that
+# future GPU executors must implement, without importing Warp into Blender.
+target_sources(sculpt_physics_reference PRIVATE physics_executor.cc)
+add_executable(test_physics_executor test_physics_executor.cc)
+target_link_libraries(test_physics_executor PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_physics_executor PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_physics_executor_contract_tests COMMAND test_physics_executor)
+
+# Optional C++ World golden fixture for actual Warp kernel numerical parity.
+# Kept distinct from benchmark targets; no Blender editor/CUDA dependency.
+option(SCULPT_PHYSICS_BUILD_INTEROP_TESTS "Build C++ XPBD fixture for Warp parity" OFF)
+if(SCULPT_PHYSICS_BUILD_INTEROP_TESTS)
+  add_executable(emit_xpbd_reference emit_xpbd_reference.cc)
+  target_link_libraries(emit_xpbd_reference PRIVATE sculpt_physics_reference)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(emit_xpbd_reference PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  endif()
+endif()
+
+# Benchmarks sparse per-dab writeback versus full-stroke proxy scanning;
+# never equate these measurements with end-to-end Blender or CUDA timing.
+if(SCULPT_PHYSICS_BUILD_BENCHMARKS)
+  add_executable(bench_executor_writeback bench_executor_writeback.cc)
+  target_link_libraries(bench_executor_writeback PRIVATE sculpt_physics_reference)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(bench_executor_writeback PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  endif()
+endif()
+
+# Native Grab executor adapter (no Blender dependency): stages exact final
+# PBVH factors, fixed first-ring halo and independent per-dab XPBD proxy.
+target_sources(sculpt_physics_reference PRIVATE native_grab_executor_adapter.cc)
+add_executable(test_native_grab_executor_adapter test_native_grab_executor_adapter.cc)
+target_link_libraries(test_native_grab_executor_adapter PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_native_grab_executor_adapter PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_native_grab_executor_adapter_tests
+         COMMAND test_native_grab_executor_adapter)
+
+# V15 translation-based adapter: preserves exact native Clay/Clay Strips/
+# Smooth/Draw factors and tests safety on fixed-halo CPU XPBD islands.
+add_executable(test_native_other_brushes_executor_adapter
+  test_native_other_brushes_executor_adapter.cc)
+target_link_libraries(test_native_other_brushes_executor_adapter
+  PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_native_other_brushes_executor_adapter
+    PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_native_other_brushes_executor_tests
+         COMMAND test_native_other_brushes_executor_adapter)

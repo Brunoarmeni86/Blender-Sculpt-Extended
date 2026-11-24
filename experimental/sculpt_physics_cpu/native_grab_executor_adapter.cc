@@ -1,0 +1,349 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#include "native_grab_executor_adapter.hh"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+#include <utility>
+
+namespace sculpt_physics {
+namespace {
+
+bool finite(Vec3 p)
+{
+  return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+}
+
+void validate_material(const NativeMaterialResponse &material)
+{
+  if (!std::isfinite(material.bond_compliance_scale) ||
+      material.bond_compliance_scale<0.0 ||
+      !std::isfinite(material.native_rest_follow) ||
+      material.native_rest_follow<0.0 || material.native_rest_follow>1.0) {
+    throw std::invalid_argument("Invalid native material response");
+  }
+}
+
+/* Alter only the isolated local island, never the persistent rest World.
+ * Native goals already contain the artist's mask, falloff and pressure.
+ * Unselected/fixed halo points retain their current coordinates. */
+void apply_material(GpuLocalIsland &island,
+                    const std::vector<ExecutorTarget> &goals,
+                    const NativeMaterialResponse &material)
+{
+  if (material.bond_compliance_scale==1.0 && material.native_rest_follow==0.0) return;
+  std::vector<Vec3> native_positions;
+  if (material.native_rest_follow>0.0) {
+    native_positions=island.positions;
+    for (const auto &goal : goals) {
+      const auto it=std::lower_bound(island.global_ids.begin(),island.global_ids.end(),
+                                     goal.global_index);
+      if (it==island.global_ids.end() || *it!=goal.global_index) {
+        throw std::logic_error("Missing material goal");
+      }
+      native_positions[std::size_t(it-island.global_ids.begin())]=goal.goal;
+    }
+  }
+  for (auto &bond : island.bonds) {
+    bond.compliance*=material.bond_compliance_scale;
+    if (!std::isfinite(bond.compliance)) {
+      throw std::overflow_error("Native bond compliance overflow");
+    }
+    if (material.native_rest_follow==0.0 ||
+        (island.inverse_masses[bond.a]==0.0 && island.inverse_masses[bond.b]==0.0)) continue;
+    const Vec3 d=native_positions[bond.b]-native_positions[bond.a];
+    const double length=std::hypot(d.x,d.y,d.z);
+    if (!std::isfinite(length)) throw std::overflow_error("Native rest length overflow");
+    // Keep strictly positive rest lengths even for coincident native goals.
+    const double floor=std::max(std::numeric_limits<double>::min(),bond.rest_length*1e-6);
+    const double follow=material.native_rest_follow;
+    bond.rest_length=(1.0-follow)*bond.rest_length+follow*std::max(length,floor);
+    if (!std::isfinite(bond.rest_length) || bond.rest_length<=0.0) {
+      throw std::overflow_error("Invalid adapted native rest length");
+    }
+  }
+}
+
+}  // namespace
+
+NativeBrushProfile experimental_native_brush_profile(NativeSculptBrushKind kind)
+{
+  // These are qualitative trial profiles, not measured material constants.
+  // A high native_rest_follow is deliberately used for additive/smoothing
+  // tools whose intended geometry must not be pulled back to the old shape.
+  switch (kind) {
+    case NativeSculptBrushKind::Clay:       return {2e-7,{2.0,0.85}};
+    case NativeSculptBrushKind::ClayStrips: return {1e-7,{1.5,0.95}};
+    case NativeSculptBrushKind::Smooth:     return {2e-7,{1.0,0.95}};
+    case NativeSculptBrushKind::Draw:       return {1e-7,{2.0,0.90}};
+    case NativeSculptBrushKind::Nudge:      return {5e-7,{1.0,0.50}};
+    case NativeSculptBrushKind::Gravity:    return {2e-6,{0.5,0.20}};
+  }
+  throw std::invalid_argument("Unsupported native brush profile");
+}
+
+PreparedNativeGrabDab::PreparedNativeGrabDab(
+    std::unique_ptr<IPhysicsExecutor> executor,
+    ExecutorWriteBatch batch)
+    : executor_(std::move(executor)), batch_(std::move(batch))
+{
+}
+
+PreparedNativeGrabDab::~PreparedNativeGrabDab()
+{
+  cancel();
+}
+
+void PreparedNativeGrabDab::finish_editor_success()
+{
+  if (!executor_) return; // Empty brush dab is an intentional no-op.
+  executor_->acknowledge_incremental(batch_.revision);
+  executor_->commit();
+  executor_.reset();
+}
+
+void PreparedNativeGrabDab::cancel() noexcept
+{
+  if (!executor_) return;
+  try {
+    if (executor_->stroke_active()) executor_->cancel();
+  }
+  catch (...) {
+    // Never throw from an RAII destructor on an editor failure path.
+  }
+  executor_.reset();
+}
+
+PreparedNativeGrabDab prepare_cpu_native_grab_dab(
+    const World &rest_world,
+    const GpuTopologyBondIndex &topology,
+    const std::vector<NativeGrabSample> &samples,
+    const std::function<Vec3(std::size_t)> &current_position,
+    const NativeGrabDab &dab)
+{
+  if (!current_position || !finite(dab.delta) ||
+      !std::isfinite(dab.compliance) || dab.compliance < 0.0 ||
+      !std::isfinite(dab.dt) || dab.dt <= 0.0 ||
+      dab.substeps < 1 || dab.substeps > 256 ||
+      dab.iterations < 1 || dab.iterations > 256) {
+    throw std::invalid_argument("Invalid native Grab executor settings");
+  }
+
+  validate_material(dab.material);
+  std::vector<NativeGrabSample> selected;
+  selected.reserve(samples.size());
+  for (const NativeGrabSample &sample : samples) {
+    if (sample.global_index >= rest_world.particles().size() ||
+        !std::isfinite(sample.factor) ||
+        sample.factor < 0.0 || sample.factor > 1.0) {
+      throw std::invalid_argument("Invalid native Grab PBVH factor/index");
+    }
+    if (sample.factor > 0.0) selected.push_back(sample);
+  }
+  std::sort(selected.begin(), selected.end(),
+            [](const NativeGrabSample &a, const NativeGrabSample &b) {
+              return a.global_index < b.global_index;
+            });
+  for (std::size_t i=1; i<selected.size(); ++i) {
+    if (selected[i].global_index == selected[i-1].global_index) {
+      throw std::invalid_argument("Duplicate Grab vertex: normalize PBVH ownership first");
+    }
+  }
+  // Even empty worksets check topology generation to avoid retaining a
+  // stale GPU/CPU proxy when Blender mutates mesh topology.
+  if (selected.empty() ||
+      (dab.delta.x==0.0 && dab.delta.y==0.0 && dab.delta.z==0.0)) {
+    (void)topology.one_ring_halo(rest_world,{},dab.topology_generation);
+    return {};
+  }
+
+  std::vector<std::size_t> active;
+  active.reserve(selected.size());
+  for (const auto &sample : selected) {
+    if (rest_world.particles()[sample.global_index].inverse_mass>0.0) {
+      active.push_back(sample.global_index);
+    }
+  }
+  const auto halo = topology.one_ring_halo(rest_world, active, dab.topology_generation);
+  // Fully masked/hidden selection is a no-op before packing or reading
+  // editor positions. Pinned samples can still be included as actual halo.
+  if (active.empty()) return {};
+  GpuLocalIsland island = topology.build(rest_world, active, halo, active,
+                                         dab.topology_generation, false);
+  // Only FREE active vertices can move. Every halo vertex is pinned so that
+  // omitted bonds crossing a fixed halo remain mathematically harmless.
+  for (std::size_t i=0; i<island.global_ids.size(); ++i) {
+    const Vec3 p=current_position(island.global_ids[i]);
+    if (!finite(p)) throw std::invalid_argument("Non-finite native Grab mesh position");
+    island.positions[i]=p;
+  }
+
+  std::vector<ExecutorTarget> targets;
+  targets.reserve(selected.size());
+  for (const auto &sample : selected) {
+    if (rest_world.particles()[sample.global_index].inverse_mass<=0.0) continue;
+    const auto it=std::lower_bound(island.global_ids.begin(),
+                                    island.global_ids.end(),sample.global_index);
+    if (it==island.global_ids.end() || *it!=sample.global_index) {
+      throw std::logic_error("Missing local Grab vertex after island construction");
+    }
+    const std::size_t local=static_cast<std::size_t>(it-island.global_ids.begin());
+    if (island.inverse_masses[local]<=0.0) continue;
+    const Vec3 goal=island.positions[local]+dab.delta*sample.factor;
+    if (!finite(goal)) throw std::invalid_argument("Grab displacement overflow");
+    targets.push_back({sample.global_index,goal,dab.compliance});
+  }
+  if (targets.empty()) return {};
+  apply_material(island,targets,dab.material);
+
+  auto executor=make_native_executor(SolverDevice::CPU);
+  executor->allocate_island(island);
+  executor->begin_stroke();
+  executor->set_targets(targets);
+  executor->step(dab.dt,dab.substeps,dab.iterations);
+  ExecutorWriteBatch batch=executor->stage_incremental();
+  // For a first-ring pinning policy, all writes must be inside the
+  // explicitly selected active set. No unrecorded exterior moves allowed.
+  for (const GpuProxyChange &write : batch.writes) {
+    if (!std::binary_search(active.begin(),active.end(),write.global_index)) {
+      throw std::logic_error("Native Grab XPBD wrote outside PBVH active/Undo set");
+    }
+  }
+  return PreparedNativeGrabDab(std::move(executor),std::move(batch));
+}
+
+PreparedNativeBrushDab prepare_cpu_native_brush_dab(
+    const World &rest_world,
+    const GpuTopologyBondIndex &topology,
+    const std::vector<NativeBrushTranslation> &samples,
+    const std::function<Vec3(std::size_t)> &current_position,
+    const NativeBrushDab &dab)
+{
+  // Validate first. This shared path must not multiply existing native
+  // Blender brush factors or silently substitute other material solvers.
+  if (!current_position || !std::isfinite(dab.assist) ||
+      dab.assist<0.0 || dab.assist>1.0 ||
+      !std::isfinite(dab.compliance) ||
+      dab.compliance<0.0 || !std::isfinite(dab.dt) || dab.dt<=0.0 ||
+      dab.substeps<1 || dab.substeps>256 ||
+      dab.iterations<1 || dab.iterations>256) {
+    throw std::invalid_argument("Invalid native physical brush settings");
+  }
+  switch (dab.kind) {
+    case NativeSculptBrushKind::Clay:
+    case NativeSculptBrushKind::ClayStrips:
+    case NativeSculptBrushKind::Smooth:
+    case NativeSculptBrushKind::Draw:
+    case NativeSculptBrushKind::Nudge:
+    case NativeSculptBrushKind::Gravity:
+      break;
+    default:
+      throw std::invalid_argument("Unsupported native physical brush kind");
+  }
+  validate_material(dab.material);
+  std::vector<NativeBrushTranslation> selected;
+  selected.reserve(samples.size());
+  for (const NativeBrushTranslation &sample : samples) {
+    if (sample.global_index>=rest_world.particles().size() ||
+        !finite(sample.translation)) {
+      throw std::invalid_argument("Invalid native sculpt translation or vertex ID");
+    }
+    if (std::hypot(sample.translation.x,sample.translation.y,
+                   sample.translation.z)>1.0e-15) {
+      selected.push_back(sample);
+    }
+  }
+  std::sort(selected.begin(),selected.end(),
+            [](const NativeBrushTranslation &a,const NativeBrushTranslation &b) {
+              return a.global_index < b.global_index;
+            });
+  for (std::size_t i=1;i<selected.size();++i) {
+    if (selected[i-1].global_index==selected[i].global_index) {
+      throw std::invalid_argument("Duplicate native brush translation vertex ID");
+    }
+  }
+  std::vector<std::size_t> active;
+  active.reserve(selected.size());
+  for (const auto &sample : selected) {
+    if (rest_world.particles()[sample.global_index].inverse_mass>0.0) {
+      active.push_back(sample.global_index);
+    }
+  }
+  // Always validate cached topology, including when there is no dab.
+  const auto halo=topology.one_ring_halo(
+      rest_world,active,dab.topology_generation);
+  if (active.empty()) return {};
+
+  GpuLocalIsland island=topology.build(
+      rest_world,active,halo,active,dab.topology_generation,false);
+  for (std::size_t i=0;i<island.global_ids.size();++i) {
+    const Vec3 position=current_position(island.global_ids[i]);
+    if (!finite(position)) {
+      throw std::invalid_argument("Non-finite current Blender mesh position");
+    }
+    island.positions[i]=position;
+  }
+  std::vector<ExecutorTarget> goals;
+  goals.reserve(active.size());
+  for (const auto &sample : selected) {
+    if (!std::binary_search(active.begin(),active.end(),sample.global_index)) continue;
+    const auto it=std::lower_bound(
+        island.global_ids.begin(),island.global_ids.end(),sample.global_index);
+    if (it==island.global_ids.end() || *it!=sample.global_index) {
+      throw std::logic_error("Missing native sculpt target inside local physics island");
+    }
+    const std::size_t local=static_cast<std::size_t>(it-island.global_ids.begin());
+    const Vec3 goal=island.positions[local]+sample.translation;
+    if (!finite(goal)) throw std::invalid_argument("Native brush goal overflow");
+    goals.push_back({sample.global_index,goal,dab.compliance});
+  }
+  if (goals.empty()) return {};
+  if (dab.assist>0.0) apply_material(island,goals,dab.material);
+
+  auto executor=make_native_executor(SolverDevice::CPU);
+  executor->allocate_island(island);
+  executor->begin_stroke();
+  if (dab.assist>0.0) {
+    executor->set_targets(goals);
+    executor->step(dab.dt,dab.substeps,dab.iterations);
+  }
+  if (dab.assist<1.0) {
+    // Preserve the artist's fully factored native displacement as baseline.
+    // Missing physical writes mean the vertex stayed at its initial position.
+    const auto physical=executor->stage_incremental(0.0);
+    std::vector<ExecutorEdit> blended;
+    blended.reserve(goals.size());
+    std::size_t changed=0;
+    for (const auto &goal : goals) {
+      while (changed<physical.writes.size() &&
+             physical.writes[changed].global_index<goal.global_index) {
+        ++changed;
+      }
+      const auto it=std::lower_bound(island.global_ids.begin(),island.global_ids.end(),
+                                     goal.global_index);
+      if (it==island.global_ids.end() || *it!=goal.global_index) {
+        throw std::logic_error("Missing V15 blend target");
+      }
+      const auto local=std::size_t(it-island.global_ids.begin());
+      const Vec3 solved=changed<physical.writes.size() &&
+                        physical.writes[changed].global_index==goal.global_index ?
+                        physical.writes[changed].position : island.positions[local];
+      const Vec3 position=dab.assist==0.0 ? goal.goal :
+          goal.goal*(1.0-dab.assist)+solved*dab.assist;
+      if (!finite(position)) throw std::runtime_error("Non-finite V15 blended target");
+      blended.push_back({goal.global_index,position});
+    }
+    // Acknowledge the actual blended editor positions, not the raw solve.
+    executor->upload_dirty(blended);
+  }
+  ExecutorWriteBatch batch=executor->stage_incremental();
+  for (const GpuProxyChange &write:batch.writes) {
+    if (!std::binary_search(active.begin(),active.end(),write.global_index)) {
+      throw std::logic_error("Native physical brush changed vertex outside editor Undo set");
+    }
+  }
+  return PreparedNativeBrushDab(std::move(executor),std::move(batch));
+}
+
+}  // namespace sculpt_physics
