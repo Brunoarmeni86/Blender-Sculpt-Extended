@@ -1416,7 +1416,8 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
                         box.label(text="Assist controls independent action intensity")
                         if brush.sculpt_physics_clay_behavior in {
                                 'AUTONOMOUS_COMPACT', 'AUTONOMOUS_PRESS',
-                                'AUTONOMOUS_PRESSURE_FLOW', 'AUTONOMOUS_HYBRID_FLOW'}:
+                                'AUTONOMOUS_PRESSURE_FLOW', 'AUTONOMOUS_HYBRID_FLOW',
+                                'AUTONOMOUS_MELT', 'AUTONOMOUS_GATHER', 'AUTONOMOUS_SMEAR'}:
                             box.label(text="Space: stamp/gesture; Airbrush: held pressure")
                         else:
                             box.label(text="Gesture-driven; no persistent plasticity yet")
