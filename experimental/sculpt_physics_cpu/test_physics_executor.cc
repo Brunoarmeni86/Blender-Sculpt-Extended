@@ -386,6 +386,46 @@ void test_target_strength_and_atomic_step()
   assert(exec->download_dirty().empty());
   exec->cancel();
 }
+void test_invariant_coefficients_and_fixed_halo()
+{
+  World world;
+  world.add_particle({0,0,0},0.0);
+  world.add_particle({1,0,0});
+  world.add_particle({2,0,0},0.0);
+  world.add_bond(0,1,1e-5);
+  world.add_bond(1,2,2e-5);
+  const auto base=build_gpu_local_island(world,{1},{0,2},{1},17,false);
+  auto with_fixed_bond=base;
+  // Both endpoints are immovable. The extra strained bond cannot affect
+  // the free particle, even with nonzero compliance and multiple substeps.
+  with_fixed_bond.bonds.push_back({0,2,0.1,1e-5});
+  auto a=make_cpu_xpbd_executor();
+  auto b=make_cpu_xpbd_executor();
+  a->allocate_island(base);
+  b->allocate_island(with_fixed_bond);
+  for (auto *executor : {a.get(),b.get()}) {
+    executor->begin_stroke();
+    executor->set_targets({{1,{1.1,0.4,0.0},2e-6}});
+    executor->step(1.0/60.0,3,8);
+  }
+  const auto x=a->stage_incremental();
+  const auto y=b->stage_incremental();
+  assert(x.writes.size()==1 && y.writes.size()==1);
+  assert(x.writes[0].global_index==1 && y.writes[0].global_index==1);
+  assert(x.writes[0].position.x==y.writes[0].position.x &&
+         x.writes[0].position.y==y.writes[0].position.y &&
+         x.writes[0].position.z==y.writes[0].position.z);
+  // Reject an overflowing timestep square before affecting live geometry.
+  bool rejected=false;
+  try { a->step(1e200,1,2); }
+  catch (const std::invalid_argument &) { rejected=true; }
+  assert(rejected);
+  const auto after=a->stage_incremental();
+  assert(after.revision==x.revision &&
+         after.writes[0].position.y==x.writes[0].position.y);
+  a->cancel();
+  b->cancel();
+}
 } // namespace
 
 int main()
@@ -397,5 +437,6 @@ int main()
   test_incremental_editor_ack_protocol();
   test_repeated_dabs_with_reused_solver_scratch();
   test_sparse_ack_on_large_proxy();
+  test_invariant_coefficients_and_fixed_halo();
   return 0;
 }
