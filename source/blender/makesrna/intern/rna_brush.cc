@@ -3520,6 +3520,7 @@ static void rna_def_brush(BlenderRNA *brna)
       {11, "AUTONOMOUS_MELT", 0, "Melt (Surface)", "Conservative surface relaxation with reduced yield; not a volumetric thermal simulation"},
       {12, "AUTONOMOUS_GATHER", 0, "Gather", "Collect surface material toward the brush center"},
       {13, "AUTONOMOUS_SMEAR", 0, "Smear", "Blend existing relief with weak directional transport"},
+      {14, "AUTONOMOUS_SCRAPE", 0, "Scrape", "Unilateral plane contact removes surface material; experimental V25"},
       {0, nullptr, 0, nullptr, nullptr},
   };
   prop = RNA_def_property(srna, "sculpt_physics_clay_behavior", PROP_ENUM, PROP_NONE);
