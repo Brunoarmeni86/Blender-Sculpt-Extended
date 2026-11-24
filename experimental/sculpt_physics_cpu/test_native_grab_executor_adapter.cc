@@ -78,6 +78,26 @@ int main()
       world,index,{{11,1.0}},position,settings);
   assert(!fixed.has_solver() && fixed.writes().empty());
 
+  // A stationary cursor must not relax old rest constraints, read the
+  // editor positions, or allocate a local solver even on a deformed mesh.
+  std::size_t reads=0;
+  auto counted_position=[&](std::size_t id)->Vec3 {++reads; return editor.at(id);};
+  NativeGrabDab stationary=settings;
+  stationary.delta={0.0,0.0,0.0};
+  auto still=prepare_cpu_native_grab_dab(
+      world,index,{{5,1.0}},counted_position,stationary);
+  assert(!still.has_solver() && still.writes().empty() && reads==0);
+  auto masked=prepare_cpu_native_grab_dab(
+      world,index,{{11,1.0}},counted_position,settings);
+  assert(!masked.has_solver() && masked.writes().empty() && reads==0);
+  // A selected but distant pinned particle must not enlarge the local
+  // physical island or force reading its unrelated neighborhood.
+  auto mixed=prepare_cpu_native_grab_dab(
+      world,index,{{5,1.0},{11,1.0}},counted_position,settings);
+  assert(mixed.has_solver() && reads==3); // vertex 5 and one-ring 4,6
+  for (const auto &change : mixed.writes()) assert(change.global_index==5);
+  mixed.cancel();
+
   auto rejects=[&](const std::vector<NativeGrabSample> &samples,
                    const NativeGrabDab &config) {
     bool rejected=false;
@@ -93,6 +113,8 @@ int main()
   rejects({{7,1.01}},settings);
   NativeGrabDab stale=settings; stale.topology_generation=20;
   rejects({{7,1.0}},stale);
+  stationary.topology_generation=20;
+  rejects({{7,1.0}},stationary);
   stale=settings; stale.dt=0.0;
   rejects({{7,1.0}},stale);
   stale=settings; stale.compliance=-1.0;
