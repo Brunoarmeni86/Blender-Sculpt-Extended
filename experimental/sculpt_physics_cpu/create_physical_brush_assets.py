@@ -206,13 +206,22 @@ def main():
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise RuntimeError("Choose a new empty dedicated asset library folder")
     source = find_source(args.source)
-    names = sorted({spec[1] for spec in SPECS})
+    # Blender replaces entries of the destination list with loaded IDs
+    # on leaving the context. Keep requested string names independently.
+    names = tuple(sorted({spec[1] for spec in SPECS}))
     with bpy.data.libraries.load(str(source),link=False) as (src,dst):
         missing = set(names)-set(src.brushes)
         if missing:
             raise RuntimeError(f"Missing Essentials brushes: {sorted(missing)}")
-        dst.brushes = names
-    bases = dict(zip(names,dst.brushes))
+        dst.brushes = list(names)
+    loaded = tuple(dst.brushes)
+    if len(loaded) != len(names):
+        raise RuntimeError(f"Expected {len(names)} base brushes, received {len(loaded)}")
+    bases = dict(zip(names,loaded))
+    for name, brush in bases.items():
+        if brush is None or not isinstance(brush,bpy.types.Brush):
+            raise RuntimeError(f"Failed to load Essentials brush: {name}")
+    print("[BSE Physical Brushes] Loaded base brushes: "+", ".join(names), flush=True)
     assets = set()
     for name, base, mode, action, icon, assist, spread in SPECS:
         brush = bases[base].copy()
