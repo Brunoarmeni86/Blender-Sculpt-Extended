@@ -13,7 +13,7 @@
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
 
 #  include "native_grab_executor_adapter.hh"
-#  include "compact_brush_topology.hh"
+#  include "compact_native_brush_adapter.hh"
 
 #  include "BKE_mesh.hh"
 #  include "BKE_multires_sculpt_layers.hh"
@@ -116,11 +116,10 @@ inline bool try_apply(const Sculpt &sd,
       cache.mirror_symmetry_pass!=0) {
     // A previously active physical stroke must not switch abruptly to the
     // stock brush; freeze remaining dabs until the user releases the stroke.
-    if (cache.xpbd_v15_active_logged) {
-      cache.xpbd_v15_failed=true;
-      return true;
-    }
-    return false;
+    // Once a stroke chose native fallback, never enter the physical solver
+    // later in that same stroke if the geometry configuration changes.
+    cache.xpbd_v15_failed=true;
+    return cache.xpbd_v15_active_logged;
   }
   const Mesh &mesh=*id_cast<Mesh *>(object.data);
   if (mesh.verts_num<=0 || position_data.eval.size()!=mesh.verts_num) {
@@ -238,54 +237,15 @@ inline bool try_apply(const Sculpt &sd,
       // The compact path stores connectivity only, and snapshots original
       // coordinates on first actual write. Untouched vertices retain their
       // stroke-start coordinates. No full-mesh physics World is allocated.
-      std::vector<std::size_t> active;
-      active.reserve(samples.size());
-      for (const auto &sample : samples) {
-        if (inverse_mass(sample.global_index)>0.0) active.push_back(sample.global_index);
-      }
-      std::sort(active.begin(),active.end());
-      if (active.empty()) {
-        cache.xpbd_v15_state=state;
-        return true;
-      }
-      auto region=state->compact->gather(active,edge_at);
-      local_to_global=std::move(region.vertices);
-      const auto local_id=[&](std::size_t global) {
-        const auto it=std::lower_bound(local_to_global.begin(),local_to_global.end(),global);
-        if (it==local_to_global.end() || *it!=global) {
-          throw std::logic_error("Missing compact brush vertex");
-        }
-        return std::size_t(it-local_to_global.begin());
-      };
-      sculpt_physics::World local_world;
-      local_world.reserve_topology(local_to_global.size(),region.edges.size());
-      for (const std::size_t id : local_to_global) {
-        const auto original=state->original_positions.find(id);
-        const auto rest=original==state->original_positions.end() ?
-                            current_position(id) : original->second;
-        local_world.add_particle(rest,std::binary_search(active.begin(),active.end(),id) ?
-                                         inverse_mass(id) : 0.0);
-      }
-      for (const auto edge_id : region.edges) {
-        const auto [a,b]=edge_at(edge_id);
-        try {
-          local_world.add_bond(local_id(a),local_id(b),1.0e-5);
-        }
-        catch (const std::invalid_argument &) {
-          // Same degenerate-rest-edge policy as the full World reference.
-        }
-      }
-      std::vector<sculpt_physics::NativeBrushTranslation> local_samples;
-      local_samples.reserve(active.size());
-      for (const auto &sample : samples) {
-        if (std::binary_search(active.begin(),active.end(),sample.global_index)) {
-          local_samples.push_back({local_id(sample.global_index),sample.translation});
-        }
-      }
-      const sculpt_physics::GpuTopologyBondIndex local_topology(local_world,1);
-      result=sculpt_physics::prepare_cpu_native_brush_dab(
-          local_world,local_topology,local_samples,
-          [&](std::size_t id) { return current_position(local_to_global.at(id)); },dab);
+      auto prepared=sculpt_physics::prepare_compact_native_brush_dab(
+          *state->compact,samples,edge_at,
+          [&](std::size_t id) {
+            const auto original=state->original_positions.find(id);
+            return original==state->original_positions.end() ?
+                       current_position(id) : original->second;
+          },current_position,inverse_mass,dab);
+      local_to_global=std::move(prepared.local_to_global);
+      result=std::move(prepared.prepared);
     }
     else {
       result=sculpt_physics::prepare_cpu_native_brush_dab(
@@ -340,6 +300,12 @@ inline bool try_apply(const Sculpt &sd,
       for (const int i : verts.index_range()) {
         const float3 wanted=before_clip[i];
         const float3 got=node.translations[i];
+        // A zero translation must remain exactly zero, even if native
+        // clipping would otherwise snap a stationary or pinned vertex.
+        if (wanted.x==0.0f && wanted.y==0.0f && wanted.z==0.0f &&
+            (got.x!=0.0f || got.y!=0.0f || got.z!=0.0f)) {
+          throw std::runtime_error("V15 clipping changed stationary vertex");
+        }
         const float tol=1e-6f*(1.0f+math::length(wanted));
         if (!std::isfinite(got.x) || !std::isfinite(got.y) ||
             !std::isfinite(got.z) ||
