@@ -307,6 +307,7 @@ void BKE_mesh_runtime_clear_geometry(Mesh *mesh)
   mesh->runtime->vert_to_face_offset_cache.tag_dirty();
   mesh->runtime->vert_to_face_map_cache.tag_dirty();
   mesh->runtime->vert_to_corner_map_cache.tag_dirty();
+  mesh->runtime->sculpt_physics_topology_cache = {};
   mesh->runtime->corner_to_face_map_cache.tag_dirty();
   mesh->runtime->vert_normals_cache.tag_dirty();
   mesh->runtime->vert_normals_true_cache.tag_dirty();
@@ -336,6 +337,7 @@ void Mesh::tag_edges_split()
   this->runtime->vert_to_face_offset_cache.tag_dirty();
   this->runtime->vert_to_face_map_cache.tag_dirty();
   this->runtime->vert_to_corner_map_cache.tag_dirty();
+  this->runtime->sculpt_physics_topology_cache = {};
   if (this->runtime->loose_edges_cache.is_cached() &&
       !this->runtime->loose_edges_cache.data().mask.is_empty())
   {
