@@ -89,6 +89,10 @@ struct NativeBrushDab {
   int substeps = 2;
   int iterations = 5;
   std::uint64_t topology_generation = 0;
+  // Blend ONLY the physics correction into the finished native translation.
+  // 0 = unmodified native target (editor should bypass the adapter entirely);
+  // 1 = original fully physical V15 response. Independent of brush strength.
+  double assist = 1.0;
 };
 
 using PreparedNativeBrushDab = PreparedNativeGrabDab;
