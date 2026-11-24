@@ -20,6 +20,7 @@ CATALOGS = {
     "Physical Brushes/Build": "f9c4b635-56c3-4db2-982c-a71b96d282f1",
     "Physical Brushes/Transport": "a66fa0fb-9bd8-44a4-9911-60ff10ad81e2",
     "Physical Brushes/Compression": "2ca7a46a-20f6-4cf5-a0dc-7adfa89903f2",
+    "Physical Brushes/Carving": "ca085ce2-6d67-49da-afeb-614f27af470a",
     "Physical Brushes/Thermal": "383a78b3-64ad-4ed4-8fbe-a395b12b618f",
 }
 # Name, Essentials base, mode, action, preview, assist, spread, catalog.
@@ -29,12 +30,13 @@ SPECS = (
     ("Clay XPBD", "Clay", "ASSISTED", None, "clay", .65, .55, "XPBD Sculpt"),
     ("Clay Strips XPBD", "Clay Strips", "ASSISTED", None, "strips", .65, .55, "XPBD Sculpt"),
     ("Physical Deposit", "Clay", "MATERIAL", "AUTONOMOUS_DEPOSIT", "deposit", .8, .55, "Physical Brushes/Build"),
-    ("Physical Flow", "Clay Strips", "MATERIAL", "FLOW", "flow", 1., 1., "Physical Brushes/Transport"),
+    ("Physical Push", "Clay Strips", "MATERIAL", "FLOW", "flow", 1., 1., "Physical Brushes/Transport"),
     ("Physical Gather", "Clay", "MATERIAL", "AUTONOMOUS_GATHER", "gather", .85, .75, "Physical Brushes/Transport"),
     ("Physical Smear", "Clay Strips", "MATERIAL", "AUTONOMOUS_SMEAR", "smear", .85, .85, "Physical Brushes/Transport"),
     ("Physical Compress", "Clay Strips", "MATERIAL", "AUTONOMOUS_COMPRESS", "compress", .75, .55, "Physical Brushes/Compression"),
     ("Physical Compact", "Clay", "MATERIAL", "AUTONOMOUS_COMPACT", "compact", .75, .45, "Physical Brushes/Compression"),
     ("Physical Press", "Clay Strips", "MATERIAL", "AUTONOMOUS_PRESS", "press", .75, .45, "Physical Brushes/Compression"),
+    ("Physical Scrape", "Clay Strips", "MATERIAL", "AUTONOMOUS_SCRAPE", "scrape", 1., .85, "Physical Brushes/Carving"),
     ("Physical Melt (Surface)", "Clay", "MATERIAL", "AUTONOMOUS_MELT", "melt", 1., 1., "Physical Brushes/Thermal"),
 )
 
@@ -73,6 +75,8 @@ def preview_height(kind, x, y):
         # Wide flattened center with a single rounded shoulder.
         r = math.hypot(x/.69,y/.48)
         return -.36*math.exp(-r**6)+.15*math.exp(-((r-1.05)/.22)**2)
+    if kind == "scrape":
+        return -.38*end*ridge(0,.35)+.12*g(.58,.38,.22,.15)
     if kind == "press":
         # Flat rectangular impression, strongly defined corners.
         return -.42*math.exp(-(x/.57)**8-(y/.32)**8)+.16*end*(ridge(-.42,.12)+ridge(.42,.12))
@@ -314,6 +318,10 @@ def main():
                 brush.sculpt_physics_plasticity = .95
                 brush.strength = 1.0
                 brush.spacing = 8
+                if action == "AUTONOMOUS_SCRAPE":
+                    brush.strength = .85
+                elif action == "AUTONOMOUS_SMEAR":
+                    brush.strength = 1.4
                 if "SMOOTH" in props["curve_distance_falloff_preset"].enum_items.keys():
                     brush.curve_distance_falloff_preset = "SMOOTH"
         brush.asset_mark()
