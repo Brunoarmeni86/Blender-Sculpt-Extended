@@ -105,13 +105,13 @@ inline void coarse_clay_transport(
     double source=0,tool=0;
     if(fusion)source=dab.sign*travel*.10*w[i];
     if(compact)source=-dab.sign*(1-dab.volume_preservation)*
-        std::min(travel*.035*w[i],.15*std::max(0.0,h[i]-floor));
+        std::min(travel*.065*w[i],.15*std::max(0.0,h[i]-floor));
     if(pressure) {
       const double gain=dab.action==ClaySurfaceAction::Compress?.30:
-          dab.action==ClaySurfaceAction::PressureFlow?.22:
-          dab.action==ClaySurfaceAction::HybridFlow?.12:.10;
+          dab.action==ClaySurfaceAction::PressureFlow?.28:
+          dab.action==ClaySurfaceAction::HybridFlow?.20:.18;
       const double depth=dab.action==ClaySurfaceAction::Press?
-          std::max(0.0,h[i]+.08*dab.radius):gain*dab.radius;
+          std::max(0.0,h[i]+.18*dab.radius):gain*dab.radius;
       tool=dab.sign*depth*w[i]*pressure_gain;
     }
     delta[i]=source; // add/sink at original resolution, transport on proxy
@@ -127,19 +127,10 @@ inline void coarse_clay_transport(
       g.height+=m*h[i];g.source+=m*source;
       g.pressure+=m*tool;
     }
-    // Only connect nodes that share an active interpolation stencil.
-    // Neighboring masked/disconnected islands are not joined by a raw
-    // geometric nearest-neighbor search. Subcell holes are unresolved.
-    for(int a=0;a<4;++a)for(int b=a+1;b<4;++b) {
-      if((a^b)==3)continue; // axis-aligned faces of the proxy
-      const auto u=stencil[i][a],v=stencil[i][b];
-      if(u.value<=0||v.value<=0)continue;
-      edges.push_back({std::min(u.id,v.id),std::max(u.id,v.id)});
-    }
   }
-  // Grid vertices with exactly aligned mesh samples need connections too.
-  // Connect only occupied adjacent cells touched by a mesh-connected
-  // chart. The host already isolated one connected active component.
+  // Connect occupied adjacent nodes within one connected active chart.
+  // Coarse cells can bridge narrow mask holes within this component;
+  // zero-influence vertices themselves never receive motion.
   for(const auto &entry:lookup) {
     for(Key k:{Key{entry.first[0]+1,entry.first[1]},Key{entry.first[0],entry.first[1]+1}}) {
       const auto it=lookup.find(k);
@@ -165,17 +156,23 @@ inline void coarse_clay_transport(
     const double envelope=std::min(u.area/u.raw,v.area/v.raw);
     const Vec3 line=ex*double(keys[b][0]-keys[a][0])+ey*double(keys[b][1]-keys[a][1]);
     const double align=dot(dir,line);
-    const bool directed=dab.action==ClaySurfaceAction::Push||dab.action==ClaySurfaceAction::HybridFlow;
+    const bool directed=dab.action==ClaySurfaceAction::Push||
+        dab.action==ClaySurfaceAction::HybridFlow||dab.action==ClaySurfaceAction::PressureFlow;
     double f=0;
     if(directed) {
       const double thickness=align>=0?u.volume/u.area:v.volume/v.area;
       f=align*thickness*width*travel*mobility*envelope*drag_gain*
-        (dab.action==ClaySurfaceAction::HybridFlow?.45:1.0);
+        (dab.action==ClaySurfaceAction::HybridFlow?.45:
+         dab.action==ClaySurfaceAction::PressureFlow?.15:1.0);
     }
     if(pressure||fusion||dab.action==ClaySurfaceAction::Spread||
        (dab.action==ClaySurfaceAction::Push&&dab.flow_fusion)) {
       const double diff=(u.height+u.source+u.pressure)-(v.height+v.source+v.pressure);
-      const double excess=std::max(0.0,std::abs(diff)-yield*spacing);
+      // The tool applies external forcing. Do not use the full
+      // quiescent yield threshold against the relatively weak pressure
+      // potential: that made Press/Compact nearly inert on smooth clay.
+      const double contact_yield=pressure?yield*.25:yield;
+      const double excess=std::max(0.0,std::abs(diff)-contact_yield*spacing);
       const double rate=fusion?dab.fusion:
           dab.action==ClaySurfaceAction::Push?.4*dab.fusion:1.0;
       f+=std::copysign(excess,diff)*width*
