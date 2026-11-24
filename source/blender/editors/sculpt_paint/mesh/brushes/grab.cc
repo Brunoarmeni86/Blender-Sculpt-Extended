@@ -504,6 +504,19 @@ static bool try_xpbd_executor_grab_preview(const Depsgraph &depsgraph,
     sculpt_physics::NativeGrabDab dab;
     dab.delta = {double(delta.x), double(delta.y), double(delta.z)};
     dab.compliance = 1.0e-6;
+    // Opt-in Grab stretch resistance. Smaller compliance scales are
+    // stiffer; keep stroke-start rest lengths, unlike additive brushes.
+    // Read once, so a running stroke cannot change its material.
+    static const double bond_scale=[]() {
+      const char *raw=std::getenv("BLENDER_SCULPT_XPBD_V14_BOND_SCALE");
+      if (!raw) return 1.0;
+      char *end=nullptr;
+      const double value=std::strtod(raw,&end);
+      if (end==raw || *end!='\0' || !std::isfinite(value) ||
+          value<0.0 || value>1000.0) return 1.0;
+      return value;
+    }();
+    dab.material.bond_compliance_scale=bond_scale;
     dab.dt = 1.0 / 60.0;
     dab.substeps = 2;
     dab.iterations = 5;
