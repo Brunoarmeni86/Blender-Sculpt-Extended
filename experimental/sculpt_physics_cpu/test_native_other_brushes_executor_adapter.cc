@@ -222,6 +222,64 @@ int main()
     assert(clay_world.particles()[2].position.x==2.0);
   }
 
+  // V3: test the brush footprint on two mesh densities, rather than
+  // asserting only that adjacent vertices moved by a nonzero amount.
+  for (const int segments : {8,64}) {
+    World surface;
+    std::vector<Vec3> points;
+    std::vector<NativeBrushTranslation> input;
+    for (int i=0;i<=segments;++i) {
+      const double x=-1.0+2.0*double(i)/segments;
+      points.push_back({x,0.0,0.0});
+      surface.add_particle(points.back());
+      if (i) surface.add_bond(i-1,i,1e-5);
+      input.push_back({std::size_t(i),{0,0,0.2}});
+    }
+    GpuTopologyBondIndex index(surface,29);
+    const auto at=[&](std::size_t i) {return points.at(i);};
+    NativeBrushDab settings;
+    settings.kind=NativeSculptBrushKind::Clay;
+    settings.topology_generation=29;
+    settings.clay_material=true;
+    settings.clay_radius=1.0;
+    settings.clay_center={0,0,0};
+    settings.clay_spread=1.0;
+    settings.compliance=0.0;
+    settings.material.bond_compliance_scale=1000.0;
+    settings.clay_behavior=2;
+    auto compress=prepare_cpu_native_brush_dab(surface,index,input,at,settings);
+    std::vector<Vec3> compressed=points;
+    for (const auto &w : compress.writes()) compressed.at(w.global_index)=w.position;
+    assert(compressed[segments/2].z<-0.05);
+    assert(compressed[segments].z>0.05);
+    double sum=0.0;
+    for (auto p : compressed) sum+=p.z;
+    assert(std::abs(sum/double(points.size()))<0.01);
+    compress.cancel();
+    settings.clay_behavior=1;
+    auto deposit=prepare_cpu_native_brush_dab(surface,index,input,at,settings);
+    std::vector<Vec3> deposited=points;
+    for (const auto &w : deposit.writes()) deposited.at(w.global_index)=w.position;
+    assert(deposited[segments].z>deposited[segments/2].z);
+    assert(deposited[segments/2].z>0.0);
+    deposit.cancel();
+    settings.clay_behavior=3;
+    settings.clay_stroke_delta={0.2,0,0};
+    auto flow=prepare_cpu_native_brush_dab(surface,index,input,at,settings);
+    std::vector<Vec3> flowed=points;
+    for (const auto &w : flow.writes()) flowed.at(w.global_index)=w.position;
+    assert(flowed[segments/2].x>0.15);
+    assert(flowed[segments/2].z<0.1);
+    flow.cancel();
+    settings.assist=0.0;
+    auto native=prepare_cpu_native_brush_dab(surface,index,input,at,settings);
+    for (const auto &w : native.writes()) {
+      assert(w.position.x==points[w.global_index].x);
+      assert(w.position.z==0.2);
+    }
+    native.cancel();
+  }
+
   auto cfg=NativeBrushDab{};
   cfg.topology_generation=114;
   auto none=prepare_cpu_native_brush_dab(rest,topology,{},position,cfg);
