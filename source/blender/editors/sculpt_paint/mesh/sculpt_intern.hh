@@ -258,6 +258,7 @@ struct StrokeCache {
   bool xpbd_v16_enabled = false;
   bool xpbd_v16_compact = false;
   bool xpbd_v16_clay_material = false;
+  int xpbd_v16_clay_behavior = 0;
   double xpbd_v16_assist = 0.0;
   double xpbd_v16_clay_yield = 0.035;
   double xpbd_v16_clay_plasticity = 0.65;
