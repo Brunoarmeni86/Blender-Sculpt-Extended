@@ -219,6 +219,11 @@ inline bool try_apply(const Sculpt &sd,
     }
     sculpt_physics::NativeBrushDab dab;
     dab.kind=kind;
+    static const bool colored=[]() {
+      const char *raw=std::getenv("BLENDER_SCULPT_XPBD_V16_COLORED");
+      return raw && raw[0]=='1' && raw[1]=='\0';
+    }();
+    dab.colored_order=colored;
     dab.assist=assist_influence();
     dab.compliance=1.0e-6;
     // Compare against the old V15 baseline before enabling new profiles.
