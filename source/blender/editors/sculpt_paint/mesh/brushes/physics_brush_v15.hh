@@ -332,6 +332,25 @@ inline bool try_apply(const Sculpt &sd,
       // not persistent plastic strain. Retain a small elastic component.
       dab.material={100.0,0.95};
       dab.compliance=1.0e-8;
+      // V18 is the default for autonomous actions, V17 remains available
+      // as an A/B reference via a process switch, with no DNA/RNA rebuild.
+      static const bool stable=[]() {
+        const char *v=std::getenv("BLENDER_SCULPT_PHYSICS_V18");
+        return !(v && v[0]=='0' && v[1]=='\0');
+      }();
+      dab.stability.enabled=stable;
+      if (stable) {
+        dab.stability.relative_limit=material_override(
+            "BLENDER_SCULPT_V18_EDGE_LIMIT",0.20,0.02,0.8);
+        dab.stability.relaxation=material_override(
+            "BLENDER_SCULPT_V18_RELAXATION",0.15,0.0,0.5);
+        dab.material={1.0,0.15};
+        dab.compliance=1.0e-6;
+        if (!cache.xpbd_v15_active_logged) {
+          std::fprintf(stderr,"[V18 stability] ACTIVE edge_limit=%.3f relax=%.3f\n",
+                       dab.stability.relative_limit,dab.stability.relaxation);
+        }
+      }
     }
     dab.topology_generation=1;
     std::vector<std::size_t> local_to_global;
