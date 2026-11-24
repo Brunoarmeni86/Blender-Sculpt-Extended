@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace sculpt_physics {
@@ -43,6 +44,8 @@ struct ClaySurfaceDab {
   bool density_independent=false; // V22 brush-scale transfer chart
   bool tool_v25=false; // V25 distinct contact and directional fold
   bool tool_v26=false; // experimental surface response; explicit native opt-in
+  bool fast_v26b=false; // common connectivity and spatial lookup, including Deposit
+  bool continuous_v26b=false; // retain supported portion of an interrupted trace
   bool has_tool_plane=false;
   double tool_plane_height=0.0; // relative to chart center, along chart axis
   double fold_gain=0.22, detail_retention=0.85, tool_depth=0.07;
@@ -262,7 +265,13 @@ inline void shape_clay_transport(
   const auto key=[&](Vec3 p)->Key{
     return {int(std::floor(dot(p,ex)/spacing)),int(std::floor(dot(p,ey)/spacing))};
   };
+  struct KeyHash {
+    std::size_t operator()(const Key &k) const noexcept {
+      return std::hash<int>{}(k[0]) ^ (std::hash<int>{}(k[1])+std::size_t(0x9e3779b9u)+(std::hash<int>{}(k[0])<<6)+(std::hash<int>{}(k[0])>>2));
+    }
+  };
   std::map<Key,std::vector<std::size_t>> bins;
+  std::unordered_map<Key,std::vector<std::size_t>,KeyHash> fast_bins;
   std::vector<std::size_t> large_triangles;
   const bool remap=dab.action==ClaySurfaceAction::Push || dab.action==ClaySurfaceAction::Gather ||
       dab.action==ClaySurfaceAction::Smear || dab.action==ClaySurfaceAction::Melt ||
@@ -275,10 +284,13 @@ inline void shape_clay_transport(
     const int x0=std::min({a[0],b[0],c[0]}),x1=std::max({a[0],b[0],c[0]});
     const int y0=std::min({a[1],b[1],c[1]}),y1=std::max({a[1],b[1],c[1]});
     if(std::size_t(x1-x0+1)*std::size_t(y1-y0+1)>64)large_triangles.push_back(i);
-    else for(int x=x0;x<=x1;++x)for(int y=y0;y<=y1;++y)bins[{x,y}].push_back(i);
+    else for(int x=x0;x<=x1;++x)for(int y=y0;y<=y1;++y) {
+      if(dab.fast_v26b)fast_bins[{x,y}].push_back(i);
+      else bins[{x,y}].push_back(i);
+    }
   }
   const auto sample=[&](Vec3 p,double &value) {
-    const auto it=bins.find(key(p));
+    const Key k=key(p);
     bool found=false;
     bool ambiguous=false;
     const auto scan=[&](const std::vector<std::size_t> &ids) {
@@ -294,7 +306,13 @@ inline void shape_clay_transport(
       value=z;found=true;
     }
     };
-    if(it!=bins.end())scan(it->second);
+    if(dab.fast_v26b){
+      const auto it=fast_bins.find(k);
+      if(it!=fast_bins.end())scan(it->second);
+    }else{
+      const auto it=bins.find(k);
+      if(it!=bins.end())scan(it->second);
+    }
     if(!ambiguous)scan(large_triangles);
     return found&&!ambiguous;
   };
@@ -302,8 +320,15 @@ inline void shape_clay_transport(
     if(norm(shift)<=1e-12)return false;
     ++out.trace_attempts;
     const int steps=std::max(1,int(std::ceil(norm(shift)/trace_spacing)));
-    for(int k=1;k<=steps;++k)if(!sample(p+shift*(double(k)/steps),value)){
-      ++out.trace_rejected;return false;
+    for(int k=1;k<=steps;++k){
+      double next=value;
+      if(!sample(p+shift*(double(k)/steps),next)){
+        ++out.trace_rejected;
+        // Keep only the already traversed, supported part. Never use a
+        // failed/ambiguous sample or jump over a gap in the active chart.
+        return dab.continuous_v26b && k>1;
+      }
+      value=next;
     }
     return true;
   };
@@ -415,7 +440,7 @@ inline void shape_clay_transport(
     const double v=area[i]*delta[i];pos+=std::max(0.0,v);neg+=std::max(0.0,-v);
   }
   out.transported_volume=std::min(pos,neg);
-  out.transport_nodes=bins.size()+large_triangles.size();
+  out.transport_nodes=(dab.fast_v26b?fast_bins.size():bins.size())+large_triangles.size();
 }
 
 using ClaySurfaceEdges=std::vector<std::array<std::size_t,2>>;
@@ -531,14 +556,31 @@ inline ClaySurfaceResult solve_clay_surface(
   if(seed==n || dab.dose==0 || dab.intensity==0) return out;
   // Only the connected component under the tip can exchange material.
   // Nonactive/pinned vertices must not serve as transport bridges.
-  std::vector<std::vector<std::size_t>> adj(n);
-  for(const auto &e:edges) if(w[e[0]]>0 && w[e[1]]>0) {
-    adj[e[0]].push_back(e[1]);adj[e[1]].push_back(e[0]);
-  }
   std::vector<bool> seen(n,false);
-  std::vector<std::size_t> queue{seed};seen[seed]=true;
-  for(std::size_t k=0;k<queue.size();++k)
-    for(auto j:adj[queue[k]]) if(!seen[j]){seen[j]=true;queue.push_back(j);}
+  if(dab.fast_v26b){
+    // Same connected component as the BFS, with flat storage instead of
+    // a heap-allocated adjacency list for each local vertex.
+    std::vector<std::size_t> parent(n);
+    for(std::size_t i=0;i<n;++i)parent[i]=i;
+    const auto root=[&](std::size_t i){
+      while(parent[i]!=i){parent[i]=parent[parent[i]];i=parent[i];}
+      return i;
+    };
+    for(const auto &e:edges)if(w[e[0]]>0 && w[e[1]]>0){
+      const auto a=root(e[0]),b=root(e[1]);
+      if(a!=b)parent[b]=a;
+    }
+    const auto component=root(seed);
+    for(std::size_t i=0;i<n;++i)seen[i]=w[i]>0 && root(i)==component;
+  }else{
+    std::vector<std::vector<std::size_t>> adj(n);
+    for(const auto &e:edges) if(w[e[0]]>0 && w[e[1]]>0) {
+      adj[e[0]].push_back(e[1]);adj[e[1]].push_back(e[0]);
+    }
+    std::vector<std::size_t> queue{seed};seen[seed]=true;
+    for(std::size_t k=0;k<queue.size();++k)
+      for(auto j:adj[queue[k]]) if(!seen[j]){seen[j]=true;queue.push_back(j);}
+  }
   double floor=h[seed];
   for(std::size_t i=0;i<n;++i){
     if(!seen[i])w[i]=0;

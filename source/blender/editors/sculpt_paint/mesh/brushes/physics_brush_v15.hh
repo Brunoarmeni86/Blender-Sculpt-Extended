@@ -63,6 +63,17 @@ struct NativePhysicsStroke {
   double autonomous_peak = 0.0;
 };
 
+inline bool fast_v26b_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_TOOL_V26B");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+inline bool profile_v26b_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PROFILE_V26");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+
 // Process-level experimental tuning; immutable for the full stroke.
 // Zero (or invalid explicit input) bypasses V15 entirely, preserving the
 // ordinary Blender evaluator including its own clipping and layer paths.
@@ -259,6 +270,10 @@ inline bool try_apply(const Sculpt &sd,
     Vector<float3> translations;
   };
   std::vector<PreparedNode> editor_writes;
+  const bool profile=profile_v26b_requested();
+  const auto total_start=std::chrono::steady_clock::now();
+  double prepare_time=0.0,contact_time=0.0,stage_time=0.0;
+  double contact_scale=1.0;
   sculpt_physics::PreparedNativeBrushDab result;
   std::shared_ptr<NativePhysicsStroke> state;
   try {
@@ -471,6 +486,7 @@ inline bool try_apply(const Sculpt &sd,
     const double prepare_ms=std::chrono::duration<double,std::milli>(
         std::chrono::steady_clock::now()-solve_start).count();
 
+    prepare_time=prepare_ms;
     // True zero-impact dab: don't traverse, clip or rewrite every PBVH
     // node with zero translations. Blender's ordinary smoothing/plane
     // clipping may otherwise modify stationary coordinates unexpectedly.
@@ -501,9 +517,11 @@ inline bool try_apply(const Sculpt &sd,
       changes.emplace(global_id,displacement);
     }
 
+    const auto contact_start=std::chrono::steady_clock::now();
     if (drag_contact_requested() && state->compact &&
         kind!=sculpt_physics::NativeSculptBrushKind::Gravity) {
       const auto result=limit_drag_contact(mesh,current,changes,conservative_clay);
+      contact_scale=result.final_scale;
       if (!cache.xpbd_v15_active_logged || result.final_scale<0.25) {
         std::fprintf(stderr,
             "[V19 contact] triangle_scale=%.5f final_scale=%.5f limited=%zu writes=%zu\n",
@@ -511,6 +529,8 @@ inline bool try_apply(const Sculpt &sd,
       }
     }
 
+    contact_time=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-contact_start).count();
+    const auto stage_start=std::chrono::steady_clock::now();
     if (!cache.xpbd_v15_active_logged) {
       double max_native=0.0,max_change=0.0,max_deviation=0.0;
       for (const auto &sample : samples) {
@@ -583,6 +603,7 @@ inline bool try_apply(const Sculpt &sd,
         }
       }
     }
+    stage_time=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-stage_start).count();
   }
   catch (const std::exception &ex) {
     std::fprintf(stderr,"[V15 physical brush] disabled before write: %s\n",ex.what());
@@ -594,6 +615,7 @@ inline bool try_apply(const Sculpt &sd,
 
   // Full native Blender Undo journal/partial PBVH write rollback is not yet
   // implemented; this gated preview must not be enabled in release builds.
+  const auto write_start=std::chrono::steady_clock::now();
   for (PreparedNode &node : editor_writes) {
     bke::pbvh::MeshNode &pbvh_node=nodes[node.id];
     position_data.deform(node.translations,pbvh_node.verts());
@@ -603,6 +625,13 @@ inline bool try_apply(const Sculpt &sd,
   pbvh.flush_bounds_to_parents();
   result.finish_editor_success();
   cache.xpbd_v15_state=state;
+  if(profile){
+    const auto now=std::chrono::steady_clock::now();
+    std::fprintf(stderr,"[V26 profile] kind=%d action=%d targets=%zu prepare_ms=%.3f contact_ms=%.3f stage_ms=%.3f write_ms=%.3f total_ms=%.3f contact_scale=%.6f\n",
+                 int(kind),cache.xpbd_v16_clay_behavior,native_translations.size(),prepare_time,contact_time,stage_time,
+                 std::chrono::duration<double,std::milli>(now-write_start).count(),
+                 std::chrono::duration<double,std::milli>(now-total_start).count(),contact_scale);
+  }
   if (autonomous) {
     // Per-dab maxima accumulated only after the editor accepted the writes.
     // Sum of maxima is a motion-budget diagnostic, not net displacement.
@@ -780,7 +809,7 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
     static thread_local unsigned int count=0;
     const bool report=count++%64==0;
     auto integrated=solve_material_transport_v21(vertices,triangles,dab,substeps,
-                                                 !dab.tool_v26 || report);
+                                                 !(dab.tool_v26 || dab.fast_v26b) || report);
     result=std::move(integrated.surface);
     if (report) {
       std::fprintf(stderr,"[%s material] substeps=%d refinement_edges=%zu active=%zu proxy_nodes=%zu\n",
@@ -898,6 +927,7 @@ inline bool try_apply_intent(
       clay.dose=intent.dose;
       clay.mobility=intent.spread;
       clay.sign=sign;
+      clay.fast_v26b=fast_v26b_requested();
       if (surface_v20) {
         clay.surface_contact=true;
         clay.flow_fusion=original_action==3;
@@ -910,6 +940,7 @@ inline bool try_apply_intent(
           clay.tool_v25=v24 && (tool_v25_requested() || original_action==14);
           const char *v26=std::getenv("BLENDER_SCULPT_TOOL_V26");
           clay.tool_v26=clay.tool_v25 && v26 && v26[0]=='1' && v26[1]=='\0';
+          clay.continuous_v26b=clay.tool_v26 && clay.fast_v26b;
           if (clay.tool_v25) {
             clay.fold_gain=material_override("BLENDER_SCULPT_V25_FOLD",.22,0.0,1.0);
             clay.detail_retention=material_override("BLENDER_SCULPT_V25_DETAIL",.65,0.0,1.0);
@@ -1002,6 +1033,7 @@ inline bool try_apply_intent(
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals);
       const double plan_ms=std::chrono::duration<double,std::milli>(
           std::chrono::steady_clock::now()-plan_start).count();
+      if(profile_v26b_requested())std::fprintf(stderr,"[V26 plan] action=%d active=%zu plan_ms=%.3f dose=%.5f scale=%.6f traces=%zu rejected=%zu\n",int(clay.action),planned.active,plan_ms,clay.dose,planned.accepted_scale,planned.trace_attempts,planned.trace_rejected);
       if (clay.shape_transport && (!cache.xpbd_v15_active_logged || planned.active==0)) {
         std::fprintf(stderr,"[V24 gesture] strength=%.3f dose=%.4f trace_attempts=%zu trace_rejected=%zu\n",
                      clay.intensity,clay.dose,planned.trace_attempts,planned.trace_rejected);
@@ -1035,7 +1067,7 @@ inline bool try_apply_intent(
     }
     else goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
     const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,conservative);
-    if (handled) {
+    if (handled && !cache.xpbd_v15_failed) {
       cache.xpbd_v17_intent_started=true;
       cache.xpbd_v17_last_center=center;
       cache.xpbd_v26_press_dose=pending_press_dose;

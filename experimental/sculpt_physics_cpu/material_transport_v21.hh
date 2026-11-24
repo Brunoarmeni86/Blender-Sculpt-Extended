@@ -42,7 +42,7 @@ inline MaterialTransportV21Result solve_material_transport_v21(
   MaterialTransportV21Result out;
   out.surface.displacement.resize(vertices.size());
   ClaySurfaceEdges dab_edges;
-  const bool cache_topology=dab.tool_v26 && reuse_topology;
+  const bool cache_topology=(dab.tool_v26 || dab.fast_v26b) && reuse_topology;
   for(int k=0;k<substeps;++k) {
     const auto step=solve_clay_surface(work,triangles,dab,cache_topology?&dab_edges:nullptr);
     if(k==0) out.surface.projected_area=step.projected_area;

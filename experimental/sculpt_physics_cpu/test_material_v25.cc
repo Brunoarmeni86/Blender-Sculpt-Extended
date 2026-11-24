@@ -84,14 +84,20 @@ static void overlapping_v26(ClaySurfaceAction action)
       const double r2=(x*x+y*y)/(dab.radius*dab.radius);
       p.influence=r2<1 && p.position.y>-.25?std::pow(1-r2,2):0;
     }
+    dab.fast_v26b=false;
     const auto full=solve_material_transport_v21(v,t,dab,4,true,false);
+    dab.fast_v26b=true;
     const auto fast=solve_material_transport_v21(v,t,dab,4,false);
+    dab.continuous_v26b=true;
+    const auto continuous=solve_material_transport_v21(v,t,dab,4,false);
+    dab.continuous_v26b=false;
     double l1=0;
     for(std::size_t i=0;i<v.size();++i){
       const auto d=fast.surface.displacement[i];
       assert(std::isfinite(d.z));
       assert(d.z==full.surface.displacement[i].z);
-      if(v[i].influence==0)assert(d.z==0);
+      assert(std::isfinite(continuous.surface.displacement[i].z));
+      if(v[i].influence==0){assert(d.z==0);assert(continuous.surface.displacement[i].z==0);}
       if(action==ClaySurfaceAction::Scrape)assert(d.z<=1e-12);
       l1+=std::abs(d.z);v[i].position+=d;
     }

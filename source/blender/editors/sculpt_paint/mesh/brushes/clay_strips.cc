@@ -354,7 +354,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
   allow_stationary=physics_v15::requested(object,brush) &&
       physics_v15::autonomous_requested(*ss.cache) &&
-      (ss.cache->xpbd_v16_clay_behavior>=7 ||
+      (physics_v15::fast_v26b_requested() || ss.cache->xpbd_v16_clay_behavior>=7 ||
        (physics_v15::drag_contact_requested() &&
         (ss.cache->xpbd_v16_clay_behavior==2 || ss.cache->xpbd_v16_clay_behavior==5))) &&
       pbvh.type()==bke::pbvh::Type::Mesh && !layer_detail_v01::state().active;
