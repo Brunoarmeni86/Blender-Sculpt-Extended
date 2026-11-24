@@ -163,7 +163,7 @@ static void offset_positions(const Depsgraph &depsgraph,
                                        factors,
                                        distances);
       if (autonomous) {
-        physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors);
+        physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors,normals);
         return;
       }
       for (const int j : verts.index_range()) {
