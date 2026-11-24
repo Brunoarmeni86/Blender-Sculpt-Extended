@@ -1,6 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "compact_native_brush_adapter.hh"
+#include "physical_brush_intent.hh"
 
+#ifdef NDEBUG
+#  undef NDEBUG
+#endif
 #include <cassert>
 #include <cmath>
 #include <unordered_map>
@@ -74,5 +78,44 @@ int main()
   }
   catch (const std::out_of_range &) { rejected=true; }
   assert(rejected);
+  // Exercise the independent action through the ACTUAL compact XPBD path,
+  // not just the pure target planner. Keep stroke-start coordinates stable.
+  current=initial;
+  saved.clear();
+  PhysicalBrushIntentDab intent;
+  intent.action=PhysicalBrushAction::Deposit;
+  intent.center={1,0,0};
+  intent.radius=3.0;
+  intent.intensity=0.6;
+  intent.dose=0.25;
+  intent.spread=0.55;
+  NativeBrushDab independent;
+  independent.topology_generation=5;
+  independent.compliance=1e-8;
+  independent.material={100.0,0.95};
+  for (int pass=0;pass<10;++pass) {
+    std::vector<PhysicalBrushIntentSample> footprint;
+    for (std::size_t i=0;i<current.size();++i) {
+      footprint.push_back({i,current[i],i==5 ? 0.0 : 1.0,1.0,mass(i)>0.0});
+    }
+    const auto target=plan_physical_brush_intent(footprint,intent);
+    const double prior=current[1].z;
+    auto trial=prepare_compact_native_brush_dab(
+        compact,target,edge_at,rest_at,current_at,mass,independent);
+    assert(!trial.prepared.writes().empty());
+    for (const auto &w : trial.prepared.writes()) {
+      const auto id=trial.local_to_global.at(w.global_index);
+      assert(id!=0 && id!=5);
+      assert(std::isfinite(w.position.z));
+      saved.try_emplace(id,current[id]);
+      current[id]=w.position;
+    }
+    trial.prepared.finish_editor_success();
+    assert(current[1].z>prior+0.005);
+  }
+  assert(current[1].z>0.1);
+  assert(current[0].z==0.0 && current[5].z==0.0);
+  intent.dose=0.0;
+  assert(plan_physical_brush_intent({{1,current[1],1.0,1.0,true}},intent).empty());
   return 0;
 }
