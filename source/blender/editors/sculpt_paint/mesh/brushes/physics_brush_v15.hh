@@ -106,6 +106,7 @@ inline bool requested(Object &object,const Brush &brush)
   cache.xpbd_v16_clay_material=explicit_mode ? brush.sculpt_physics_mode==3 :
       (material && material[0]=='1' && material[1]=='\0');
   if (explicit_mode) {
+    cache.xpbd_v16_clay_behavior=brush.sculpt_physics_clay_behavior;
     cache.xpbd_v16_clay_yield=brush.sculpt_physics_yield;
     cache.xpbd_v16_clay_plasticity=brush.sculpt_physics_plasticity;
     cache.xpbd_v16_clay_spread=brush.sculpt_physics_spread;
@@ -282,6 +283,17 @@ inline bool try_apply(const Sculpt &sd,
     dab.clay_yield=cache.xpbd_v16_clay_yield;
     dab.clay_plasticity=cache.xpbd_v16_clay_plasticity;
     dab.clay_spread=cache.xpbd_v16_clay_spread;
+    if (dab.clay_material &&
+        (kind==sculpt_physics::NativeSculptBrushKind::Clay ||
+         kind==sculpt_physics::NativeSculptBrushKind::ClayStrips)) {
+      dab.clay_behavior=cache.xpbd_v16_clay_behavior;
+      const float3 center=cache.location_symm;
+      const float3 stroke_delta=cache.first_time ? float3(0.0f) :
+                                  cache.location_symm-cache.last_location_symm;
+      dab.clay_center={double(center.x),double(center.y),double(center.z)};
+      dab.clay_radius=double(cache.radius);
+      dab.clay_stroke_delta={double(stroke_delta.x),double(stroke_delta.y),double(stroke_delta.z)};
+    }
     dab.compliance=1.0e-6;
     // Compare against the old V15 baseline before enabling new profiles.
     static const bool profiles=[]() {
@@ -433,7 +445,9 @@ inline bool try_apply(const Sculpt &sd,
                  cache.xpbd_v16_clay_material &&
                      (kind==sculpt_physics::NativeSculptBrushKind::Clay ||
                       kind==sculpt_physics::NativeSculptBrushKind::ClayStrips) ?
-                     "Clay V2" : "assist");
+                     (cache.xpbd_v16_clay_behavior==1 ? "Clay V3 Deposit" :
+                      cache.xpbd_v16_clay_behavior==2 ? "Clay V3 Compress" :
+                      cache.xpbd_v16_clay_behavior==3 ? "Clay V3 Flow" : "Clay V2") : "assist");
     cache.xpbd_v15_active_logged=true;
   }
   return true;
