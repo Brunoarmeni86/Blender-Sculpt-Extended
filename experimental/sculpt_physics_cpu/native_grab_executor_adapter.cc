@@ -551,6 +551,15 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
       b.rest_length=std::max(1e-12,std::hypot(d.x,d.y,d.z));
     }
   }
+  if (dab.current_rest && !dab.stability.enabled && dab.assist>0.0) {
+    // Native Clay XPBD only: do not elastically undo accepted earlier dabs.
+    // Rebase isolated bonds, without modifying native brush targets or
+    // persisting a material field outside the editor's Undo transaction.
+    for (auto &b : island.bonds) {
+      const Vec3 d=island.positions[b.b]-island.positions[b.a];
+      b.rest_length=std::max(1e-12,std::hypot(d.x,d.y,d.z));
+    }
+  }
   const bool clay=dab.assist>0.0 && dab.clay_material &&
       (dab.kind==NativeSculptBrushKind::Clay || dab.kind==NativeSculptBrushKind::ClayStrips);
   const auto native_goals=clay && dab.assist<1.0 ? goals : std::vector<ExecutorTarget>{};
