@@ -320,3 +320,7 @@ add_test(NAME sculpt_material_stability_tests COMMAND test_material_stability)
 add_executable(test_clay_material_layer test_clay_material_layer.cc)
 target_link_libraries(test_clay_material_layer PRIVATE sculpt_physics_reference)
 add_test(NAME sculpt_clay_material_layer_tests COMMAND test_clay_material_layer)
+
+add_executable(test_clay_surface_solver test_clay_surface_solver.cc)
+target_link_libraries(test_clay_surface_solver PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_clay_surface_solver_tests COMMAND test_clay_surface_solver)
