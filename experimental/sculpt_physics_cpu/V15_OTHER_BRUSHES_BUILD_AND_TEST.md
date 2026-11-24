@@ -33,6 +33,38 @@ CCG / sculpt layer writes, Warp GPU execution, performance of large meshes.
 The existing CI only builds the standalone physics component. Do not
 claim the full Blender native callback is tested from that result.
 
+## Follow-up refinement — 24 November 2026
+
+The existing brushes are the priority; do not add Melt/Infection/other
+simulation families until this native path is robust.
+
+- Common CPU XPBD: precompute invariant alpha/denominator/mass coefficients
+  once per dab, preserve constraint ordering and skip fixed-fixed halo
+  bonds in the iterative solver. Reject overflowing timestep squares.
+  This reduces repeated operations but uses additional reusable coefficient
+  scratch; measure CPU latency and memory on real organic proxy graphs
+  before claiming a speedup.
+- V14 Grab: exact zero cursor delta bypasses the solve and native PBVH
+  writes. Fully pinned selections bypass even proxy coordinate reads.
+  Exclude distant pinned targets from the active workset; include them
+  only when adjacent halo constraints require them. Partial mask already
+  belongs to the native factor, so use unit mass for unpinned particles
+  (as in V15), rather than reweighting the same mask in inverse mass.
+- V14/V15: a staged empty write batch is acknowledged without clipping
+  zero translations, recalculating PBVH bounds or tagging draw caches.
+- Regression tests check stationary and pinned Grab, sparse editor reads,
+  stale topology, fixed-fixed bond equivalence and timestep failure
+  atomicity. Native callbacks remain OFF by default; full Blender build
+  and viewport verification are still required.
+
+Next quality gates: tune Grab stretch resistance and boundary continuity;
+preserve Clay/Clay Strips plane and depth profile; make Smooth reduce
+high-frequency noise without fighting native shape preservation; compare
+actual brush output with stock at matched pressure/mask. Keep per-brush
+material controls independent from native strength, and benchmark
+first-dab versus continuation. Then move executor ownership to the stroke
+and connect a verified native GPU backend.
+
 ## Core code
 
 - `experimental/sculpt_physics_cpu/native_grab_executor_adapter.hh/.cc`
