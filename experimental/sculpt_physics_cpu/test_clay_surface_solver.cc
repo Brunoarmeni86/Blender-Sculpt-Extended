@@ -43,6 +43,7 @@ int main()
   assert(std::abs(push.signed_swept_volume)<1e-12);
   assert(push.displacement[11].z<0 && push.displacement[13].z>0);
   assert(push.displacement[0].z==0);
+  const auto initial=v;
   // Repeated accepted updates conserve projected material budget.
   for(int k=0;k<50;++k) {
     auto step=solve_clay_surface(v,t,dab);
@@ -53,10 +54,11 @@ int main()
       v[i].position+=step.displacement[i];
     }
   }
+  v=initial;
   // Gather can build a ridge even without directional input.
   dab.action=ClaySurfaceAction::Gather;dab.direction={};
   auto gather=solve_clay_surface(v,t,dab);
-  assert(gather.transported_volume>0);
+  assert(gather.transported_volume>0 && gather.displacement[12].z>0);
   assert(std::abs(gather.signed_swept_volume)<1e-12);
   dab.action=ClaySurfaceAction::Spread;
   auto spread=solve_clay_surface(v,t,dab);
