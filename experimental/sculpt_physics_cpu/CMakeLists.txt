@@ -348,3 +348,7 @@ add_test(NAME sculpt_material_v24_tests COMMAND test_material_v24)
 add_executable(test_material_v25 test_material_v25.cc)
 target_link_libraries(test_material_v25 PRIVATE sculpt_physics_reference)
 add_test(NAME sculpt_material_v25_tests COMMAND test_material_v25)
+
+add_executable(test_volume_v25 test_volume_v25.cc)
+target_link_libraries(test_volume_v25 PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_volume_v25_tests COMMAND test_volume_v25)
