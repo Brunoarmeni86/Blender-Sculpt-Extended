@@ -308,3 +308,7 @@ elseif(MSVC)
   target_compile_options(test_symmetry_dab_targets PRIVATE /UNDEBUG)
 endif()
 add_test(NAME sculpt_symmetry_dab_targets_tests COMMAND test_symmetry_dab_targets)
+
+add_executable(test_physical_brush_intent test_physical_brush_intent.cc)
+target_link_libraries(test_physical_brush_intent PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_physical_brush_intent_tests COMMAND test_physical_brush_intent)
