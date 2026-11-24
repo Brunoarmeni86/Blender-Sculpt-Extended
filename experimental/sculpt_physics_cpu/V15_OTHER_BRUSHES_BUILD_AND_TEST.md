@@ -91,6 +91,50 @@ The adapter regression covers all six kinds, interpolated coordinates,
 pinned samples and invalid values. Full native Blender compile/visual tests
 remain separate requirements.
 
+## Per-brush material response — experimental trial profiles
+
+Enable only for controlled comparisons (default OFF):
+```powershell
+$env:BLENDER_SCULPT_XPBD_OTHER_BRUSHES_V15 = "1"
+$env:BLENDER_SCULPT_XPBD_V15_ASSIST = "0.5"
+$env:BLENDER_SCULPT_XPBD_V15_PROFILES = "1"
+```
+
+| Brush | Target compliance | Bond compliance multiplier | Native rest follow |
+| --- | ---: | ---: | ---: |
+| Clay | 2e-7 | 2.0 | 0.85 |
+| Clay Strips | 1e-7 | 1.5 | 0.95 |
+| Smooth | 2e-7 | 1.0 | 0.95 |
+| Draw | 1e-7 | 2.0 | 0.90 |
+| Nudge | 5e-7 | 1.0 | 0.50 |
+| Gravity | 2e-6 | 0.5 | 0.20 |
+
+These are uncalibrated starting values, not physical constants. Lower
+target compliance tracks the native displacement more tightly; higher
+bond compliance reduces edge stretch resistance. Native rest follow
+interpolates edge rest lengths toward distances between the final
+native brush goals, using current positions for fixed/halo vertices.
+Only the temporary island is modified: source topology and stroke-start
+rest World remain untouched, including when canceled. Coincident goals
+retain a positive minimum rest length. Zero assist still bypasses the
+editor path. With profiles OFF, old V15 behavior is unchanged.
+
+Grab V14 has an independent process-level trial control
+`BLENDER_SCULPT_XPBD_V14_BOND_SCALE` (default 1, range 0..1000).
+Lower values resist stretch more; higher values permit more stretch.
+Grab keeps stroke-start rest lengths, and does not use V15 rest-follow.
+Restart Blender to change these values.
+
+Tests compare native target fidelity for Clay/Strips/Smooth/Draw on a
+small pinned graph, Grab stretch response at equal input, and reject
+invalid material parameters. These are local edge-based numerical tests,
+not evidence of enclosed-volume preservation, density-independent
+Smooth, viscosity, full Blender compilation, or Multires/CUDA support.
+For real volume preservation use area/volume constraints on a properly
+defined patch; for density-independent Smooth implement physical-radius
+weighted neighborhoods / coarse proxy and compare the same shape at
+several resolutions before exposing defaults.
+
 ## Core code
 
 - `experimental/sculpt_physics_cpu/native_grab_executor_adapter.hh/.cc`
