@@ -153,7 +153,9 @@ PreparedNativeBrushDab prepare_cpu_native_brush_dab(
 {
   // Validate first. This shared path must not multiply existing native
   // Blender brush factors or silently substitute other material solvers.
-  if (!current_position || !std::isfinite(dab.compliance) ||
+  if (!current_position || !std::isfinite(dab.assist) ||
+      dab.assist<0.0 || dab.assist>1.0 ||
+      !std::isfinite(dab.compliance) ||
       dab.compliance<0.0 || !std::isfinite(dab.dt) || dab.dt<=0.0 ||
       dab.substeps<1 || dab.substeps>256 ||
       dab.iterations<1 || dab.iterations>256) {
@@ -231,8 +233,39 @@ PreparedNativeBrushDab prepare_cpu_native_brush_dab(
   auto executor=make_native_executor(SolverDevice::CPU);
   executor->allocate_island(island);
   executor->begin_stroke();
-  executor->set_targets(goals);
-  executor->step(dab.dt,dab.substeps,dab.iterations);
+  if (dab.assist>0.0) {
+    executor->set_targets(goals);
+    executor->step(dab.dt,dab.substeps,dab.iterations);
+  }
+  if (dab.assist<1.0) {
+    // Preserve the artist's fully factored native displacement as baseline.
+    // Missing physical writes mean the vertex stayed at its initial position.
+    const auto physical=executor->stage_incremental(0.0);
+    std::vector<ExecutorEdit> blended;
+    blended.reserve(goals.size());
+    std::size_t changed=0;
+    for (const auto &goal : goals) {
+      while (changed<physical.writes.size() &&
+             physical.writes[changed].global_index<goal.global_index) {
+        ++changed;
+      }
+      const auto it=std::lower_bound(island.global_ids.begin(),island.global_ids.end(),
+                                     goal.global_index);
+      if (it==island.global_ids.end() || *it!=goal.global_index) {
+        throw std::logic_error("Missing V15 blend target");
+      }
+      const auto local=std::size_t(it-island.global_ids.begin());
+      const Vec3 solved=changed<physical.writes.size() &&
+                        physical.writes[changed].global_index==goal.global_index ?
+                        physical.writes[changed].position : island.positions[local];
+      const Vec3 position=dab.assist==0.0 ? goal.goal :
+          goal.goal*(1.0-dab.assist)+solved*dab.assist;
+      if (!finite(position)) throw std::runtime_error("Non-finite V15 blended target");
+      blended.push_back({goal.global_index,position});
+    }
+    // Acknowledge the actual blended editor positions, not the raw solve.
+    executor->upload_dirty(blended);
+  }
   ExecutorWriteBatch batch=executor->stage_incremental();
   for (const GpuProxyChange &write:batch.writes) {
     if (!std::binary_search(active.begin(),active.end(),write.global_index)) {
