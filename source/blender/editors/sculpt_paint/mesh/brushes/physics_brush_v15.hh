@@ -601,8 +601,9 @@ inline bool try_apply(const Sculpt &sd,
 // modes retain their exact path, and no other brush is silently upgraded.
 inline bool autonomous_requested(const StrokeCache &cache)
 {
-  return cache.xpbd_v16_clay_material && cache.xpbd_v16_clay_behavior>=4 &&
-         cache.xpbd_v16_clay_behavior<=10;
+  return cache.xpbd_v16_clay_material &&
+      ((cache.xpbd_v16_clay_behavior>=4 && cache.xpbd_v16_clay_behavior<=10) ||
+       (drag_contact_requested() && cache.xpbd_v16_clay_behavior==2));
 }
 
 // Explicit opt-in while tuning the new solver; no RNA/DNA change.
@@ -725,8 +726,9 @@ inline bool try_apply_intent(
                      cache.xpbd_v16_assist;
     intent.dose=cache.xpbd_v17_intent_started ?
         std::clamp(double(math::length(delta))/std::max(intent.radius,1e-12),0.0,1.0) : 0.15;
-    const int action=cache.xpbd_v16_clay_behavior;
-    if ((action>=7 || conservative) && brush.stroke_method==BRUSH_STROKE_AIRBRUSH &&
+    const int action=drag_contact_requested() && cache.xpbd_v16_clay_behavior==2 ?
+                         5 : cache.xpbd_v16_clay_behavior;
+    if ((action>=7 || conservative || drag_contact_requested()) && brush.stroke_method==BRUSH_STROKE_AIRBRUSH &&
         cache.xpbd_v17_intent_started) {
       // Native timer dispatch already provides repeated stationary dabs.
       // Use nominal timer seconds, not wall-clock/frame time or cursor
