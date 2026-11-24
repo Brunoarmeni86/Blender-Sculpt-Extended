@@ -41,6 +41,7 @@ struct ClaySurfaceDab {
   bool flow_fusion=false; // V20 Flow: weak relief blending alongside directed transport
   bool extended_material=false;
   bool density_independent=false; // V22 brush-scale transfer chart
+  bool shape_transport=false; // V24 native-height remap and distinct contact operators
   bool smooth_proxy=false; // V23 positive quadratic B-spline transfer
   int proxy_cells_per_radius=8; // independent of native mesh density
   // Dimensionless artist controls, not calibrated rheological constants.
@@ -213,6 +214,146 @@ inline void coarse_clay_transport(
   out.transport_nodes=nodes.size();
 }
 
+/* V24: sample the current fine triangle surface instead of only its
+ * coarse grid increments. Semi-Lagrangian height remap with a conservative
+ * signed-volume correction (not a conservative characteristic remap).
+ * No tangential vertex movement, no actual material IDs or topology edits.
+ * Only triangles wholly in the connected writable component are sampled.
+ * Segment probes reject unsupported traces; sub-probe holes are unresolved.
+ */
+inline void shape_clay_transport(
+    const std::vector<Vec3> &xy,const std::vector<double> &h,
+    const std::vector<double> &w,const std::vector<double> &area,
+    const std::vector<ClaySurfaceTriangle> &triangles,
+    const ClaySurfaceDab &dab,Vec3 axis,double travel,double mobility,
+    std::vector<double> &delta,ClaySurfaceResult &out)
+{
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  const auto norm=[](Vec3 v){return std::hypot(v.x,v.y,v.z);};
+  const auto cross=[](Vec3 a,Vec3 b){return Vec3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};};
+  const auto unit=[&](Vec3 v){const double l=norm(v);return l>1e-12?v/l:Vec3{};};
+  const Vec3 ex=unit(cross(std::abs(axis.z)<.9?Vec3{0,0,1}:Vec3{0,1,0},axis));
+  const Vec3 ey=cross(axis,ex);
+  const Vec3 dir=unit(dab.direction-axis*dot(dab.direction,axis));
+  const Vec3 across=cross(axis,dir);
+  const double spacing=dab.radius/double(dab.proxy_cells_per_radius);
+  using Key=std::array<int,2>;
+  const auto key=[&](Vec3 p)->Key{
+    return {int(std::floor(dot(p,ex)/spacing)),int(std::floor(dot(p,ey)/spacing))};
+  };
+  std::map<Key,std::vector<std::size_t>> bins;
+  const bool remap=dab.action==ClaySurfaceAction::Push || dab.action==ClaySurfaceAction::Gather ||
+      dab.action==ClaySurfaceAction::Smear || dab.action==ClaySurfaceAction::Melt ||
+      dab.action==ClaySurfaceAction::Spread || dab.action==ClaySurfaceAction::HybridFlow ||
+      dab.action==ClaySurfaceAction::PressureFlow;
+  if(remap) for(std::size_t i=0;i<triangles.size();++i) {
+    const auto &t=triangles[i];
+    if(w[t[0]]<=0||w[t[1]]<=0||w[t[2]]<=0)continue;
+    const auto a=key(xy[t[0]]),b=key(xy[t[1]]),c=key(xy[t[2]]);
+    const int x0=std::min({a[0],b[0],c[0]}),x1=std::max({a[0],b[0],c[0]});
+    const int y0=std::min({a[1],b[1],c[1]}),y1=std::max({a[1],b[1],c[1]});
+    for(int x=x0;x<=x1;++x)for(int y=y0;y<=y1;++y)bins[{x,y}].push_back(i);
+  }
+  const auto sample=[&](Vec3 p,double &value) {
+    const auto it=bins.find(key(p));if(it==bins.end())return false;
+    bool found=false;
+    for(auto id:it->second) {
+      const auto &t=triangles[id];const auto a=xy[t[0]],b=xy[t[1]]-a,c=xy[t[2]]-a,d=p-a;
+      const double det=dot(cross(b,c),axis);
+      if(det<=1e-24)continue;
+      const double u=dot(cross(d,c),axis)/det,v=dot(cross(b,d),axis)/det;
+      if(u< -1e-9||v< -1e-9||u+v>1+1e-9)continue;
+      const double z=(1-u-v)*h[t[0]]+u*h[t[1]]+v*h[t[2]];
+      // Reject overlapping projected sheets with inconsistent heights.
+      if(found && std::abs(z-value)>1e-7*dab.radius)return false;
+      value=z;found=true;
+    }
+    return found;
+  };
+  const auto trace=[&](Vec3 p,Vec3 shift,double &value) {
+    const int steps=std::max(1,int(std::ceil(norm(shift)/(spacing*.5))));
+    for(int k=1;k<=steps;++k)if(!sample(p+shift*(double(k)/steps),value))return false;
+    return true;
+  };
+  const double amount=std::min(.28*dab.radius,travel*(.35+1.65*mobility));
+  const double drag=amount*dab.friction;
+  const auto smooth=[](double t){t=std::clamp(t,0.0,1.0);return t*t*(3-2*t);};
+  const bool press=dab.action==ClaySurfaceAction::Press;
+  const bool compact=dab.action==ClaySurfaceAction::Compact;
+  const bool compress=dab.action==ClaySurfaceAction::Compress;
+  std::vector<double> rim(w.size(),0.0);
+  double removed=0,receiver=0;
+  for(std::size_t i=0;i<w.size();++i)if(w[i]>0) {
+    const auto p=xy[i];const double r=norm(p)/dab.radius;
+    if(press||compact||compress) {
+      const double inner=1-smooth((r-.42)/.29);
+      const double depth=press?std::max(0.0,dab.sign*h[i]+.065*dab.radius):amount*.30;
+      delta[i]=-dab.sign*w[i]*inner*std::min(depth,amount*.55);
+      rim[i]=w[i]*smooth((r-.60)/.22);
+      removed-=delta[i]*area[i];receiver+=rim[i]*area[i];
+    }
+    else if(dab.action==ClaySurfaceAction::Push) {
+      double z=h[i];
+      if(trace(p,dir*(-dab.sign*drag),z))delta[i]=w[i]*(z-h[i]);
+    }
+    else if(dab.action==ClaySurfaceAction::Gather) {
+      double z=h[i];
+      const Vec3 shift=unit(p)*std::min(drag*.7,norm(p)*.55)*dab.sign;
+      if(trace(p,shift,z))delta[i]=w[i]*(z-h[i]);
+      // Convergence of the material column can also gather flat clay.
+      delta[i]+=dab.sign*w[i]*amount*.22*(1-3*r*r);
+    }
+    else {
+      const bool smear=dab.action==ClaySurfaceAction::Smear ||
+                       dab.action==ClaySurfaceAction::HybridFlow;
+      const double reach=dab.radius*(smear?.20:.16);
+      const Vec3 t=smear && norm(dir)>0?dir:ex;
+      const Vec3 b=smear && norm(dir)>0?across:ey;
+      double sum=0,count=0;
+      for(const Vec3 offset:{t*reach,t*(-reach),b*(reach*(smear?.25:1)),
+                             b*(-reach*(smear?.25:1))}) {
+        double z=h[i];
+        if(trace(p,offset,z)){sum+=z;++count;}
+      }
+      if(count>0)delta[i]=w[i]*(sum/count-h[i])*
+          (1-std::exp(-amount/dab.radius*(smear?5.0:8.0)));
+      if(smear) {
+        double z=h[i];
+        if(trace(p,dir*(-dab.sign*drag*.5),z))
+          delta[i]+=w[i]*(z-h[i])*.55;
+      }
+      if(dab.action==ClaySurfaceAction::PressureFlow)
+        delta[i]-=dab.sign*w[i]*amount*.15*(1-3*r*r);
+    }
+  }
+  if(press||compact||compress) {
+    const double fraction=compact?dab.volume_preservation:1.0;
+    if(receiver>1e-24) {
+      for(std::size_t i=0;i<w.size();++i)delta[i]+=fraction*removed*rim[i]/receiver;
+    } else if(fraction>0) {
+      // No writable recipient: reject conservative compression.
+      for(double &d:delta)d*=1-fraction;
+    }
+  } else {
+    // Balance both signs without adding an artificial broad offset or
+    // changing pinned vertices. A one-sided remap is rejected.
+    double positive=0,negative=0;
+    for(std::size_t i=0;i<w.size();++i) {
+      const double v=delta[i]*area[i];
+      positive+=std::max(0.0,v);negative+=std::max(0.0,-v);
+    }
+    const double budget=std::min(positive,negative);
+    for(double &d:delta)d*=d>0?(positive>0?budget/positive:0):
+                                 (negative>0?budget/negative:0);
+  }
+  double pos=0,neg=0;
+  for(std::size_t i=0;i<w.size();++i){
+    const double v=area[i]*delta[i];pos+=std::max(0.0,v);neg+=std::max(0.0,-v);
+  }
+  out.transported_volume=std::min(pos,neg);
+  out.transport_nodes=bins.size();
+}
+
 inline ClaySurfaceResult solve_clay_surface(
     const std::vector<ClaySurfaceVertex> &vertices,
     const std::vector<ClaySurfaceTriangle> &triangles,
@@ -226,7 +367,8 @@ inline ClaySurfaceResult solve_clay_surface(
   if (!std::isfinite(norm(dab.center)) || !std::isfinite(norm(dab.axis)) ||
       norm(dab.axis)<=1e-12 || !std::isfinite(norm(dab.direction)) ||
       !std::isfinite(dab.radius) || dab.radius<=1e-12 ||
-      !interval(dab.dose) || !interval(dab.intensity) || !interval(dab.mobility) ||
+      !interval(dab.dose) || !std::isfinite(dab.intensity) || dab.intensity<0 ||
+      dab.intensity>(dab.shape_transport?4.0:1.0) || !interval(dab.mobility) ||
       (dab.sign!=1 && dab.sign!=-1) ||
       !interval(dab.yield_slope) || !interval(dab.relative_slope_limit) ||
       dab.relative_slope_limit==0 ||
@@ -262,7 +404,8 @@ inline ClaySurfaceResult solve_clay_surface(
     if(!std::isfinite(h[i]) || !std::isfinite(norm(xy[i])))
       throw std::overflow_error("Invalid clay chart");
     // Explicit depth bound avoids gathering the back side of a thin mesh.
-    if(std::abs(h[i])<=dab.radius*0.5 && (dab.surface_contact || norm(xy[i])<=dab.radius))
+    if(std::abs(h[i])<=dab.radius*0.5 &&
+       ((dab.surface_contact && !dab.shape_transport) || norm(xy[i])<=dab.radius))
       w[i]=vertices[i].influence;
   }
   std::vector<std::array<std::size_t,2>> edges;
@@ -333,6 +476,8 @@ inline ClaySurfaceResult solve_clay_surface(
   if(dab.action==ClaySurfaceAction::Buildup) {
     for(std::size_t i=0;i<n;++i) if(w[i]>0)
       delta[i]=dab.sign*travel*0.10*w[i];
+  } else if(dab.shape_transport && dab.action!=ClaySurfaceAction::FusionDeposit) {
+    shape_clay_transport(xy,h,w,out.projected_area,triangles,dab,axis,travel,mobility,delta,out);
   } else if(dab.density_independent &&
             (dab.smooth_proxy || dab.action!=ClaySurfaceAction::Gather)) {
     coarse_clay_transport(xy,h,w,out.projected_area,dab,axis,floor,travel,
