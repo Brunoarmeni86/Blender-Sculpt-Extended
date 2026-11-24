@@ -845,7 +845,8 @@ inline bool try_apply_intent(
       if (!std::isfinite(rate) || rate<=0.0) {
         throw std::invalid_argument("Invalid physical airbrush rate");
       }
-      intent.dose=std::clamp(rate*1.5,0.0,1.0);
+      const double dwell=std::clamp(rate*1.5,0.0,1.0);
+      intent.dose=v24?std::max(intent.dose,dwell):dwell;
     }
     intent.radial_sign=sign;
     intent.spread=cache.xpbd_v16_clay_spread;
@@ -926,6 +927,10 @@ inline bool try_apply_intent(
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals);
       const double plan_ms=std::chrono::duration<double,std::milli>(
           std::chrono::steady_clock::now()-plan_start).count();
+      if (clay.shape_transport && (!cache.xpbd_v15_active_logged || planned.active==0)) {
+        std::fprintf(stderr,"[V24 gesture] strength=%.3f dose=%.4f trace_attempts=%zu trace_rejected=%zu\n",
+                     clay.intensity,clay.dose,planned.trace_attempts,planned.trace_rejected);
+      }
       if (!cache.xpbd_v15_active_logged || (clay.shape_transport && planned.active==0)) {
         std::fprintf(stderr,"[%s clay surface] action=%d active=%zu target_volume=%.9g transport=%.9g scale=%.4f plan_ms=%.3f\n",
                      clay.shape_transport ? "V24" : clay.smooth_proxy ? "V23" : clay.density_independent ? "V22" : material_v21_requested() && surface_v20 ? "V21" : surface_v20 ? "V20" : "V19",int(clay.action),planned.active,planned.signed_swept_volume,
