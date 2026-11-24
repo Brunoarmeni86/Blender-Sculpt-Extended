@@ -15,7 +15,7 @@ namespace sculpt_physics {
  * This is a shared front end, NOT a constitutive law or a completed solver.
  * The caller must gather writable candidates BEFORE native geometry changes,
  * evaluate Blender's envelope once, and honor native Undo coverage. */
-enum class PhysicalBrushAction { Deposit, Compress, Flow };
+enum class PhysicalBrushAction { Deposit, Compress, Flow, Compact, Press, PressureFlow, HybridFlow };
 
 struct PhysicalBrushIntentSample {
   std::size_t global_index = 0;
@@ -27,6 +27,7 @@ struct PhysicalBrushIntentSample {
   // a documented approximation. Only relative weights matter.
   double area = 1.0;
   bool writable = false;
+  Vec3 surface_normal{}; // optional local tangent; zero falls back to brush axis
 };
 
 struct PhysicalBrushIntentDab {
@@ -40,6 +41,7 @@ struct PhysicalBrushIntentDab {
   double spread = 0.55;
   // Native callers already filtered the exact brush footprint (e.g. cube).
   bool limit_to_projected_disk = true;
+  double radial_sign = 1.0; // inversion of pressure flow, independent of brush normal
 };
 
 /* The increment is bounded by a fraction of the brush radius, not by edge
@@ -62,12 +64,14 @@ inline std::vector<NativeBrushTranslation> plan_physical_brush_intent(
   if (!finite(dab.center) || !finite(dab.normal) || !finite(dab.stroke_direction) ||
       !std::isfinite(dab.radius) || dab.radius<=0.0 ||
       !unit_interval(dab.intensity) || !unit_interval(dab.dose) ||
-      !unit_interval(dab.spread)) {
+      !unit_interval(dab.spread) || (dab.radial_sign!=1.0 && dab.radial_sign!=-1.0)) {
     throw std::invalid_argument("Invalid independent brush intent");
   }
   if (dab.action!=PhysicalBrushAction::Deposit &&
       dab.action!=PhysicalBrushAction::Compress &&
-      dab.action!=PhysicalBrushAction::Flow) {
+      dab.action!=PhysicalBrushAction::Flow &&
+      dab.action!=PhysicalBrushAction::Compact && dab.action!=PhysicalBrushAction::Press &&
+      dab.action!=PhysicalBrushAction::PressureFlow && dab.action!=PhysicalBrushAction::HybridFlow) {
     throw std::invalid_argument("Unknown physical brush action");
   }
   const double normal_len=norm(dab.normal);
@@ -80,7 +84,7 @@ inline std::vector<NativeBrushTranslation> plan_physical_brush_intent(
   double area_max=0.0;
   for (std::size_t i=0;i<samples.size();++i) {
     const auto &s=samples[i];
-    if (!finite(s.position) || !unit_interval(s.envelope) ||
+    if (!finite(s.position) || !finite(s.surface_normal) || !unit_interval(s.envelope) ||
         !std::isfinite(s.area) || s.area<=0.0) {
       throw std::invalid_argument("Invalid physical brush sample");
     }
@@ -128,6 +132,17 @@ inline std::vector<NativeBrushTranslation> plan_physical_brush_intent(
     const auto &s=samples[a.index];
     const double h=step*s.envelope;
     Vec3 move{};
+    // Local tangent projection prevents a uniform brush-plane vector from
+    // being interpreted as a normal displacement on a curved surface.
+    const double local_len=norm(s.surface_normal);
+    const Vec3 local_axis=local_len>1e-12 ? s.surface_normal/local_len : axis;
+    const auto tangent_to_surface=[&](Vec3 v) {return v-local_axis*dot(v,local_axis);};
+    const Vec3 offset=(s.position-dab.center)/dab.radius;
+    const Vec3 radial=offset-axis*dot(offset,axis);
+    const double radial_len=norm(radial);
+    // Smooth radial field: zero at center; bounded, and native envelope
+    // handles the edge of the footprint. No singular unit radial vector.
+    const Vec3 outward=tangent_to_surface(radial/std::max(1.0,radial_len))*dab.radial_sign;
     switch (dab.action) {
       case PhysicalBrushAction::Deposit:
         move=axis*(h*(1.0+dab.spread*(a.rim-mean)));
@@ -137,6 +152,27 @@ inline std::vector<NativeBrushTranslation> plan_physical_brush_intent(
         break;
       case PhysicalBrushAction::Flow:
         move=direction*h;
+        break;
+      case PhysicalBrushAction::Compact:
+        // Indent without a forced positive rim. Spread is a small lateral
+        // displacement budget, not a measured volumetric compression.
+        move=axis*(-h)+outward*(h*0.35*dab.spread);
+        break;
+      case PhysicalBrushAction::Press: {
+        // Approximate contact with a flat tool advanced by step. Points
+        // below its plane are untouched. Cap penetration correction so
+        // distant irregularities cannot create an arbitrarily large dab.
+        const double penetration=dot(s.position-dab.center,axis)+step;
+        const double depth=std::clamp(penetration,0.0,step)*s.envelope;
+        move=axis*(-depth)+outward*(depth*0.2*dab.spread);
+        break;
+      }
+      case PhysicalBrushAction::PressureFlow:
+        move=outward*h;
+        break;
+      case PhysicalBrushAction::HybridFlow:
+        move=(tangent_len>1e-12 ? tangent_to_surface(direction)*(1.0-dab.spread*0.35)+
+                  outward*(dab.spread*0.35) : outward)*h;
         break;
     }
     if (!finite(move)) throw std::overflow_error("Invalid independent brush motion");
