@@ -361,6 +361,19 @@ inline bool try_apply(const Sculpt &sd,
       dab.compliance=profile.target_compliance;
       dab.material=profile.material;
     }
+    // Native XPBD Sculpt assets keep Blender's original Clay plane and
+    // pressure/falloff. They never invoke an autonomous material action.
+    const Brush &active_brush=*BKE_paint_brush_for_read(&sd.paint);
+    const bool native_clay_assist=active_brush.sculpt_physics_mode==2 &&
+        !autonomous && !dab.clay_material &&
+        (kind==sculpt_physics::NativeSculptBrushKind::Clay ||
+         kind==sculpt_physics::NativeSculptBrushKind::ClayStrips);
+    if (native_clay_assist && drag_contact_requested()) {
+      const auto profile=sculpt_physics::experimental_native_brush_profile(kind);
+      dab.compliance=profile.target_compliance;
+      dab.material=profile.material;
+      dab.current_rest=true;
+    }
     // Read the overrides once per process. Artist tuning preserves the
     // original brush pressure/falloff and changes only the physical solve.
     static const double bond_override=material_override(
