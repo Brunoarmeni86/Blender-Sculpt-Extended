@@ -146,6 +146,7 @@ int main()
   // bonds, and a coincident goal is handled with positive rest length.
   NativeBrushDab follow;
   follow.topology_generation=114;
+  follow.compliance=0.0;
   follow.material={0.0,1.0};
   auto exact=prepare_cpu_native_brush_dab(
       rest,topology,{{5,{0,0.6,0}}},position,follow);
