@@ -81,6 +81,40 @@ int main()
     assert(rest.particles()[5].position.y==source[5].y);
   }
 
+  // Artist assist is a blend of the ORIGINAL native displacement and
+  // fully solved displacement, not a second pressure/mask multiplier.
+  editor=source;
+  for (auto kind : {NativeSculptBrushKind::Clay,NativeSculptBrushKind::ClayStrips,
+                    NativeSculptBrushKind::Smooth,NativeSculptBrushKind::Draw,
+                    NativeSculptBrushKind::Nudge,NativeSculptBrushKind::Gravity}) {
+    NativeBrushDab settings;
+    settings.kind=kind;
+    settings.topology_generation=114;
+    const double dy=kind==NativeSculptBrushKind::Smooth ? -0.4 : 0.4;
+    const std::vector<NativeBrushTranslation> input{{5,{0,dy,0}},
+                                                    {10,{0,1,0}}};
+    settings.assist=0.0;
+    auto native=prepare_cpu_native_brush_dab(rest,topology,input,position,settings);
+    assert(native.writes().size()==1 && native.writes()[0].global_index==5);
+    const Vec3 n=native.writes()[0].position;
+    assert(n.x==source[5].x && n.y==source[5].y+dy);
+    native.finish_editor_success();
+    settings.assist=1.0;
+    auto full=prepare_cpu_native_brush_dab(rest,topology,input,position,settings);
+    assert(full.writes().size()==1);
+    const Vec3 p=full.writes()[0].position;
+    full.cancel();
+    settings.assist=0.25;
+    auto blend=prepare_cpu_native_brush_dab(rest,topology,input,position,settings);
+    assert(blend.writes().size()==1 && blend.writes()[0].global_index==5);
+    const Vec3 m=blend.writes()[0].position;
+    assert(std::abs(m.x-(0.75*n.x+0.25*p.x))<1e-12);
+    assert(std::abs(m.y-(0.75*n.y+0.25*p.y))<1e-12);
+    assert(std::abs(m.z-(0.75*n.z+0.25*p.z))<1e-12);
+    blend.finish_editor_success();
+    assert(editor[5].y==source[5].y && editor[10].y==source[10].y);
+  }
+
   auto cfg=NativeBrushDab{};
   cfg.topology_generation=114;
   auto none=prepare_cpu_native_brush_dab(rest,topology,{},position,cfg);
@@ -107,6 +141,11 @@ int main()
   cfg.compliance=-1;
   rejects({{5,{0,0.1,0}}},cfg);
   cfg.compliance=1e-6;
+  for (double assist : {-0.1,1.1,std::numeric_limits<double>::quiet_NaN()}) {
+    cfg.assist=assist;
+    rejects({{5,{0,0.1,0}}},cfg);
+  }
+  cfg.assist=1.0;
   cfg.kind=static_cast<NativeSculptBrushKind>(999);
   rejects({{5,{0,0.1,0}}},cfg);
 
