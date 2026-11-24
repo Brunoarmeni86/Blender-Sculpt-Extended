@@ -254,6 +254,8 @@ struct MeshRuntime {
   SharedCache<Array<int>> vert_to_face_map_cache;
   /** Cache of indices for vert to corner map. */
   SharedCache<Array<int>> vert_to_corner_map_cache;
+  /** Experimental sculpt connectivity only; never stores positions or UVs. */
+  SharedCache<std::shared_ptr<const void>> sculpt_physics_topology_cache;
   /** Cache of face indices for each face corner. */
   SharedCache<Array<int>> corner_to_face_map_cache;
   /** Cache of data about edges not used by faces. See #Mesh::loose_edges(). */
