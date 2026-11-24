@@ -340,3 +340,7 @@ add_test(NAME sculpt_material_density_v22_tests COMMAND test_material_density_v2
 add_executable(test_material_v23 test_material_v23.cc)
 target_link_libraries(test_material_v23 PRIVATE sculpt_physics_reference)
 add_test(NAME sculpt_material_v23_tests COMMAND test_material_v23)
+
+add_executable(test_material_v24 test_material_v24.cc)
+target_link_libraries(test_material_v24 PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_material_v24_tests COMMAND test_material_v24)
