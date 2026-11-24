@@ -7,7 +7,7 @@
 namespace sculpt_physics {
 
 /* V19-C contact state belongs to one native stroke, never to the mesh.
- * The reference is captured before the first accepted contact at a vertex.
+ * The reference is captured before the first eligible contact at a vertex.
  * Repeated compression is limited relative to that reference, not by a
  * per-dab counter. A new stroke can intentionally compress further.
  * No persistent constitutive material history or volumetric solver. */
@@ -43,9 +43,9 @@ inline std::vector<NativeBrushTranslation> plan_drag_contact(
     if(std::abs(dot(offset,axis))>0.65 ||
        (dab.limit_to_projected_disk && r>1)) continue;
     Vec3 n=unit(s.surface_normal);
-    if(norm(n)<=1e-12) n=axis;
-    // Axis may be inverted with Ctrl; use the absolute normal alignment.
-    if(std::abs(dot(n,axis))<0.25) continue;
+    if(norm(n)<=1e-12) n=axis*dab.radial_sign;
+    // Ctrl changes the force axis, not which side of the surface is exposed.
+    if(dot(n,axis)*dab.radial_sign<0.25) continue;
     const auto tangent=[&](Vec3 x){return x-n*dot(x,n);};
     const Vec3 drag=tangent(direction);
     const Vec3 side=tangent(radial/std::max(1.0,r))*dab.radial_sign;
