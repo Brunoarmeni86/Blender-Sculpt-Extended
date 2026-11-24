@@ -1415,10 +1415,14 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
                     if brush.sculpt_physics_clay_behavior.startswith("AUTONOMOUS_"):
                         box.label(text="Assist controls independent action intensity")
                         box.label(text="Gesture-driven; no persistent plasticity yet")
-                    else:
+                    elif brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'}:
                         box.prop(brush, "sculpt_physics_yield", slider=True)
                         box.prop(brush, "sculpt_physics_plasticity", slider=True)
-                    box.prop(brush, "sculpt_physics_spread", slider=True)
+                    else:
+                        box.label(text="V2/V3 actions apply only to Clay; choose Autonomous")
+                    if (brush.sculpt_physics_clay_behavior.startswith("AUTONOMOUS_") or
+                            brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'}):
+                        box.prop(brush, "sculpt_physics_spread", slider=True)
                 box.label(text="UV coordinates preserved", icon='LOCKED')
                 box.label(text="CPU preview; symmetry and Multires unsupported")
 
