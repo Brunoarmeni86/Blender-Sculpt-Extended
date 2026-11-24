@@ -134,6 +134,89 @@ void apply_clay_material(GpuLocalIsland &island,
   }
 }
 
+// V3: brush-footprint response rather than displacement limited to a
+// single mesh edge. Native goals provide the mask/pressure/alpha envelope.
+// The area proxy is mean incident edge length squared, not actual face area.
+// Compress balances signed displacement along a common axis at the TARGET
+// stage only: it is not a guarantee of enclosed volume after XPBD.
+void apply_clay_footprint(GpuLocalIsland &island,
+                          std::vector<ExecutorTarget> &goals,
+                          const NativeBrushDab &dab)
+{
+  if (goals.empty() || dab.clay_radius<=0.0) return;
+  const auto norm=[](Vec3 v) { return std::hypot(v.x,v.y,v.z); };
+  const auto dot=[](Vec3 a,Vec3 b) { return a.x*b.x+a.y*b.y+a.z*b.z; };
+  const std::size_t n=island.positions.size();
+  std::vector<double> areas(n,0.0);
+  std::vector<unsigned int> degree(n,0);
+  for (const auto &b : island.bonds) {
+    const double edge=norm(island.positions[b.a]-island.positions[b.b]);
+    const double scaled=std::clamp(edge/dab.clay_radius,1e-8,1.0);
+    const double w=scaled*scaled;
+    areas[b.a]+=w; areas[b.b]+=w;
+    ++degree[b.a]; ++degree[b.b];
+  }
+  struct Sample { std::size_t local; Vec3 motion; double strength; double shape; double area; };
+  std::vector<Sample> points;
+  points.reserve(goals.size());
+  double peak=0.0;
+  for (const auto &goal : goals) {
+    const auto it=std::lower_bound(island.global_ids.begin(),island.global_ids.end(),
+                                   goal.global_index);
+    const auto i=std::size_t(it-island.global_ids.begin());
+    const Vec3 motion=goal.goal-island.positions[i];
+    const double strength=norm(motion);
+    if (!std::isfinite(strength)) throw std::overflow_error("Clay V3 motion overflow");
+    peak=std::max(peak,strength);
+    points.push_back({i,motion,strength,0.0,degree[i] ? areas[i]/degree[i] : 1.0});
+  }
+  if (peak<=1e-15) return;
+  Vec3 axis{};
+  for (const auto &p : points) axis+=p.motion*(p.area/peak);
+  const double axis_len=norm(axis);
+  if (!std::isfinite(axis_len) || axis_len<=1e-12) return;
+  axis=axis*(1.0/axis_len);
+  double sum=0.0, weighted=0.0;
+  for (auto &p : points) {
+    const Vec3 d=island.positions[p.local]-dab.clay_center;
+    const double r=std::clamp(norm(d-axis*dot(d,axis))/dab.clay_radius,0.0,1.0);
+    p.shape=std::clamp((r-0.25)/0.55,0.0,1.0);
+    p.shape=p.shape*p.shape*(3.0-2.0*p.shape);
+    const double w=p.area*(p.strength/peak);
+    sum+=w; weighted+=w*p.shape;
+  }
+  if (sum<=0.0 || !std::isfinite(sum) || !std::isfinite(weighted)) return;
+  const double mean=weighted/sum;
+  Vec3 flow=dab.clay_stroke_delta-axis*dot(dab.clay_stroke_delta,axis);
+  const double flow_len=norm(flow);
+  const double flow_weight=std::clamp(flow_len/dab.clay_radius*8.0,0.0,1.0);
+  flow=flow_len>1e-12 ? flow*(1.0/flow_len) : Vec3{};
+  for (std::size_t k=0;k<points.size();++k) {
+    const auto &p=points[k];
+    Vec3 move=p.motion;
+    const double spread=dab.clay_spread;
+    const double axial=dot(p.motion,axis);
+    if (dab.clay_behavior==1) {
+      // Deposit: keep the original projected increment, but shift it from
+      // the peak to the shoulder according to pressure spread.
+      move+=axis*(spread*p.strength*(p.shape-mean));
+    }
+    else if (dab.clay_behavior==2) {
+      // Compress: at full spread the center sinks and the shoulder rises;
+      // the weighted projected increment sums to zero before XPBD.
+      move+=axis*(-spread*axial+2.0*spread*p.strength*(p.shape-mean));
+    }
+    else if (dab.clay_behavior==3) {
+      // Flow: tangential drag uses actual stroke movement, not mesh spacing.
+      move+=axis*(-0.8*spread*flow_weight*axial)+
+          flow*(1.5*spread*flow_weight*p.strength);
+    }
+    const Vec3 goal=island.positions[p.local]+move;
+    if (!finite(goal)) throw std::overflow_error("Clay V3 goal overflow");
+    goals[k].goal=goal;
+  }
+}
+
 }  // namespace
 
 NativeBrushProfile experimental_native_brush_profile(NativeSculptBrushKind kind)
@@ -309,7 +392,11 @@ void validate_native_brush_dab(const NativeBrushDab &dab)
   validate_material(dab.material);
   if (!std::isfinite(dab.clay_yield) || dab.clay_yield<0.0 || dab.clay_yield>1.0 ||
       !std::isfinite(dab.clay_plasticity) || dab.clay_plasticity<0.0 || dab.clay_plasticity>1.0 ||
-      !std::isfinite(dab.clay_spread) || dab.clay_spread<0.0 || dab.clay_spread>1.0) {
+      !std::isfinite(dab.clay_spread) || dab.clay_spread<0.0 || dab.clay_spread>1.0 ||
+      dab.clay_behavior<0 || dab.clay_behavior>3 ||
+      !finite(dab.clay_center) || !finite(dab.clay_stroke_delta) ||
+      !std::isfinite(dab.clay_radius) || dab.clay_radius<0.0 ||
+      (dab.clay_behavior!=0 && dab.clay_radius<=0.0)) {
     throw std::invalid_argument("Invalid Clay V2 settings");
   }
 }
@@ -442,9 +529,21 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
   const auto native_goals=clay && dab.assist<1.0 ? goals : std::vector<ExecutorTarget>{};
   if (dab.assist>0.0) {
     if (clay) {
-      apply_clay_material(island,goals,dab);
-      // Do not erase the yielded rest lengths with the legacy rest-follow.
-      apply_material(island,goals,{dab.material.bond_compliance_scale,0.0});
+      if (dab.clay_behavior==0) {
+        apply_clay_material(island,goals,dab);
+        apply_material(island,goals,{dab.material.bond_compliance_scale,0.0});
+      }
+      else {
+        // Keep yield adaptation, but replace the weak one-ring spread with
+        // the footprint response. Follow modified targets to avoid restoring
+        // the uncompressed surface at high tessellation densities.
+        NativeBrushDab yield_only=dab;
+        yield_only.clay_spread=0.0;
+        apply_clay_material(island,goals,yield_only);
+        apply_clay_footprint(island,goals,dab);
+        apply_material(island,goals,{dab.material.bond_compliance_scale,
+                                    0.7+0.3*dab.clay_plasticity});
+      }
     }
     else apply_material(island,goals,dab.material);
   }
