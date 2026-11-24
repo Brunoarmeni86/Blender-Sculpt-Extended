@@ -411,6 +411,11 @@ static bool try_xpbd_executor_grab_preview(const Depsgraph &depsgraph,
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
   const MeshAttributeData attributes(mesh);
   const float3 delta = grab_delta - cache.xpbd_v14_previous_delta;
+  // No movement: keep the stroke state but do not build a rest proxy,
+  // solve spring relaxation or clip/write any native geometry.
+  if (delta.x == 0.0f && delta.y == 0.0f && delta.z == 0.0f) {
+    return true;
+  }
   struct PreparedNode {
     int node_id;
     Vector<float3> translation;
@@ -434,8 +439,10 @@ static bool try_xpbd_executor_grab_preview(const Depsgraph &depsgraph,
         const float3 p = eval[i];
         const bool hidden = !attributes.hide_vert.is_empty() && attributes.hide_vert[i];
         const float mask = attributes.mask.is_empty() ? 0.0f : attributes.mask[i];
-        const double inv_mass = hidden || mask >= 0.999f ? 0.0 :
-                                std::max(1.0e-4, 1.0 - double(mask));
+        // Final native Grab factors already include partial mask influence.
+        // Match V15: only fully masked/hidden vertices are fixed, rather than
+        // attenuating the same partial mask again through inverse mass.
+        const double inv_mass = hidden || mask >= 0.999f ? 0.0 : 1.0;
         state->rest_world.add_particle(
             {double(p.x), double(p.y), double(p.z)}, inv_mass);
       }
@@ -514,6 +521,15 @@ static bool try_xpbd_executor_grab_preview(const Depsgraph &depsgraph,
           return {double(p.x), double(p.y), double(p.z)};
         },
         dab);
+
+    if (prepared.writes().empty()) {
+      // An empty or completely pinned dab must not clip zero translations,
+      // recalculate every node bound, or dirty PBVH draw caches.
+      prepared.finish_editor_success();
+      cache.xpbd_v14_state = state;
+      cache.xpbd_v14_previous_delta = grab_delta;
+      return true;
+    }
 
     std::unordered_map<std::size_t, float3> staged_translations;
     staged_translations.reserve(prepared.writes().size());
