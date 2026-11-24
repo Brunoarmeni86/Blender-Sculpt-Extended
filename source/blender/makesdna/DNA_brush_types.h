@@ -329,6 +329,7 @@ struct Brush {
   float sculpt_physics_yield = 0.035f;
   float sculpt_physics_plasticity = 0.65f;
   float sculpt_physics_spread = 0.55f;
+  char _pad_physics[4] = {};
 
 
   float tilt_strength_factor = 0;
