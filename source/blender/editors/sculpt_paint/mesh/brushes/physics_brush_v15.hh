@@ -16,6 +16,7 @@
 #  include "compact_native_brush_adapter.hh"
 #  include "physical_brush_intent.hh"
 #  include "clay_surface_solver.hh"
+#  include "brush_contact.hh"
 
 #  include "BKE_mesh.hh"
 #  include "BKE_brush.hh"
@@ -132,6 +133,50 @@ inline bool freeze_if_mode_changed(Object &object, const bke::pbvh::Tree &pbvh,c
   StrokeCache &cache=*object.runtime->sculpt_session->cache;
   cache.xpbd_v15_failed=true;
   return cache.xpbd_v15_active_logged;
+}
+
+inline bool drag_contact_requested()
+{
+  static const bool enabled=[]() {
+    const char *v=std::getenv("BLENDER_SCULPT_CONTACT_V19");
+    return v && v[0]=='1' && v[1]=='\0';
+  }();
+  return enabled;
+}
+
+// Evaluate all triangles incident on actual staged write IDs, including
+// quad diagonals and pinned neighboring vertices. Never scan all faces.
+inline double drag_contact_scale(const Mesh &mesh, const Span<float3> positions,
+                                 const std::unordered_map<std::size_t,float3> &changes)
+{
+  const auto map=mesh.vert_to_face_map();
+  const auto faces=mesh.faces();
+  const auto corners=mesh.corner_verts();
+  const auto tris=mesh.corner_tris();
+  std::vector<int> ids;
+  for (const auto &entry:changes) {
+    for (const int f:map[int(entry.first)]) ids.push_back(f);
+  }
+  std::sort(ids.begin(),ids.end());
+  ids.erase(std::unique(ids.begin(),ids.end()),ids.end());
+  const auto cv=[](const float3 &v)->sculpt_physics::Vec3 {
+    return {double(v.x),double(v.y),double(v.z)};
+  };
+  double scale=1;
+  for (const int f:ids) {
+    for (const int t:bke::mesh::face_triangles_range(faces,f)) {
+      sculpt_physics::ContactTriangle tri{};
+      const int3 c=tris[t];
+      for (int j=0;j<3;++j) {
+        const int v=corners[c[j]];
+        tri.position[j]=cv(positions[v]);
+        const auto it=changes.find(std::size_t(v));
+        if(it!=changes.end()) tri.motion[j]=cv(it->second);
+      }
+      scale=std::min(scale,sculpt_physics::contact_triangle_scale(tri));
+    }
+  }
+  return scale;
 }
 
 inline bool try_apply(const Sculpt &sd,
@@ -417,6 +462,17 @@ inline bool try_apply(const Sculpt &sd,
       changes.emplace(global_id,displacement);
     }
 
+    if (drag_contact_requested() && state->compact &&
+        kind!=sculpt_physics::NativeSculptBrushKind::Gravity) {
+      const double scale=drag_contact_scale(mesh,current,changes);
+      if (!cache.xpbd_v15_active_logged || scale<0.25) {
+        std::fprintf(stderr,"[V19 contact] triangle_scale=%.5f writes=%zu\n",scale,changes.size());
+      }
+      if (scale<1.0) {
+        for (auto &entry:changes) entry.second*=float(scale);
+      }
+    }
+
     if (!cache.xpbd_v15_active_logged) {
       double max_native=0.0,max_change=0.0,max_deviation=0.0;
       for (const auto &sample : samples) {
@@ -460,7 +516,8 @@ inline bool try_apply(const Sculpt &sd,
           throw std::runtime_error("V15 clipping changed stationary vertex");
         }
         const float tol=1e-6f*(1.0f+math::length(wanted));
-        if ((conservative_clay && (got.x!=wanted.x || got.y!=wanted.y || got.z!=wanted.z)) ||
+        if (((conservative_clay || drag_contact_requested()) &&
+             (got.x!=wanted.x || got.y!=wanted.y || got.z!=wanted.z)) ||
             !std::isfinite(got.x) || !std::isfinite(got.y) ||
             !std::isfinite(got.z) ||
             std::abs(got.x-wanted.x)>tol ||
@@ -726,6 +783,27 @@ inline bool try_apply_intent(
                      int(clay.action),planned.active,planned.signed_swept_volume,
                      planned.transported_volume,planned.accepted_scale,plan_ms);
       }
+    }
+    else if (drag_contact_requested()) {
+      using namespace sculpt_physics;
+      auto history=std::static_pointer_cast<BrushContactHistory>(cache.xpbd_v19_contact_history);
+      if (!history) {
+        history=std::make_shared<BrushContactHistory>();
+        cache.xpbd_v19_contact_history=history;
+      }
+      // Capture first eligible contact before geometry changes. No counters
+      // advance on rejected dabs; compression is measured from actual mesh.
+      const double len=std::hypot(intent.normal.x,intent.normal.y,intent.normal.z);
+      if (!std::isfinite(len) || len<=1e-12) throw std::invalid_argument("Invalid contact axis");
+      if (intent.intensity>0 && intent.dose>0 &&
+          (action==5 || action==7 || action==8)) {
+        const auto axis=intent.normal/len;
+        for (const auto &v:samples) {
+          if(v.writable && v.envelope>0)
+            history->try_emplace(v.global_index,BrushContactReference{v.position,axis});
+        }
+      }
+      goals=plan_drag_contact(samples,intent,*history);
     }
     else goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
     const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,conservative);
