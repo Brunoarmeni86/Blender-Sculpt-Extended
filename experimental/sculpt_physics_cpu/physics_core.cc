@@ -50,6 +50,14 @@ SurfaceSample evaluate_anchor(const SurfaceAnchor &anchor,
   return out;
 }
 
+void World::reserve_topology(std::size_t particles, std::size_t bonds)
+{
+  if (active_stroke_) throw std::logic_error("Cannot reserve topology during stroke");
+  particles_.reserve(particles);
+  particle_bond_ids_.reserve(particles);
+  bonds_.reserve(bonds);
+}
+
 std::size_t World::add_particle(Vec3 position, double inverse_mass, double radius)
 {
   if (active_stroke_) throw std::logic_error("Cannot alter topology during stroke");
