@@ -342,7 +342,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
-  if (physics_v15::freeze_if_mode_changed(object,pbvh)) return;
+  if (physics_v15::freeze_if_mode_changed(object,pbvh,brush)) return;
 #endif
   const bool flip = (ss.cache->bstrength < 0.0f);
 
@@ -360,12 +360,12 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
   // The existing Clay Strips layer-detail projection must not be bypassed
   // by a base-mesh XPBD writer which has no layer-delta implementation.
   const bool v15_layer_detail=layer_detail_v01::state().active;
-  if (physics_v15::requested() && v15_layer_detail &&
+  if (physics_v15::requested(object,brush) && v15_layer_detail &&
       ss.cache->xpbd_v15_active_logged) {
     ss.cache->xpbd_v15_failed=true;
     return; // freeze an already physical stroke; do not mix editors
   }
-  if (physics_v15::requested() && !v15_layer_detail &&
+  if (physics_v15::requested(object,brush) && !v15_layer_detail &&
       pbvh.type()==bke::pbvh::Type::Mesh) {
     Mesh &mesh=*id_cast<Mesh *>(object.data);
     const PositionDeformData pos(depsgraph,object,true);
