@@ -146,8 +146,9 @@ inline bool drag_contact_requested()
 
 // Evaluate all triangles incident on actual staged write IDs, including
 // quad diagonals and pinned neighboring vertices. Never scan all faces.
-inline double drag_contact_scale(const Mesh &mesh, const Span<float3> positions,
-                                 const std::unordered_map<std::size_t,float3> &changes)
+inline sculpt_physics::LocalContactResult limit_drag_contact(
+    const Mesh &mesh, const Span<float3> positions,
+    std::unordered_map<std::size_t,float3> &changes, const bool uniform_only)
 {
   const auto map=mesh.vert_to_face_map();
   const auto faces=mesh.faces();
@@ -162,21 +163,37 @@ inline double drag_contact_scale(const Mesh &mesh, const Span<float3> positions,
   const auto cv=[](const float3 &v)->sculpt_physics::Vec3 {
     return {double(v.x),double(v.y),double(v.z)};
   };
-  double scale=1;
+  std::unordered_map<std::size_t,std::size_t> local;
+  std::vector<std::size_t> global;
+  std::vector<sculpt_physics::Vec3> p, motion;
+  std::vector<std::array<std::size_t,3>> triangles;
+  const auto add_vertex=[&](std::size_t v) {
+    const auto found=local.find(v);
+    if(found!=local.end()) return found->second;
+    const auto i=p.size();
+    local.emplace(v,i);
+    global.push_back(v);
+    p.push_back(cv(positions[int(v)]));
+    const auto it=changes.find(v);
+    motion.push_back(it==changes.end()?sculpt_physics::Vec3{}:cv(it->second));
+    return i;
+  };
   for (const int f:ids) {
     for (const int t:bke::mesh::face_triangles_range(faces,f)) {
-      sculpt_physics::ContactTriangle tri{};
       const int3 c=tris[t];
-      for (int j=0;j<3;++j) {
-        const int v=corners[c[j]];
-        tri.position[j]=cv(positions[v]);
-        const auto it=changes.find(std::size_t(v));
-        if(it!=changes.end()) tri.motion[j]=cv(it->second);
-      }
-      scale=std::min(scale,sculpt_physics::contact_triangle_scale(tri));
+      triangles.push_back({add_vertex(std::size_t(corners[c[0]])),
+                           add_vertex(std::size_t(corners[c[1]])),
+                           add_vertex(std::size_t(corners[c[2]]))});
     }
   }
-  return scale;
+  const auto result=sculpt_physics::limit_local_contact(p,triangles,motion,uniform_only);
+  for(std::size_t i=0;i<global.size();++i) {
+    auto it=changes.find(global[i]);
+    if(it!=changes.end()) {
+      it->second=float3(float(motion[i].x),float(motion[i].y),float(motion[i].z));
+    }
+  }
+  return result;
 }
 
 inline bool try_apply(const Sculpt &sd,
@@ -477,12 +494,11 @@ inline bool try_apply(const Sculpt &sd,
 
     if (drag_contact_requested() && state->compact &&
         kind!=sculpt_physics::NativeSculptBrushKind::Gravity) {
-      const double scale=drag_contact_scale(mesh,current,changes);
-      if (!cache.xpbd_v15_active_logged || scale<0.25) {
-        std::fprintf(stderr,"[V19 contact] triangle_scale=%.5f writes=%zu\n",scale,changes.size());
-      }
-      if (scale<1.0) {
-        for (auto &entry:changes) entry.second*=float(scale);
+      const auto result=limit_drag_contact(mesh,current,changes,conservative_clay);
+      if (!cache.xpbd_v15_active_logged || result.final_scale<0.25) {
+        std::fprintf(stderr,
+            "[V19 contact] triangle_scale=%.5f final_scale=%.5f limited=%zu writes=%zu\n",
+            result.minimum_scale,result.final_scale,result.limited_vertices,changes.size());
       }
     }
 
