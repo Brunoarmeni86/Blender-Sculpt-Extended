@@ -1402,6 +1402,21 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
     if mode == 'SCULPT':
         container.prop(brush, "sculpt_brush_type")
 
+        if (brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS', 'DRAW', 'SMOOTH', 'NUDGE'} and
+                hasattr(brush, "sculpt_physics_mode")):
+            box = container.box()
+            box.label(text="Physical Brush (Experimental)")
+            box.prop(brush, "sculpt_physics_mode")
+            if brush.sculpt_physics_mode in {'ASSISTED', 'MATERIAL'}:
+                box.prop(brush, "sculpt_physics_assist", slider=True)
+                if (brush.sculpt_physics_mode == 'MATERIAL' and
+                        brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'}):
+                    box.prop(brush, "sculpt_physics_yield", slider=True)
+                    box.prop(brush, "sculpt_physics_plasticity", slider=True)
+                    box.prop(brush, "sculpt_physics_spread", slider=True)
+                box.label(text="UV coordinates preserved", icon='LOCKED')
+                box.label(text="CPU preview; symmetry and Multires unsupported")
+
         capabilities = brush.sculpt_capabilities
         if capabilities.has_accumulate:
             container.prop(brush, "use_accumulate")
