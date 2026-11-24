@@ -3525,28 +3525,24 @@ static void rna_def_brush(BlenderRNA *brna)
   prop = RNA_def_property(srna, "sculpt_physics_assist", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "sculpt_physics_assist");
   RNA_def_property_range(prop, 0.0f, 1.0f);
-  RNA_def_property_float_default(prop, 0.75f);
   RNA_def_property_ui_text(prop, "Physical Assist", "Blend from native brush to physical solver");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "sculpt_physics_yield", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "sculpt_physics_yield");
   RNA_def_property_range(prop, 0.0f, 1.0f);
-  RNA_def_property_float_default(prop, 0.035f);
   RNA_def_property_ui_text(prop, "Yield Strain", "Relative edge strain before plastic adaptation");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "sculpt_physics_plasticity", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "sculpt_physics_plasticity");
   RNA_def_property_range(prop, 0.0f, 1.0f);
-  RNA_def_property_float_default(prop, 0.65f);
   RNA_def_property_ui_text(prop, "Plasticity", "Amount of per-dab rest-length adaptation after yield");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
   prop = RNA_def_property(srna, "sculpt_physics_spread", PROP_FLOAT, PROP_FACTOR);
   RNA_def_property_float_sdna(prop, nullptr, "sculpt_physics_spread");
   RNA_def_property_range(prop, 0.0f, 1.0f);
-  RNA_def_property_float_default(prop, 0.55f);
   RNA_def_property_ui_text(prop, "Pressure Spread", "Bounded lateral redistribution of brush pressure");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
