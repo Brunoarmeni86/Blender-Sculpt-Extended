@@ -105,7 +105,7 @@ inline std::vector<Vec3> seed_volume_v25(const VolumeSurfaceV25 &mesh,double spa
  * sphere radius determines bias in reconstructed volume. No UV transfer. */
 inline VolumeSurfaceV25 extract_volume_v25(const std::vector<Vec3>&points,
                                            double spacing,double radius){
-  if(!std::isfinite(radius)||radius<=0||radius/spacing>8)
+  if(!std::isfinite(spacing)||spacing<=1e-9||!std::isfinite(radius)||radius<=0||radius/spacing>8)
     throw std::invalid_argument("Invalid extraction radius");
   auto l=volume_lattice_v25(points,spacing,int(std::ceil(radius/spacing))+2);
   if(points.size()>20000)throw std::length_error("Extraction particle budget exceeded");
