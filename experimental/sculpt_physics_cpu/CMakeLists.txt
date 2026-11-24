@@ -332,3 +332,7 @@ add_test(NAME sculpt_brush_contact_tests COMMAND test_brush_contact)
 add_executable(test_material_v21 test_material_v21.cc)
 target_link_libraries(test_material_v21 PRIVATE sculpt_physics_reference)
 add_test(NAME sculpt_material_v21_tests COMMAND test_material_v21)
+
+add_executable(test_material_density_v22 test_material_density_v22.cc)
+target_link_libraries(test_material_density_v22 PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_material_density_v22_tests COMMAND test_material_density_v22)
