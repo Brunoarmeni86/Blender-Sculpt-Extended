@@ -61,6 +61,40 @@ int main()
   dab.dose=0;
   assert(plan_physical_brush_intent(samples,dab).empty());
   dab.dose=0.5;
+  // V18-B: pressure actions must work without a gesture. No forced rim
+  // for Compact; Press does not pull points already below the tool.
+  dab.stroke_direction={};
+  const std::vector<PhysicalBrushIntentSample> pressure_samples{
+      {0,{0,0,0},1,1,true,{0,0,1}},
+      {1,{0.5,0,0},1,1,true,{0.6,0,0.8}},
+      {2,{-0.5,0,-0.5},1,1,true,{0,0,1}},
+      {3,{0,0.5,0},0,1,true,{0,0,1}},
+      {4,{0,-0.5,0},1,1,false,{0,0,1}}};
+  dab.action=PhysicalBrushAction::Compact;
+  const auto compact=plan_physical_brush_intent(pressure_samples,dab);
+  assert(compact.size()==3 && compact[0].translation.z<0);
+  assert(compact[1].translation.z<0 && compact[2].translation.z<0);
+  dab.action=PhysicalBrushAction::Press;
+  const auto press=plan_physical_brush_intent(pressure_samples,dab);
+  assert(press.size()==2 && press[0].translation.z<0);
+  dab.action=PhysicalBrushAction::PressureFlow;
+  const auto radial=plan_physical_brush_intent(pressure_samples,dab);
+  assert(radial.size()==2 && radial[0].global_index==1);
+  assert(radial[0].translation.x>0);
+  assert(std::abs(radial[0].translation.x*0.6+radial[0].translation.z*0.8)<1e-12);
+  assert(radial[1].translation.x<0);
+  dab.radial_sign=-1;
+  const auto inward=plan_physical_brush_intent(pressure_samples,dab);
+  assert(inward[0].translation.x<0);
+  dab.radial_sign=1;
+  dab.action=PhysicalBrushAction::HybridFlow;
+  assert(plan_physical_brush_intent(pressure_samples,dab).size()==2);
+  dab.stroke_direction={1,0,0};
+  const auto hybrid=plan_physical_brush_intent(pressure_samples,dab);
+  assert(hybrid.size()==3 && hybrid[0].translation.x>0);
+  dab.dose=0.0;
+  assert(plan_physical_brush_intent(pressure_samples,dab).empty());
+  dab.dose=0.5;
   auto duplicate=samples;
   duplicate.push_back(samples[0]);
   bool rejected=false;
