@@ -269,3 +269,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 add_test(NAME sculpt_native_other_brushes_executor_tests
          COMMAND test_native_other_brushes_executor_adapter)
+
+# V16 compact topology: standalone, no Blender or CUDA dependency.
+add_executable(test_compact_brush_topology test_compact_brush_topology.cc)
+target_compile_features(test_compact_brush_topology PRIVATE cxx_std_17)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_compact_brush_topology PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+elseif(MSVC)
+  target_compile_options(test_compact_brush_topology PRIVATE /UNDEBUG)
+endif()
+add_test(NAME sculpt_compact_brush_topology_tests COMMAND test_compact_brush_topology)
