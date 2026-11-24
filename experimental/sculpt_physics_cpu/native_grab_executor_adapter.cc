@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -14,7 +15,73 @@ bool finite(Vec3 p)
   return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
 }
 
+void validate_material(const NativeMaterialResponse &material)
+{
+  if (!std::isfinite(material.bond_compliance_scale) ||
+      material.bond_compliance_scale<0.0 ||
+      !std::isfinite(material.native_rest_follow) ||
+      material.native_rest_follow<0.0 || material.native_rest_follow>1.0) {
+    throw std::invalid_argument("Invalid native material response");
+  }
+}
+
+/* Alter only the isolated local island, never the persistent rest World.
+ * Native goals already contain the artist's mask, falloff and pressure.
+ * Unselected/fixed halo points retain their current coordinates. */
+void apply_material(GpuLocalIsland &island,
+                    const std::vector<ExecutorTarget> &goals,
+                    const NativeMaterialResponse &material)
+{
+  if (material.bond_compliance_scale==1.0 && material.native_rest_follow==0.0) return;
+  std::vector<Vec3> native_positions;
+  if (material.native_rest_follow>0.0) {
+    native_positions=island.positions;
+    for (const auto &goal : goals) {
+      const auto it=std::lower_bound(island.global_ids.begin(),island.global_ids.end(),
+                                     goal.global_index);
+      if (it==island.global_ids.end() || *it!=goal.global_index) {
+        throw std::logic_error("Missing material goal");
+      }
+      native_positions[std::size_t(it-island.global_ids.begin())]=goal.goal;
+    }
+  }
+  for (auto &bond : island.bonds) {
+    bond.compliance*=material.bond_compliance_scale;
+    if (!std::isfinite(bond.compliance)) {
+      throw std::overflow_error("Native bond compliance overflow");
+    }
+    if (material.native_rest_follow==0.0 ||
+        (island.inverse_masses[bond.a]==0.0 && island.inverse_masses[bond.b]==0.0)) continue;
+    const Vec3 d=native_positions[bond.b]-native_positions[bond.a];
+    const double length=std::hypot(d.x,d.y,d.z);
+    if (!std::isfinite(length)) throw std::overflow_error("Native rest length overflow");
+    // Keep strictly positive rest lengths even for coincident native goals.
+    const double floor=std::max(std::numeric_limits<double>::min(),bond.rest_length*1e-6);
+    const double follow=material.native_rest_follow;
+    bond.rest_length=(1.0-follow)*bond.rest_length+follow*std::max(length,floor);
+    if (!std::isfinite(bond.rest_length) || bond.rest_length<=0.0) {
+      throw std::overflow_error("Invalid adapted native rest length");
+    }
+  }
+}
+
 }  // namespace
+
+NativeBrushProfile experimental_native_brush_profile(NativeSculptBrushKind kind)
+{
+  // These are qualitative trial profiles, not measured material constants.
+  // A high native_rest_follow is deliberately used for additive/smoothing
+  // tools whose intended geometry must not be pulled back to the old shape.
+  switch (kind) {
+    case NativeSculptBrushKind::Clay:       return {2e-7,{2.0,0.85}};
+    case NativeSculptBrushKind::ClayStrips: return {1e-7,{1.5,0.95}};
+    case NativeSculptBrushKind::Smooth:     return {2e-7,{1.0,0.95}};
+    case NativeSculptBrushKind::Draw:       return {1e-7,{2.0,0.90}};
+    case NativeSculptBrushKind::Nudge:      return {5e-7,{1.0,0.50}};
+    case NativeSculptBrushKind::Gravity:    return {2e-6,{0.5,0.20}};
+  }
+  throw std::invalid_argument("Unsupported native brush profile");
+}
 
 PreparedNativeGrabDab::PreparedNativeGrabDab(
     std::unique_ptr<IPhysicsExecutor> executor,
@@ -63,6 +130,7 @@ PreparedNativeGrabDab prepare_cpu_native_grab_dab(
     throw std::invalid_argument("Invalid native Grab executor settings");
   }
 
+  validate_material(dab.material);
   std::vector<NativeGrabSample> selected;
   selected.reserve(samples.size());
   for (const NativeGrabSample &sample : samples) {
@@ -127,6 +195,7 @@ PreparedNativeGrabDab prepare_cpu_native_grab_dab(
     targets.push_back({sample.global_index,goal,dab.compliance});
   }
   if (targets.empty()) return {};
+  apply_material(island,targets,dab.material);
 
   auto executor=make_native_executor(SolverDevice::CPU);
   executor->allocate_island(island);
@@ -172,6 +241,7 @@ PreparedNativeBrushDab prepare_cpu_native_brush_dab(
     default:
       throw std::invalid_argument("Unsupported native physical brush kind");
   }
+  validate_material(dab.material);
   std::vector<NativeBrushTranslation> selected;
   selected.reserve(samples.size());
   for (const NativeBrushTranslation &sample : samples) {
@@ -229,6 +299,7 @@ PreparedNativeBrushDab prepare_cpu_native_brush_dab(
     goals.push_back({sample.global_index,goal,dab.compliance});
   }
   if (goals.empty()) return {};
+  if (dab.assist>0.0) apply_material(island,goals,dab.material);
 
   auto executor=make_native_executor(SolverDevice::CPU);
   executor->allocate_island(island);
