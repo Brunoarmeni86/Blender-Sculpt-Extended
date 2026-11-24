@@ -19,6 +19,16 @@ struct NativeGrabSample {
   double factor = 0.0; // final Blender influence; must lie in [0,1]
 };
 
+/* Material response independent of the native brush strength. The bond
+ * scale multiplies compliance (higher = softer); native_rest_follow lets
+ * rest lengths approach the finished native target geometry for this dab,
+ * rather than elastically restoring all details of the stroke-start mesh.
+ * This is a local edge response, not a volume or plasticity solver. */
+struct NativeMaterialResponse {
+  double bond_compliance_scale = 1.0;
+  double native_rest_follow = 0.0;
+};
+
 struct NativeGrabDab {
   Vec3 delta{}; // incremental Grab displacement in mesh/object space
   double compliance = 1.0e-6;
@@ -26,6 +36,7 @@ struct NativeGrabDab {
   int substeps = 2;
   int iterations = 5;
   std::uint64_t topology_generation = 0;
+  NativeMaterialResponse material{};
 };
 
 /* RAII staging only. No Blender editor writes occur here.
@@ -77,6 +88,15 @@ PreparedNativeGrabDab prepare_cpu_native_grab_dab(
  * Never reapply factor/strength inside the XPBD adapter. */
 enum class NativeSculptBrushKind { Clay, ClayStrips, Smooth, Draw, Nudge, Gravity };
 
+struct NativeBrushProfile {
+  double target_compliance = 1.0e-6;
+  NativeMaterialResponse material{};
+};
+
+/* Opt-in starting points for artist trials; not calibrated material
+ * constants. Legacy settings remain unchanged unless explicitly selected. */
+NativeBrushProfile experimental_native_brush_profile(NativeSculptBrushKind kind);
+
 struct NativeBrushTranslation {
   std::size_t global_index = 0;
   Vec3 translation{}; // fully factored original Blender displacement
@@ -93,6 +113,7 @@ struct NativeBrushDab {
   // 0 = unmodified native target (editor should bypass the adapter entirely);
   // 1 = original fully physical V15 response. Independent of brush strength.
   double assist = 1.0;
+  NativeMaterialResponse material{};
 };
 
 using PreparedNativeBrushDab = PreparedNativeGrabDab;
