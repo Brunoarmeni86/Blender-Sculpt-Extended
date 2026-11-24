@@ -642,7 +642,7 @@ inline bool autonomous_requested(const StrokeCache &cache)
   return cache.xpbd_v16_clay_material &&
       ((cache.xpbd_v16_clay_behavior>=4 && cache.xpbd_v16_clay_behavior<=10) ||
        (drag_contact_requested() && cache.xpbd_v16_clay_behavior==2) ||
-       (surface_contact_v20_requested() && cache.xpbd_v16_clay_behavior>=1 &&
+       (surface_contact_v20_requested() && cache.xpbd_v16_compact && cache.xpbd_v16_clay_behavior>=1 &&
         cache.xpbd_v16_clay_behavior<=3));
 }
 
@@ -812,6 +812,7 @@ inline bool try_apply_intent(
       clay.sign=sign;
       if (surface_v20) {
         clay.surface_contact=true;
+        clay.flow_fusion=original_action==3;
         clay.yield_slope=0.05;
         switch(action) {
           case 4: clay.action=ClaySurfaceAction::FusionDeposit; break;
