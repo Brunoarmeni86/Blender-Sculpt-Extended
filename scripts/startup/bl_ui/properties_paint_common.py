@@ -1410,8 +1410,8 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
             if brush.sculpt_physics_mode in {'ASSISTED', 'MATERIAL'}:
                 box.prop(brush, "sculpt_physics_assist", slider=True)
                 if (brush.sculpt_physics_mode == 'MATERIAL' and
-                        brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'}):
-                    box.prop(brush, "sculpt_physics_clay_behavior")
+                        brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS', 'DRAW', 'NUDGE'}):
+                    box.prop(brush, "sculpt_physics_clay_behavior", text="Material Action")
                     if brush.sculpt_physics_clay_behavior.startswith("AUTONOMOUS_"):
                         box.label(text="Assist controls independent action intensity")
                         box.label(text="Gesture-driven; no persistent plasticity yet")
