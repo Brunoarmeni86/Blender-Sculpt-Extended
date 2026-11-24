@@ -316,3 +316,7 @@ add_test(NAME sculpt_physical_brush_intent_tests COMMAND test_physical_brush_int
 add_executable(test_material_stability test_material_stability.cc)
 target_link_libraries(test_material_stability PRIVATE sculpt_physics_reference)
 add_test(NAME sculpt_material_stability_tests COMMAND test_material_stability)
+
+add_executable(test_clay_material_layer test_clay_material_layer.cc)
+target_link_libraries(test_clay_material_layer PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_clay_material_layer_tests COMMAND test_clay_material_layer)
