@@ -29,6 +29,7 @@
 
 #  include <algorithm>
 #  include <cmath>
+#  include <chrono>
 #  include <cstdio>
 #  include <cstdlib>
 #  include <memory>
@@ -318,6 +319,7 @@ inline bool try_apply(const Sculpt &sd,
     if (compliance_override>=0.0) dab.compliance=compliance_override;
     dab.topology_generation=1;
     std::vector<std::size_t> local_to_global;
+    const auto solve_start=std::chrono::steady_clock::now();
     if (state->compact) {
       // The compact path stores connectivity only, and snapshots original
       // coordinates on first actual write. Untouched vertices retain their
@@ -336,6 +338,9 @@ inline bool try_apply(const Sculpt &sd,
       result=sculpt_physics::prepare_cpu_native_brush_dab(
           state->rest_world,*state->topology,samples,current_position,dab);
     }
+
+    const double prepare_ms=std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now()-solve_start).count();
 
     // True zero-impact dab: don't traverse, clip or rewrite every PBVH
     // node with zero translations. Blender's ordinary smoothing/plane
@@ -365,6 +370,24 @@ inline bool try_apply(const Sculpt &sd,
         throw std::runtime_error("V15 physics displacement out of float32 range");
       }
       changes.emplace(global_id,displacement);
+    }
+
+    if (!cache.xpbd_v15_active_logged) {
+      double max_native=0.0,max_change=0.0,max_deviation=0.0;
+      for (const auto &sample : samples) {
+        if (inverse_mass(sample.global_index)<=0.0) continue;
+        const auto &v=sample.translation;
+        const auto it=changes.find(sample.global_index);
+        const float3 t=it==changes.end() ? float3(0.0f) : it->second;
+        max_native=std::max(max_native,std::hypot(v.x,v.y,v.z));
+        max_change=std::max(max_change,std::hypot(double(t.x),double(t.y),double(t.z)));
+        max_deviation=std::max(max_deviation,
+            std::hypot(double(t.x)-v.x,double(t.y)-v.y,double(t.z)-v.z));
+      }
+      std::fprintf(stderr,
+          "[V16 physics trial] targets=%zu writes=%zu prepare_ms=%.3f native_max=%.6g physical_max=%.6g deviation_ratio=%.3f\n",
+          samples.size(),changes.size(),prepare_ms,max_native,max_change,
+          max_native>0.0 ? max_deviation/max_native : 0.0);
     }
 
     std::unordered_set<std::size_t> covered;
