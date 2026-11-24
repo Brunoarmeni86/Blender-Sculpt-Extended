@@ -44,10 +44,27 @@ struct NativePhysicsStroke {
   int edges_num = 0;
 };
 
+// Process-level experimental tuning; immutable for the full stroke.
+// Zero (or invalid explicit input) bypasses V15 entirely, preserving the
+// ordinary Blender evaluator including its own clipping and layer paths.
+inline double assist_influence()
+{
+  static const double value=[]() {
+    const char *raw=std::getenv("BLENDER_SCULPT_XPBD_V15_ASSIST");
+    if (!raw) return 1.0; // retain previous V15 behavior
+    char *end=nullptr;
+    const double result=std::strtod(raw,&end);
+    if (end==raw || *end!='\0' || !std::isfinite(result) ||
+        result<0.0 || result>1.0) return 0.0;
+    return result;
+  }();
+  return value;
+}
+
 inline bool requested()
 {
   const char *value=std::getenv("BLENDER_SCULPT_XPBD_OTHER_BRUSHES_V15");
-  return value && value[0]=='1' && value[1]=='\0';
+  return value && value[0]=='1' && value[1]=='\0' && assist_influence()>0.0;
 }
 
 /* If Blender's geometry mode changes after this physical brush has
@@ -162,6 +179,7 @@ inline bool try_apply(const Sculpt &sd,
     for (const auto &item : dedup) samples.push_back({item.first,item.second});
     sculpt_physics::NativeBrushDab dab;
     dab.kind=kind;
+    dab.assist=assist_influence();
     dab.compliance=1.0e-6;
     dab.topology_generation=1;
     result=sculpt_physics::prepare_cpu_native_brush_dab(
