@@ -279,6 +279,11 @@ void test_incremental_editor_ack_protocol()
   assert(exec->stage_incremental().writes.empty());
   exec->upload_dirty({{2,{2,0.3,0}}});
   const auto third=exec->stage_incremental();
+  assert(third.revision>second.revision);
+  rejected=false;
+  try {exec->acknowledge_incremental(first.revision);}
+  catch(const std::logic_error &) {rejected=true;}
+  assert(rejected && !exec->stage_incremental().writes.empty());
   exec->acknowledge_incremental(third.revision);
   exec->commit();
   exec->begin_stroke();
