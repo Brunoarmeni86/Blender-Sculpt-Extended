@@ -373,6 +373,8 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
     const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
     MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
     std::vector<sculpt_physics::NativeBrushTranslation> native;
+    std::vector<sculpt_physics::PhysicalBrushIntentSample> intent_samples;
+    const bool autonomous=physics_v15::autonomous_requested(*ss.cache);
     LocalData tls;
     node_mask.foreach_index([&](const int ni) {
       const bke::pbvh::MeshNode &node=nodes[ni];
@@ -387,7 +389,10 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       tls.xy_positions.resize(verts.size());
       tls.z_positions.resize(verts.size());
       calc_local_positions(pos.eval,verts,mat,tls.xy_positions,tls.z_positions);
-      apply_z_axis_factors(tls.z_positions,factors);
+      // The native depth envelope extinguishes force once the brush
+      // plane is reached. Autonomous mode uses the cube XY envelope
+      // instead; explicit plane trim remains an artist restriction.
+      if (!autonomous) apply_z_axis_factors(tls.z_positions,factors);
       apply_plane_trim_factors(brush,tls.z_positions,factors);
       tls.distances.resize(verts.size());
       MutableSpan<float> distances=tls.distances;
@@ -400,6 +405,10 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       auto_mask::calc_vert_factors(
           depsgraph,object,ss.cache->automasking.get(),node,verts,factors);
       calc_brush_texture_factors(ss,brush,pos.eval,verts,factors);
+      if (autonomous) {
+        physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors);
+        return;
+      }
       tls.translations.resize(verts.size());
       translations_from_offset_and_factors(offset,factors,tls.translations);
       for (const int j : verts.index_range()) {
@@ -408,7 +417,11 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
                           {double(value.x),double(value.y),double(value.z)}});
       }
     });
-    if (physics_v15::try_apply(sd,object,node_mask,pos,
+    if (autonomous ?
+        physics_v15::try_apply_intent(sd,object,node_mask,pos,
+                                    sculpt_physics::NativeSculptBrushKind::ClayStrips,
+                                    intent_samples,plane_normal) :
+        physics_v15::try_apply(sd,object,node_mask,pos,
                               sculpt_physics::NativeSculptBrushKind::ClayStrips,
                               native)) {
       return;
