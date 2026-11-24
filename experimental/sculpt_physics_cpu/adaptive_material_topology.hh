@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <map>
 #include <stdexcept>
 #include <vector>
 
@@ -114,6 +115,65 @@ inline MaterialPatch separate_material_region(const MaterialPatch &p,
   }
   for(std::size_t f=0;f<p.faces.size();++f) if(selected[f])
     for(auto &v:out.faces[f].vertex) v=map[v];
+  return out;
+}
+
+
+/* Strain-triggered separation of a selected face region. The host supplies
+ * the pre-deformation reference and candidate region. All shared boundary
+ * edges must reach the threshold: no partial open crack or hidden topology
+ * edits. This is a real connectivity change in the staged CPU patch, NOT
+ * a native Grab Tear or a volumetric fracture law. */
+struct MaterialTearResultV23 {
+  MaterialPatch patch;
+  std::size_t boundary_edges=0;
+  double minimum_strain=0;
+  bool separated=false;
+};
+inline MaterialTearResultV23 stage_material_tear_v23(
+    const MaterialPatch &current,const std::vector<Vec3> &rest,
+    const std::vector<bool> &selected,double threshold)
+{
+  validate_material_patch(current);
+  if(rest.size()!=current.vertices.size()||selected.size()!=current.faces.size()||
+     !std::isfinite(threshold)||threshold<=0)
+    throw std::invalid_argument("Invalid tear input");
+  using Edge=std::array<std::size_t,2>;
+  struct Incidence {int inside=0,outside=0;};
+  std::map<Edge,Incidence> edges;
+  for(std::size_t i=0;i<current.faces.size();++i) {
+    const auto &f=current.faces[i];
+    for(int j=0;j<3;++j) {
+      auto a=f.vertex[j],b=f.vertex[(j+1)%3];
+      if(a>b)std::swap(a,b);
+      auto &entry=edges[{a,b}];
+      if(selected[i])++entry.inside;else ++entry.outside;
+    }
+  }
+  MaterialTearResultV23 out;
+  out.patch=current;
+  const auto norm=[](Vec3 v){return std::hypot(v.x,v.y,v.z);};
+  for(const auto &v:rest)if(!std::isfinite(norm(v)))
+    throw std::invalid_argument("Invalid tear reference");
+  for(const auto &entry:edges) {
+    const auto &e=entry.first;const auto &inc=entry.second;
+    if(inc.inside+inc.outside>2)
+      throw std::invalid_argument("Nonmanifold tear patch");
+    if(!inc.inside||!inc.outside)continue;
+    const auto a=e[0],b=e[1];
+    const double initial=norm(rest[a]-rest[b]);
+    const double length=norm(current.vertices[a].position-current.vertices[b].position);
+    if(initial<=1e-12||!std::isfinite(length))
+      throw std::invalid_argument("Degenerate tear edge");
+    const double strain=length/initial-1;
+    if(!std::isfinite(strain))throw std::overflow_error("Invalid tear strain");
+    if(out.boundary_edges++==0)out.minimum_strain=strain;
+    else out.minimum_strain=std::min(out.minimum_strain,strain);
+  }
+  if(out.boundary_edges>0 && out.minimum_strain>=threshold) {
+    out.patch=separate_material_region(current,selected);
+    out.separated=true;
+  }
   return out;
 }
 
