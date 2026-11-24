@@ -127,7 +127,8 @@ static void offset_positions(const Depsgraph &depsgraph,
                              Object &object,
                              const float3 &offset,
                              const IndexMask &node_mask,
-                             [[maybe_unused]] const OffsetBrushKind brush_kind)
+                             [[maybe_unused]] const OffsetBrushKind brush_kind,
+                             [[maybe_unused]] const float3 &intent_normal)
 {
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
@@ -142,6 +143,9 @@ static void offset_positions(const Depsgraph &depsgraph,
     const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
     MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
     std::vector<sculpt_physics::NativeBrushTranslation> native;
+    std::vector<sculpt_physics::PhysicalBrushIntentSample> intent_samples;
+    const bool autonomous=brush_kind!=OffsetBrushKind::Gravity &&
+        physics_v15::autonomous_requested(*object.runtime->sculpt_session->cache);
     Vector<float> factors;
     Vector<float> distances;
     node_mask.foreach_index([&](const int ni) {
@@ -156,6 +160,10 @@ static void offset_positions(const Depsgraph &depsgraph,
                                        node,
                                        factors,
                                        distances);
+      if (autonomous) {
+        physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors);
+        return;
+      }
       for (const int j : verts.index_range()) {
         const float factor=factors[j];
         if (!std::isfinite(factor) || factor==0.0f) continue;
@@ -172,7 +180,10 @@ static void offset_positions(const Depsgraph &depsgraph,
         brush_kind == OffsetBrushKind::Gravity ?
             sculpt_physics::NativeSculptBrushKind::Gravity :
             sculpt_physics::NativeSculptBrushKind::Draw;
-    if (physics_v15::try_apply(sd,object,node_mask,pos,physical_kind,native)) {
+    if (autonomous ?
+        physics_v15::try_apply_intent(sd,object,node_mask,pos,physical_kind,
+                                    intent_samples,intent_normal) :
+        physics_v15::try_apply(sd,object,node_mask,pos,physical_kind,native)) {
       return;
     }
   }
@@ -247,7 +258,7 @@ void do_draw_brush(const Depsgraph &depsgraph,
   const float3 offset = effective_normal * ss.cache->radius * ss.cache->scale *
                         ss.cache->bstrength;
 
-  offset_positions(depsgraph, sd, object, offset, node_mask, OffsetBrushKind::Draw);
+  offset_positions(depsgraph, sd, object, offset, node_mask, OffsetBrushKind::Draw,effective_normal);
 }
 
 void do_nudge_brush(const Depsgraph &depsgraph,
@@ -263,7 +274,7 @@ void do_nudge_brush(const Depsgraph &depsgraph,
       ss.cache->sculpt_normal_symm);
 
   offset_positions(depsgraph, sd, object, offset * ss.cache->bstrength, node_mask,
-                   OffsetBrushKind::Nudge);
+                   OffsetBrushKind::Nudge,ss.cache->sculpt_normal_symm);
 }
 
 void do_gravity_brush(const Depsgraph &depsgraph,
@@ -277,7 +288,7 @@ void do_gravity_brush(const Depsgraph &depsgraph,
   const float3 offset = ss.cache->gravity_direction_symm * -ss.cache->radius_squared *
                         ss.cache->scale * sd.gravity_factor;
 
-  offset_positions(depsgraph, sd, object, offset, node_mask, OffsetBrushKind::Gravity);
+  offset_positions(depsgraph, sd, object, offset, node_mask, OffsetBrushKind::Gravity,ss.cache->sculpt_normal_symm);
 }
 
 }  // namespace blender::ed::sculpt_paint::brushes
