@@ -84,15 +84,23 @@ PreparedNativeGrabDab prepare_cpu_native_grab_dab(
   }
   // Even empty worksets check topology generation to avoid retaining a
   // stale GPU/CPU proxy when Blender mutates mesh topology.
-  if (selected.empty()) {
+  if (selected.empty() ||
+      (dab.delta.x==0.0 && dab.delta.y==0.0 && dab.delta.z==0.0)) {
     (void)topology.one_ring_halo(rest_world,{},dab.topology_generation);
     return {};
   }
 
   std::vector<std::size_t> active;
   active.reserve(selected.size());
-  for (const auto &sample : selected) active.push_back(sample.global_index);
+  for (const auto &sample : selected) {
+    if (rest_world.particles()[sample.global_index].inverse_mass>0.0) {
+      active.push_back(sample.global_index);
+    }
+  }
   const auto halo = topology.one_ring_halo(rest_world, active, dab.topology_generation);
+  // Fully masked/hidden selection is a no-op before packing or reading
+  // editor positions. Pinned samples can still be included as actual halo.
+  if (active.empty()) return {};
   GpuLocalIsland island = topology.build(rest_world, active, halo, active,
                                          dab.topology_generation, false);
   // Only FREE active vertices can move. Every halo vertex is pinned so that
@@ -106,6 +114,7 @@ PreparedNativeGrabDab prepare_cpu_native_grab_dab(
   std::vector<ExecutorTarget> targets;
   targets.reserve(selected.size());
   for (const auto &sample : selected) {
+    if (rest_world.particles()[sample.global_index].inverse_mass<=0.0) continue;
     const auto it=std::lower_bound(island.global_ids.begin(),
                                     island.global_ids.end(),sample.global_index);
     if (it==island.global_ids.end() || *it!=sample.global_index) {
