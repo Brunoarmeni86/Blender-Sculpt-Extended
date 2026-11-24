@@ -2,13 +2,16 @@
 
 Run in background, with --python-exit-code 1. Output must be a dedicated
 new folder. No preferences or existing Essentials assets are modified.
-Previews are procedural clay-style illustrations, not solver test renders.
+Previews use actual Workbench geometry and Blender's brush thumbnail MatCap.
+They illustrate intended behavior, not measured solver results. Native XPBD
+assets retain the corresponding Essentials preview.
 """
 import argparse
 import math
 import os
 from pathlib import Path
 import sys
+import tempfile
 import bpy
 
 CATALOGS = {
@@ -55,33 +58,118 @@ def preview_height(kind, x, y):
         return -.21*end*math.exp(-(v/.27)**8)
     return end*(-.11*ridge(0,.25)+.13*(ridge(-.29,.14)+ridge(.29,.14)))
 
+def copy_preview(source, target):
+    src = source.preview
+    if not src or not all(src.image_size):
+        return False
+    dst = target.preview_ensure()
+    dst.image_size = tuple(src.image_size)
+    dst.image_pixels = list(src.image_pixels)
+    if all(src.icon_size):
+        dst.icon_size = tuple(src.icon_size)
+        dst.icon_pixels = list(src.icon_pixels)
+    return True
+
+
+def preview_mesh(kind):
+    # Sculpt a rounded clay patch, not a rectangular heightmap or a glyph.
+    # Each effect has a readable silhouette and broad, smooth forms.
+    rings, sides = 64, 128
+    verts = [(0., 0., .22 + preview_height(kind, 0., 0.))]
+    for j in range(1, rings+1):
+        r = j/rings
+        for i in range(sides):
+            t = 2*math.pi*i/sides
+            x = .94*r*math.cos(t)
+            y = .74*r*math.sin(t)
+            # Flow pulls the leading edge out of the original silhouette.
+            if kind in {"flow","direction","hybrid"}:
+                x += .17*r*max(0.,math.cos(t))**4
+                y += .10*r*max(0.,math.cos(t))**3
+            dome = .22*math.sqrt(max(0.,1-r*r))
+            blend = min(1.,max(0.,(1-r)/.16))
+            blend = blend*blend*(3-2*blend)
+            z = dome + blend*preview_height(kind,x,y)
+            verts.append((x,y,z))
+    faces = [(0,1+i,1+(i+1)%sides) for i in range(sides)]
+    for j in range(1,rings):
+        a, b = 1+(j-1)*sides, 1+j*sides
+        for i in range(sides):
+            k = (i+1)%sides
+            faces.append((a+i,b+i,b+k,a+k))
+    # Rounded underside closes the edge for solid silhouettes.
+    last = 1+(rings-1)*sides
+    bottom = len(verts)
+    verts.append((0.,0.,-.19))
+    faces.extend((last+i,bottom,last+(i+1)%sides) for i in range(sides))
+    mesh = bpy.data.meshes.new("BSE Thumbnail Clay")
+    mesh.from_pydata(verts,[],faces)
+    mesh.update()
+    for poly in mesh.polygons:
+        poly.use_smooth = True
+    return mesh
+
+
 def make_preview(brush, kind):
-    n = 128
-    step = 2/n
-    pixels = []
-    for j in range(n):
-        y = (j+.5)*step-1
-        for i in range(n):
-            x = (i+.5)*step-1
-            z = preview_height(kind,x,y)
-            dx = (preview_height(kind,x+step,y)-preview_height(kind,x-step,y))/(2*step)
-            dy = (preview_height(kind,x,y+step)-preview_height(kind,x,y-step))/(2*step)
-            light = (.35*dx-.48*dy+.80)/math.sqrt(1+dx*dx+dy*dy)
-            shade = max(.05,min(.95,.22+.56*max(0,light)+.1*z))
-            fade = max(0,min(1,(1-max(abs(x),abs(y)))/.17))
-            shade = .13+(shade-.13)*fade
-            pixels.extend((shade,shade,shade,1.))
-    p = brush.preview_ensure()
-    p.image_size = (n,n)
-    p.image_pixels_float = pixels
-    # Explicit low-resolution icon for small shelf display.
-    p.icon_size = (32,32)
-    icon = []
-    for y in range(32):
-        for x in range(32):
-            k = ((y*4+2)*n+x*4+2)*4
-            icon.extend(pixels[k:k+4])
-    p.icon_pixels_float = icon
+    # Use the installed official MatCap, rather than approximating its
+    # colors. Fail clearly if unavailable or if headless Workbench cannot
+    # render; do not silently switch back to artificial graphic previews.
+    from mathutils import Vector
+    lights = bpy.context.preferences.studio_lights
+    matcaps = [l.name for l in lights if l.type == "MATCAP"
+               and "brush_thumbnail_preview" in l.name.lower()]
+    if not matcaps:
+        raise RuntimeError("Official brush_thumbnail_preview MatCap unavailable")
+    scene = bpy.data.scenes.new("BSE Thumbnail Scene")
+    mesh = obj = camera = camera_data = None
+    try:
+        mesh = preview_mesh(kind)
+        obj = bpy.data.objects.new("BSE Thumbnail Clay",mesh)
+        scene.collection.objects.link(obj)
+        obj.rotation_euler.z = math.radians(30)
+        camera_data = bpy.data.cameras.new("BSE Thumbnail Camera")
+        camera = bpy.data.objects.new("BSE Thumbnail Camera",camera_data)
+        scene.collection.objects.link(camera)
+        camera.location = (0.,-2.8,4.8)
+        camera.rotation_euler = (Vector((0.,0.,.04))-camera.location).to_track_quat("-Z","Y").to_euler()
+        camera_data.type = "ORTHO"
+        camera_data.ortho_scale = 2.45
+        scene.camera = camera
+        scene.render.engine = "BLENDER_WORKBENCH"
+        shade = scene.display.shading
+        shade.light = "MATCAP"
+        shade.studio_light = matcaps[0]
+        shade.color_type = "SINGLE"
+        shade.show_shadows = False
+        shade.show_cavity = False
+        shade.show_outline = False
+        scene.render.resolution_x = 256
+        scene.render.resolution_y = 256
+        scene.render.resolution_percentage = 100
+        scene.render.film_transparent = True
+        scene.render.image_settings.file_format = "PNG"
+        scene.render.image_settings.color_mode = "RGBA"
+        with tempfile.TemporaryDirectory(prefix="bse_brush_preview_") as folder:
+            file = Path(folder)/"preview.png"
+            scene.render.filepath = str(file)
+            result = bpy.ops.render.render(scene=scene.name,write_still=True)
+            if "FINISHED" not in result or not file.is_file():
+                raise RuntimeError("Workbench preview render failed")
+            with bpy.context.temp_override(id=brush):
+                result = bpy.ops.ed.lib_id_load_custom_preview(filepath=str(file))
+            if "FINISHED" not in result or not brush.preview or not all(brush.preview.image_size):
+                raise RuntimeError("Could not attach rendered brush thumbnail")
+    finally:
+        if camera:
+            bpy.data.objects.remove(camera,do_unlink=True)
+        if obj:
+            bpy.data.objects.remove(obj,do_unlink=True)
+        if camera_data:
+            bpy.data.cameras.remove(camera_data)
+        if mesh:
+            bpy.data.meshes.remove(mesh)
+        bpy.data.scenes.remove(scene)
+
 
 def find_source(explicit):
     if explicit:
@@ -143,7 +231,8 @@ def main():
             "Experimental gesture-driven physical material action: "+action)
         brush.asset_data.author = "Blender Sculpt Extended"
         brush.asset_data.tags.new("BSE")
-        make_preview(brush,icon)
+        if mode != "ASSISTED" or not copy_preview(bases[base],brush):
+            make_preview(brush,icon)
         assets.add(brush)
     output.mkdir(parents=True,exist_ok=True)
     target = output/"bse_physical_brushes.blend"
