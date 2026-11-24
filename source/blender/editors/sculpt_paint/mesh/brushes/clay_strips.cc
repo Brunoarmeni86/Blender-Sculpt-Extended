@@ -692,7 +692,7 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
   bool independent_contact=false;
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
   independent_contact=brush.sculpt_physics_mode==3 &&
-      ((brush.sculpt_physics_clay_behavior>=7 && brush.sculpt_physics_clay_behavior<=10) ||
+      ((brush.sculpt_physics_clay_behavior>=7 && brush.sculpt_physics_clay_behavior<=13) ||
        (physics_v15::drag_contact_requested() &&
         (brush.sculpt_physics_clay_behavior==2 || brush.sculpt_physics_clay_behavior==5))) &&
       pbvh.type()==bke::pbvh::Type::Mesh && !isolated;
