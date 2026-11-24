@@ -49,6 +49,16 @@ int main(){
     std::cout<<"backend="<<int(backend)<<" z_before="<<average_z(before)
              <<" z_after="<<average_z(after)<<" vertices="<<result.positions.size()
              <<" faces="<<result.triangles.size()<<std::endl;
+    const auto preview=stage_volume_preview_v25(after,frame,.10,.25);
+    assert(after.time==frame.dt);
+    assert(preview.session.time==2*frame.dt);
+    assert(preview.surface.particle_source.size()==preview.surface.positions.size());
+    validate_closed_volume_v25(preview.surface);
+    assert(average_z(preview.session)<average_z(after));
+    bool invalid_preview=false;
+    try{stage_volume_preview_v25(after,frame,0,.25);}
+    catch(const std::invalid_argument&){invalid_preview=true;}
+    assert(invalid_preview&&after.time==frame.dt);
     bool rejected=false;frame.dt=-1;
     try{stage_volume_frame_v25(after,frame);}catch(const std::invalid_argument&){rejected=true;}
     assert(rejected&&after.time==.002);
