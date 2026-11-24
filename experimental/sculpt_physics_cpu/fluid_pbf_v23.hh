@@ -24,6 +24,8 @@ struct FluidSettingsV23 {
   bool tool_enabled=false;
   Vec3 tool_center{};
   double tool_radius=.5;
+  bool floor_enabled=false;
+  double floor_z=0.0;
 };
 struct FluidResultV23 {
   std::vector<FluidParticleV23> particles;
@@ -39,6 +41,7 @@ inline FluidResultV23 step_fluid_v23(const std::vector<FluidParticleV23> &input,
      !positive(s.dt)||!positive(s.relaxation)||!std::isfinite(s.viscosity)||
      s.viscosity<0||s.viscosity>1||s.iterations<1||s.iterations>32||
      !std::isfinite(norm(s.gravity))||
+     (s.floor_enabled&&!std::isfinite(s.floor_z))||
      (s.tool_enabled&&(!positive(s.tool_radius)||!std::isfinite(norm(s.tool_center)))))
     throw std::invalid_argument("Invalid fluid settings");
   constexpr double pi=3.14159265358979323846;
@@ -57,10 +60,12 @@ inline FluidResultV23 step_fluid_v23(const std::vector<FluidParticleV23> &input,
   std::vector<Vec3> p,correction(input.size());
   p.reserve(input.size());
   const auto contact=[&](Vec3 pos) {
-    if(!s.tool_enabled)return pos;
-    const auto d=pos-s.tool_center;const double len=norm(d);
-    if(len>=s.tool_radius)return pos;
-    return s.tool_center+(len>1e-12?d/len:Vec3{0,0,1})*s.tool_radius;
+    if(s.tool_enabled){
+      const auto d=pos-s.tool_center;const double len=norm(d);
+      if(len<s.tool_radius)pos=s.tool_center+(len>1e-12?d/len:Vec3{0,0,1})*s.tool_radius;
+    }
+    if(s.floor_enabled)pos.z=std::max(pos.z,s.floor_z);
+    return pos;
   };
   for(const auto &v:input) {
     if(!std::isfinite(norm(v.position))||!std::isfinite(norm(v.velocity))||
