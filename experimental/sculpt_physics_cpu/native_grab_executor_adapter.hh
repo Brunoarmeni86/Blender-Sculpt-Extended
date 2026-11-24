@@ -114,6 +114,7 @@ struct NativeBrushDab {
   // 1 = original fully physical V15 response. Independent of brush strength.
   double assist = 1.0;
   NativeMaterialResponse material{};
+  bool colored_order = false;
 };
 
 using PreparedNativeBrushDab = PreparedNativeGrabDab;
