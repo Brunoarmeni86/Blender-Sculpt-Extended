@@ -146,7 +146,7 @@ inline bool try_apply(const Sculpt &sd,
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
   if (!cache.xpbd_v16_enabled) return false;
-  if (cache.xpbd_v15_failed) return cache.xpbd_v15_active_logged;
+  if (cache.xpbd_v15_failed) return conservative_clay || cache.xpbd_v15_active_logged;
   bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
   const Mesh &mesh=*id_cast<Mesh *>(object.data);
   // Check the actual dispatcher configuration BEFORE its first pass.
@@ -327,7 +327,7 @@ inline bool try_apply(const Sculpt &sd,
     if (bond_override>=0.0) dab.material.bond_compliance_scale=bond_override;
     if (follow_override>=0.0) dab.material.native_rest_follow=follow_override;
     if (compliance_override>=0.0) dab.compliance=compliance_override;
-    if (autonomous) {
+    if (autonomous && !conservative_clay) {
       // Independent intent is already the full material-driving target.
       // Never run V3 footprint redistribution a second time.
       // Current rest-follow is a preview of compliant surface response,
@@ -494,7 +494,7 @@ inline bool try_apply(const Sculpt &sd,
     result.cancel();
     cache.xpbd_v15_state.reset();
     cache.xpbd_v15_failed=true;
-    return cache.xpbd_v15_active_logged;
+    return conservative_clay || cache.xpbd_v15_active_logged;
   }
 
   // Full native Blender Undo journal/partial PBVH write rollback is not yet
@@ -529,7 +529,7 @@ inline bool try_apply(const Sculpt &sd,
   if (!cache.xpbd_v15_active_logged) {
     std::fprintf(stderr,"[V16 physical brush] CPU XPBD %s %s preview ACTIVE\n",
                  state->compact ? "compact" : "reference",
-                 autonomous ? "V17 Autonomous" : cache.xpbd_v16_clay_material &&
+                 conservative_clay ? "V19 Conservative Clay" : autonomous ? "V17 Autonomous" : cache.xpbd_v16_clay_material &&
                      (kind==sculpt_physics::NativeSculptBrushKind::Clay ||
                       kind==sculpt_physics::NativeSculptBrushKind::ClayStrips) ?
                      (cache.xpbd_v16_clay_behavior==1 ? "Clay V3 Deposit" :
@@ -568,6 +568,7 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
   const auto convert=[](const float3 &v)->Vec3 {
     return {double(v.x),double(v.y),double(v.z)};
   };
+  const MeshAttributeData attributes(mesh);
   const auto vertex_faces=mesh.vert_to_face_map();
   const auto faces=mesh.faces();
   const auto corners=mesh.corner_verts();
@@ -589,6 +590,12 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
   };
   for (const auto &s:samples) {
     if (!s.writable || s.envelope<=0.0) continue;
+    if (s.global_index>=std::size_t(positions.size())) throw std::out_of_range("Stale clay sample");
+    const int vi=int(s.global_index);
+    // Match the compact writer's immovable set exactly, or its late
+    // filtering would remove a donor/recipient and break conservation.
+    if ((!attributes.hide_vert.is_empty() && attributes.hide_vert[vi]) ||
+        (!attributes.mask.is_empty() && attributes.mask[vi]>=0.999f)) continue;
     const auto i=add_vertex(s.global_index);
     vertices[i].influence=s.envelope;
     for (const int f:vertex_faces[int(s.global_index)]) face_ids.push_back(f);
@@ -620,7 +627,12 @@ inline bool try_apply_intent(
     const float3 &normal)
 {
   StrokeCache &cache=*object.runtime->sculpt_session->cache;
-  if (cache.xpbd_v15_failed) return cache.xpbd_v15_active_logged;
+  const bool conservative=conservative_clay_requested() &&
+      kind==sculpt_physics::NativeSculptBrushKind::Clay &&
+      (cache.xpbd_v16_clay_behavior==4 || cache.xpbd_v16_clay_behavior==6 ||
+       cache.xpbd_v16_clay_behavior==9 || cache.xpbd_v16_clay_behavior==10) &&
+      cache.xpbd_v16_compact;
+  if (cache.xpbd_v15_failed) return conservative || cache.xpbd_v15_active_logged;
   try {
     // PBVH boundary duplicates must not double the impulse.
     std::sort(samples.begin(),samples.end(),[](const auto &a,const auto &b) {
@@ -657,10 +669,6 @@ inline bool try_apply_intent(
     intent.dose=cache.xpbd_v17_intent_started ?
         std::clamp(double(math::length(delta))/std::max(intent.radius,1e-12),0.0,1.0) : 0.15;
     const int action=cache.xpbd_v16_clay_behavior;
-    const bool conservative=conservative_clay_requested() &&
-        kind==sculpt_physics::NativeSculptBrushKind::Clay &&
-        (action==4 || action==6 || action==9 || action==10) &&
-        cache.xpbd_v16_compact;
     if ((action>=7 || conservative) && brush.stroke_method==BRUSH_STROKE_AIRBRUSH &&
         cache.xpbd_v17_intent_started) {
       // Native timer dispatch already provides repeated stationary dabs.
@@ -725,9 +733,9 @@ inline bool try_apply_intent(
     return handled;
   }
   catch (const std::exception &ex) {
-    std::fprintf(stderr,"[V17 intent] rejected before write: %s\n",ex.what());
+    std::fprintf(stderr,"[V17/V19 intent] rejected before write: %s\n",ex.what());
     cache.xpbd_v15_failed=true;
-    return cache.xpbd_v15_active_logged;
+    return conservative || cache.xpbd_v15_active_logged;
   }
 }
 
