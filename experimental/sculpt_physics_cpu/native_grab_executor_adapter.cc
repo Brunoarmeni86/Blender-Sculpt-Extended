@@ -365,7 +365,8 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
   if (goals.empty()) return {};
   if (dab.assist>0.0) apply_material(island,goals,dab.material);
 
-  auto executor=make_native_executor(SolverDevice::CPU);
+  auto executor=dab.colored_order ? make_cpu_colored_xpbd_executor() :
+                                    make_native_executor(SolverDevice::CPU);
   executor->allocate_island(island);
   executor->begin_stroke();
   if (dab.assist>0.0) {
