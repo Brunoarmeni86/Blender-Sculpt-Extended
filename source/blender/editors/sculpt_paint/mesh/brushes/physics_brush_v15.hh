@@ -1563,6 +1563,9 @@ inline bool try_apply_intent(
           footprint_v30e_brush(object,brush) && clay.continuous_contact_v31d2 &&
           clay.live_surface_v30 && !clay.plastic_v29 &&
           !cache.reference_symmetry && !cache.reference_combined &&
+          mesh.symmetry==0 && mesh.radial_symmetry[0]==1 &&
+          mesh.radial_symmetry[1]==1 && mesh.radial_symmetry[2]==1 &&
+          !(sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z)) &&
           cache.tile_pass==0 && cache.radial_symmetry_pass==0 && cache.mirror_symmetry_pass==0;
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get(),
                                          multichart_v31d7,convert(cache.view_normal_symm));
