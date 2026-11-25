@@ -5772,7 +5772,13 @@ static void do_brush_action(const Depsgraph &depsgraph,
   anchor_reference.restore();
   /* Face Set painting changes IDs only. Do not apply Auto Smooth to geometry
    * while recording Face Sets independently of the selected sculpt layer. */
-  if (!ELEM(brush.sculpt_brush_type,
+  bool suppress_physical_autosmooth=false;
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  suppress_physical_autosmooth=brushes::physics_v15::d5_enabled("BLENDER_SCULPT_NO_AUTOSMOOTH_V31D5") &&
+      brush.sculpt_physics_mode==3 && brushes::physics_v15::live_surface_v30_brush(ob,brush);
+#endif
+  if (!suppress_physical_autosmooth &&
+      !ELEM(brush.sculpt_brush_type,
             SCULPT_BRUSH_TYPE_SMOOTH,
             SCULPT_BRUSH_TYPE_MASK,
             SCULPT_BRUSH_TYPE_DRAW_FACE_SETS) &&
