@@ -68,6 +68,48 @@ int main()
   require(add_tangential_transport_v31d6(v,t,dab,weights,inverse).moved==0,"zero dose no-op");
   for(std::size_t i=0;i<saved.size();++i)
     require(length(saved[i]-inverse[i])==0,"zero dose preserves baseline");
+  // The actual V31 integrator exports contact weights without changing
+  // its original normal-motion calculation.
+  constexpr int side=13;
+  std::vector<ClaySurfaceVertex> grid;
+  std::vector<ClaySurfaceTriangle> faces;
+  for(int y=0;y<side;++y)for(int x=0;x<side;++x){
+    const double px=2.*x/(side-1)-1,py=2.*y/(side-1)-1;
+    const double r2=px*px+py*py;
+    grid.push_back({{px,py,.2*px},r2<1?std::pow(1-r2,2):0});
+  }
+  for(int y=0;y<side-1;++y)for(int x=0;x<side-1;++x){
+    const auto a=std::size_t(y*side+x),b=a+1,c=a+side,d=c+1;
+    faces.push_back({a,b,d});faces.push_back({a,d,c});
+  }
+  const auto other=grid.size();
+  grid.push_back({{.05,.05,.30},1});grid.push_back({{.15,.05,.30},1});
+  grid.push_back({{.05,.15,.30},1});faces.push_back({other,other+1,other+2});
+  ClaySurfaceDab live;
+  live.action=ClaySurfaceAction::Push;live.radius=1;live.dose=.1;
+  live.direction={1,0,0};live.density_independent=true;live.smooth_proxy=true;
+  live.shape_transport=true;live.tool_v25=true;live.tool_v26=true;
+  live.stable_v28=true;live.refine_v28b=true;live.live_surface_v30=true;
+  live.fast_v26b=true;live.transport_v30b=true;live.push_v30d=true;
+  live.average_surface_v31d=.65;live.continuous_contact_v31d2=true;
+  live.gradient_v31c=true;
+  const auto baseline=solve_material_transport_v21(grid,faces,live,4);
+  live.tangential_gain_v31d6=.18;
+  auto selected=solve_material_transport_v21(grid,faces,live,4);
+  require(selected.surface.tangent_weights_v31d6.size()==grid.size(),"real integrator exports selected support");
+  require(selected.surface.tangent_weights_v31d6[side*side/2]>0,"center contact retained");
+  for(std::size_t i=0;i<grid.size();++i){
+    require(length(selected.surface.displacement[i]-baseline.surface.displacement[i])==0,
+            "recording support does not change original V31 solver");
+    if(grid[i].influence==0 || i>=other)
+      require(selected.surface.tangent_weights_v31d6[i]==0,"masked and detached support excluded");
+  }
+  auto normal_only=selected.surface.displacement;
+  const auto combined=add_tangential_transport_v31d6(grid,faces,live,
+      selected.surface.tangent_weights_v31d6,selected.surface.displacement);
+  require(std::abs(combined.signed_volume)<1e-10,"inclined mesh first-order tangent budget");
+  for(std::size_t i=0;i<grid.size();++i)if(grid[i].influence==0 || i>=other)
+    require(length(selected.surface.displacement[i]-normal_only[i])==0,"integrated transport cannot leak");
   std::cout<<"V31D5/D6 tests passed\n";
   return EXIT_SUCCESS;
 }
