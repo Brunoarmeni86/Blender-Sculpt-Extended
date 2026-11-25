@@ -1352,6 +1352,8 @@ inline bool try_apply_intent(
         clay.average_surface_v31d=material_override("BLENDER_SCULPT_V31D_AVERAGING",.65,0.0,1.0);
       clay.continuous_contact_v31d2=clay.average_surface_v31d>0 && continuous_contact_v31d2_requested();
       clay.contact_reach_v31d4=clay.continuous_contact_v31d2 && contact_reach_v31d4_requested();
+      clay.narrow_rim_v31d8=clay.live_surface_v30 && stroke_option_v31d5("BLENDER_SCULPT_NARROW_RIM_V31D8") &&
+          (action==5 || action==7 || action==8);
       if(clay.continuous_contact_v31d2)clay.gradient_v31c=gradient_v31c_requested();
       if(clay.continuous_contact_v31d2 && motion_proxy_v31d3_requested())
         clay.motion_proxy_v31d3=material_override("BLENDER_SCULPT_V31D3_PROXY_BLEND",.65,0.0,1.0);
@@ -1548,6 +1550,19 @@ inline bool try_apply_intent(
                      action,expected,missing,zero_factor,samples.size());
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      if(stroke_option_v31d5("BLENDER_SCULPT_DIAG_V31D8")){
+        static thread_local unsigned int counter=0;
+        if(counter++%32==0){
+          std::size_t eligible=0;
+          for(const auto &s:samples)if(s.writable && s.envelope>0)++eligible;
+          std::fprintf(stderr,"[V31D8 support] action=%d enabled=%d eligible=%zu active=%zu goals=%zu chart_rejected=%zu component_rejected=%zu rim_samples=%zu rim_adapted=%zu rim_empty=%zu extent_R=%.7g receiver=%.7g removed=%.7g rim_accept=%.7g scale=%.7g\n",
+              action,int(clay.narrow_rim_v31d8),eligible,planned.active,goals.size(),
+              planned.chart_rejected_v30b,planned.component_rejected_v30b,
+              planned.rim_samples_v31d8,planned.rim_adapted_v31d8,planned.rim_empty_v31d8,
+              planned.rim_extent_v31d8,planned.rim_receiver_v31d8,planned.rim_removed_v31d8,
+              planned.rim_acceptance_v31d8,planned.accepted_scale);
+        }
+      }
       if(clay.contact_reach_v31d4 && profile_v26b_requested())
         std::fprintf(stderr,"[V31D4 reach] action=%d extra_R=0.15 active=%zu goals=%zu component_rejected=%zu scale=%.7g\n",
                      action,planned.active,goals.size(),planned.component_rejected_v30b,planned.accepted_scale);
