@@ -371,3 +371,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_continuous_transport_v31d6 PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_continuous_transport_v31d6_tests COMMAND test_continuous_transport_v31d6)
+
+# V31-D8A narrow supported contact regression.
+add_executable(test_narrow_rim_v31d8 test_narrow_rim_v31d8.cc)
+target_link_libraries(test_narrow_rim_v31d8 PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_narrow_rim_v31d8 PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_narrow_rim_v31d8_tests COMMAND test_narrow_rim_v31d8)
