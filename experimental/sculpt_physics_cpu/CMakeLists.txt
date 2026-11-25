@@ -363,3 +363,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_contact_reach_v31d4 PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_contact_reach_v31d4_tests COMMAND test_contact_reach_v31d4)
+
+# Opt-in continuous stroke and tangential transport regression.
+add_executable(test_continuous_transport_v31d6 test_continuous_transport_v31d6.cc)
+target_link_libraries(test_continuous_transport_v31d6 PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_continuous_transport_v31d6 PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_continuous_transport_v31d6_tests COMMAND test_continuous_transport_v31d6)
