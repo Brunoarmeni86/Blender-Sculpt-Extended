@@ -283,7 +283,7 @@ inline void coarse_clay_transport(
     auto &u=nodes[f.a];auto &v=nodes[f.b];
     const double cap=u.volume*.25;
     double scale=std::min(1.0,cap/u.outgoing);
-    if(dab.stable_v28){
+    if(dab.stable_v28 && !fusion){
       // A simultaneous donor and recipient CFL-like cap. All transfers
       // remain paired; no mass is created by a saturated receiver.
       const double local_cap=.035*dab.radius;
@@ -430,9 +430,8 @@ inline void shape_clay_transport(
       rim[i]=dab.contact_v27b?w[i]*smooth((r-.22)/.40)*(1-smooth((r-.78)/.22)):
           w[i]*smooth((r-(dab.tool_v26&&press?.38:.50))/.25);
       if(dab.stable_v28){
-        // Reduce return into relief already above its first-contact level.
-        // Shape is measured from geometry, not from requested displacement.
-        // A smaller Compact rim makes it meaningfully different from Press.
+        // Feather the outer return profile. First-contact capacity is
+        // enforced separately on final targets before budget balancing.
         if(compact)rim[i]*=1-smooth((r-.65)/.35);
         // Avoid a narrow high receiving band even on an asymmetric mask.
         rim[i]*=1-smooth((r-.75)/.25);
