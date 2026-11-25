@@ -468,8 +468,58 @@ static void overlap_v30c_tests(){
   const auto sheets=solve_clay_surface(v,tri,dab);
   for(std::size_t i=start;i<v.size();++i)assert(sheets.displacement[i].z==0);
 }
+static void push_v30d_tests(){
+  constexpr int n=49;
+  std::vector<ClaySurfaceVertex> v;
+  std::vector<ClaySurfaceTriangle> tri;
+  for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+    const double px=2.*x/(n-1)-1,py=2.*y/(n-1)-1;
+    const double r2=(px*px+py*py)/.64;
+    const double h=.04*std::exp(-24*((px+.12)*(px+.12)+py*py));
+    v.push_back({{px,py,h},r2<1 && py>-.45?std::pow(1-r2,2):0});
+  }
+  for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+    const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
+    tri.push_back({a,b,d});tri.push_back({a,d,c});
+  }
+  ClaySurfaceDab dab;dab.radius=.8;dab.dose=.08;dab.direction={1,0,0};
+  dab.action=ClaySurfaceAction::Push;dab.intensity=1;dab.transport_load_v30b=.8;
+  dab.density_independent=true;dab.smooth_proxy=true;dab.shape_transport=true;
+  dab.tool_v25=true;dab.tool_v26=true;dab.stable_v28=true;dab.refine_v28b=true;
+  dab.live_surface_v30=true;dab.fast_v26b=true;dab.transport_v30b=true;
+  const auto old=solve_clay_surface(v,tri,dab);
+  dab.push_v30d=true;
+  const auto first=solve_clay_surface(v,tri,dab);
+  const auto moment=[&](const ClaySurfaceResult &out){
+    double m=0;
+    for(std::size_t i=0;i<v.size();++i)m+=out.projected_area[i]*out.displacement[i].z*v[i].position.x;
+    return m;
+  };
+  assert(moment(first)>moment(old) && moment(first)>0);
+  assert(std::abs(first.signed_swept_volume)<1e-9);
+  auto work=v;double accumulated=0;
+  for(int k=0;k<12;++k){
+    const auto out=solve_material_transport_v21(work,tri,dab,4,false).surface;
+    assert(std::abs(out.signed_swept_volume)<1e-9);
+    double forward=0;
+    for(std::size_t i=0;i<work.size();++i){
+      assert(std::isfinite(out.displacement[i].z));
+      if(work[i].influence==0)assert(out.displacement[i].z==0);
+      forward+=out.projected_area[i]*out.displacement[i].z*v[i].position.x;
+      work[i].position+=out.displacement[i];
+    }
+    if(k==11)assert(forward>0);
+    accumulated+=forward;
+  }
+  assert(accumulated>moment(first));
+  // Actual zero dose and masked input must remain inert.
+  dab.dose=0;
+  const auto none=solve_clay_surface(work,tri,dab);
+  for(const auto &p:none.displacement)assert(p.z==0);
+}
 int main(){
   stroke_context_v27_tests();
+  push_v30d_tests();
   overlap_v30c_tests();
   contact_v30b_tests();
   transport_v30b_tests();

@@ -56,6 +56,8 @@ struct ClaySurfaceDab {
   bool transport_v30b=false;
   bool contact_v30b=false;
   bool overlap_v30c=false;
+  bool push_v30d=false; // stronger current-relief entrainment; Push only
+  double push_gain_v30d=2.5;
   double transport_load_v30b=1.0;
   bool refine_v28b=false; // gradual capacities and curvature-aware Melt
   bool swept_v29=false;
@@ -243,9 +245,14 @@ inline void coarse_clay_transport(
       dab.action==ClaySurfaceAction::HybridFlow || compact;
   std::array<double,6> background{};
   const bool live_transport=dab.transport_v30b && (gather||smear||dab.action==ClaySurfaceAction::Push);
+  const bool plough=dab.push_v30d && live_transport && dab.action==ClaySurfaceAction::Push;
   const bool detrend=dab.refine_v28b && melt;
-  const bool fit_ok=!(detrend||live_transport) || fit_quadratic_v28b(xy,h,w,area,ex,ey,dab.radius,background);
+  const bool fit_ok=!(detrend||(live_transport&&!plough)) || fit_quadratic_v28b(xy,h,w,area,ex,ey,dab.radius,background);
   const auto residual=[&](std::size_t i){
+    // A broad pile is part of the material Push must entrain. Unlike Melt,
+    // do not subtract a quadratic fit through the pile itself. Use the
+    // current connected chart's low support, with bounded effective depth.
+    if(plough)return std::clamp(h[i]-(floor+.12*dab.radius),0.0,.30*dab.radius);
     if((detrend||live_transport) && fit_ok)
       return h[i]-quadratic_height_v28b(background,dot(xy[i],ex)/dab.radius,dot(xy[i],ey)/dab.radius);
     return detrend?0.0:h[i]-(live_transport?floor+.12*dab.radius:0.0);
@@ -322,7 +329,8 @@ inline void coarse_clay_transport(
   for(auto &g:nodes) {
     if(g.area<=0||!std::isfinite(g.area))throw std::overflow_error("Invalid proxy area");
     g.height/=g.area;g.source/=g.area;g.pressure/=g.area;
-    g.volume=(live_transport?std::clamp(.08*dab.radius+.7*g.height,.015*dab.radius,.20*dab.radius):
+    g.volume=(plough?std::clamp(.12*dab.radius+.85*g.height,.12*dab.radius,.36*dab.radius):
+              live_transport?std::clamp(.08*dab.radius+.7*g.height,.015*dab.radius,.20*dab.radius):
               detrend?.10*dab.radius:std::max(0.0,g.height+g.source-floor))*g.area;
   }
   const Vec3 dir=unit(dab.direction-axis*dot(dab.direction,axis))*dab.sign;
@@ -348,7 +356,13 @@ inline void coarse_clay_transport(
       const double r=std::hypot(q.x,q.y,q.z)/dab.radius;
       const double taper=std::max(0.0,1-r*r);
       if(gather)field=q*(-dab.sign/dab.radius)*(2.2*taper*taper);
-      else field=dir*(taper*taper*(smear?1.0:dab.transport_load_v30b));
+      else if(plough){
+        // Broad central translation, smoothly decelerating at the leading
+        // edge. The existing native envelope still controls mask/alpha.
+        const double t=std::clamp((r-.55)/.45,0.0,1.0);
+        const double contact=1-t*t*(3-2*t);
+        field=dir*(contact*(.75+.25*dab.transport_load_v30b));
+      }else field=dir*(taper*taper*(smear?1.0:dab.transport_load_v30b));
     }else if(dab.refine_v28b && gather){
       // A regular radial velocity vanishes at the center instead of
       // converging at finite speed into a singular point.
@@ -363,8 +377,12 @@ inline void coarse_clay_transport(
       const double available=align>=0?u.volume/u.area:v.volume/v.area;
       // Do not let a deepening virtual floor create ever larger flux.
       const double thickness=dab.stable_v28 && !live_transport?std::min(available,.10*dab.radius):available;
-      f=align*thickness*width*travel*mobility*envelope*drag_gain*
-        (smear?.30:dab.action==ClaySurfaceAction::HybridFlow?.45:
+      // The proxy splat and transpose already encode native influence.
+      // Keep an additional square-root envelope for Push instead of
+      // multiplying the full falloff yet again. Zero mask stays zero.
+      const double contact_envelope=plough?std::sqrt(std::clamp(envelope,0.0,1.0)):envelope;
+      f=align*thickness*width*travel*mobility*contact_envelope*drag_gain*
+        (plough?dab.push_gain_v30d:smear?.30:dab.action==ClaySurfaceAction::HybridFlow?.45:
          dab.action==ClaySurfaceAction::PressureFlow?.15:1.0);
     }
     // V26 surface-only Melt: gravity along the tangent chart in object coordinates.
@@ -413,7 +431,7 @@ inline void coarse_clay_transport(
       d+=b.value*nodes[b.id].change/nodes[b.id].area;
     delta[i]+=w[i]*d;
   }
-  if(live_transport && smear && fine_edges){
+  if(live_transport && (smear||plough) && fine_edges){
     // Paired fine residual transfers on mesh edges, without another resampling trace.
     std::vector<double> detail(h.size()),incoming(h.size()),outgoing(h.size()),change(h.size());
     std::vector<Link> fine;
@@ -431,10 +449,10 @@ inline void coarse_clay_transport(
       const double lo=std::min(area[a],area[b]),hi=std::max(area[a],area[b]);
       if(lo<=0)continue;
       const double dual=2*lo/(1+lo/hi),align=dot(dir,line/len);
-      const double step=std::min(.18*len,travel*mobility*std::min(w[a],w[b])*drag_gain);
+      const double step=std::min((plough?.24:.18)*len,travel*mobility*std::min(w[a],w[b])*drag_gain*(plough?dab.push_gain_v30d:1.0));
       const double upwind=align>=0?detail[a]:detail[b];
-      const double diffusion=(detail[a]-detail[b])*(.12+.28*align*align)*(1-.6*dab.detail_retention);
-      double f=(.65*align*upwind+diffusion)*dual/len*step;
+      const double diffusion=(detail[a]-detail[b])*(plough?.06:(.12+.28*align*align)*(1-.6*dab.detail_retention));
+      double f=((plough?1.0:.65)*align*upwind+diffusion)*dual/len*step;
       if(!std::isfinite(f))throw std::overflow_error("V30B fine flux overflow");
       if(f==0)continue;
       if(f<0){std::swap(a,b);f=-f;}
@@ -708,7 +726,8 @@ inline ClaySurfaceResult solve_clay_surface(
       norm(dab.axis)<=1e-12 || !std::isfinite(norm(dab.direction)) ||
       !std::isfinite(dab.radius) || dab.radius<=1e-12 ||
       (dab.swept_v29 && (!std::isfinite(norm(dab.sweep_start)) || norm(dab.sweep_start-dab.center)>dab.radius*.500001)) ||
-      !interval(dab.dose) || !interval(dab.transport_load_v30b) || !std::isfinite(dab.intensity) || dab.intensity<0 ||
+      !interval(dab.dose) || !interval(dab.transport_load_v30b) ||
+      !std::isfinite(dab.push_gain_v30d) || dab.push_gain_v30d<.5 || dab.push_gain_v30d>4.0 || !std::isfinite(dab.intensity) || dab.intensity<0 ||
       dab.intensity>(dab.shape_transport?4.0:1.0) || !interval(dab.mobility) ||
       (dab.sign!=1 && dab.sign!=-1) ||
       !interval(dab.yield_slope) || !interval(dab.relative_slope_limit) ||
