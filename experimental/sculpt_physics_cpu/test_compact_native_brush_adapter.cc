@@ -107,6 +107,39 @@ int main()
     }
   }
   assert(cache.hits>0 && cache.misses>0);
+  // Real assisted Clay and Strips: test checked dense lookup parity and
+  // the post-blend relative edge safety with large opposing targets.
+  for(const auto kind:{NativeSculptBrushKind::Clay,NativeSculptBrushKind::ClayStrips}){
+    current=initial;
+    NativeBrushDab trial;
+    trial.kind=kind;trial.topology_generation=5;trial.current_rest=true;trial.assist=.65;
+    trial.material=experimental_native_brush_profile(kind).material;
+    const std::vector<NativeBrushTranslation> targets{{1,{0,0,2}},{2,{0,0,-2}},{0,{1,1,1}}};
+    auto old=prepare_compact_native_brush_dab(compact,targets,edge_at,rest_at,current_at,mass,trial);
+    trial.dense_ids_v28=true;
+    auto fast=prepare_compact_native_brush_dab(compact,targets,edge_at,rest_at,current_at,mass,trial);
+    assert(old.prepared.writes().size()==fast.prepared.writes().size());
+    for(std::size_t i=0;i<old.prepared.writes().size();++i){
+      const auto &a=old.prepared.writes()[i],&b=fast.prepared.writes()[i];
+      assert(a.global_index==b.global_index);
+      assert(a.position.x==b.position.x && a.position.y==b.position.y && a.position.z==b.position.z);
+    }
+    old.prepared.finish_editor_success();fast.prepared.finish_editor_success();
+    trial.post_stability_v28=true;trial.stability.relative_limit=.35;
+    auto guarded=prepare_compact_native_brush_dab(compact,targets,edge_at,rest_at,current_at,mass,trial);
+    assert(!guarded.prepared.writes().empty());
+    auto final=current;
+    for(const auto &w:guarded.prepared.writes()){
+      const auto id=guarded.local_to_global.at(w.global_index);
+      assert(id!=0);final[id]=w.position;
+    }
+    for(const auto &[a,b]:edges){
+      const auto dx=(final[b]-current[b])-(final[a]-current[a]);
+      const auto e=current[b]-current[a];
+      assert(std::hypot(dx.x,dx.y,dx.z)<=.35*std::hypot(e.x,e.y,e.z)+1e-10);
+    }
+    guarded.prepared.finish_editor_success();
+  }
   current[0]=initial[0];
   assert(!saved.empty());
   assert(current[0].x==initial[0].x && current[0].y==initial[0].y);

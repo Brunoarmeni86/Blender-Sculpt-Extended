@@ -128,6 +128,8 @@ struct NativeBrushDab {
   Vec3 clay_stroke_delta{};
   MaterialStabilitySettings stability{}; // V18 opt-in shared motion constraint
   bool current_rest = false; // Native XPBD sculpt: follow accepted geometry, not stroke-start springs
+  bool post_stability_v28=false; // guard the final blended native Clay motion only
+  bool dense_ids_v28=false; // checked contiguous local-ID lookup
 
 };
 

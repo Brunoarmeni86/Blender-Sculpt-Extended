@@ -396,6 +396,12 @@ void validate_native_brush_dab(const NativeBrushDab &dab)
       throw std::invalid_argument("V18 stability requires full independent targets");
     }
   }
+  if(dab.post_stability_v28){
+    validate_material_stability(dab.stability);
+    if(!dab.current_rest || dab.clay_material || dab.assist<=0 || dab.stability.enabled ||
+       (dab.kind!=NativeSculptBrushKind::Clay && dab.kind!=NativeSculptBrushKind::ClayStrips))
+      throw std::invalid_argument("V28 post stability requires assisted current-rest Clay");
+  }
   if (!std::isfinite(dab.clay_yield) || dab.clay_yield<0.0 || dab.clay_yield>1.0 ||
       !std::isfinite(dab.clay_plasticity) || dab.clay_plasticity<0.0 || dab.clay_plasticity>1.0 ||
       !std::isfinite(dab.clay_spread) || dab.clay_spread<0.0 || dab.clay_spread>1.0 ||
@@ -481,11 +487,28 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
       std::adjacent_find(island.global_ids.begin(),island.global_ids.end())!=island.global_ids.end()) {
     throw std::invalid_argument("Invalid native brush island");
   }
+  // Compact islands use local IDs 0..n-1; verify the entire mapping
+  // before taking the O(1) lookup path. Generic sparse islands keep the
+  // exact existing sorted-search behavior.
+  bool dense=dab.dense_ids_v28;
+  if(dense)for(std::size_t i=0;i<n;++i)if(island.global_ids[i]!=i){dense=false;break;}
+  const auto contains=[&](std::size_t id){
+    return dense?id<n:std::binary_search(island.global_ids.begin(),island.global_ids.end(),id);
+  };
+  const auto local_id=[&](std::size_t id){
+    if(dense){
+      if(id>=n)throw std::out_of_range("Unknown dense native vertex");
+      return id;
+    }
+    const auto it=std::lower_bound(island.global_ids.begin(),island.global_ids.end(),id);
+    if(it==island.global_ids.end() || *it!=id)throw std::out_of_range("Unknown native vertex");
+    return std::size_t(it-island.global_ids.begin());
+  };
   std::vector<NativeBrushTranslation> selected;
   selected.reserve(samples.size());
   for (const auto &sample : samples) {
     if (!finite(sample.translation)) throw std::invalid_argument("Invalid native translation");
-    if (!std::binary_search(island.global_ids.begin(),island.global_ids.end(),sample.global_index)) {
+    if (!contains(sample.global_index)) {
       throw std::out_of_range("Native target outside prepared island");
     }
     if (std::hypot(sample.translation.x,sample.translation.y,sample.translation.z)>1e-15) {
@@ -517,13 +540,8 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
   std::vector<ExecutorTarget> goals;
   goals.reserve(active.size());
   for (const auto &sample : selected) {
-    if (!std::binary_search(active.begin(),active.end(),sample.global_index)) continue;
-    const auto it=std::lower_bound(
-        island.global_ids.begin(),island.global_ids.end(),sample.global_index);
-    if (it==island.global_ids.end() || *it!=sample.global_index) {
-      throw std::logic_error("Missing native sculpt target inside local physics island");
-    }
-    const std::size_t local=static_cast<std::size_t>(it-island.global_ids.begin());
+    const std::size_t local=local_id(sample.global_index);
+    if (island.inverse_masses[local]<=0) continue;
     const Vec3 goal=island.positions[local]+sample.translation;
     if (!finite(goal)) throw std::invalid_argument("Native brush goal overflow");
     goals.push_back({sample.global_index,goal,dab.compliance});
@@ -605,12 +623,7 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
              physical.writes[changed].global_index<goal.global_index) {
         ++changed;
       }
-      const auto it=std::lower_bound(island.global_ids.begin(),island.global_ids.end(),
-                                     goal.global_index);
-      if (it==island.global_ids.end() || *it!=goal.global_index) {
-        throw std::logic_error("Missing V15 blend target");
-      }
-      const auto local=std::size_t(it-island.global_ids.begin());
+      const auto local=local_id(goal.global_index);
       const Vec3 solved=changed<physical.writes.size() &&
                         physical.writes[changed].global_index==goal.global_index ?
                         physical.writes[changed].position : island.positions[local];
@@ -622,26 +635,20 @@ PreparedNativeBrushDab prepare_cpu_native_brush_island(
     // Acknowledge the actual blended editor positions, not the raw solve.
     executor->upload_dirty(blended);
   }
-  if (dab.stability.enabled) {
+  if (dab.stability.enabled || dab.post_stability_v28) {
     // XPBD can modify the safe input goals. Enforce the same incremental
     // edge bound on the final solved displacement before staging writes.
     const auto solved=executor->stage_incremental(0.0);
     std::vector<Vec3> motion(n);
     for (const auto &w : solved.writes) {
-      const auto it=std::lower_bound(island.global_ids.begin(),island.global_ids.end(),
-                                     w.global_index);
-      if (it==island.global_ids.end() || *it!=w.global_index) {
-        throw std::logic_error("Unknown V18 solved vertex");
-      }
-      const auto i=std::size_t(it-island.global_ids.begin());
+      const auto i=local_id(w.global_index);
       motion[i]=w.position-island.positions[i];
     }
     stabilize_surface_motion(island,motion,dab.stability,false);
     std::vector<ExecutorEdit> stable;
     stable.reserve(goals.size());
     for (const auto &g : goals) {
-      const auto i=std::size_t(std::lower_bound(island.global_ids.begin(),
-          island.global_ids.end(),g.global_index)-island.global_ids.begin());
+      const auto i=local_id(g.global_index);
       const Vec3 p=island.positions[i]+motion[i];
       if (!finite(p)) throw std::overflow_error("Invalid V18 stable write");
       stable.push_back({g.global_index,p});

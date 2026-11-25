@@ -411,6 +411,7 @@ inline bool try_apply(const Sculpt &sd,
       return raw && raw[0]=='1' && raw[1]=='\0';
     }();
     dab.colored_order=colored;
+    dab.dense_ids_v28=refine_v28b_requested() && optimize_v27c_requested();
     dab.assist=autonomous ? 1.0 : cache.xpbd_v16_assist;
     dab.clay_material=!autonomous && cache.xpbd_v16_clay_material;
     dab.clay_yield=cache.xpbd_v16_clay_yield;
@@ -450,6 +451,14 @@ inline bool try_apply(const Sculpt &sd,
       dab.compliance=profile.target_compliance;
       dab.material=profile.material;
       dab.current_rest=true;
+      if(stable_v28_requested() && refine_v28b_requested() && dab.assist>0.0){
+        dab.post_stability_v28=true;
+        dab.stability.relative_limit=material_override("BLENDER_SCULPT_V28_CLAY_EDGE_LIMIT",.35,.05,.8);
+        dab.stability.relaxation=0.0;
+        dab.stability.iterations=2;
+        if(profile && !cache.xpbd_v15_active_logged)
+          std::fprintf(stderr,"[V28B XPBD] kind=%d edge_limit=%.3f dense_ids=%d\n",int(kind),dab.stability.relative_limit,int(dab.dense_ids_v28));
+      }
     }
     // Read the overrides once per process. Artist tuning preserves the
     // original brush pressure/falloff and changes only the physical solve.
