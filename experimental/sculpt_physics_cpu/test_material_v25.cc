@@ -193,8 +193,62 @@ static void contact_v27b_tests()
     assert(moving>=6);
   }
 }
+static void stability_v28_tests(){
+  assert(history_scale_v28({0,0,.25},{},{0,0,.1},.25)<1e-12);
+  assert(history_scale_v28({0,0,.25},{},{0,0,-.1},.25)==1);
+  assert(std::abs(history_scale_v28({0,0,.20},{},{0,0,.10},.25)-.5)<1e-12);
+  for(auto action:{ClaySurfaceAction::Press,ClaySurfaceAction::Compress,ClaySurfaceAction::Compact,
+                   ClaySurfaceAction::Scrape,ClaySurfaceAction::Push,ClaySurfaceAction::Gather,
+                   ClaySurfaceAction::Smear,ClaySurfaceAction::Melt}){
+    constexpr int n=33;
+    std::vector<ClaySurfaceVertex> v;
+    std::vector<ClaySurfaceTriangle> tri;
+    const double radius=.5;
+    for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+      const double px=2.*x/(n-1)-1,py=2.*y/(n-1)-1;
+      const Vec3 p{px,py,.015*std::cos(8*px)*std::cos(7*py)};
+      v.push_back({p,0,p,radius});
+    }
+    for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+      const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
+      tri.push_back({a,b,d});tri.push_back({a,d,c});
+    }
+    ClaySurfaceDab dab;dab.action=action;dab.radius=radius;dab.intensity=2;dab.dose=.30;
+    dab.density_independent=true;dab.smooth_proxy=true;dab.shape_transport=true;
+    dab.tool_v25=true;dab.tool_v26=true;dab.fast_v26b=true;dab.contact_v27b=true;dab.stable_v28=true;
+    dab.has_tool_plane=true;dab.tool_plane_height=-.07*radius;
+    double total_motion=0;
+    for(int k=0;k<48;++k){
+      const double x=.16*std::sin(.23*k),y=.12*std::cos(.23*k);
+      dab.center={x,y,0};dab.direction={std::cos(.23*k),-std::sin(.23*k),0};
+      for(auto &p:v){
+        const double dx=p.position.x-x,dy=p.position.y-y;
+        const double r2=(dx*dx+dy*dy)/(radius*radius);
+        p.influence=r2<1&&p.position.y>-.23?std::pow(1-r2,2):0;
+      }
+      const auto out=solve_material_transport_v21(v,tri,dab,4,false).surface;
+      if(action==ClaySurfaceAction::Push || action==ClaySurfaceAction::Gather ||
+         action==ClaySurfaceAction::Smear)assert(out.trace_attempts==0);
+      for(std::size_t i=0;i<v.size();++i){
+        const auto delta=out.displacement[i];
+        assert(std::isfinite(delta.z));
+        if(v[i].influence==0)assert(delta.z==0);
+        if(action==ClaySurfaceAction::Scrape)assert(delta.z<=1e-12);
+        v[i].position+=delta;
+        assert(std::abs(v[i].position.z-v[i].contact_reference.z)<=radius*history_radius_fraction_v28(action)+1e-10);
+        total_motion+=std::abs(delta.z);
+      }
+      if(action==ClaySurfaceAction::Scrape || action==ClaySurfaceAction::Compact)
+        assert(out.signed_swept_volume<=1e-9);
+      else assert(std::abs(out.signed_swept_volume)<1e-8);
+    }
+    assert(total_motion>1e-6);
+    std::cout<<"V28 stability action="<<int(action)<<" motion="<<total_motion<<std::endl;
+  }
+}
 int main(){
   stroke_context_v27_tests();
+  stability_v28_tests();
   contact_v27b_tests();
   assert(progressive_press_depth_v26(.07,0)==.07);
   assert(progressive_press_depth_v26(.07,.5)>progressive_press_depth_v26(.07,.1));

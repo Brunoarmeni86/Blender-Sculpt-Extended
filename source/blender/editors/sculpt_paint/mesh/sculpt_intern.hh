@@ -264,6 +264,7 @@ struct StrokeCache {
   bool xpbd_v25_plane_valid = false;
   double xpbd_v26_press_dose = 0.0;
   std::shared_ptr<void> xpbd_v27_stroke;
+  std::shared_ptr<void> xpbd_v28_surface_history;
   float3 xpbd_v25_plane_origin = float3(0.0f);
   float3 xpbd_v25_plane_normal = float3(0.0f);
   int xpbd_v16_clay_behavior = 0;

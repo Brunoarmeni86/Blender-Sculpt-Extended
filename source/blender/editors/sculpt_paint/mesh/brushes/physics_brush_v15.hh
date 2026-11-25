@@ -85,6 +85,13 @@ inline bool optimize_v27c_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_OPTIMIZE_V27C");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
+inline bool stable_v28_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_STABLE_V28");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+struct SurfaceContactRefV28 { sculpt_physics::Vec3 position{}; double radius=0; };
+using SurfaceContactHistoryV28=std::unordered_map<std::size_t,SurfaceContactRefV28>;
 inline bool profile_v26b_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PROFILE_V26");return v && v[0]=='1' && v[1]=='\0';}();
@@ -785,7 +792,8 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
     const Mesh &mesh, const Span<float3> positions,
     const std::vector<sculpt_physics::PhysicalBrushIntentSample> &samples,
     const sculpt_physics::ClaySurfaceDab &dab,
-    std::vector<sculpt_physics::NativeBrushTranslation> &goals)
+    std::vector<sculpt_physics::NativeBrushTranslation> &goals,
+    SurfaceContactHistoryV28 *history=nullptr)
 {
   using namespace sculpt_physics;
   const auto convert=[](const float3 &v)->Vec3 {
@@ -821,6 +829,14 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
         (!attributes.mask.is_empty() && attributes.mask[vi]>=0.999f)) continue;
     const auto i=add_vertex(s.global_index);
     vertices[i].influence=s.envelope;
+    if(history && dab.dose>0 && dab.intensity>0){
+      // Capture only the first eligible geometry, never requested or
+      // unaccepted motion. Reference does not reset when a dab is clipped.
+      const auto it=history->try_emplace(s.global_index,SurfaceContactRefV28{
+          vertices[i].position,dab.radius}).first;
+      vertices[i].contact_reference=it->second.position;
+      vertices[i].contact_radius=it->second.radius;
+    }
     for (const int f:vertex_faces[int(s.global_index)]) face_ids.push_back(f);
   }
   std::sort(face_ids.begin(),face_ids.end());
@@ -972,6 +988,7 @@ inline bool try_apply_intent(
       clay.sign=sign;
       clay.fast_v26b=fast_v26b_requested();
       clay.contact_v27b=v27 && contact_v27b_requested();
+      clay.stable_v28=stable_v28_requested() && v27;
       if(clay.contact_v27b)clay.melt_local_gravity_v27b=material_override("BLENDER_SCULPT_V27B_MELT_LOCAL_GRAVITY",0.0,0.0,1.0);
       if (surface_v20) {
         clay.surface_contact=true;
@@ -1094,7 +1111,19 @@ inline bool try_apply_intent(
       const Mesh &mesh=*id_cast<Mesh *>(object.data);
       if (position_data.eval.size()!=mesh.verts_num) return false;
       const auto plan_start=std::chrono::steady_clock::now();
-      auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals);
+      std::shared_ptr<SurfaceContactHistoryV28> history;
+      if(clay.stable_v28 && clay.action!=ClaySurfaceAction::Buildup &&
+         clay.action!=ClaySurfaceAction::FusionDeposit){
+        history=std::static_pointer_cast<SurfaceContactHistoryV28>(cache.xpbd_v28_surface_history);
+        if(!history){
+          history=std::make_shared<SurfaceContactHistoryV28>();
+          cache.xpbd_v28_surface_history=history;
+        }
+      }
+      auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      if(clay.stable_v28 && profile_v26b_requested())
+        std::fprintf(stderr,"[V28 stability] action=%d history_limited=%zu slope_scale=%.6f history_size=%zu transport_nodes=%zu\n",
+                     action,planned.history_limited,planned.slope_scale,history?history->size():0,planned.transport_nodes);
       const double plan_ms=std::chrono::duration<double,std::milli>(
           std::chrono::steady_clock::now()-plan_start).count();
       if(v27 && profile_v26b_requested())std::fprintf(stderr,"[V27 stroke] action=%d samples=%zu path=%.8g dose=%.6f gap=%d goals=%zu\n",action,stroke_step.next.samples,stroke_step.next.path_length,clay.dose,int(stroke_step.gap),goals.size());

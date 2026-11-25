@@ -23,6 +23,9 @@ namespace sculpt_physics {
 struct ClaySurfaceVertex {
   Vec3 position{};
   double influence=0.0;
+  // First eligible contact in this stroke; zero radius disables history.
+  Vec3 contact_reference{};
+  double contact_radius=0.0;
 };
 using ClaySurfaceTriangle=std::array<std::size_t,3>;
 enum class ClaySurfaceAction { Buildup, Push, Gather, Spread, FusionDeposit, Compress, Compact, Press, PressureFlow, HybridFlow, Melt, Smear, Scrape };
@@ -47,6 +50,7 @@ struct ClaySurfaceDab {
   bool fast_v26b=false; // common connectivity and spatial lookup, including Deposit
   bool continuous_v26b=false; // retain supported portion of an interrupted trace
   bool contact_v27b=false; // broader contact/return profile
+  bool stable_v28=false; // opt-in cumulative bounds and conservative proxy transport
   double melt_local_gravity_v27b=0.0; // opt-in object-local downhill
   bool has_tool_plane=false;
   double tool_plane_height=0.0; // relative to chart center, along chart axis
@@ -74,8 +78,58 @@ struct ClaySurfaceResult {
   std::size_t active=0;
   std::size_t transport_nodes=0;
   std::size_t trace_attempts=0,trace_rejected=0;
+  std::size_t history_limited=0;
+  double slope_scale=1.0;
 };
 
+/* Keep the original positive/negative projected budget ratio after
+ * individual capacity clamps. This preserves zero net volume for balanced
+ * actions and the configured sink fraction for Compact. Never amplify a
+ * clipped target. A single-sign tool (Scrape) remains unilateral. */
+inline void balance_capacity_v28(std::vector<double> &delta,const std::vector<double> &area,
+                                 double original_pos,double original_neg)
+{
+  double pos=0,neg=0;
+  for(std::size_t i=0;i<delta.size();++i){
+    const double v=delta[i]*area[i];
+    pos+=std::max(0.0,v);neg+=std::max(0.0,-v);
+  }
+  double ratio=1.0;
+  if(original_pos>0)ratio=std::min(ratio,pos/original_pos);
+  if(original_neg>0)ratio=std::min(ratio,neg/original_neg);
+  for(double &v:delta){
+    if(v>0)v*=pos>0?std::min(1.0,ratio*original_pos/pos):0.0;
+    else if(v<0)v*=neg>0?std::min(1.0,ratio*original_neg/neg):0.0;
+  }
+}
+inline double history_radius_fraction_v28(ClaySurfaceAction action)
+{
+  switch(action){
+    case ClaySurfaceAction::Compact:return .16;
+    case ClaySurfaceAction::Compress:return .24;
+    case ClaySurfaceAction::Press:return .25;
+    case ClaySurfaceAction::Scrape:return .35;
+    default:return .28;
+  }
+}
+/* Bound Euclidean cumulative motion, not a per-dab pressure counter.
+ * If an external operation already exceeds the budget, allow recovery
+ * but no worsening; reference is immutable for the duration of a stroke. */
+inline double history_scale_v28(Vec3 current,Vec3 reference,Vec3 motion,double radius)
+{
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  const Vec3 p=current-reference;
+  const double a=dot(motion,motion);
+  if(a<=0)return 1.0;
+  const double p2=dot(p,p);
+  const double cap2=std::max(p2,radius*radius);
+  const double b=dot(p,motion);
+  if(dot(p+motion,p+motion)<=cap2)return 1.0;
+  const double headroom=std::max(0.0,cap2-p2);
+  const double disc=std::sqrt(std::max(0.0,b*b+a*headroom));
+  const double root=b>=0 ? (disc+b>0?headroom/(disc+b):0.0) : (disc-b)/a;
+  return std::clamp(root,0.0,1.0);
+}
 /* Brush-scale finite-volume proxy. Each active vertex splats its
  * projected area * influence into bilinear or quadratic B-spline chart nodes. The exact
  * transpose of this transfer prolongates height increments. Thus
@@ -91,7 +145,7 @@ inline void coarse_clay_transport(
     std::vector<double> &delta,ClaySurfaceResult &out)
 {
   using Key=std::array<int,2>;
-  struct Node { double area=0,raw=0,height=0,source=0,pressure=0,volume=0,change=0,outgoing=0; };
+  struct Node { double area=0,raw=0,height=0,source=0,pressure=0,volume=0,change=0,outgoing=0,incoming=0; };
   struct Link {std::size_t a,b;double amount;};
   struct Weight {std::size_t id=0;double value=0;};
   const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
@@ -192,7 +246,9 @@ inline void coarse_clay_transport(
         dab.action==ClaySurfaceAction::HybridFlow||dab.action==ClaySurfaceAction::PressureFlow;
     double f=0;
     if(directed) {
-      const double thickness=align>=0?u.volume/u.area:v.volume/v.area;
+      const double available=align>=0?u.volume/u.area:v.volume/v.area;
+      // Do not let a deepening virtual floor create ever larger flux.
+      const double thickness=dab.stable_v28?std::min(available,.10*dab.radius):available;
       f=align*thickness*width*travel*mobility*envelope*drag_gain*
         (smear?.30:dab.action==ClaySurfaceAction::HybridFlow?.45:
          dab.action==ClaySurfaceAction::PressureFlow?.15:1.0);
@@ -221,12 +277,20 @@ inline void coarse_clay_transport(
     if(!std::isfinite(f))throw std::overflow_error("Invalid proxy flux");
     if(f==0)continue;
     if(f<0){std::swap(a,b);f=-f;}
-    nodes[a].outgoing+=f;flux.push_back({a,b,f});
+    nodes[a].outgoing+=f;nodes[b].incoming+=f;flux.push_back({a,b,f});
   }
   for(const auto &f:flux) {
     auto &u=nodes[f.a];auto &v=nodes[f.b];
     const double cap=u.volume*.25;
-    const double mass=f.amount*std::min(1.0,cap/u.outgoing);
+    double scale=std::min(1.0,cap/u.outgoing);
+    if(dab.stable_v28){
+      // A simultaneous donor and recipient CFL-like cap. All transfers
+      // remain paired; no mass is created by a saturated receiver.
+      const double local_cap=.035*dab.radius;
+      scale=std::min({scale,local_cap*u.area/u.outgoing,
+                            local_cap*v.area/v.incoming});
+    }
+    const double mass=f.amount*scale;
     u.change-=mass;v.change+=mass;out.transported_volume+=mass;
   }
   for(std::size_t i=0;i<h.size();++i) if(w[i]>0) {
@@ -359,11 +423,20 @@ inline void shape_clay_transport(
       const double inner=dab.contact_v27b?1-smooth((r-.30)/.49):
           1-smooth((r-.42)/(dab.tool_v26&&press?.37:.29));
       const double plane=dab.has_tool_plane?dab.tool_plane_height:-dab.sign*(dab.tool_v25?dab.tool_depth:.065)*dab.radius;
-      const double depth=press?std::max(0.0,dab.sign*(h[i]-plane)):amount*.30;
+      double depth=press?std::max(0.0,dab.sign*(h[i]-plane)):amount*.30;
+      if(dab.stable_v28 && !press)depth=std::min(depth,.08*dab.radius);
       delta[i]=-dab.sign*w[i]*inner*std::min(depth,amount*(dab.tool_v26&&press?.75:.55));
       // Broaden the receiving band while tapering its outer boundary.
       rim[i]=dab.contact_v27b?w[i]*smooth((r-.22)/.40)*(1-smooth((r-.78)/.22)):
           w[i]*smooth((r-(dab.tool_v26&&press?.38:.50))/.25);
+      if(dab.stable_v28){
+        // Reduce return into relief already above its first-contact level.
+        // Shape is measured from geometry, not from requested displacement.
+        // A smaller Compact rim makes it meaningfully different from Press.
+        if(compact)rim[i]*=1-smooth((r-.65)/.35);
+        // Avoid a narrow high receiving band even on an asymmetric mask.
+        rim[i]*=1-smooth((r-.75)/.25);
+      }
       peak_rim=std::max(peak_rim,rim[i]);
       removed-=delta[i]*area[i];receiver+=rim[i]*area[i];
     }
@@ -419,10 +492,11 @@ inline void shape_clay_transport(
     }
   }
   if(press||compact||compress) {
-    const double fraction=compact?dab.volume_preservation:1.0;
+    const double fraction=compact?(dab.stable_v28?std::min(.40,dab.volume_preservation):dab.volume_preservation):1.0;
     double coefficient=receiver>1e-24?fraction*removed/receiver:0.0;
     const double peak=std::abs(coefficient)*peak_rim;
-    const double accepted=receiver<=1e-24?0.0:peak>amount*.65?amount*.65/peak:1.0;
+    const double peak_limit=amount*(dab.stable_v28?.30:.65);
+    const double accepted=receiver<=1e-24?0.0:peak>peak_limit?peak_limit/peak:1.0;
     // Preserve the unreturned compaction fraction; reduce only the
     // conservative displacement when the receiving rim has no capacity.
     // Prevent a narrow mask opening from generating a high berm.
@@ -501,7 +575,9 @@ inline ClaySurfaceResult solve_clay_surface(
   std::vector<Vec3> xy(n);
   std::vector<bool> bad(n,false);
   for(std::size_t i=0;i<n;++i) {
-    if(!std::isfinite(norm(vertices[i].position)) || !interval(vertices[i].influence))
+    if(!std::isfinite(norm(vertices[i].position)) || !interval(vertices[i].influence) ||
+       (dab.stable_v28 && (!std::isfinite(vertices[i].contact_radius) || vertices[i].contact_radius<0 ||
+                          !std::isfinite(norm(vertices[i].contact_reference)))))
       throw std::invalid_argument("Invalid clay surface vertex");
     const Vec3 offset=vertices[i].position-dab.center;
     h[i]=dot(offset,axis);
@@ -607,6 +683,13 @@ inline ClaySurfaceResult solve_clay_surface(
   if(dab.action==ClaySurfaceAction::Buildup) {
     for(std::size_t i=0;i<n;++i) if(w[i]>0)
       delta[i]=dab.sign*travel*0.10*w[i];
+  } else if(dab.stable_v28 && dab.density_independent &&
+            (dab.action==ClaySurfaceAction::Push || dab.action==ClaySurfaceAction::Gather ||
+             dab.action==ClaySurfaceAction::Smear)){
+    // Existing paired proxy flux replaces repeated triangle traces. This
+    // is an experimental relief transfer, not real tangential material IDs.
+    coarse_clay_transport(xy,h,w,out.projected_area,dab,axis,floor,travel,
+                          mobility,yield,drag_gain,pressure_gain,delta,out);
   } else if(dab.shape_transport && dab.action!=ClaySurfaceAction::FusionDeposit &&
             !(dab.tool_v26 && dab.action==ClaySurfaceAction::Melt && dab.density_independent)) {
     shape_clay_transport(xy,h,w,out.projected_area,triangles,dab,axis,travel,mobility,delta,out);
@@ -705,6 +788,28 @@ inline ClaySurfaceResult solve_clay_surface(
     for(std::size_t i=0;i<n;++i) if(w[i]>0)
       delta[i]+=(received[i]-sent[i])/out.projected_area[i];
   }
+  const bool guarded=dab.stable_v28 && dab.action!=ClaySurfaceAction::Buildup &&
+                     dab.action!=ClaySurfaceAction::FusionDeposit;
+  if(guarded){
+    double pos=0,neg=0;
+    for(std::size_t i=0;i<n;++i){
+      const double v=delta[i]*out.projected_area[i];
+      pos+=std::max(0.0,v);neg+=std::max(0.0,-v);
+    }
+    for(std::size_t i=0;i<n;++i)if(delta[i]!=0 && vertices[i].contact_radius>0){
+      const double limit=history_radius_fraction_v28(dab.action)*vertices[i].contact_radius;
+      const double scale=history_scale_v28(vertices[i].position,vertices[i].contact_reference,axis*delta[i],limit);
+      if(scale<1)++out.history_limited;
+      delta[i]*=scale;
+    }
+    balance_capacity_v28(delta,out.projected_area,pos,neg);
+    double final_pos=0,final_neg=0;
+    for(std::size_t i=0;i<n;++i){
+      const double v=delta[i]*out.projected_area[i];
+      final_pos+=std::max(0.0,v);final_neg+=std::max(0.0,-v);
+    }
+    out.transported_volume=std::min(final_pos,final_neg);
+  }
   // One common acceptance factor preserves the transport balance.
   // Limit increment of slopes across all edges including pinned exterior.
   // No Laplacian on original positions: existing details are not erased.
@@ -716,7 +821,7 @@ inline ClaySurfaceResult solve_clay_surface(
     for(double d:delta)peak=std::max(peak,std::abs(d));
     if(peak>dab.radius*.08)out.accepted_scale=dab.radius*.08/peak;
   }
-  else for(const auto &e:edges) {
+  if(!dab.density_independent || guarded) for(const auto &e:edges) {
     const double increment=delta[e[0]]-delta[e[1]];
     const double diff=std::abs(increment);
     const double len=norm(xy[e[0]]-xy[e[1]]);
@@ -726,8 +831,15 @@ inline ClaySurfaceResult solve_clay_surface(
       // instability. Still bound any increase of absolute height slope.
       const double recovery=dab.surface_contact && existing*increment<0 ?
           std::abs(existing):0.0;
-      out.accepted_scale=std::min(out.accepted_scale,
-                                 (recovery+dab.relative_slope_limit*len)/diff);
+      const double scale=guarded?
+          // Permit steep existing edges to recover without making the
+          // opposite slope worse. Never increase an already-steep edge.
+          std::min((recovery+dab.relative_slope_limit*len)/diff,
+                   std::max(0.0,(std::max(std::abs(existing),1.5*len)-
+                                (increment>0?existing:-existing))/diff)):
+          (recovery+dab.relative_slope_limit*len)/diff;
+      out.accepted_scale=std::min(out.accepted_scale,scale);
+      if(guarded)out.slope_scale=std::min(out.slope_scale,scale);
     }
   }
   for(std::size_t i=0;i<n;++i) {
