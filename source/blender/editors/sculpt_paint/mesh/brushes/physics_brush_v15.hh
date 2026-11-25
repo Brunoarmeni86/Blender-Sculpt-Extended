@@ -21,6 +21,7 @@
 #  include "brush_contact.hh"
 #  include "global_collision_v29.hh"
 #  include "stroke_context_v27.hh"
+#  include "tangential_transport_v31d6.hh"
 
 #  include "BKE_mesh.hh"
 #  include "BKE_attribute.hh"
@@ -28,6 +29,7 @@
 #  include "BKE_brush.hh"
 #  include "BKE_colortools.hh"
 #  include "BKE_paint.hh"
+#  include "BKE_paint_types.hh"
 #  include "BKE_mesh_types.hh"
 #  include "DNA_brush_types.h"
 #  include "BKE_multires_sculpt_layers.hh"
@@ -38,6 +40,7 @@
 
 #  include "editors/sculpt_paint/mesh/mesh_brush_common.hh"
 #  include "editors/sculpt_paint/mesh/sculpt_intern.hh"
+#  include "editors/sculpt_paint/paint_intern.hh"
 
 #  include <algorithm>
 #  include <cmath>
@@ -159,6 +162,11 @@ inline bool contact_reach_v31d4_requested()
     return v && v[0]=='1' && v[1]=='\0';
   }();
   return enabled && continuous_contact_v31d2_requested();
+}
+inline bool stroke_option_v31d5(const char *name)
+{
+  const char *v=std::getenv(name);
+  return v && v[0]=='1' && v[1]=='\0';
 }
 inline bool motion_proxy_v31d3_requested()
 {
@@ -1152,6 +1160,13 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
     }
   }
   else result=solve_clay_surface(vertices,triangles,dab);
+  if(dab.tangential_gain_v31d6>0){
+    const auto tangent=add_tangential_transport_v31d6(vertices,triangles,dab,
+        result.tangent_weights_v31d6,result.displacement);
+    if(profile_v26b_requested() || stroke_option_v31d5("BLENDER_SCULPT_DIAG_V31D5"))
+      std::fprintf(stderr,"[V31D6 tangent] action=%d moved=%zu scale=%.7g peak=%.7g first_order_volume=%.7g\n",
+          int(dab.action),tangent.moved,tangent.scale,tangent.peak,tangent.signed_volume);
+  }
   goals.reserve(vertices.size());
   for (std::size_t i=0;i<vertices.size();++i) {
     const auto &v=result.displacement[i];
@@ -1219,6 +1234,7 @@ inline bool try_apply_intent(
     const bool v27=stroke_v27_requested() && conservative;
     std::shared_ptr<sculpt_physics::StrokeContextV27> stroke;
     sculpt_physics::StrokeStepV27 stroke_step;
+    bool refreshed_v31d5=false;
     if(v27){
       stroke=std::static_pointer_cast<sculpt_physics::StrokeContextV27>(cache.xpbd_v27_stroke);
       if(!stroke)stroke=std::make_shared<sculpt_physics::StrokeContextV27>();
@@ -1228,6 +1244,28 @@ inline bool try_apply_intent(
       // are optimized. Other actions use radius-averaged segment dose.
       if(original_action!=1 && original_action!=4)intent.dose=stroke_step.dose;
     }
+    const double original_dose_v31d5=intent.dose;
+    const bool continuous_space_v31d5=v27 && brush.stroke_method==BRUSH_STROKE_SPACE &&
+        live_surface_v30_brush(object,brush);
+    const bool moving_v31d5=continuous_space_v31d5 && stroke->started &&
+        math::length(delta)>1e-12;
+    if(moving_v31d5){
+      const bool native_dose=stroke_option_v31d5("BLENDER_SCULPT_NATIVE_DOSE_V31D5") &&
+          sculpt_uniform_accumulation_enabled(brush);
+      const double gain=stroke_option_v31d5("BLENDER_SCULPT_DOSE_V31D5")?
+          material_override("BLENDER_SCULPT_V31D5_DOSE_GAIN",1.30,1.0,2.0):1.0;
+      if(native_dose || gain!=1.0)
+        intent.dose=sculpt_physics::continuous_dose_v31d5(intent.dose,true,stroke_step.gap,
+            native_dose,double(sd.paint.runtime->overlap_factor),gain);
+      if(stroke_option_v31d5("BLENDER_SCULPT_REFRESH_V31D5"))
+        refreshed_v31d5=sculpt_physics::refresh_contact_v31d5(stroke_step,*stroke,
+            material_override("BLENDER_SCULPT_V31D5_REFRESH_R",.50,.20,2.0));
+    }
+    if(continuous_space_v31d5 && stroke_option_v31d5("BLENDER_SCULPT_DIAG_V31D5"))
+      std::fprintf(stderr,"[V31D5 dose] action=%d samples=%zu old=%.7g new=%.7g travel=%.7g refresh=%d gap=%d uniform=%d overlap=%.7g\n",
+          original_action,stroke_step.next.samples,original_dose_v31d5,intent.dose,
+          stroke_step.next.normalized_travel,int(refreshed_v31d5),int(stroke_step.gap),
+          int(sculpt_uniform_accumulation_enabled(brush)),double(sd.paint.runtime->overlap_factor));
     const int action=surface_v20 && original_action>=1 && original_action<=3 ?
                          original_action+3 :
                      drag_contact_requested() && original_action==2 ? 5 : original_action;
@@ -1306,11 +1344,16 @@ inline bool try_apply_intent(
       if(clay.push_v30d)clay.push_gain_v30d=material_override("BLENDER_SCULPT_V30D_PUSH_GAIN",2.5,.5,4.0);
       if(clay.transport_v30b && v27){
         stage_transport_v30b(stroke_step,*stroke);
+        if(refreshed_v31d5)refresh_transport_direction_v31d5(stroke_step);
         if(action==6 || action==13){
           clay.direction=stroke_step.next.transport_direction_v30b;
           clay.transport_load_v30b=.55+.45*stroke_step.next.transport_load_v30b;
         }
       }
+      if(clay.continuous_contact_v31d2 && clay.transport_v30b &&
+         (action==6 || action==13) && moving_v31d5 && !stroke_step.gap &&
+         stroke_option_v31d5("BLENDER_SCULPT_TANGENT_V31D6"))
+        clay.tangential_gain_v31d6=material_override("BLENDER_SCULPT_V31D6_TANGENT_GAIN",.18,0.0,.50);
       clay.swept_v29=clay.refine_v28b && swept_v29_active(cache,brush);
       if(clay.swept_v29)clay.sweep_start=convert(cache.xpbd_v17_last_center);
       if(clay.contact_v27b)clay.melt_local_gravity_v27b=material_override("BLENDER_SCULPT_V27B_MELT_LOCAL_GRAVITY",0.0,0.0,1.0);
