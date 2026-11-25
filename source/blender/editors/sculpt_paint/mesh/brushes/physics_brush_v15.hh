@@ -22,6 +22,7 @@
 #  include "global_collision_v29.hh"
 #  include "stroke_context_v27.hh"
 #  include "tangential_transport_v31d6.hh"
+#  include "multichart_contact_v31d7.hh"
 
 #  include "BKE_mesh.hh"
 #  include "BKE_attribute.hh"
@@ -1106,7 +1107,8 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
     const std::vector<sculpt_physics::PhysicalBrushIntentSample> &samples,
     const sculpt_physics::ClaySurfaceDab &dab,
     std::vector<sculpt_physics::NativeBrushTranslation> &goals,
-    SurfaceContactHistoryV28 *history=nullptr)
+    SurfaceContactHistoryV28 *history=nullptr,
+    bool multichart_v31d7=false,sculpt_physics::Vec3 view_normal={})
 {
   using namespace sculpt_physics;
   const auto convert=[](const float3 &v)->Vec3 {
@@ -1165,8 +1167,18 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
     }
   }
   ClaySurfaceResult result;
-  if (dab.extended_material) {
-    const int substeps=int(material_override("BLENDER_SCULPT_V21_SUBSTEPS",4.0,1.0,16.0));
+  const int substeps=int(material_override("BLENDER_SCULPT_V21_SUBSTEPS",4.0,1.0,16.0));
+  MultiChartContactV31D7 multi_stats;
+  const bool multichart_used=multichart_v31d7 &&
+      solve_multichart_contact_v31d7(vertices,triangles,dab,view_normal,substeps,result,multi_stats);
+  if(multichart_v31d7 && stroke_option_v31d5("BLENDER_SCULPT_DIAG_V31D7")){
+    static thread_local unsigned int d7_count=0;
+    if(d7_count++%32==0)
+      std::fprintf(stderr,"[V31D7 contact] action=%d used=%d eligible=%zu connected=%zu steep=%zu charts=%zu recovered=%zu scale=%.7g signed_first_order=%.8g\n",
+          int(dab.action),int(multichart_used),multi_stats.eligible,multi_stats.connected,
+          multi_stats.steep,multi_stats.charts,multi_stats.recovered,multi_stats.final_scale,multi_stats.signed_volume);
+  }
+  if (!multichart_used && dab.extended_material) {
     // V26 avoids sorting diagnostic edges on unreported dabs.
     static thread_local unsigned int count=0;
     const bool report=count++%64==0;
@@ -1179,8 +1191,8 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
                    integrated.refinement_edges,result.active,result.transport_nodes);
     }
   }
-  else result=solve_clay_surface(vertices,triangles,dab);
-  if(dab.tangential_gain_v31d6>0){
+  else if(!multichart_used) result=solve_clay_surface(vertices,triangles,dab);
+  if(!multichart_used && dab.tangential_gain_v31d6>0){
     const auto tangent=add_tangential_transport_v31d6(vertices,triangles,dab,
         result.tangent_weights_v31d6,result.displacement);
     if(profile_v26b_requested() || stroke_option_v31d5("BLENDER_SCULPT_DIAG_V31D5"))
@@ -1547,7 +1559,13 @@ inline bool try_apply_intent(
         std::fprintf(stderr,"[V30E audit] action=%d expected=%zu missing_pbvh=%zu zero_factor=%zu samples=%zu\n",
                      action,expected,missing,zero_factor,samples.size());
       }
-      auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      const bool multichart_v31d7=stroke_option_v31d5("BLENDER_SCULPT_MULTICHART_V31D7") &&
+          footprint_v30e_brush(object,brush) && clay.continuous_contact_v31d2 &&
+          clay.live_surface_v30 && !clay.plastic_v29 &&
+          !cache.reference_symmetry && !cache.reference_combined &&
+          cache.tile_pass==0 && cache.radial_symmetry_pass==0 && cache.mirror_symmetry_pass==0;
+      auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get(),
+                                         multichart_v31d7,convert(cache.view_normal_symm));
       if(clay.contact_reach_v31d4 && profile_v26b_requested())
         std::fprintf(stderr,"[V31D4 reach] action=%d extra_R=0.15 active=%zu goals=%zu component_rejected=%zu scale=%.7g\n",
                      action,planned.active,goals.size(),planned.component_rejected_v30b,planned.accepted_scale);
