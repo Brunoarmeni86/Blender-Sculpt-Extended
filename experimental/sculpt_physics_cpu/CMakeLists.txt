@@ -371,3 +371,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_continuous_transport_v31d6 PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_continuous_transport_v31d6_tests COMMAND test_continuous_transport_v31d6)
+
+# Experimental two-chart fold contact regression.
+add_executable(test_multichart_contact_v31d7 test_multichart_contact_v31d7.cc)
+target_link_libraries(test_multichart_contact_v31d7 PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_multichart_contact_v31d7 PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_multichart_contact_v31d7_tests COMMAND test_multichart_contact_v31d7)
