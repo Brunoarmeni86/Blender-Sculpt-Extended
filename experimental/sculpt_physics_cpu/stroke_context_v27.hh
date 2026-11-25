@@ -65,6 +65,20 @@ inline StrokeStepV27 stage_stroke_v27(const StrokeContextV27 &before,Vec3 center
   }
   return out;
 }
+/* V31D5: distribute an optional equivalent click dose over normalized
+ * travel, not over input events. Never inject a stationary dose or a
+ * bonus across an unobserved gap. The existing first contact is untouched.
+ * This is an artistic exposure control, not calibrated physical time. */
+inline double continuous_exposure_v31d5(double dose,bool started,bool gap,
+                                         double bonus_per_radius)
+{
+  if(!std::isfinite(dose) || dose<0 || dose>1 ||
+     !std::isfinite(bonus_per_radius) || bonus_per_radius<0 || bonus_per_radius>.5)
+    throw std::invalid_argument("Invalid V31D5 exposure");
+  if(!started || gap || dose==0 || bonus_per_radius==0)return dose;
+  return std::min(1.0,dose*(1+bonus_per_radius));
+}
+
 /* Stroke-local tool entrainment, not frozen geometry or material inventory. */
 inline void stage_transport_v30b(StrokeStepV27 &step,const StrokeContextV27 &before)
 {
