@@ -19,6 +19,7 @@
 #  include "material_transport_v21.hh"
 #  include "material_profiles_v25.hh"
 #  include "brush_contact.hh"
+#  include "global_collision_v29.hh"
 #  include "stroke_context_v27.hh"
 
 #  include "BKE_mesh.hh"
@@ -132,6 +133,11 @@ inline float swept_distance_v29(const StrokeCache &cache,float3 p,const float3 *
 inline bool plastic_v29_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PLASTIC_V29");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+inline bool global_collision_v29_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_COLLISION_V29");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
 inline bool profile_v26b_requested()
@@ -622,6 +628,30 @@ inline bool try_apply(const Sculpt &sd,
       }
     }
 
+    if(global_collision_v29_requested()){
+      const auto tris=mesh.corner_tris();
+      const auto corners=mesh.corner_verts();
+      const auto tri_at=[&](std::size_t i){
+        const int3 tri=tris[int(i)];
+        return std::array<std::size_t,3>{std::size_t(corners[tri[0]]),std::size_t(corners[tri[1]]),std::size_t(corners[tri[2]])};
+      };
+      const auto motion_at=[&](std::size_t i)->sculpt_physics::Vec3{
+        const auto it=changes.find(i);
+        if(it==changes.end())return {};
+        return {double(it->second.x),double(it->second.y),double(it->second.z)};
+      };
+      const auto guarded=sculpt_physics::guard_global_collision_v29(
+          std::size_t(tris.size()),tri_at,current_position,motion_at,
+          std::max(1e-12,double(cache.radius)*1e-6));
+      if(profile || guarded.scale<1)
+        std::fprintf(stderr,"[V29 collision] scale=%.7g pairs=%zu limited=%zu unresolved=%zu budget=%d\n",
+            guarded.scale,guarded.tested_pairs,guarded.limited_pairs,guarded.unresolved_pairs,int(guarded.budget_exhausted));
+      contact_scale*=guarded.scale;
+      if(guarded.scale==0){
+        result.cancel();cache.xpbd_v15_state=state;return true;
+      }
+      if(guarded.scale<1)for(auto &item:changes)item.second*=float(guarded.scale);
+    }
     contact_time=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-contact_start).count();
     const auto stage_start=std::chrono::steady_clock::now();
     if (!cache.xpbd_v15_active_logged) {

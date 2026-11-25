@@ -1,3 +1,4 @@
+#include "global_collision_v29.hh"
 #include "stroke_context_v27.hh"
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "material_transport_v21.hh"
@@ -298,8 +299,23 @@ static void compaction_v29_tests(){
   assert(update_compaction_v29(state,.05,1,-1)<state);
   assert(update_compaction_v29(state,0,1,1)==state);
 }
+static void collision_v29_tests(){
+  const std::vector<Vec3> positions{{0,0,0},{1,0,0},{0,1,0},{0,0,1},{1,0,1},{0,1,1}};
+  std::vector<Vec3> motion(6);
+  const std::vector<std::array<std::size_t,3>> tri{{0,1,2},{3,4,5}};
+  const auto tr=[&](std::size_t i){return tri.at(i);};
+  const auto p=[&](std::size_t i){return positions.at(i);};
+  const auto m=[&](std::size_t i){return motion.at(i);};
+  assert(guard_global_collision_v29(tri.size(),tr,p,m).scale==1);
+  for(int i=0;i<3;++i)motion[i]={0,0,2};
+  const auto crossing=guard_global_collision_v29(tri.size(),tr,p,m);
+  assert(crossing.scale>0 && crossing.scale<.5 && crossing.limited_pairs==1);
+  for(int i=0;i<3;++i)motion[i]={0,0,-2};
+  assert(guard_global_collision_v29(tri.size(),tr,p,m).scale==1);
+}
 int main(){
   stroke_context_v27_tests();
+  collision_v29_tests();
   compaction_v29_tests();
   swept_v29_tests();
   refinement_v28b_tests();
