@@ -1380,7 +1380,7 @@ inline bool try_apply_intent(
     const char *coverage_path=std::getenv("BLENDER_SCULPT_COVERAGE_FILE_V31D9");
     const bool capture_v31d9=conservative && coverage_path && coverage_path[0] &&
         live_surface_v30_brush(object,brush) && intent.dose>0 && intent.intensity>0 &&
-        (!v27 || stroke_step.next.samples==1 || stroke_step.next.samples%16==0);
+        (!v27 || stroke_step.next.samples<=2 || stroke_step.next.samples%16==0);
     std::unordered_map<std::size_t,double> coverage_v31d9;
     double pending_press_dose=cache.xpbd_v26_press_dose;
     sculpt_physics::ClaySurfaceDab plastic_dab;
