@@ -92,6 +92,11 @@ inline bool stable_v28_requested()
 }
 struct SurfaceContactRefV28 { sculpt_physics::Vec3 position{}; double radius=0; };
 using SurfaceContactHistoryV28=std::unordered_map<std::size_t,SurfaceContactRefV28>;
+inline bool refine_v28b_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_REFINE_V28B");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
 inline bool profile_v26b_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PROFILE_V26");return v && v[0]=='1' && v[1]=='\0';}();
@@ -989,6 +994,7 @@ inline bool try_apply_intent(
       clay.fast_v26b=fast_v26b_requested();
       clay.contact_v27b=v27 && contact_v27b_requested();
       clay.stable_v28=stable_v28_requested() && v27;
+      clay.refine_v28b=clay.stable_v28 && refine_v28b_requested();
       if(clay.contact_v27b)clay.melt_local_gravity_v27b=material_override("BLENDER_SCULPT_V27B_MELT_LOCAL_GRAVITY",0.0,0.0,1.0);
       if (surface_v20) {
         clay.surface_contact=true;
@@ -1063,13 +1069,15 @@ inline bool try_apply_intent(
         if(clay.contact_v27b){
           const bool reset=!stroke->tool_plane_valid || stroke_step.gap ||
               stroke_dot_v27(stroke_step.next.axis,stroke->axis)<.85;
-          const bool supported=track_tool_plane_v27(stroke_step,*stroke,samples);
+          const bool supported=track_tool_plane_v27(stroke_step,*stroke,samples,clay.refine_v28b);
           if(reset)pending_press_dose=0;
           double depth=clay.tool_depth;
-          if(action==8 && clay.tool_v26){
+          if(action==8 && clay.tool_v26 && !clay.refine_v28b){
             pending_press_dose=std::min(1.0,pending_press_dose+clay.dose*clay.intensity);
             depth=progressive_press_depth_v26(depth,pending_press_dose);
           }
+          // V28B: fixed artist depth, with geometry-local saturation.
+          // Do not deepen a newly encountered area just because the stroke is long.
           clay.axis=stroke_step.next.axis;
           clay.has_tool_plane=true;
           clay.tool_plane_height=stroke_dot_v27(stroke_step.next.tool_reference-clay.center,clay.axis)-

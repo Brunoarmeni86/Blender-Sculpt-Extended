@@ -66,7 +66,8 @@ inline StrokeStepV27 stage_stroke_v27(const StrokeContextV27 &before,Vec3 center
 /* Follow supported leading samples rather than the bottom of a newly
  * carved track. Only existing native candidates participate. */
 inline bool track_tool_plane_v27(StrokeStepV27 &step,const StrokeContextV27 &before,
-                                const std::vector<PhysicalBrushIntentSample> &samples)
+                                const std::vector<PhysicalBrushIntentSample> &samples,
+                                bool recover_v28b=false)
 {
   auto &s=step.next;
   const Vec3 axis=s.axis;
@@ -81,7 +82,7 @@ inline bool track_tool_plane_v27(StrokeStepV27 &step,const StrokeContextV27 &bef
   s.tool_reference=before.tool_reference+move-axis*stroke_dot_v27(move,axis);
   if(distance<=1e-12)return false;
   const Vec3 dir=tangent/distance;
-  double total=0,height=0;
+  double total=0,height=0,fallback_total=0,fallback_height=0;
   for(const auto &v:samples){
     if(!v.writable || v.envelope<=0 || !std::isfinite(v.envelope))continue;
     const Vec3 q=v.position-s.center;
@@ -89,12 +90,20 @@ inline bool track_tool_plane_v27(StrokeStepV27 &step,const StrokeContextV27 &bef
     const Vec3 p=q-axis*z;
     const double front=stroke_dot_v27(p,dir)/s.radius;
     const double r=stroke_norm_v27(p)/s.radius;
-    if(!std::isfinite(r) || !std::isfinite(z) || front<=.20 || r>=.95 || std::abs(z)>.5*s.radius)continue;
+    if(!std::isfinite(r) || !std::isfinite(z) || r>=.95 || std::abs(z)>.5*s.radius)continue;
     const double n=stroke_norm_v27(v.surface_normal);
     if(n>1e-12 && stroke_dot_v27(v.surface_normal/n,axis)<.5)continue;
+    if(recover_v28b && front>0 && r>.15){
+      const double weight=v.envelope*std::clamp(front/.20,0.0,1.0)*std::clamp((.95-r)/.20,0.0,1.0);
+      fallback_total+=weight;fallback_height+=weight*z;
+    }
+    if(front<=.20)continue;
     const double weight=v.envelope*std::min(1.0,(front-.20)/.25)*
                         std::clamp((.95-r)/.20,0.0,1.0);
     height+=weight*z;total+=weight;
+  }
+  if(total<=1e-12 && recover_v28b && fallback_total>1e-12){
+    total=fallback_total;height=fallback_height;
   }
   if(total<=1e-12)return false;
   const double old=stroke_dot_v27(s.tool_reference-s.center,axis);

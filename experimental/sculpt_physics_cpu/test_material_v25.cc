@@ -246,8 +246,43 @@ static void stability_v28_tests(){
     std::cout<<"V28 stability action="<<int(action)<<" motion="<<total_motion<<std::endl;
   }
 }
+static void refinement_v28b_tests(){
+  constexpr int n=33;
+  std::vector<ClaySurfaceVertex> v;
+  std::vector<ClaySurfaceTriangle> tri;
+  for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+    const double px=2.*x/(n-1)-1,py=2.*y/(n-1)-1;
+    const double r2=(px*px+py*py)/.64;
+    const Vec3 p{px,py,.02+.03*px-.04*py-.10*(px*px+py*py)+.02*px*py};
+    v.push_back({p,r2<1?std::pow(1-r2,2):0,p,.8});
+  }
+  for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+    const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
+    tri.push_back({a,b,d});tri.push_back({a,d,c});
+  }
+  ClaySurfaceDab dab;dab.action=ClaySurfaceAction::Melt;dab.radius=.8;dab.dose=.15;
+  dab.density_independent=true;dab.smooth_proxy=true;dab.shape_transport=true;
+  dab.tool_v25=true;dab.tool_v26=true;dab.contact_v27b=true;dab.stable_v28=true;dab.refine_v28b=true;
+  const auto equilibrium=solve_material_transport_v21(v,tri,dab,4,false).surface;
+  for(const auto &p:equilibrium.displacement)assert(std::abs(p.z)<1e-10);
+  for(auto &p:v)p.position.z+=.04*std::exp(-100*(p.position.x*p.position.x+p.position.y*p.position.y));
+  const auto relief=solve_material_transport_v21(v,tri,dab,4,false).surface;
+  assert(relief.displacement[n*n/2].z<0);
+  assert(std::abs(relief.signed_swept_volume)<1e-9);
+  StrokeContextV27 first;
+  auto step=stage_stroke_v27(first,{0,0,0},{0,0,1},1,1);
+  assert(track_tool_plane_v27(step,first,{}));
+  first=step.next;
+  step=stage_stroke_v27(first,{.1,0,0},{0,0,1},1,1);
+  std::vector<PhysicalBrushIntentSample> narrow{{0,{.20,.30,-.03},1,1,true,{0,0,1}}};
+  auto legacy=step;
+  assert(!track_tool_plane_v27(legacy,first,narrow));
+  assert(track_tool_plane_v27(step,first,narrow,true));
+  assert(step.next.tool_reference.z<0 && step.next.tool_reference.z>=-.04);
+}
 int main(){
   stroke_context_v27_tests();
+  refinement_v28b_tests();
   stability_v28_tests();
   contact_v27b_tests();
   assert(progressive_press_depth_v26(.07,0)==.07);

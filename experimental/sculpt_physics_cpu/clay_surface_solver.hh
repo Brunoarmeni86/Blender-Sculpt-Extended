@@ -51,6 +51,7 @@ struct ClaySurfaceDab {
   bool continuous_v26b=false; // retain supported portion of an interrupted trace
   bool contact_v27b=false; // broader contact/return profile
   bool stable_v28=false; // opt-in cumulative bounds and conservative proxy transport
+  bool refine_v28b=false; // gradual capacities and curvature-aware Melt
   double melt_local_gravity_v27b=0.0; // opt-in object-local downhill
   bool has_tool_plane=false;
   double tool_plane_height=0.0; // relative to chart center, along chart axis
@@ -130,6 +131,46 @@ inline double history_scale_v28(Vec3 current,Vec3 reference,Vec3 motion,double r
   const double root=b>=0 ? (disc+b>0?headroom/(disc+b):0.0) : (disc-b)/a;
   return std::clamp(root,0.0,1.0);
 }
+/* Weighted least-squares quadratic in brush-radius coordinates.
+ * A plane or quadratic chart is an equilibrium of the relief diffusion,
+ * rather than being flattened because its height varies in the tool frame.
+ * Singular/narrow masks fall back to zero flux instead of extrapolation. */
+inline bool fit_quadratic_v28b(const std::vector<Vec3> &xy,const std::vector<double> &h,
+                               const std::vector<double> &w,const std::vector<double> &area,
+                               Vec3 ex,Vec3 ey,double radius,std::array<double,6> &coeff)
+{
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  double a[6][7]{};
+  double total=0;
+  for(std::size_t i=0;i<h.size();++i)if(w[i]>0){
+    const double x=dot(xy[i],ex)/radius,y=dot(xy[i],ey)/radius;
+    const double p[6]={1,x,y,x*x,x*y,y*y};
+    const double m=area[i]*w[i];total+=m;
+    for(int j=0;j<6;++j){
+      for(int k=0;k<6;++k)a[j][k]+=m*p[j]*p[k];
+      a[j][6]+=m*p[j]*h[i];
+    }
+  }
+  if(!(total>0) || !std::isfinite(total))return false;
+  for(int j=0;j<6;++j){
+    int pivot=j;
+    for(int k=j+1;k<6;++k)if(std::abs(a[k][j])>std::abs(a[pivot][j]))pivot=k;
+    if(std::abs(a[pivot][j])<total*1e-9)return false;
+    for(int k=j;k<7;++k)std::swap(a[j][k],a[pivot][k]);
+    const double div=a[j][j];
+    for(int k=j;k<7;++k)a[j][k]/=div;
+    for(int i=0;i<6;++i)if(i!=j){
+      const double f=a[i][j];
+      for(int k=j;k<7;++k)a[i][k]-=f*a[j][k];
+    }
+  }
+  for(int j=0;j<6;++j){coeff[j]=a[j][6];if(!std::isfinite(coeff[j]))return false;}
+  return true;
+}
+inline double quadratic_height_v28b(const std::array<double,6> &c,double x,double y)
+{
+  return c[0]+c[1]*x+c[2]*y+c[3]*x*x+c[4]*x*y+c[5]*y*y;
+}
 /* Brush-scale finite-volume proxy. Each active vertex splats its
  * projected area * influence into bilinear or quadratic B-spline chart nodes. The exact
  * transpose of this transfer prolongates height increments. Thus
@@ -162,6 +203,9 @@ inline void coarse_clay_transport(
   const bool pressure=dab.action==ClaySurfaceAction::Compress ||
       dab.action==ClaySurfaceAction::Press || dab.action==ClaySurfaceAction::PressureFlow ||
       dab.action==ClaySurfaceAction::HybridFlow || compact;
+  std::array<double,6> background{};
+  const bool detrend=dab.refine_v28b && melt;
+  const bool fit_ok=!detrend || fit_quadratic_v28b(xy,h,w,area,ex,ey,dab.radius,background);
   std::map<Key,std::size_t> lookup;
   std::vector<Node> nodes;
   std::vector<std::array<Weight,9>> stencil(h.size());
@@ -208,7 +252,8 @@ inline void coarse_clay_transport(
       auto &g=nodes[id];
       const double m=area[i]*w[i]*b;
       g.area+=m;g.raw+=area[i]*b;
-      g.height+=m*h[i];g.source+=m*source;
+      const double relief=detrend?(fit_ok?h[i]-quadratic_height_v28b(background,x*spacing/dab.radius,y*spacing/dab.radius):0.0):h[i];
+      g.height+=m*relief;g.source+=m*source;
       g.pressure+=m*tool;
     }
   }
@@ -228,7 +273,7 @@ inline void coarse_clay_transport(
   for(auto &g:nodes) {
     if(g.area<=0||!std::isfinite(g.area))throw std::overflow_error("Invalid proxy area");
     g.height/=g.area;g.source/=g.area;g.pressure/=g.area;
-    g.volume=std::max(0.0,g.height+g.source-floor)*g.area;
+    g.volume=(detrend?.10*dab.radius:std::max(0.0,g.height+g.source-floor))*g.area;
   }
   const Vec3 dir=unit(dab.direction-axis*dot(dab.direction,axis))*dab.sign;
   std::vector<Link> flux;
@@ -241,7 +286,14 @@ inline void coarse_clay_transport(
     const Vec3 line=ex*double(keys[b][0]-keys[a][0])+ey*double(keys[b][1]-keys[a][1]);
     const Vec3 midpoint=ex*(.5*(keys[a][0]+keys[b][0])*spacing)+
                         ey*(.5*(keys[a][1]+keys[b][1])*spacing);
-    const double align=dot(gather?unit(midpoint*(-1.0))*dab.sign:dir,line);
+    Vec3 field=gather?unit(midpoint*(-1.0))*dab.sign:dir;
+    if(dab.refine_v28b && gather){
+      // A regular radial velocity vanishes at the center instead of
+      // converging at finite speed into a singular point.
+      const double r=std::hypot(midpoint.x,midpoint.y,midpoint.z)/dab.radius;
+      field=field*std::clamp(r/.35,0.0,1.0);
+    }
+    const double align=dot(field,line);
     const bool directed=gather||smear||dab.action==ClaySurfaceAction::Push||
         dab.action==ClaySurfaceAction::HybridFlow||dab.action==ClaySurfaceAction::PressureFlow;
     double f=0;
@@ -425,6 +477,8 @@ inline void shape_clay_transport(
       const double plane=dab.has_tool_plane?dab.tool_plane_height:-dab.sign*(dab.tool_v25?dab.tool_depth:.065)*dab.radius;
       double depth=press?std::max(0.0,dab.sign*(h[i]-plane)):amount*.30;
       if(dab.stable_v28 && !press)depth=std::min(depth,.08*dab.radius);
+      // Reference-based taper is applied below, after the conservative
+      // target has been assembled; no independent hidden pressure counter.
       delta[i]=-dab.sign*w[i]*inner*std::min(depth,amount*(dab.tool_v26&&press?.75:.55));
       // Broaden the receiving band while tapering its outer boundary.
       rim[i]=dab.contact_v27b?w[i]*smooth((r-.22)/.40)*(1-smooth((r-.78)/.22)):
@@ -550,7 +604,7 @@ inline ClaySurfaceResult solve_clay_surface(
       !interval(dab.plasticity) || !interval(dab.volume_preservation) ||
       !interval(dab.fusion) || !interval(dab.fold_gain) || !interval(dab.detail_retention) ||
       !interval(dab.tool_depth) || !interval(dab.melt_local_gravity_v27b) || !std::isfinite(dab.tool_plane_height) ||
-      (dab.tool_v26&&!dab.tool_v25) || (dab.tool_v25&&!dab.shape_transport) || dab.proxy_cells_per_radius<4 || dab.proxy_cells_per_radius>16) throw std::invalid_argument("Invalid clay surface dab");
+      (dab.refine_v28b&&!dab.stable_v28) || (dab.tool_v26&&!dab.tool_v25) || (dab.tool_v25&&!dab.shape_transport) || dab.proxy_cells_per_radius<4 || dab.proxy_cells_per_radius>16) throw std::invalid_argument("Invalid clay surface dab");
   switch(dab.action) {
     case ClaySurfaceAction::Buildup: case ClaySurfaceAction::Push:
     case ClaySurfaceAction::Gather: case ClaySurfaceAction::Spread:
@@ -797,7 +851,14 @@ inline ClaySurfaceResult solve_clay_surface(
     }
     for(std::size_t i=0;i<n;++i)if(delta[i]!=0 && vertices[i].contact_radius>0){
       const double limit=history_radius_fraction_v28(dab.action)*vertices[i].contact_radius;
-      const double scale=history_scale_v28(vertices[i].position,vertices[i].contact_reference,axis*delta[i],limit);
+      const Vec3 offset=vertices[i].position-vertices[i].contact_reference;
+      double scale=history_scale_v28(vertices[i].position,vertices[i].contact_reference,axis*delta[i],limit);
+      if(dab.refine_v28b && dot(offset,axis*delta[i])>0){
+        // Smoothly reduce only outward-from-reference motion as a point
+        // approaches saturation. Recovery stays fully available.
+        const double t=std::clamp((limit-norm(offset))/(.45*limit),0.0,1.0);
+        scale=std::min(scale,t*t*(3-2*t));
+      }
       if(scale<1)++out.history_limited;
       delta[i]*=scale;
     }
