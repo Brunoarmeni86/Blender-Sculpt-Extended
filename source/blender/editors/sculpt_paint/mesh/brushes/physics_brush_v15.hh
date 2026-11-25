@@ -74,6 +74,11 @@ inline bool stroke_v27_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_STROKE_V27");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
+inline bool contact_v27b_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_CONTACT_V27B");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
 inline bool profile_v26b_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PROFILE_V26");return v && v[0]=='1' && v[1]=='\0';}();
@@ -950,6 +955,8 @@ inline bool try_apply_intent(
       clay.mobility=intent.spread;
       clay.sign=sign;
       clay.fast_v26b=fast_v26b_requested();
+      clay.contact_v27b=v27 && contact_v27b_requested();
+      if(clay.contact_v27b)clay.melt_local_gravity_v27b=material_override("BLENDER_SCULPT_V27B_MELT_LOCAL_GRAVITY",0.0,0.0,1.0);
       if (surface_v20) {
         clay.surface_contact=true;
         clay.flow_fusion=original_action==3;
@@ -1020,6 +1027,24 @@ inline bool try_apply_intent(
       else clay.action=ClaySurfaceAction::Push;
       if (clay.tool_v25 && (action==8 || action==14) &&
           material_override("BLENDER_SCULPT_V25_LOCK_PLANE",1.0,0.0,1.0)>0.5) {
+        if(clay.contact_v27b){
+          const bool reset=!stroke->tool_plane_valid || stroke_step.gap ||
+              stroke_dot_v27(stroke_step.next.axis,stroke->axis)<.85;
+          const bool supported=track_tool_plane_v27(stroke_step,*stroke,samples);
+          if(reset)pending_press_dose=0;
+          double depth=clay.tool_depth;
+          if(action==8 && clay.tool_v26){
+            pending_press_dose=std::min(1.0,pending_press_dose+clay.dose*clay.intensity);
+            depth=progressive_press_depth_v26(depth,pending_press_dose);
+          }
+          clay.axis=stroke_step.next.axis;
+          clay.has_tool_plane=true;
+          clay.tool_plane_height=stroke_dot_v27(stroke_step.next.tool_reference-clay.center,clay.axis)-
+                                sign*depth*clay.radius;
+          if(profile_v26b_requested())std::fprintf(stderr,
+              "[V27B contact] action=%d plane=%.7g depth=%.7g reset=%d support=%d\n",
+              action,clay.tool_plane_height,depth,int(reset),int(supported));
+        }else{
         const float3 axis=v27 ? float3(float(clay.axis.x),float(clay.axis.y),float(clay.axis.z)) : math::normalize(normal);
         if (!cache.xpbd_v25_plane_valid) {
           pending_press_dose=0.0;
@@ -1047,6 +1072,7 @@ inline bool try_apply_intent(
           clay.axis=convert(cache.xpbd_v25_plane_normal);
           clay.has_tool_plane=true;
           clay.tool_plane_height=(reanchor?0.0:height)-sign*depth*clay.radius;
+        }
         }
       }
       const Mesh &mesh=*id_cast<Mesh *>(object.data);

@@ -131,8 +131,71 @@ static void stroke_context_v27_tests(){
   assert(swept_distance_squared_v27({2,0,0},{0,0,0},{1,0,0})==1);
   assert(swept_distance_squared_v27({1,0,0},{0,0,0},{0,0,0})==1);
 }
+static void contact_v27b_tests()
+{
+  StrokeContextV27 before;
+  auto first=stage_stroke_v27(before,{0,0,0},{0,0,1},1,1);
+  assert(track_tool_plane_v27(first,before,{}));
+  before=first.next;
+  auto next=stage_stroke_v27(before,{.1,0,-.12},{0,0,1},1,1);
+  std::vector<PhysicalBrushIntentSample> samples{
+      {0,{.55,0,0},1,1,true,{0,0,1}},
+      {1,{.1,0,-.12},1,1,true,{0,0,1}},
+      {2,{.65,0,-.4},1,1,false,{0,0,1}}};
+  assert(track_tool_plane_v27(next,before,samples));
+  assert(std::abs(next.next.tool_reference.z)<1e-12);
+  assert(before.center.z==0);
+  const auto old=next.next;
+  auto unsupported=stage_stroke_v27(old,{.2,0,-.18},{0,0,1},1,1);
+  assert(!track_tool_plane_v27(unsupported,old,{}));
+  assert(std::abs(unsupported.next.tool_reference.z-old.tool_reference.z)<1e-12);
+  for(const auto action:{ClaySurfaceAction::Scrape,ClaySurfaceAction::Press,ClaySurfaceAction::Compact,ClaySurfaceAction::Melt}){
+    constexpr int n=33;
+    std::vector<ClaySurfaceVertex> v;
+    std::vector<ClaySurfaceTriangle> tri;
+    for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+      const double px=2.*x/(n-1)-1,py=2.*y/(n-1)-1;
+      v.push_back({{px,py,.03*std::cos(5*px)},0});
+    }
+    for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+      const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
+      tri.push_back({a,b,d});tri.push_back({a,d,c});
+    }
+    ClaySurfaceDab dab;dab.action=action;dab.radius=.5;dab.dose=.12;dab.intensity=1;
+    dab.direction={1,0,0};dab.density_independent=true;dab.smooth_proxy=true;
+    dab.shape_transport=true;dab.tool_v25=true;dab.tool_v26=true;dab.fast_v26b=true;
+    dab.contact_v27b=true;dab.has_tool_plane=true;dab.volume_preservation=.75;
+    int moving=0;
+    for(int k=0;k<8;++k){
+      const double x=-.28+.06*k;
+      dab.center={x,0,.03*std::cos(5*x)};
+      dab.tool_plane_height=-.07*dab.radius;
+      for(auto &p:v){
+        const double dx=p.position.x-x,dy=p.position.y;
+        const double r2=(dx*dx+dy*dy)/(dab.radius*dab.radius);
+        p.influence=r2<1&&dy>-.30?std::pow(1-r2,2):0;
+      }
+      const auto out=solve_material_transport_v21(v,tri,dab,4,false).surface;
+      double l1=0;
+      for(std::size_t i=0;i<v.size();++i){
+        const auto delta=out.displacement[i];
+        assert(std::isfinite(delta.z));
+        if(v[i].influence==0)assert(delta.z==0);
+        if(action==ClaySurfaceAction::Scrape)assert(delta.z<=1e-12);
+        l1+=std::abs(delta.z);v[i].position+=delta;
+      }
+      if(l1>1e-9)++moving;
+      if(action==ClaySurfaceAction::Press || action==ClaySurfaceAction::Melt)
+        assert(std::abs(out.signed_swept_volume)<1e-8);
+      else assert(out.signed_swept_volume<=1e-10);
+    }
+    std::cout<<"V27B overlap action="<<int(action)<<" moving="<<moving<<std::endl;
+    assert(moving>=6);
+  }
+}
 int main(){
   stroke_context_v27_tests();
+  contact_v27b_tests();
   assert(progressive_press_depth_v26(.07,0)==.07);
   assert(progressive_press_depth_v26(.07,.5)>progressive_press_depth_v26(.07,.1));
   assert(progressive_press_depth_v26(.24,100)<=.25);

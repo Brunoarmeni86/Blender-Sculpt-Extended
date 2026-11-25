@@ -46,6 +46,8 @@ struct ClaySurfaceDab {
   bool tool_v26=false; // experimental surface response; explicit native opt-in
   bool fast_v26b=false; // common connectivity and spatial lookup, including Deposit
   bool continuous_v26b=false; // retain supported portion of an interrupted trace
+  bool contact_v27b=false; // broader contact/return profile
+  double melt_local_gravity_v27b=0.0; // opt-in object-local downhill
   bool has_tool_plane=false;
   double tool_plane_height=0.0; // relative to chart center, along chart axis
   double fold_gain=0.22, detail_retention=0.85, tool_depth=0.07;
@@ -200,7 +202,8 @@ inline void coarse_clay_transport(
     if(melt && dab.tool_v26) {
       const double downhill=dot(Vec3{0,0,-1},line);
       const double thickness=downhill>=0?u.volume/u.area:v.volume/v.area;
-      f+=downhill*thickness*width*travel*mobility*envelope*.65;
+      f+=downhill*thickness*width*travel*mobility*envelope*.65*
+          (dab.contact_v27b?dab.melt_local_gravity_v27b:1.0);
     }
     if(pressure||fusion||melt||smear||dab.action==ClaySurfaceAction::Spread||
        (dab.action==ClaySurfaceAction::Push&&dab.flow_fusion)) {
@@ -353,11 +356,14 @@ inline void shape_clay_transport(
       delta[i]=-dab.sign*w[i]*std::min(penetration,amount*(dab.tool_v26?.85:.60));
     }
     else if(press||compact||compress) {
-      const double inner=1-smooth((r-.42)/(dab.tool_v26&&press?.37:.29));
+      const double inner=dab.contact_v27b?1-smooth((r-.30)/.49):
+          1-smooth((r-.42)/(dab.tool_v26&&press?.37:.29));
       const double plane=dab.has_tool_plane?dab.tool_plane_height:-dab.sign*(dab.tool_v25?dab.tool_depth:.065)*dab.radius;
       const double depth=press?std::max(0.0,dab.sign*(h[i]-plane)):amount*.30;
       delta[i]=-dab.sign*w[i]*inner*std::min(depth,amount*(dab.tool_v26&&press?.75:.55));
-      rim[i]=w[i]*smooth((r-(dab.tool_v26&&press?.38:.50))/.25);
+      // Broaden the receiving band while tapering its outer boundary.
+      rim[i]=dab.contact_v27b?w[i]*smooth((r-.22)/.40)*(1-smooth((r-.78)/.22)):
+          w[i]*smooth((r-(dab.tool_v26&&press?.38:.50))/.25);
       peak_rim=std::max(peak_rim,rim[i]);
       removed-=delta[i]*area[i];receiver+=rim[i]*area[i];
     }
@@ -470,7 +476,7 @@ inline ClaySurfaceResult solve_clay_surface(
       !interval(dab.cohesion) || !interval(dab.stiffness) ||
       !interval(dab.plasticity) || !interval(dab.volume_preservation) ||
       !interval(dab.fusion) || !interval(dab.fold_gain) || !interval(dab.detail_retention) ||
-      !interval(dab.tool_depth) || !std::isfinite(dab.tool_plane_height) ||
+      !interval(dab.tool_depth) || !interval(dab.melt_local_gravity_v27b) || !std::isfinite(dab.tool_plane_height) ||
       (dab.tool_v26&&!dab.tool_v25) || (dab.tool_v25&&!dab.shape_transport) || dab.proxy_cells_per_radius<4 || dab.proxy_cells_per_radius>16) throw std::invalid_argument("Invalid clay surface dab");
   switch(dab.action) {
     case ClaySurfaceAction::Buildup: case ClaySurfaceAction::Push:
