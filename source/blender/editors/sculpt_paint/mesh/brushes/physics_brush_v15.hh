@@ -482,9 +482,9 @@ inline bool try_apply(const Sculpt &sd,
       return raw && raw[0]=='1' && raw[1]=='\0';
     }();
     if (profiles || cache.xpbd_v16_clay_material) {
-      const auto profile=sculpt_physics::experimental_native_brush_profile(kind);
-      dab.compliance=profile.target_compliance;
-      dab.material=profile.material;
+      const auto brush_profile=sculpt_physics::experimental_native_brush_profile(kind);
+      dab.compliance=brush_profile.target_compliance;
+      dab.material=brush_profile.material;
     }
     // Native XPBD Sculpt assets keep Blender's original Clay plane and
     // pressure/falloff. They never invoke an autonomous material action.
@@ -494,9 +494,9 @@ inline bool try_apply(const Sculpt &sd,
         (kind==sculpt_physics::NativeSculptBrushKind::Clay ||
          kind==sculpt_physics::NativeSculptBrushKind::ClayStrips);
     if (native_clay_assist && drag_contact_requested()) {
-      const auto profile=sculpt_physics::experimental_native_brush_profile(kind);
-      dab.compliance=profile.target_compliance;
-      dab.material=profile.material;
+      const auto brush_profile=sculpt_physics::experimental_native_brush_profile(kind);
+      dab.compliance=brush_profile.target_compliance;
+      dab.material=brush_profile.material;
       dab.current_rest=true;
       if(stable_v28_requested() && refine_v28b_requested() && dab.assist>0.0){
         dab.post_stability_v28=true;
