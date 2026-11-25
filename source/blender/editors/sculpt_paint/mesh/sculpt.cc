@@ -5319,6 +5319,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
   PRF_scope(ProfileCategory::Editor);
   PRF_scope_set_dynamic_name("%s", sculpt_brush_type_name(brush));
   SculptSession &ss = *ob.runtime->sculpt_session;
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  brushes::physics_v15::MirrorStrokeScopeV31D5 physical_pass(sd,ob,brush);
+#endif
   /* Sculpt Mesh V3 timing probe.
    * Instrumentation only: no sculpt math / PBVH / undo behavior changes. */
   const Mesh *sculpt_mesh_v3_probe_mesh = BKE_object_get_original_mesh(&ob);
@@ -5793,7 +5796,12 @@ static void do_brush_action(const Depsgraph &depsgraph,
   }
 
   /* The cloth brush adds the gravity as a regular force and it is processed in the solver. */
-  if (ss.cache->supports_gravity && brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_CLOTH) {
+  bool suppress_physical_gravity=false;
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  suppress_physical_gravity=brushes::physics_v15::d5_enabled("BLENDER_SCULPT_NO_GRAVITY_V31D5") &&
+      brush.sculpt_physics_mode==3 && brushes::physics_v15::live_surface_v30_brush(ob,brush);
+#endif
+  if (!suppress_physical_gravity && ss.cache->supports_gravity && brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_CLOTH) {
     brushes::do_gravity_brush(depsgraph, sd, ob, node_mask);
   }
 
