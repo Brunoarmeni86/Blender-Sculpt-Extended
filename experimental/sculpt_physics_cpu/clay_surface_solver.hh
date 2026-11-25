@@ -64,6 +64,7 @@ struct ClaySurfaceDab {
   bool continuous_contact_v31d2=false;
   double motion_proxy_v31d3=0.0; // opt-in conservative two-scale motion reconstruction
   bool contact_reach_v31d4=false; // experimental +0.15R geodesic reach; same geometric candidate bound
+  bool narrow_rim_v31d8=false; // opt-in smaller receiving profile on very short supported patches
   double tangential_gain_v31d6=0.0; // opt-in; retain selected weights for host tangential pass
   bool push_v30d=false; // stronger current-relief entrainment; Push only
   double push_gain_v30d=2.5;
@@ -113,7 +114,36 @@ struct ClaySurfaceResult {
   std::size_t proxy_passes_v31d3=0,proxy_rejected_v31d3=0,proxy_nodes_v31d3=0;
   double proxy_strain_before_v31d3=0,proxy_strain_after_v31d3=0,proxy_budget_error_v31d3=0;
   double melt_residual_peak_v30b=0.0;
+  std::size_t rim_samples_v31d8=0,rim_adapted_v31d8=0,rim_empty_v31d8=0;
+  double rim_extent_v31d8=0,rim_receiver_v31d8=0,rim_removed_v31d8=0,rim_acceptance_v31d8=1;
 };
+
+/* Internal return-profile scale, NOT brush radius or actual thickness.
+ * Preserve the old response exactly where max_r >= .22. */
+inline double contact_rim_radius_v31d8(double max_r,bool enabled)
+{
+  return std::clamp(max_r/.88,enabled?.025:.25,1.0);
+}
+inline void accumulate_rim_stats_v31d8(ClaySurfaceResult &out,const ClaySurfaceResult &part)
+{
+  out.rim_samples_v31d8+=part.rim_samples_v31d8;
+  out.rim_adapted_v31d8+=part.rim_adapted_v31d8;
+  out.rim_empty_v31d8+=part.rim_empty_v31d8;
+  out.rim_extent_v31d8=std::max(out.rim_extent_v31d8,part.rim_extent_v31d8);
+  out.rim_receiver_v31d8+=part.rim_receiver_v31d8;
+  out.rim_removed_v31d8+=part.rim_removed_v31d8;
+  out.rim_acceptance_v31d8=std::min(out.rim_acceptance_v31d8,part.rim_acceptance_v31d8);
+}
+inline void record_rim_stats_v31d8(ClaySurfaceResult &out,double extent,double rim,double removed,double receiver,double accepted)
+{
+  ++out.rim_samples_v31d8;
+  if(rim<.25)++out.rim_adapted_v31d8;
+  if(receiver<=1e-24)++out.rim_empty_v31d8;
+  out.rim_extent_v31d8=std::max(out.rim_extent_v31d8,extent);
+  out.rim_receiver_v31d8+=receiver;
+  out.rim_removed_v31d8+=std::abs(removed);
+  out.rim_acceptance_v31d8=std::min(out.rim_acceptance_v31d8,accepted);
+}
 
 // Qualitative hardening state. Units are normal displacement / brush radius,
 // not measured volumetric plastic strain. Inverse compression can loosen it.
@@ -673,12 +703,11 @@ inline void shape_clay_transport(
   const bool compress=dab.action==ClaySurfaceAction::Compress;
   std::vector<double> rim(w.size(),0.0);
   double removed=0,receiver=0,peak_rim=0;
-  double rim_radius=1.0;
+  double rim_radius=1.0,max_r=0;
   if(dab.contact_v30b && (press||compact||compress)){
-    double max_r=0;
     for(std::size_t i=0;i<w.size();++i)if(w[i]>.02)
       max_r=std::max(max_r,chart_distance_v29(xy[i],dab,axis)/dab.radius);
-    rim_radius=std::clamp(max_r/.88,.25,1.0);
+    rim_radius=contact_rim_radius_v31d8(max_r,dab.narrow_rim_v31d8 && dab.contact_v27b && dab.live_surface_v30);
   }
   const auto penetration_v30b=[&](double height,double plane,double r){
     double z=dab.sign*height,p=dab.sign*plane;
@@ -777,6 +806,7 @@ inline void shape_clay_transport(
     const double peak=std::abs(coefficient)*peak_rim;
     const double peak_limit=amount*(dab.stable_v28?.30:.65);
     const double accepted=receiver<=1e-24?0.0:peak>peak_limit?peak_limit/peak:1.0;
+    record_rim_stats_v31d8(out,max_r,rim_radius,removed,receiver,accepted);
     // Preserve the unreturned compaction fraction; reduce only the
     // conservative displacement when the receiving rim has no capacity.
     // Prevent a narrow mask opening from generating a high berm.
@@ -1132,7 +1162,7 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   const bool compact=dab.action==ClaySurfaceAction::Compact;
   const double amount=std::min(.08*dab.radius,dab.radius*dab.dose*dab.intensity*
       (.35+1.65*dab.mobility)*(1-.45*dab.stiffness)*(1-.30*dab.cohesion));
-  const double rim_radius=std::clamp(max_r/.88,.25,1.0);
+  const double rim_radius=contact_rim_radius_v31d8(max_r,dab.narrow_rim_v31d8 && !scrape && dab.live_surface_v30);
   std::vector<double> reference;
   if(dab.average_surface_v31d>0 && (press||scrape)){
     std::vector<Vec3> xy(n);std::vector<double> height(n);
@@ -1178,6 +1208,7 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
     const double coefficient=receiver>1e-24?fraction*removed/receiver:0;
     const double peak=coefficient*peak_rim;
     const double accepted=receiver<=1e-24?0:peak>amount*.30?amount*.30/peak:1;
+    record_rim_stats_v31d8(out,max_r,rim_radius,removed,receiver,accepted);
     for(std::size_t i=0;i<n;++i)
       delta[i]=delta[i]*((1-fraction)+fraction*accepted)+dab.sign*accepted*coefficient*rim[i];
   }
@@ -1471,6 +1502,7 @@ inline ClaySurfaceResult solve_clay_surface(
         out.signed_swept_volume+=part.signed_swept_volume;
         out.transported_volume+=part.transported_volume;
         out.fine_transport_v30b+=part.fine_transport_v30b;
+        accumulate_rim_stats_v31d8(out,part);
         out.melt_fit_failures_v30b+=part.melt_fit_failures_v30b;
         out.melt_affine_fallbacks_v31c+=part.melt_affine_fallbacks_v31c;
         // Parent already counted pre-split candidate recovery; report
