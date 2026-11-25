@@ -60,6 +60,7 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     out.surface.trace_rejected+=step.trace_rejected;
     out.surface.history_limited+=step.history_limited;
     out.surface.fine_transport_v30b+=step.fine_transport_v30b;
+    accumulate_rim_stats_v31d8(out.surface,step);
     out.surface.chart_rejected_v30b+=step.chart_rejected_v30b;
     out.surface.chart_recovered_v30b+=step.chart_recovered_v30b;
     out.surface.depth_rejected_v30b+=step.depth_rejected_v30b;
