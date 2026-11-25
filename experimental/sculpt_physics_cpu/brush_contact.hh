@@ -212,4 +212,55 @@ inline LocalContactResult limit_local_contact(
   return out;
 }
 
+/* V30C: local triangle reductions with a signed first-order volume
+ * budget. For the parallel-axis surface motion this is the projected
+ * swept-volume budget; arbitrary 3D motion is not supported by this path.
+ * Balance only by reducing motion, then revalidate EVERY incident face.
+ * No changes to pinned vertices. */
+inline LocalContactResult limit_balanced_contact_v30c(
+    const std::vector<Vec3> &positions,
+    const std::vector<std::array<std::size_t,3>> &triangles,
+    std::vector<Vec3> &motion)
+{
+  if(positions.size()!=motion.size())throw std::invalid_argument("V30C contact size");
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  const auto cross=[](Vec3 a,Vec3 b){return Vec3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};};
+  const auto norm=[](Vec3 a){return std::hypot(a.x,a.y,a.z);};
+  const auto original=motion;
+  std::vector<Vec3> dual(positions.size());
+  for(const auto &tri:triangles){
+    for(auto i:tri)if(i>=positions.size())throw std::out_of_range("V30C contact triangle");
+    const Vec3 a=cross(positions[tri[1]]-positions[tri[0]],positions[tri[2]]-positions[tri[0]])/6.0;
+    for(auto i:tri)dual[i]+=a;
+  }
+  const auto budget=[&](const std::vector<Vec3> &moves){
+    std::array<double,2> sum{};
+    for(std::size_t i=0;i<moves.size();++i){
+      const double v=dot(dual[i],moves[i]);
+      sum[0]+=std::max(0.0,v);sum[1]+=std::max(0.0,-v);
+    }
+    return sum;
+  };
+  const auto before=budget(original);
+  auto out=limit_local_contact(positions,triangles,motion,false);
+  const auto after=budget(motion);
+  double ratio=1.0;
+  for(int j=0;j<2;++j)if(before[j]>0)ratio=std::min(ratio,after[j]/before[j]);
+  for(std::size_t i=0;i<motion.size();++i){
+    const double v=dot(dual[i],motion[i]);
+    if(v==0)continue;
+    const int j=v>0?0:1;
+    motion[i]=motion[i]*std::clamp(ratio*before[j]/after[j],0.0,1.0);
+  }
+  const auto final=limit_local_contact(positions,triangles,motion,true);
+  out.final_scale=final.final_scale;
+  out.minimum_scale=1.0;out.limited_vertices=0;
+  for(std::size_t i=0;i<motion.size();++i)if(norm(original[i])>0){
+    const double scale=norm(motion[i])/norm(original[i]);
+    out.minimum_scale=std::min(out.minimum_scale,scale);
+    if(scale<.999999)++out.limited_vertices;
+  }
+  return out;
+}
+
 } // namespace sculpt_physics

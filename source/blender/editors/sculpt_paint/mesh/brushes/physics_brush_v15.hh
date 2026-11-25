@@ -132,6 +132,11 @@ inline bool contact_v30b_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_CONTACT_V30B");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
+inline bool overlap_v30c_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_OVERLAP_V30C");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
 inline bool swept_v29_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_SWEEP_V29");return v && v[0]=='1' && v[1]=='\0';}();
@@ -271,7 +276,8 @@ inline bool drag_contact_requested()
 // quad diagonals and pinned neighboring vertices. Never scan all faces.
 inline sculpt_physics::LocalContactResult limit_drag_contact(
     const Mesh &mesh, const Span<float3> positions,
-    std::unordered_map<std::size_t,float3> &changes, const bool uniform_only)
+    std::unordered_map<std::size_t,float3> &changes, const bool uniform_only,
+    const bool balance_local=false)
 {
   const auto map=mesh.vert_to_face_map();
   const auto faces=mesh.faces();
@@ -309,7 +315,8 @@ inline sculpt_physics::LocalContactResult limit_drag_contact(
                            add_vertex(std::size_t(corners[c[2]]))});
     }
   }
-  const auto result=sculpt_physics::limit_local_contact(p,triangles,motion,uniform_only);
+  const auto result=balance_local?sculpt_physics::limit_balanced_contact_v30c(p,triangles,motion):
+                                 sculpt_physics::limit_local_contact(p,triangles,motion,uniform_only);
   for(std::size_t i=0;i<global.size();++i) {
     auto it=changes.find(global[i]);
     if(it!=changes.end()) {
@@ -655,7 +662,10 @@ inline bool try_apply(const Sculpt &sd,
         kind!=sculpt_physics::NativeSculptBrushKind::Gravity) {
       const bool local_scrape=live_surface && contact_v30b_requested() && autonomous &&
                               cache.xpbd_v16_clay_behavior==14;
-      const auto result=limit_drag_contact(mesh,current,changes,conservative_clay && !local_scrape);
+      const bool balanced_local=live_surface && overlap_v30c_requested() && conservative_clay &&
+                                autonomous && cache.xpbd_v16_clay_behavior!=1 &&
+                                cache.xpbd_v16_clay_behavior!=4 && cache.xpbd_v16_clay_behavior!=14;
+      const auto result=limit_drag_contact(mesh,current,changes,conservative_clay && !local_scrape,balanced_local);
       contact_scale=result.final_scale;
       if (!cache.xpbd_v15_active_logged || result.final_scale<0.25) {
         std::fprintf(stderr,
@@ -802,7 +812,16 @@ inline bool try_apply(const Sculpt &sd,
   // Full native Blender Undo journal/partial PBVH write rollback is not yet
   // implemented; this gated preview must not be enabled in release builds.
   const auto write_start=std::chrono::steady_clock::now();
+  std::size_t moved_v30c=0,staged_v30c=0;
   for (PreparedNode &node : editor_writes) {
+    if(profile && overlap_v30c_requested()){
+      const Span<int> ids=nodes[node.id].verts();
+      for(const int i:ids.index_range()){
+        const float3 p=current[ids[i]],q=p+node.translations[i];
+        ++staged_v30c;
+        if(q.x!=p.x || q.y!=p.y || q.z!=p.z)++moved_v30c;
+      }
+    }
     bke::pbvh::MeshNode &pbvh_node=nodes[node.id];
     position_data.deform(node.translations,pbvh_node.verts());
     bke::pbvh::update_node_bounds_mesh(position_data.eval,pbvh_node);
@@ -816,6 +835,7 @@ inline bool try_apply(const Sculpt &sd,
   pbvh.flush_bounds_to_parents();
   result.finish_editor_success();
   cache.xpbd_v15_state=state;
+  if(profile && overlap_v30c_requested())std::fprintf(stderr,"[V30C write] action=%d targets=%zu staged=%zu moved=%zu contact_scale=%.7g\n",cache.xpbd_v16_clay_behavior,native_translations.size(),staged_v30c,moved_v30c,contact_scale);
   if(profile){
     const auto now=std::chrono::steady_clock::now();
     std::fprintf(stderr,"[V26 profile] kind=%d action=%d targets=%zu prepare_ms=%.3f contact_ms=%.3f stage_ms=%.3f write_ms=%.3f total_ms=%.3f contact_scale=%.6f\n",
@@ -1153,6 +1173,7 @@ inline bool try_apply_intent(
         clay.axis=convert(normal);
         if(v27)stroke_step.next.axis=clay.axis/stroke_norm_v27(clay.axis);
       }
+      clay.overlap_v30c=clay.live_surface_v30 && clay.stable_v28 && overlap_v30c_requested();
       clay.contact_v30b=clay.live_surface_v30 && clay.refine_v28b && contact_v30b_requested() &&
                          (action==5 || action==7 || action==8 || action==14);
       clay.transport_v30b=clay.live_surface_v30 && clay.refine_v28b && transport_v30b_requested() &&
@@ -1312,6 +1333,11 @@ inline bool try_apply_intent(
         }
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      if(clay.overlap_v30c && profile_v26b_requested()){
+        std::size_t eligible=0;
+        for(const auto &sample:samples)if(sample.writable && sample.envelope>0)++eligible;
+        std::fprintf(stderr,"[V30C coverage] action=%d candidates=%zu eligible=%zu active=%zu goals=%zu patches=%zu chart_rejected=%zu depth_rejected=%zu other_component=%zu patch_budget=%zu scale=%.7g\n",action,samples.size(),eligible,planned.active,goals.size(),planned.patches_v30c,planned.chart_rejected_v30b,planned.depth_rejected_v30b,planned.component_rejected_v30b,planned.patch_budget_skipped_v30c,planned.accepted_scale);
+      }
       if(clay.live_surface_v30 && profile_v26b_requested())std::fprintf(stderr,"[V30 live] action=%d candidates=%zu active=%zu goals=%zu scale=%.7g history_limited=%zu\n",action,samples.size(),planned.active,goals.size(),planned.accepted_scale,planned.history_limited);
       if(clay.live_surface_v30 && clay.refine_v28b && action==11 && profile_v26b_requested())
         std::fprintf(stderr,"[V30B melt] fit_failures=%zu residual_peak_R=%.7g active=%zu proxy_nodes=%zu volume=%.8g scale=%.7g\n",planned.melt_fit_failures_v30b,planned.melt_residual_peak_v30b,planned.active,planned.transport_nodes,planned.transported_volume,planned.accepted_scale);

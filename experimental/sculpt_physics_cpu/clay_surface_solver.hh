@@ -55,6 +55,7 @@ struct ClaySurfaceDab {
   bool live_surface_v30=false; // incremental current-geometry safety, no stroke-start displacement cap
   bool transport_v30b=false;
   bool contact_v30b=false;
+  bool overlap_v30c=false;
   double transport_load_v30b=1.0;
   bool refine_v28b=false; // gradual capacities and curvature-aware Melt
   bool swept_v29=false;
@@ -92,6 +93,7 @@ struct ClaySurfaceResult {
   double fine_transport_v30b=0.0;
   std::size_t chart_rejected_v30b=0,chart_recovered_v30b=0,depth_rejected_v30b=0;
   std::size_t component_rejected_v30b=0,local_limited_v30b=0;
+  std::size_t patches_v30c=0,patch_budget_skipped_v30c=0;
   std::size_t melt_fit_failures_v30b=0;
   double melt_residual_peak_v30b=0.0;
 };
@@ -695,7 +697,7 @@ inline ClaySurfaceResult solve_clay_surface(
     const std::vector<ClaySurfaceVertex> &vertices,
     const std::vector<ClaySurfaceTriangle> &triangles,
     const ClaySurfaceDab &dab,
-    ClaySurfaceEdges *dab_edges=nullptr)
+    ClaySurfaceEdges *dab_edges=nullptr,bool allow_patch_split=true)
 {
   const auto norm=[](Vec3 a){return std::hypot(a.x,a.y,a.z);};
   const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
@@ -830,6 +832,72 @@ inline ClaySurfaceResult solve_clay_surface(
     }
   }
   if(seed==n || dab.dose==0 || dab.intensity==0) return out;
+  // V30C: separate topological support from writable transport components.
+  // The halo includes incident faces, including zero-factor vertices.
+  // Other disconnected mesh sheets are still excluded. Within the touched
+  // sheet, solve each writable island independently so no proxy flux crosses
+  // a mask or an excluded strip of steep vertices. Do not reuse any geometry
+  // or goals from an earlier dab.
+  if(dab.overlap_v30c && allow_patch_split){
+    std::vector<std::size_t> sheet(n),active_parent(n);
+    for(std::size_t i=0;i<n;++i)sheet[i]=active_parent[i]=i;
+    const auto root=[](std::vector<std::size_t> &p,std::size_t i){
+      while(p[i]!=i){p[i]=p[p[i]];i=p[i];}return i;
+    };
+    const auto unite=[&](std::vector<std::size_t> &p,std::size_t a,std::size_t b){
+      a=root(p,a);b=root(p,b);if(a!=b)p[b]=a;
+    };
+    for(const auto &e:edges){
+      unite(sheet,e[0],e[1]);
+      if(w[e[0]]>0 && w[e[1]]>0)unite(active_parent,e[0],e[1]);
+    }
+    struct Patch {std::vector<std::size_t> ids;double nearest=std::numeric_limits<double>::infinity();};
+    std::map<std::size_t,Patch> patches;
+    const auto main_sheet=root(sheet,seed);
+    for(std::size_t i=0;i<n;++i)if(w[i]>0){
+      if(root(sheet,i)!=main_sheet){++out.component_rejected_v30b;continue;}
+      auto &patch=patches[root(active_parent,i)];
+      patch.ids.push_back(i);
+      patch.nearest=std::min(patch.nearest,norm(vertices[i].position-dab.center));
+    }
+    if(patches.size()>1){
+      std::vector<const Patch *> ordered;
+      for(const auto &entry:patches)ordered.push_back(&entry.second);
+      std::stable_sort(ordered.begin(),ordered.end(),[](const Patch *a,const Patch *b){
+        return a->nearest<b->nearest;
+      });
+      // Bound worst-case work on fragmented masks; report every skipped
+      // eligible vertex rather than pretending that it was processed.
+      constexpr std::size_t max_patches=8;
+      auto local_vertices=vertices;
+      for(auto &v:local_vertices)v.influence=0.0;
+      for(const Patch *patch:ordered){
+        if(out.patches_v30c>=max_patches){out.patch_budget_skipped_v30c+=patch->ids.size();continue;}
+        for(auto i:patch->ids)local_vertices[i].influence=vertices[i].influence;
+        const auto part=solve_clay_surface(local_vertices,triangles,dab,&edges,false);
+        ++out.patches_v30c;
+        out.active+=part.active;out.transport_nodes+=part.transport_nodes;
+        out.trace_attempts+=part.trace_attempts;out.trace_rejected+=part.trace_rejected;
+        out.history_limited+=part.history_limited;out.local_limited_v30b+=part.local_limited_v30b;
+        out.slope_scale=std::min(out.slope_scale,part.slope_scale);
+        out.accepted_scale=std::min(out.accepted_scale,part.accepted_scale);
+        out.signed_swept_volume+=part.signed_swept_volume;
+        out.transported_volume+=part.transported_volume;
+        out.fine_transport_v30b+=part.fine_transport_v30b;
+        out.melt_fit_failures_v30b+=part.melt_fit_failures_v30b;
+        out.melt_residual_peak_v30b=std::max(out.melt_residual_peak_v30b,part.melt_residual_peak_v30b);
+        for(auto i:patch->ids){
+          out.displacement[i]=part.displacement[i];
+          local_vertices[i].influence=0.0;
+        }
+      }
+      return out;
+    }
+    // Single component uses original fast path. Avoid double counting its
+    // excluded sheets in the ordinary component accounting below.
+    out.component_rejected_v30b=0;
+    out.patches_v30c=1;
+  }
   // Only the connected component under the tip can exchange material.
   // Nonactive/pinned vertices must not serve as transport bridges.
   std::vector<bool> seen(n,false);

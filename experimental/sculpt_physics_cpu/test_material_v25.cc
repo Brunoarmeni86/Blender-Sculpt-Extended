@@ -430,8 +430,47 @@ static void contact_v30b_tests(){
     else assert(std::abs(out.signed_swept_volume)<1e-9);
   }
 }
+static void overlap_v30c_tests(){
+  constexpr int n=41;
+  std::vector<ClaySurfaceVertex> v;
+  std::vector<ClaySurfaceTriangle> tri;
+  for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+    const double px=2.*x/(n-1)-1,py=2.*y/(n-1)-1,r2=(px*px+py*py)/.64;
+    // One zero-factor column on a connected sheet; both sides must work,
+    // but the excluded column must not receive or transport matter.
+    v.push_back({{px,py,0},r2<1 && x!=n/2?std::pow(1-r2,2):0});
+  }
+  for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+    const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
+    tri.push_back({a,b,d});tri.push_back({a,d,c});
+  }
+  ClaySurfaceDab dab;dab.radius=.8;dab.dose=.15;dab.direction={1,0,0};
+  dab.action=ClaySurfaceAction::Scrape;dab.has_tool_plane=true;dab.tool_plane_height=-.05;
+  dab.density_independent=true;dab.smooth_proxy=true;dab.shape_transport=true;
+  dab.tool_v25=true;dab.tool_v26=true;dab.stable_v28=true;dab.refine_v28b=true;
+  dab.live_surface_v30=true;dab.fast_v26b=true;dab.contact_v30b=true;
+  const auto old=solve_clay_surface(v,tri,dab);
+  assert(old.component_rejected_v30b>0);
+  dab.overlap_v30c=true;
+  const auto cut=solve_clay_surface(v,tri,dab);
+  assert(cut.patches_v30c==2 && cut.active>old.active);
+  double left=0,right=0;
+  for(std::size_t i=0;i<v.size();++i){
+    if(v[i].influence==0)assert(cut.displacement[i].z==0);
+    if(v[i].position.x<0)left-=cut.displacement[i].z;
+    if(v[i].position.x>0)right-=cut.displacement[i].z;
+  }
+  assert(left>0 && right>0);
+  // Separate sheet is not activated just because it is close in projection.
+  const auto start=v.size();
+  v.push_back({{.1,.1,.03},1});v.push_back({{.2,.1,.03},1});v.push_back({{.1,.2,.03},1});
+  tri.push_back({start,start+1,start+2});
+  const auto sheets=solve_clay_surface(v,tri,dab);
+  for(std::size_t i=start;i<v.size();++i)assert(sheets.displacement[i].z==0);
+}
 int main(){
   stroke_context_v27_tests();
+  overlap_v30c_tests();
   contact_v30b_tests();
   transport_v30b_tests();
   live_surface_v30_tests();
