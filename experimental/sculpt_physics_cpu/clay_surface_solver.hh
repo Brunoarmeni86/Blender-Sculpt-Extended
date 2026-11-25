@@ -1709,7 +1709,7 @@ inline ClaySurfaceResult solve_clay_surface(
     for(double d:delta)peak=std::max(peak,std::abs(d));
     if(peak>dab.radius*.08)out.accepted_scale=dab.radius*.08/peak;
   }
-  if(!dab.density_independent || guarded) for(const auto &e:edges) {
+  if(!native_support && (!dab.density_independent || guarded)) for(const auto &e:edges) {
     const double increment=delta[e[0]]-delta[e[1]];
     const double diff=std::abs(increment);
     const double len=dab.live_surface_v30?norm(vertices[e[0]].position-vertices[e[1]].position):
@@ -1740,7 +1740,25 @@ inline ClaySurfaceResult solve_clay_surface(
     out.displacement[i]=axis*d;
     out.signed_swept_volume+=d*out.projected_area[i];
   }
-  if(continuous){
+  if(native_support){
+    // Limit unsafe triangles locally, preserve the positive/negative
+    // projected motion ratio, then revalidate every incident triangle.
+    std::vector<Vec3> positions(n);
+    for(std::size_t i=0;i<n;++i)positions[i]=vertices[i].position;
+    const auto safe=limit_balanced_contact_v30c(positions,triangles,out.displacement);
+    out.accepted_scale*=safe.final_scale;
+    out.slope_scale=std::min(out.slope_scale,safe.minimum_scale);
+    out.local_limited_v30b+=safe.limited_vertices;
+    out.signed_swept_volume=0;
+    double positive=0,negative=0;
+    for(std::size_t i=0;i<n;++i){
+      const double volume=dot(out.displacement[i],axis)*out.projected_area[i];
+      out.signed_swept_volume+=volume;
+      positive+=std::max(0.0,volume);
+      negative+=std::max(0.0,-volume);
+    }
+    out.transported_volume=std::min(positive,negative);
+  }else if(continuous){
     // Reuse the V31 coherent guard on the real triangles, including halo.
     std::vector<Vec3> positions(n);
     for(std::size_t i=0;i<n;++i)positions[i]=vertices[i].position;
@@ -1752,7 +1770,7 @@ inline ClaySurfaceResult solve_clay_surface(
     out.slope_scale=std::min(out.slope_scale,scale);
     out.signed_swept_volume*=scale*safe.final_scale;
   }
-  out.transported_volume*=out.accepted_scale;
+  if(!native_support)out.transported_volume*=out.accepted_scale;
   out.fine_transport_v30b*=out.accepted_scale;
   if(!std::isfinite(out.signed_swept_volume)||!std::isfinite(out.transported_volume))
     throw std::overflow_error("Invalid clay surface volume");
