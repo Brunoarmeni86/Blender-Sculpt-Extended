@@ -47,6 +47,9 @@
 #  include <chrono>
 #  include <cstdio>
 #  include <cstdlib>
+#  include <fstream>
+#  include <iomanip>
+#  include <locale>
 #  include <memory>
 #  include <stdexcept>
 #  include <unordered_map>
@@ -1106,7 +1109,8 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
     const std::vector<sculpt_physics::PhysicalBrushIntentSample> &samples,
     const sculpt_physics::ClaySurfaceDab &dab,
     std::vector<sculpt_physics::NativeBrushTranslation> &goals,
-    SurfaceContactHistoryV28 *history=nullptr)
+    SurfaceContactHistoryV28 *history=nullptr,
+    std::unordered_map<std::size_t,double> *coverage_v31d9=nullptr)
 {
   using namespace sculpt_physics;
   const auto convert=[](const float3 &v)->Vec3 {
@@ -1187,12 +1191,66 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
       std::fprintf(stderr,"[V31D6 tangent] action=%d moved=%zu scale=%.7g peak=%.7g first_order_volume=%.7g\n",
           int(dab.action),tangent.moved,tangent.scale,tangent.peak,tangent.signed_volume);
   }
+  if(coverage_v31d9 && result.coverage_weights_v31d9.size()==vertices.size()){
+    coverage_v31d9->reserve(vertices.size());
+    for(std::size_t i=0;i<vertices.size();++i)
+      if(vertices[i].influence>0)
+        coverage_v31d9->emplace(global[i],result.coverage_weights_v31d9[i]);
+  }
   goals.reserve(vertices.size());
   for (std::size_t i=0;i<vertices.size();++i) {
     const auto &v=result.displacement[i];
     if (std::hypot(v.x,v.y,v.z)>1e-15) goals.push_back({global[i],v});
   }
   return result;
+}
+
+/* Optional sampled snapshot. Read evaluated geometry after the writer.
+ * Never modify the mesh, Undo or material state here. A missing PBVH
+ * vertex is not diagnosed by this local-only capture. */
+inline void export_coverage_v31d9(
+    const char *path,const Mesh &mesh,const StrokeCache &cache,const Brush &brush,
+    const float3 &normal,const Span<float3> current,
+    const std::vector<sculpt_physics::PhysicalBrushIntentSample> &samples,
+    const std::unordered_map<std::size_t,double> &coverage,
+    const std::vector<sculpt_physics::NativeBrushTranslation> &goals,
+    double dose,double intensity,int action,bool handled,bool failed)
+{
+  try {
+    std::unordered_map<std::size_t,double> requested;
+    requested.reserve(goals.size());
+    for(const auto &g:goals)
+      requested[g.global_index]=std::hypot(g.translation.x,g.translation.y,g.translation.z);
+    std::ofstream out(path,std::ios::trunc);
+    if(!out){std::fprintf(stderr,"[V31D9] cannot open coverage file\n");return;}
+    out.imbue(std::locale::classic());
+    out<<std::setprecision(10);
+    out<<"id,verts,edges,faces,action,radius,dose,intensity,handled,failed,host,selected,planned,written,x,y,z,nx,ny,nz\n";
+    std::size_t rows=0;
+    const double radius=double(cache.radius);
+    for(const auto &s:samples){
+      if(s.global_index>=std::size_t(current.size()))continue;
+      const float3 p(float(s.position.x),float(s.position.y),float(s.position.z));
+      if((!s.writable || s.envelope<=0) &&
+         (math::length(p-cache.location_symm)>1.51*radius ||
+          footprint_distance_v30e(cache,brush,p,normal)>=radius))continue;
+      const auto w=coverage.find(s.global_index),g=requested.find(s.global_index);
+      const auto q=current[int(s.global_index)];
+      const double actual=std::hypot(double(q.x)-s.position.x,
+          double(q.y)-s.position.y,double(q.z)-s.position.z);
+      out<<s.global_index<<','<<mesh.verts_num<<','<<mesh.edges_num<<','<<mesh.faces_num<<','
+         <<action<<','<<radius<<','<<dose<<','<<intensity<<','<<int(handled)<<','<<int(failed)<<','
+         <<(s.writable?s.envelope:0.)<<','<<(w==coverage.end()?-1.:w->second)<<','
+         <<(g==requested.end()?0.:g->second)<<','<<actual<<','
+         <<q.x<<','<<q.y<<','<<q.z<<','<<s.surface_normal.x<<','<<s.surface_normal.y<<','<<s.surface_normal.z<<'\n';
+      ++rows;
+    }
+    out.close();
+    if(!out)std::fprintf(stderr,"[V31D9] incomplete coverage write\n");
+    else std::fprintf(stderr,"[V31D9] snapshot rows=%zu action=%d failed=%d\n",rows,action,int(failed));
+  } catch(const std::exception &ex){
+    std::fprintf(stderr,"[V31D9] snapshot failed: %s\n",ex.what());
+  }
 }
 
 inline bool try_apply_intent(
@@ -1319,12 +1377,18 @@ inline bool try_apply_intent(
       default: throw std::invalid_argument("Unknown autonomous action");
     }
     std::vector<sculpt_physics::NativeBrushTranslation> goals;
+    const char *coverage_path=std::getenv("BLENDER_SCULPT_COVERAGE_FILE_V31D9");
+    const bool capture_v31d9=conservative && coverage_path && coverage_path[0] &&
+        live_surface_v30_brush(object,brush) && intent.dose>0 && intent.intensity>0 &&
+        (!v27 || stroke_step.next.samples==1 || stroke_step.next.samples%16==0);
+    std::unordered_map<std::size_t,double> coverage_v31d9;
     double pending_press_dose=cache.xpbd_v26_press_dose;
     sculpt_physics::ClaySurfaceDab plastic_dab;
     if (conservative) {
       using namespace sculpt_physics;
       ClaySurfaceDab clay;
       clay.center=intent.center;
+      clay.coverage_v31d9=capture_v31d9;
       clay.axis=v27 && v24 ? stroke_step.next.axis : convert(normal);
       clay.direction=convert(delta);
       clay.radius=intent.radius;
@@ -1547,7 +1611,8 @@ inline bool try_apply_intent(
         std::fprintf(stderr,"[V30E audit] action=%d expected=%zu missing_pbvh=%zu zero_factor=%zu samples=%zu\n",
                      action,expected,missing,zero_factor,samples.size());
       }
-      auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get(),
+                                         capture_v31d9?&coverage_v31d9:nullptr);
       if(clay.contact_reach_v31d4 && profile_v26b_requested())
         std::fprintf(stderr,"[V31D4 reach] action=%d extra_R=0.15 active=%zu goals=%zu component_rejected=%zu scale=%.7g\n",
                      action,planned.active,goals.size(),planned.component_rejected_v30b,planned.accepted_scale);
@@ -1615,6 +1680,11 @@ inline bool try_apply_intent(
     else goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
     const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,conservative,
                                  plastic_dab.plastic_v29?&plastic_dab:nullptr);
+    if(capture_v31d9){
+      const Mesh &mesh=*id_cast<const Mesh *>(object.data);
+      export_coverage_v31d9(coverage_path,mesh,cache,brush,normal,position_data.eval,
+          samples,coverage_v31d9,goals,intent.dose,intent.intensity,action,handled,cache.xpbd_v15_failed);
+    }
     if (handled && !cache.xpbd_v15_failed) {
       cache.xpbd_v17_intent_started=true;
       cache.xpbd_v17_last_center=center;
