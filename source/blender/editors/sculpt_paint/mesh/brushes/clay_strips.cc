@@ -386,28 +386,23 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
     const bool autonomous=physics_v15::autonomous_requested(*ss.cache);
     const bool round_contact=autonomous && (physics_v15::shape_v24_requested() || ss.cache->xpbd_v16_clay_behavior==14) &&
         ss.cache->xpbd_v16_clay_behavior!=1 && ss.cache->xpbd_v16_clay_behavior!=4;
+    const bool footprint=autonomous && physics_v15::footprint_v30e_brush(object,brush);
+    const bool audit=footprint && physics_v15::profile_v26b_requested();
+    physics_v15::FootprintAuditV30E coverage;
     LocalData tls;
     node_mask.foreach_index([&](const int ni) {
       const bke::pbvh::MeshNode &node=nodes[ni];
       const Span<int> verts=node.verts();
       tls.factors.resize(verts.size());
       MutableSpan<float> factors=tls.factors;
-      fill_factor_from_hide_and_mask(attributes.hide_vert,attributes.mask,verts,factors);
-      filter_region_clip_factors(ss,pos.eval,verts,factors);
-      if (brush.flag & BRUSH_FRONTFACE) {
-        calc_front_face(ss.cache->view_normal_symm,normals,verts,factors);
-      }
       tls.xy_positions.resize(verts.size());
       tls.z_positions.resize(verts.size());
       calc_local_positions(pos.eval,verts,mat,tls.xy_positions,tls.z_positions);
-      // The native depth envelope extinguishes force once the brush
-      // plane is reached. Autonomous mode uses the cube XY envelope
-      // instead; explicit plane trim remains an artist restriction.
-      if (!autonomous) apply_z_axis_factors(tls.z_positions,factors);
-      apply_plane_trim_factors(brush,tls.z_positions,factors);
       tls.distances.resize(verts.size());
       MutableSpan<float> distances=tls.distances;
-      if (round_contact) {
+      if(footprint){
+        for(const int j:verts.index_range())distances[j]=physics_v15::footprint_distance_v30e(*ss.cache,brush,pos.eval[verts[j]],plane_normal)/std::max(ss.cache->radius,1e-12f);
+      }else if (round_contact) {
         const float3 axis=math::normalize(plane_normal);
         for (const int j:verts.index_range()) {
           const float3 d=pos.eval[verts[j]]-ss.cache->location_symm;
@@ -418,14 +413,26 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
         }
       }
       else calc_brush_cube_distances<float2>(brush,tls.xy_positions,distances);
+      if(audit)for(const float dist:distances)if(dist<1.0f)++coverage.geometric;
+      fill_factor_from_hide_and_mask(attributes.hide_vert,attributes.mask,verts,factors);
+      filter_region_clip_factors(ss,pos.eval,verts,factors);
+      if(audit)coverage.base+=coverage.count(factors,distances,1.0f);
+      if(brush.flag & BRUSH_FRONTFACE)calc_front_face(ss.cache->view_normal_symm,normals,verts,factors);
+      if(audit)coverage.front+=coverage.count(factors,distances,1.0f);
+      if(!autonomous)apply_z_axis_factors(tls.z_positions,factors);
+      apply_plane_trim_factors(brush,tls.z_positions,factors);
+      if(audit)coverage.trim+=coverage.count(factors,distances,1.0f);
       filter_distances_with_radius(1.0f,distances,factors);
       apply_hardness_to_distances(1.0f,ss.cache->hardness,distances);
       BKE_brush_calc_curve_factors(
           eBrushCurvePreset(brush.curve_distance_falloff_preset),
           brush.curve_distance_falloff,distances,1.0f,factors);
+      if(audit)coverage.curve+=coverage.count(factors,distances,1.0f);
       auto_mask::calc_vert_factors(
           depsgraph,object,ss.cache->automasking.get(),node,verts,factors);
+      if(audit)coverage.automask+=coverage.count(factors,distances,1.0f);
       calc_brush_texture_factors(ss,brush,pos.eval,verts,factors);
+      if(audit)coverage.texture+=coverage.count(factors,distances,1.0f);
       if (autonomous) {
         physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors,normals);
         return;
@@ -438,6 +445,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
                           {double(value.x),double(value.y),double(value.z)}});
       }
     });
+    if(audit)coverage.report(ss.cache->xpbd_v16_clay_behavior);
     if (autonomous ?
         physics_v15::try_apply_intent(sd,object,node_mask,pos,
                                     sculpt_physics::NativeSculptBrushKind::ClayStrips,

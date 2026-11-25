@@ -206,18 +206,35 @@ void do_clay_brush(const Depsgraph &depsgraph,
     Vector<float> factors;
     Vector<float> distances;
     Vector<float3> translations;
+    const bool footprint=autonomous && physics_v15::footprint_v30e_brush(object,brush);
+    const bool audit=footprint && physics_v15::profile_v26b_requested();
+    physics_v15::FootprintAuditV30E coverage;
     node_mask.foreach_index([&](const int ni) {
       const bke::pbvh::MeshNode &node=nodes[ni];
       const Span<int> verts=node.verts();
-      calc_factors_common_mesh_indexed(depsgraph,
-                                       brush,
-                                       object,
-                                       attributes,
-                                       pos.eval,
-                                       normals,
-                                       node,
-                                       factors,
-                                       distances);
+      if(footprint){
+        factors.resize(verts.size());distances.resize(verts.size());
+        for(const int i:verts.index_range()){
+          distances[i]=physics_v15::footprint_distance_v30e(*ss.cache,brush,pos.eval[verts[i]],area_no);
+          if(audit && distances[i]<ss.cache->radius)++coverage.geometric;
+        }
+        fill_factor_from_hide_and_mask(attributes.hide_vert,attributes.mask,verts,factors);
+        filter_region_clip_factors(ss,pos.eval,verts,factors);
+        if(audit)coverage.base+=coverage.count(factors,distances,ss.cache->radius);
+        if(brush.flag & BRUSH_FRONTFACE)calc_front_face(ss.cache->view_normal_symm,normals,verts,factors);
+        if(audit){coverage.front+=coverage.count(factors,distances,ss.cache->radius);coverage.trim=coverage.front;}
+        filter_distances_with_radius(ss.cache->radius,distances,factors);
+        apply_hardness_to_distances(ss.cache->radius,ss.cache->hardness,distances);
+        BKE_brush_calc_curve_factors(eBrushCurvePreset(brush.curve_distance_falloff_preset),
+                                     brush.curve_distance_falloff,distances,ss.cache->radius,factors);
+        if(audit)coverage.curve+=coverage.count(factors,distances,ss.cache->radius);
+        auto_mask::calc_vert_factors(depsgraph,object,ss.cache->automasking.get(),node,verts,factors);
+        if(audit)coverage.automask+=coverage.count(factors,distances,ss.cache->radius);
+        calc_brush_texture_factors(ss,brush,pos.eval,verts,factors);
+        if(audit)coverage.texture+=coverage.count(factors,distances,ss.cache->radius);
+      }else{
+        calc_factors_common_mesh_indexed(depsgraph,brush,object,attributes,pos.eval,normals,node,factors,distances);
+      }
       if (autonomous) {
         physics_v15::append_intent_samples(intent_samples,verts,pos.eval,factors,normals);
         return;
@@ -237,6 +254,7 @@ void do_clay_brush(const Depsgraph &depsgraph,
                           {double(value.x),double(value.y),double(value.z)}});
       }
     });
+    if(audit)coverage.report(ss.cache->xpbd_v16_clay_behavior);
     if (autonomous ?
         physics_v15::try_apply_intent(sd,object,node_mask,pos,
                                     sculpt_physics::NativeSculptBrushKind::Clay,

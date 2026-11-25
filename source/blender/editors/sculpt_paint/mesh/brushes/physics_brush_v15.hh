@@ -172,6 +172,45 @@ inline float swept_distance_v29(const StrokeCache &cache,float3 p,const float3 *
   const float t=den>1e-20f?std::clamp(math::dot(p,a)/den,0.0f,1.0f):0.0f;
   return math::length(p-a*t);
 }
+inline bool footprint_v30e_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_FOOTPRINT_V30E");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+inline bool footprint_audit_v30e_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_FOOTPRINT_AUDIT_V30E");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+inline bool footprint_v30e_brush(const Object &object,const Brush &brush)
+{
+  return footprint_v30e_requested() && live_surface_v30_brush(object,brush) &&
+         stroke_v27_requested() && stable_v28_requested() && refine_v28b_requested() &&
+         brush.sculpt_physics_mode==3 && brush.falloff_shape==PAINT_FALLOFF_SHAPE_SPHERE &&
+         brush.sculpt_physics_clay_behavior>=5 && brush.sculpt_physics_clay_behavior<=14;
+}
+inline float footprint_distance_v30e(const StrokeCache &cache,const Brush &brush,
+                                      const float3 &p,const float3 &normal)
+{
+  const float3 axis=math::normalize(normal);
+  if(swept_v29_active(cache,brush))return swept_distance_v29(cache,p,&axis);
+  const float3 delta=p-cache.location_symm;
+  return math::length(delta-axis*math::dot(delta,axis));
+}
+struct FootprintAuditV30E {
+  std::size_t geometric=0,base=0,front=0,trim=0,curve=0,automask=0,texture=0;
+  static std::size_t count(Span<float> factors,Span<float> distances,float radius)
+  {
+    std::size_t total=0;
+    for(const int i:factors.index_range())if(distances[i]<radius && factors[i]>0)++total;
+    return total;
+  }
+  void report(int action) const
+  {
+    std::fprintf(stderr,"[V30E factors] action=%d geometric=%zu mask_clip=%zu front=%zu trim=%zu curve=%zu automask=%zu texture=%zu\n",
+                 action,geometric,base,front,trim,curve,automask,texture);
+  }
+};
 inline bool plastic_v29_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PLASTIC_V29");return v && v[0]=='1' && v[1]=='\0';}();
@@ -1338,6 +1377,28 @@ inline bool try_apply_intent(
           history=std::make_shared<SurfaceContactHistoryV28>();
           cache.xpbd_v28_surface_history=history;
         }
+      }
+      if(footprint_v30e_brush(object,brush) && footprint_audit_v30e_requested()){
+        // Expensive independent reference, never changes the write mask.
+        // Count geometrically eligible original mesh vertices absent from
+        // gathered unique-node samples, before optional frontface/alpha.
+        const MeshAttributeData attrs(mesh);
+        const float3 axis=math::normalize(normal);
+        const double depth=clay.contact_v30b?.65:.50;
+        std::size_t expected=0,missing=0,zero_factor=0,cursor=0;
+        for(const int i:position_data.eval.index_range()){
+          while(cursor<samples.size() && samples[cursor].global_index<std::size_t(i))++cursor;
+          if((!attrs.hide_vert.is_empty() && attrs.hide_vert[i]) ||
+             (!attrs.mask.is_empty() && attrs.mask[i]>=.999f))continue;
+          const auto p=position_data.eval[i];
+          if(std::abs(math::dot(p-center,axis))>=depth*cache.radius ||
+             footprint_distance_v30e(cache,brush,p,normal)>=cache.radius)continue;
+          ++expected;
+          if(cursor==samples.size() || samples[cursor].global_index!=std::size_t(i))++missing;
+          else if(!samples[cursor].writable || samples[cursor].envelope<=0)++zero_factor;
+        }
+        std::fprintf(stderr,"[V30E audit] action=%d expected=%zu missing_pbvh=%zu zero_factor=%zu samples=%zu\n",
+                     action,expected,missing,zero_factor,samples.size());
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
       if(clay.overlap_v30c && profile_v26b_requested()){

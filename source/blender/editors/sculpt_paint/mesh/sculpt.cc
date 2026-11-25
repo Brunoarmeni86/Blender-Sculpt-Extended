@@ -5465,9 +5465,23 @@ static void do_brush_action(const Depsgraph &depsgraph,
       depsgraph, ob, brush, memory);
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
   // Expand the real dispatched PBVH mask BEFORE automasking and Undo.
-  // Enclosing sphere is a conservative broad phase for the capsule.
-  // Fine distance is evaluated in the physical Clay brush factors.
-  if ((brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY ||
+  // V30E: cover a projected radius R and axial depth up to .65 R,
+  // plus the tangent length of the preceding short swept segment.
+  // sqrt(1 + .65^2) < 1.20: triangle inequality gives a conservative
+  // bound regardless of the normal used for the later exact footprint.
+  if(brushes::physics_v15::footprint_v30e_brush(ob,brush)){
+    const float segment=brushes::physics_v15::swept_v29_active(*ss.cache,brush)?
+        math::length(ss.cache->location_symm-ss.cache->xpbd_v17_last_center):0.0f;
+    const float r=1.21f*ss.cache->radius+segment;
+    const auto extra=gather_nodes(*bke::object::pbvh_get(ob),PAINT_FALLOFF_SHAPE_SPHERE,
+                                  false,ss.cache->location_symm,r*r,std::nullopt,memory);
+    const auto original_size=cursor_sample_result.node_mask.size();
+    cursor_sample_result.node_mask=IndexMask::from_union(cursor_sample_result.node_mask,extra,memory);
+    if(brushes::physics_v15::profile_v26b_requested())
+      std::fprintf(stderr,"[V30E PBVH] action=%d original=%lld expanded=%lld radius=%.7g\n",
+          brush.sculpt_physics_clay_behavior,static_cast<long long>(original_size),
+          static_cast<long long>(cursor_sample_result.node_mask.size()),double(r));
+  }else if ((brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY ||
        brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY_STRIPS) &&
       bke::object::pbvh_get(ob)->type()==bke::pbvh::Type::Mesh &&
       !ss.deform_modifiers_active && !ss.shapekey_active &&
