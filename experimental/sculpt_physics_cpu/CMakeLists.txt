@@ -355,3 +355,11 @@ add_test(NAME sculpt_volume_v25_tests COMMAND test_volume_v25)
 
 add_executable(volume_preview_v25 volume_preview_v25.cc)
 target_link_libraries(volume_preview_v25 PRIVATE sculpt_physics_reference)
+
+# Opt-in geodesic footprint regression.
+add_executable(test_contact_reach_v31d4 test_contact_reach_v31d4.cc)
+target_link_libraries(test_contact_reach_v31d4 PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_contact_reach_v31d4 PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_contact_reach_v31d4_tests COMMAND test_contact_reach_v31d4)
