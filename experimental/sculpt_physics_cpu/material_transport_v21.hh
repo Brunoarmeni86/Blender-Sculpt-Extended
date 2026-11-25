@@ -57,6 +57,9 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     out.surface.depth_rejected_v30b+=step.depth_rejected_v30b;
     out.surface.component_rejected_v30b+=step.component_rejected_v30b;
     out.surface.local_limited_v30b+=step.local_limited_v30b;
+    out.surface.adaptive_candidates_v31=std::max(out.surface.adaptive_candidates_v31,step.adaptive_candidates_v31);
+    out.surface.adaptive_reached_v31=std::max(out.surface.adaptive_reached_v31,step.adaptive_reached_v31);
+    out.surface.adaptive_deep_v31=std::max(out.surface.adaptive_deep_v31,step.adaptive_deep_v31);
     out.surface.patches_v30c=std::max(out.surface.patches_v30c,step.patches_v30c);
     out.surface.patch_budget_skipped_v30c+=step.patch_budget_skipped_v30c;
     out.surface.melt_fit_failures_v30b+=step.melt_fit_failures_v30b;

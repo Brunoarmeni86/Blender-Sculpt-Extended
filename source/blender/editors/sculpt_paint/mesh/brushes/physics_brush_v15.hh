@@ -142,6 +142,20 @@ inline bool push_v30d_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PUSH_V30D");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
+inline bool adaptive_v31_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_ADAPTIVE_V31");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+inline bool round_material_action_v31(int action)
+{
+  // Asset ids 2/3 map to Compress/Push (5/6) in surface_v20.
+  return action==2 || action==3 || (action>=5 && action<=14);
+}
+inline bool direct_material_action_v31(int action)
+{
+  return action==2 || action==5 || action==7 || action==8 || action==14;
+}
 inline bool swept_v29_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_SWEEP_V29");return v && v[0]=='1' && v[1]=='\0';}();
@@ -155,7 +169,7 @@ inline bool swept_v29_active(const StrokeCache &cache,const Brush &brush)
      !refine_v28b_requested() ||
      brush.sculpt_physics_mode!=3 || brush.sculpt_physics_assist<=0 ||
      brush.falloff_shape!=PAINT_FALLOFF_SHAPE_SPHERE ||
-     brush.sculpt_physics_clay_behavior<5 || brush.sculpt_physics_clay_behavior>14 ||
+     !round_material_action_v31(brush.sculpt_physics_clay_behavior) ||
      !cache.xpbd_v17_intent_started || cache.xpbd_v15_failed ||
      cache.reference_symmetry || cache.reference_combined ||
      cache.tile_pass!=0 || cache.radial_symmetry_pass!=0 || cache.mirror_symmetry_pass!=0)
@@ -187,7 +201,7 @@ inline bool footprint_v30e_brush(const Object &object,const Brush &brush)
   return footprint_v30e_requested() && live_surface_v30_brush(object,brush) &&
          stroke_v27_requested() && stable_v28_requested() && refine_v28b_requested() &&
          brush.sculpt_physics_mode==3 && brush.falloff_shape==PAINT_FALLOFF_SHAPE_SPHERE &&
-         brush.sculpt_physics_clay_behavior>=5 && brush.sculpt_physics_clay_behavior<=14;
+         round_material_action_v31(brush.sculpt_physics_clay_behavior);
 }
 inline float footprint_distance_v30e(const StrokeCache &cache,const Brush &brush,
                                       const float3 &p,const float3 &normal)
@@ -704,9 +718,9 @@ inline bool try_apply(const Sculpt &sd,
     const auto contact_start=std::chrono::steady_clock::now();
     if (drag_contact_requested() && state->compact &&
         kind!=sculpt_physics::NativeSculptBrushKind::Gravity) {
-      const bool local_scrape=live_surface && contact_v30b_requested() && autonomous &&
+      const bool local_scrape=live_surface && (contact_v30b_requested() || adaptive_v31_requested()) && autonomous &&
                               cache.xpbd_v16_clay_behavior==14;
-      const bool balanced_local=live_surface && overlap_v30c_requested() && conservative_clay &&
+      const bool balanced_local=live_surface && (overlap_v30c_requested() || adaptive_v31_requested()) && conservative_clay &&
                                 autonomous && cache.xpbd_v16_clay_behavior!=1 &&
                                 cache.xpbd_v16_clay_behavior!=4 && cache.xpbd_v16_clay_behavior!=14;
       const auto result=limit_drag_contact(mesh,current,changes,conservative_clay && !local_scrape,balanced_local);
@@ -1218,6 +1232,8 @@ inline bool try_apply_intent(
         if(v27)stroke_step.next.axis=clay.axis/stroke_norm_v27(clay.axis);
       }
       clay.overlap_v30c=clay.live_surface_v30 && clay.stable_v28 && overlap_v30c_requested();
+      clay.adaptive_v31=footprint_v30e_brush(object,brush) && adaptive_v31_requested() &&
+                        (action==5 || action==7 || action==8 || action==14);
       clay.contact_v30b=clay.live_surface_v30 && clay.refine_v28b && contact_v30b_requested() &&
                          (action==5 || action==7 || action==8 || action==14);
       clay.transport_v30b=clay.live_surface_v30 && clay.refine_v28b && transport_v30b_requested() &&
@@ -1384,14 +1400,18 @@ inline bool try_apply_intent(
         // gathered unique-node samples, before optional frontface/alpha.
         const MeshAttributeData attrs(mesh);
         const float3 axis=math::normalize(normal);
+        // Adaptive path no longer applies a fixed axial depth; this audit
+        // measures the enclosing spatial candidate bound, not geodesic reach.
         const double depth=clay.contact_v30b?.65:.50;
+        const double spatial_bound=1.51*cache.radius+(clay.swept_v29?math::length(delta):0.0);
         std::size_t expected=0,missing=0,zero_factor=0,cursor=0;
         for(const int i:position_data.eval.index_range()){
           while(cursor<samples.size() && samples[cursor].global_index<std::size_t(i))++cursor;
           if((!attrs.hide_vert.is_empty() && attrs.hide_vert[i]) ||
              (!attrs.mask.is_empty() && attrs.mask[i]>=.999f))continue;
           const auto p=position_data.eval[i];
-          if(std::abs(math::dot(p-center,axis))>=depth*cache.radius ||
+          if((clay.adaptive_v31?math::length(p-center)>=spatial_bound:
+              std::abs(math::dot(p-center,axis))>=depth*cache.radius) ||
              footprint_distance_v30e(cache,brush,p,normal)>=cache.radius)continue;
           ++expected;
           if(cursor==samples.size() || samples[cursor].global_index!=std::size_t(i))++missing;
@@ -1401,6 +1421,8 @@ inline bool try_apply_intent(
                      action,expected,missing,zero_factor,samples.size());
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      if(clay.adaptive_v31 && profile_v26b_requested())
+        std::fprintf(stderr,"[V31 contact] action=%d candidates=%zu reached=%zu beyond_old_depth=%zu goals=%zu local_limits=%zu min_scale=%.7g signed_first_order=%.9g\n",action,planned.adaptive_candidates_v31,planned.adaptive_reached_v31,planned.adaptive_deep_v31,goals.size(),planned.local_limited_v30b,planned.accepted_scale,planned.signed_swept_volume);
       if(clay.overlap_v30c && profile_v26b_requested()){
         std::size_t eligible=0;
         for(const auto &sample:samples)if(sample.writable && sample.envelope>0)++eligible;

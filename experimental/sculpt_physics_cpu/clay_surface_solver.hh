@@ -2,6 +2,8 @@
 #pragma once
 
 #include "physics_core.hh"
+#include "brush_contact.hh"
+#include <queue>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -56,6 +58,7 @@ struct ClaySurfaceDab {
   bool transport_v30b=false;
   bool contact_v30b=false;
   bool overlap_v30c=false;
+  bool adaptive_v31=false; // direct surface contact on current local normals
   bool push_v30d=false; // stronger current-relief entrainment; Push only
   double push_gain_v30d=2.5;
   double transport_load_v30b=1.0;
@@ -96,6 +99,7 @@ struct ClaySurfaceResult {
   std::size_t chart_rejected_v30b=0,chart_recovered_v30b=0,depth_rejected_v30b=0;
   std::size_t component_rejected_v30b=0,local_limited_v30b=0;
   std::size_t patches_v30c=0,patch_budget_skipped_v30c=0;
+  std::size_t adaptive_candidates_v31=0,adaptive_reached_v31=0,adaptive_deep_v31=0;
   std::size_t melt_fit_failures_v30b=0;
   double melt_residual_peak_v30b=0.0;
 };
@@ -709,6 +713,174 @@ inline void shape_clay_transport(
 
 using ClaySurfaceEdges=std::vector<std::array<std::size_t,2>>;
 
+inline bool adaptive_direct_v31(const ClaySurfaceDab &dab)
+{
+  return dab.adaptive_v31 && (dab.action==ClaySurfaceAction::Press ||
+      dab.action==ClaySurfaceAction::Scrape || dab.action==ClaySurfaceAction::Compact ||
+      dab.action==ClaySurfaceAction::Compress);
+}
+
+/* V31A: direct contact on a bounded edge-geodesic patch. The native
+ * footprint and artist masks remain authoritative. Current incident
+ * triangles define the oriented dual-area vector and local motion axis.
+ * Never bridge zero-influence vertices or disconnected sheets. This is
+ * first-order volume accounting for nonparallel motions, not exact CCD
+ * or a multi-chart advective solver. */
+inline ClaySurfaceResult solve_adaptive_contact_v31(
+    const std::vector<ClaySurfaceVertex> &vertices,
+    const std::vector<ClaySurfaceTriangle> &triangles,
+    const ClaySurfaceDab &dab,ClaySurfaceEdges *dab_edges)
+{
+  const auto norm=[](Vec3 a){return std::hypot(a.x,a.y,a.z);};
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  const auto cross=[](Vec3 a,Vec3 b){return Vec3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};};
+  const auto smooth=[](double x){x=std::clamp(x,0.0,1.0);return x*x*(3-2*x);};
+  const std::size_t n=vertices.size();
+  ClaySurfaceResult out;
+  out.displacement.resize(n);out.projected_area.assign(n,0.0);
+  std::vector<Vec3> positions(n),dual(n),normals(n);
+  std::vector<double> w(n,0),radial(n),distance(n,std::numeric_limits<double>::infinity());
+  std::vector<bool> bad(n,false);
+  const Vec3 axis=dab.axis/norm(dab.axis);
+  ClaySurfaceEdges local_edges;
+  auto &edges=dab_edges?*dab_edges:local_edges;
+  const bool build=edges.empty();
+  for(std::size_t i=0;i<n;++i){
+    positions[i]=vertices[i].position;
+    if(!std::isfinite(norm(positions[i])) || !std::isfinite(vertices[i].influence) ||
+       vertices[i].influence<0 || vertices[i].influence>1 ||
+       (dab.plastic_v29 && (!std::isfinite(vertices[i].compaction_v29) ||
+        vertices[i].compaction_v29<0 || vertices[i].compaction_v29>1)))
+      throw std::invalid_argument("Invalid V31 contact vertex");
+  }
+  for(const auto &tri:triangles){
+    for(auto i:tri)if(i>=n)throw std::out_of_range("V31 triangle index");
+    const Vec3 a=cross(positions[tri[1]]-positions[tri[0]],positions[tri[2]]-positions[tri[0]])/6.0;
+    const double area=norm(a);
+    if(!std::isfinite(area))throw std::overflow_error("V31 dual area");
+    for(auto i:tri){dual[i]+=a;if(area<=1e-24)bad[i]=true;}
+    if(build)for(int j=0;j<3;++j){
+      auto a=tri[j],b=tri[(j+1)%3];if(a>b)std::swap(a,b);
+      if(a!=b)edges.push_back({a,b});
+    }
+  }
+  if(build){std::sort(edges.begin(),edges.end());edges.erase(std::unique(edges.begin(),edges.end()),edges.end());}
+  std::size_t seed=n;
+  double nearest=std::numeric_limits<double>::infinity();
+  for(std::size_t i=0;i<n;++i){
+    const double area=norm(dual[i]);out.projected_area[i]=area;
+    if(vertices[i].influence<=0)continue;
+    ++out.adaptive_candidates_v31;
+    if(bad[i] || area<=1e-24){++out.chart_rejected_v30b;continue;}
+    normals[i]=dual[i]/area;
+    // Steep front-facing slopes remain valid. Reject the back of a thin
+    // sheet and disallow sharp orientation jumps along the graph.
+    if(dot(normals[i],axis)<=.015){++out.chart_rejected_v30b;continue;}
+    const Vec3 off=positions[i]-dab.center;
+    radial[i]=chart_distance_v29(off-axis*dot(off,axis),dab,axis)/dab.radius;
+    if(radial[i]>=1)continue;
+    w[i]=vertices[i].influence;
+    const double dist=norm(off);
+    if(dist<nearest){nearest=dist;seed=i;}
+  }
+  if(seed==n || dab.dose==0 || dab.intensity==0)return out;
+  const double segment=dab.swept_v29?norm(dab.sweep_start-dab.center):0.0;
+  const double reach=1.5*dab.radius+segment;
+  if(nearest>=reach)return out;
+  std::vector<std::vector<std::pair<std::size_t,double>>> adj(n);
+  for(const auto &e:edges){
+    const auto a=e[0],b=e[1];
+    if(w[a]<=0 || w[b]<=0 || dot(normals[a],normals[b])<.20)continue;
+    const double len=norm(positions[a]-positions[b]);
+    if(len<=1e-12 || len>reach)continue;
+    adj[a].push_back({b,len});adj[b].push_back({a,len});
+  }
+  using Entry=std::pair<double,std::size_t>;
+  std::priority_queue<Entry,std::vector<Entry>,std::greater<Entry>> queue;
+  distance[seed]=nearest;queue.push({nearest,seed});
+  while(!queue.empty()){
+    const auto [dist,i]=queue.top();queue.pop();
+    if(dist!=distance[i])continue;
+    for(const auto &edge:adj[i]){
+      const double next=dist+edge.second;
+      if(next<reach && next<distance[edge.first]){
+        distance[edge.first]=next;queue.push({next,edge.first});
+      }
+    }
+  }
+  double max_r=0;
+  for(std::size_t i=0;i<n;++i)if(w[i]>0){
+    if(!std::isfinite(distance[i])){w[i]=0;++out.component_rejected_v30b;continue;}
+    w[i]*=1-smooth((distance[i]-(reach-.25*dab.radius))/(.25*dab.radius));
+    // Gentle orientation taper on steep sides without a hard axial depth.
+    w[i]*=.25+.75*smooth(dot(normals[i],axis)/.30);
+    if(w[i]<=0)continue;
+    ++out.adaptive_reached_v31;
+    if(std::abs(dot(positions[i]-dab.center,axis))>dab.radius*(dab.contact_v30b?.65:.50))
+      ++out.adaptive_deep_v31;
+    if(w[i]>.02)max_r=std::max(max_r,radial[i]);
+  }
+  out.active=out.adaptive_reached_v31;
+  out.patches_v30c=out.active?1:0;
+  if(!out.active)return out;
+  const bool scrape=dab.action==ClaySurfaceAction::Scrape;
+  const bool press=dab.action==ClaySurfaceAction::Press;
+  const bool compact=dab.action==ClaySurfaceAction::Compact;
+  const double amount=std::min(.08*dab.radius,dab.radius*dab.dose*dab.intensity*
+      (.35+1.65*dab.mobility)*(1-.45*dab.stiffness)*(1-.30*dab.cohesion));
+  const double rim_radius=std::clamp(max_r/.88,.25,1.0);
+  std::vector<double> delta(n),rim(n);
+  double removed=0,receiver=0,peak_rim=0;
+  for(std::size_t i=0;i<n;++i)if(w[i]>0){
+    const double r=radial[i],rr=r/rim_radius;
+    const double inner=1-smooth((rr-.30)/.49);
+    // A bounded local indentation/cut is evaluated on the CURRENT point.
+    // This intentionally differs from the old single-plane cutter.
+    const double nominal=std::max(0.0,dab.sign*(dot(positions[i]-dab.center,axis)-
+                        (dab.has_tool_plane?dab.tool_plane_height:-dab.sign*dab.tool_depth*dab.radius)));
+    const double local_depth=std::max(nominal,.35*dab.tool_depth*dab.radius);
+    const double cut=scrape?std::min(local_depth,amount*.85):
+                     press?inner*std::min(local_depth,amount*.75):
+                     inner*amount*(compact?.24:.30);
+    delta[i]=-dab.sign*w[i]*cut;
+    if(dab.plastic_v29 && dab.sign>0 && !scrape){
+      const double hardening=compact?.85:press?.45:.60;
+      delta[i]*=1-hardening*vertices[i].compaction_v29;
+    }
+    removed+=std::abs(delta[i])*out.projected_area[i];
+    if(!scrape){
+      rim[i]=w[i]*smooth((rr-.22)/.40)*(1-smooth((rr-.78)/.22));
+      receiver+=rim[i]*out.projected_area[i];peak_rim=std::max(peak_rim,rim[i]);
+    }
+  }
+  if(!scrape){
+    const double fraction=compact?std::min(.40,dab.volume_preservation):1.0;
+    const double coefficient=receiver>1e-24?fraction*removed/receiver:0;
+    const double peak=coefficient*peak_rim;
+    const double accepted=receiver<=1e-24?0:peak>amount*.30?amount*.30/peak:1;
+    for(std::size_t i=0;i<n;++i)
+      delta[i]=delta[i]*((1-fraction)+fraction*accepted)+dab.sign*accepted*coefficient*rim[i];
+  }
+  // First-order signed budget using actual oriented dual vectors.
+  double pos=0,neg=0;
+  for(std::size_t i=0;i<n;++i){
+    const double v=delta[i]*out.projected_area[i];
+    pos+=std::max(0.0,v);neg+=std::max(0.0,-v);
+    out.displacement[i]=normals[i]*delta[i];
+  }
+  // Local area guard + signed budget restoration (nonparallel motion:
+  // first-order volume only). Every incident face participates.
+  const auto safe=limit_balanced_contact_v30c(positions,triangles,out.displacement);
+  out.accepted_scale=safe.minimum_scale;out.local_limited_v30b=safe.limited_vertices;
+  pos=0;neg=0;
+  for(std::size_t i=0;i<n;++i){
+    const double v=dot(dual[i],out.displacement[i]);
+    pos+=std::max(0.0,v);neg+=std::max(0.0,-v);
+  }
+  out.signed_swept_volume=pos-neg;out.transported_volume=std::min(pos,neg);
+  return out;
+}
+
 // Optional per-dab topology cache, populated only from validated triangles.
 // Callers must clear it when changing the local vertex/triangle indexing.
 inline ClaySurfaceResult solve_clay_surface(
@@ -750,6 +922,7 @@ inline ClaySurfaceResult solve_clay_surface(
       break;
     default: throw std::invalid_argument("Invalid clay surface action");
   }
+  if(adaptive_direct_v31(dab))return solve_adaptive_contact_v31(vertices,triangles,dab,dab_edges);
   const Vec3 axis=dab.axis/norm(dab.axis);
   const auto tangent=[&](Vec3 v){return v-axis*dot(v,axis);};
   const auto unit=[&](Vec3 v){const double l=norm(v);return l>1e-12?v/l:Vec3{};};

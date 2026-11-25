@@ -5472,7 +5472,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
   if(brushes::physics_v15::footprint_v30e_brush(ob,brush)){
     const float segment=brushes::physics_v15::swept_v29_active(*ss.cache,brush)?
         math::length(ss.cache->location_symm-ss.cache->xpbd_v17_last_center):0.0f;
-    const float r=1.21f*ss.cache->radius+segment;
+    const bool adaptive=brushes::physics_v15::adaptive_v31_requested() &&
+                        brushes::physics_v15::direct_material_action_v31(brush.sculpt_physics_clay_behavior);
+    const float r=(adaptive?1.51f:1.21f)*ss.cache->radius+segment;
     const auto extra=gather_nodes(*bke::object::pbvh_get(ob),PAINT_FALLOFF_SHAPE_SPHERE,
                                   false,ss.cache->location_symm,r*r,std::nullopt,memory);
     const auto original_size=cursor_sample_result.node_mask.size();

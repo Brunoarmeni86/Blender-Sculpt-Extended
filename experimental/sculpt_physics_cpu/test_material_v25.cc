@@ -517,8 +517,53 @@ static void push_v30d_tests(){
   const auto none=solve_clay_surface(work,tri,dab);
   for(const auto &p:none.displacement)assert(p.z==0);
 }
+static void adaptive_v31_tests(){
+  // Inclined front-facing strip: points beyond the old depth slab must
+  // still be reachable along current mesh edges; a separate sheet must not.
+  constexpr int n=41;
+  std::vector<ClaySurfaceVertex> v;
+  std::vector<ClaySurfaceTriangle> tri;
+  for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+    const double px=2.*x/(n-1)-1,py=2.*y/(n-1)-1;
+    const double r2=(px*px+py*py)/.64;
+    v.push_back({{px,py,1.2*px},r2<1?std::pow(1-r2,2):0});
+  }
+  for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+    const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
+    tri.push_back({a,b,d});tri.push_back({a,d,c});
+  }
+  const auto other=v.size();
+  v.push_back({{.05,.05,.12},1});v.push_back({{.15,.05,.12},1});v.push_back({{.05,.15,.12},1});
+  tri.push_back({other,other+1,other+2});
+  ClaySurfaceDab dab;dab.radius=.8;dab.dose=.10;dab.direction={1,0,0};
+  dab.action=ClaySurfaceAction::Scrape;dab.has_tool_plane=true;dab.tool_plane_height=-.05;
+  dab.density_independent=true;dab.smooth_proxy=true;dab.shape_transport=true;
+  dab.tool_v25=true;dab.tool_v26=true;dab.stable_v28=true;dab.refine_v28b=true;
+  dab.live_surface_v30=true;dab.fast_v26b=true;dab.contact_v30b=true;
+  const auto old=solve_clay_surface(v,tri,dab);
+  dab.adaptive_v31=true;
+  const auto out=solve_clay_surface(v,tri,dab);
+  assert(out.adaptive_deep_v31>0 && out.active>old.active);
+  bool deep_moved=false;
+  for(std::size_t i=0;i<v.size();++i){
+    const auto q=out.displacement[i];
+    assert(std::isfinite(q.z));
+    if(i>=other || v[i].influence==0)assert(q.x==0 && q.y==0 && q.z==0);
+    if(i<other && std::abs(v[i].position.z)>.65*dab.radius && q.z<0)deep_moved=true;
+    assert(q.z<=1e-12);
+  }
+  assert(deep_moved);
+  for(auto action:{ClaySurfaceAction::Press,ClaySurfaceAction::Compress,ClaySurfaceAction::Compact}){
+    dab.action=action;
+    const auto step=solve_clay_surface(v,tri,dab);
+    assert(step.active>0 && step.transported_volume>0);
+    if(action!=ClaySurfaceAction::Compact)assert(std::abs(step.signed_swept_volume)<1e-9);
+    else assert(step.signed_swept_volume<=1e-9);
+  }
+}
 int main(){
   stroke_context_v27_tests();
+  adaptive_v31_tests();
   push_v30d_tests();
   overlap_v30c_tests();
   contact_v30b_tests();
