@@ -64,6 +64,7 @@ struct ClaySurfaceDab {
   bool continuous_contact_v31d2=false;
   double motion_proxy_v31d3=0.0; // opt-in conservative two-scale motion reconstruction
   bool contact_reach_v31d4=false; // experimental +0.15R geodesic reach; same geometric candidate bound
+  double tangential_gain_v31d6=0.0; // opt-in; retain selected weights for host tangential pass
   bool push_v30d=false; // stronger current-relief entrainment; Push only
   double push_gain_v30d=2.5;
   double transport_load_v30b=1.0;
@@ -92,6 +93,7 @@ inline double progressive_press_depth_v26(double base,double cumulative_dose)
 struct ClaySurfaceResult {
   std::vector<Vec3> displacement;
   std::vector<double> projected_area;
+  std::vector<double> tangent_weights_v31d6; // selected contact; zero for all fixed/removed candidates
   double signed_swept_volume=0.0;
   double transported_volume=0.0;
   double accepted_scale=1.0;
@@ -1522,6 +1524,8 @@ inline ClaySurfaceResult solve_clay_surface(
   // Finite effective substrate, recalculated from current chart per dab.
   // Lets Push work on existing clay as well as newly deposited relief.
   // Does not represent physical mass below the visible surface.
+  if(dab.tangential_gain_v31d6>0 && continuous)
+    out.tangent_weights_v31d6=w;
   floor-=0.12*dab.radius;
   const double travel=dab.radius*dab.dose*dab.intensity;
   const double mobility=dab.mobility*(dab.extended_material ?
