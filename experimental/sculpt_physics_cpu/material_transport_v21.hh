@@ -54,6 +54,12 @@ inline MaterialTransportV21Result solve_material_transport_v21(
       else for(std::size_t i=0;i<weights.size();++i)
         weights[i]=std::min(weights[i],step.tangent_weights_v31d6[i]);
     }
+    if(dab.coverage_v31d9 && step.coverage_weights_v31d9.size()==vertices.size()){
+      auto &coverage=out.surface.coverage_weights_v31d9;
+      if(coverage.empty())coverage=step.coverage_weights_v31d9;
+      else for(std::size_t i=0;i<coverage.size();++i)
+        coverage[i]=std::max(coverage[i],step.coverage_weights_v31d9[i]);
+    }
     out.surface.active=std::max(out.surface.active,step.active);
     out.surface.transport_nodes=std::max(out.surface.transport_nodes,step.transport_nodes);
     out.surface.trace_attempts+=step.trace_attempts;
