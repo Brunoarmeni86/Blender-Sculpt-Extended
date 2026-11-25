@@ -643,8 +643,36 @@ static void average_v31d_tests(){
   for(std::size_t i=other;i<v.size();++i)
     assert(out.displacement[i].x==0 && out.displacement[i].y==0 && out.displacement[i].z==0);
 }
+static void continuous_v31d2_tests(){
+  // Sharp neighboring slopes with individually positive projected
+  // support remain connected; a masked bridge and a separate sheet do not.
+  const std::vector<Vec3> p{{0,0,0},{.10,0,.08},{.20,0,0},{.30,0,0},{.40,0,0},{.05,.05,.01}};
+  const std::vector<Vec3> dual{{.9,0,.1},{-.9,0,.1},{.9,0,.1},{0,0,1},{0,0,1},{0,0,1}};
+  const ClaySurfaceEdges edges{{0,1},{1,2},{2,3},{3,4}};
+  std::vector<double> w{1,1,1,0,1,1};
+  std::size_t rejected=0;
+  connected_contact_v31d2(p,dual,edges,{0,0,1},0,0,1.5,1,.65,w,rejected);
+  assert(w[0]>0 && w[1]>0 && w[2]>0);
+  assert(w[3]==0 && w[4]==0 && w[5]==0 && rejected==2);
+  // On a smooth parabola the bounded curved reference retains more
+  // shape than the affine-only D1 reference.
+  std::vector<Vec3> xy;std::vector<double> h,weights,area,flat,curved;
+  for(int y=0;y<9;++y)for(int x=0;x<9;++x){
+    const double px=(x-4)*.1,py=(y-4)*.1;
+    xy.push_back({px,py,0});h.push_back(.6*(px*px+py*py));
+    weights.push_back(1);area.push_back(1);
+  }
+  assert(average_reference_v31d(xy,h,weights,area,{0,0,1},1,flat));
+  assert(average_reference_v31d(xy,h,weights,area,{0,0,1},1,curved,true));
+  double e0=0,e1=0;
+  for(std::size_t i=0;i<h.size();++i){
+    e0+=std::abs(h[i]-flat[i]);e1+=std::abs(h[i]-curved[i]);
+  }
+  assert(e1<e0);
+}
 int main(){
   stroke_context_v27_tests();
+  continuous_v31d2_tests();
   average_v31d_tests();
   gradient_v31c_tests();
   coherent_v31b_tests();
