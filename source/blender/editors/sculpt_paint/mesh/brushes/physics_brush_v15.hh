@@ -142,6 +142,15 @@ inline bool push_v30d_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PUSH_V30D");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
+inline bool average_surface_v31d_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_AVERAGE_V31D");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+inline bool average_transport_action_v31d(int action)
+{
+  return action==3 || action==6 || action==11 || action==12 || action==13;
+}
 inline bool gradient_v31c_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_GRADIENT_V31C");return v && v[0]=='1' && v[1]=='\0';}();
@@ -1260,6 +1269,9 @@ inline bool try_apply_intent(
       clay.adaptive_v31=footprint_v30e_brush(object,brush) && adaptive_v31_requested() &&
                         (action==5 || action==7 || action==8 || action==14);
       clay.gradient_v31c=clay.adaptive_v31 && gradient_v31c_requested();
+      if(average_surface_v31d_requested() && footprint_v30e_brush(object,brush) &&
+         (clay.adaptive_v31 || average_transport_action_v31d(action)))
+        clay.average_surface_v31d=material_override("BLENDER_SCULPT_V31D_AVERAGING",.65,0.0,1.0);
       clay.melt_fallback_v31c=clay.live_surface_v30 && clay.refine_v28b && action==11 && melt_fallback_v31c_requested();
       clay.contact_v30b=clay.live_surface_v30 && clay.refine_v28b && contact_v30b_requested() &&
                          (action==5 || action==7 || action==8 || action==14);
@@ -1437,7 +1449,7 @@ inline bool try_apply_intent(
           if((!attrs.hide_vert.is_empty() && attrs.hide_vert[i]) ||
              (!attrs.mask.is_empty() && attrs.mask[i]>=.999f))continue;
           const auto p=position_data.eval[i];
-          if((clay.adaptive_v31?math::length(p-center)>=spatial_bound:
+          if(((clay.adaptive_v31 || clay.average_surface_v31d>0)?math::length(p-center)>=spatial_bound:
               std::abs(math::dot(p-center,axis))>=depth*cache.radius) ||
              footprint_distance_v30e(cache,brush,p,normal)>=cache.radius)continue;
           ++expected;
@@ -1448,6 +1460,8 @@ inline bool try_apply_intent(
                      action,expected,missing,zero_factor,samples.size());
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      if(clay.average_surface_v31d>0 && profile_v26b_requested())
+        std::fprintf(stderr,"[V31D average] action=%d blend=%.3f fits=%zu recovered_pre_split=%zu peak_residual_R=%.7g active=%zu goals=%zu\n",action,clay.average_surface_v31d,planned.average_fits_v31d,planned.average_recovered_v31d,planned.average_peak_v31d,planned.active,goals.size());
       if(clay.adaptive_v31 && profile_v26b_requested())
         std::fprintf(stderr,"[V31 contact] action=%d candidates=%zu reached=%zu beyond_old_depth=%zu goals=%zu local_limits=%zu min_scale=%.7g signed_first_order=%.9g\n",action,planned.adaptive_candidates_v31,planned.adaptive_reached_v31,planned.adaptive_deep_v31,goals.size(),planned.local_limited_v30b,planned.accepted_scale,planned.signed_swept_volume);
       if(clay.overlap_v30c && profile_v26b_requested()){

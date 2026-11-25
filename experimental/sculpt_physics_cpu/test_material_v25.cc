@@ -603,8 +603,49 @@ static void gradient_v31c_tests(){
   for(std::size_t i=0;i<h.size();++i)
     assert(std::abs(h[i]-quadratic_height_v28b(coeff,xy[i].x,xy[i].y))<1e-10);
 }
+static void average_v31d_tests(){
+  // Affine support with an isolated high outlier: reference is not
+  // the raw noisy geometry. Planar background must remain recognizable.
+  std::vector<Vec3> xy;std::vector<double> h,w,a,ref;
+  for(int y=0;y<9;++y)for(int x=0;x<9;++x){
+    const double px=(x-4)*.1,py=(y-4)*.1;
+    xy.push_back({px,py,0});h.push_back(.1+.5*px-.2*py);w.push_back(1);a.push_back(1);
+  }
+  h[40]+=.6;
+  assert(average_reference_v31d(xy,h,w,a,{0,0,1},1,ref));
+  assert(std::abs(ref[40]-.1)<.02 && h[40]>.69);
+  // Transport on an inclined strip: the reference should admit some
+  // points beyond the old slab while the real mesh stays untouched by
+  // reference construction. Detached sheet must remain stationary.
+  constexpr int n=31;
+  std::vector<ClaySurfaceVertex> v;std::vector<ClaySurfaceTriangle> tri;
+  for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+    const double px=2.*x/(n-1)-1,py=2.*y/(n-1)-1;
+    const double r2=(px*px+py*py)/.64;
+    v.push_back({{px,py,.9*px},r2<1?std::pow(1-r2,2):0});
+  }
+  for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+    const auto i=std::size_t(y*n+x),j=i+1,k=i+n,l=k+1;
+    tri.push_back({i,j,l});tri.push_back({i,l,k});
+  }
+  const auto other=v.size();
+  v.push_back({{.05,.05,.16},1});v.push_back({{.15,.05,.16},1});v.push_back({{.05,.15,.16},1});
+  tri.push_back({other,other+1,other+2});
+  ClaySurfaceDab dab;dab.radius=.8;dab.dose=.10;dab.direction={1,0,0};
+  dab.action=ClaySurfaceAction::Push;dab.density_independent=true;dab.smooth_proxy=true;
+  dab.shape_transport=true;dab.tool_v25=true;dab.tool_v26=true;dab.stable_v28=true;
+  dab.refine_v28b=true;dab.live_surface_v30=true;dab.fast_v26b=true;dab.overlap_v30c=true;
+  dab.transport_v30b=true;dab.push_v30d=true;
+  const auto old=solve_clay_surface(v,tri,dab);
+  dab.average_surface_v31d=.65;
+  const auto out=solve_clay_surface(v,tri,dab);
+  assert(out.average_fits_v31d>0 && out.average_recovered_v31d>0 && out.active>old.active);
+  for(std::size_t i=other;i<v.size();++i)
+    assert(out.displacement[i].x==0 && out.displacement[i].y==0 && out.displacement[i].z==0);
+}
 int main(){
   stroke_context_v27_tests();
+  average_v31d_tests();
   gradient_v31c_tests();
   coherent_v31b_tests();
   adaptive_v31_tests();

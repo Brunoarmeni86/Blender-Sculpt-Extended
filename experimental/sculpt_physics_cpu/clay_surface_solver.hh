@@ -60,6 +60,7 @@ struct ClaySurfaceDab {
   bool overlap_v30c=false;
   bool adaptive_v31=false; // adaptive selection, coherent per-dab direction
   bool gradient_v31c=false, melt_fallback_v31c=false;
+  double average_surface_v31d=0.0; // virtual reference blend; never smooth actual geometry
   bool push_v30d=false; // stronger current-relief entrainment; Push only
   double push_gain_v30d=2.5;
   double transport_load_v30b=1.0;
@@ -102,6 +103,8 @@ struct ClaySurfaceResult {
   std::size_t patches_v30c=0,patch_budget_skipped_v30c=0;
   std::size_t adaptive_candidates_v31=0,adaptive_reached_v31=0,adaptive_deep_v31=0;
   std::size_t melt_fit_failures_v30b=0,melt_affine_fallbacks_v31c=0;
+  std::size_t average_fits_v31d=0,average_recovered_v31d=0;
+  double average_peak_v31d=0.0;
   double melt_residual_peak_v30b=0.0;
 };
 
@@ -246,6 +249,42 @@ inline bool fit_affine_v31c(const std::vector<Vec3> &xy,const std::vector<double
   coeff={mz-gx*mx-gy*my,gx,gy,0,0,0};
   for(double v:coeff)if(!std::isfinite(v))return false;
   return true;
+}
+/* V31D1: a robust brush-scale affine reference, built from a single
+ * connected support selected by the caller. Two Huber reweighting
+ * passes reduce the leverage of individual peaks. Only the virtual
+ * reference is filtered; positions and physical volume stay unchanged. */
+inline bool average_reference_v31d(const std::vector<Vec3> &xy,const std::vector<double> &h,
+                                  const std::vector<double> &w,const std::vector<double> &area,
+                                  Vec3 axis,double radius,std::vector<double> &reference)
+{
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  const auto cross=[](Vec3 a,Vec3 b){return Vec3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};};
+  Vec3 ex=cross(std::abs(axis.z)<.9?Vec3{0,0,1}:Vec3{0,1,0},axis);
+  const double len=std::hypot(ex.x,ex.y,ex.z);
+  if(len<=1e-12)return false;
+  ex=ex/len;const Vec3 ey=cross(axis,ex);
+  std::array<double,6> coeff{};
+  std::vector<double> robust=w;
+  const auto predict=[&](std::size_t i){return coeff[0]+coeff[1]*dot(xy[i],ex)/radius+coeff[2]*dot(xy[i],ey)/radius;};
+  for(int pass=0;pass<3;++pass){
+    if(!fit_affine_v31c(xy,h,robust,area,ex,ey,radius,coeff))return false;
+    if(pass<2)for(std::size_t i=0;i<h.size();++i)if(w[i]>0)
+      robust[i]=w[i]*std::min(1.0,.15*radius/std::max(1e-24,std::abs(h[i]-predict(i))));
+  }
+  reference=h;
+  for(std::size_t i=0;i<h.size();++i)if(w[i]>0){
+    const double value=predict(i);
+    if(!std::isfinite(value))return false;
+    reference[i]=std::clamp(value,-.65*radius,.65*radius);
+  }
+  return true;
+}
+inline bool average_transport_v31d(const ClaySurfaceDab &dab)
+{
+  return dab.average_surface_v31d>0 && dab.live_surface_v30 && dab.stable_v28 &&
+      (dab.action==ClaySurfaceAction::Push || dab.action==ClaySurfaceAction::Gather ||
+       dab.action==ClaySurfaceAction::Smear || dab.action==ClaySurfaceAction::Melt);
 }
 inline double quadratic_height_v28b(const std::array<double,6> &c,double x,double y)
 {
@@ -873,6 +912,19 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   const double amount=std::min(.08*dab.radius,dab.radius*dab.dose*dab.intensity*
       (.35+1.65*dab.mobility)*(1-.45*dab.stiffness)*(1-.30*dab.cohesion));
   const double rim_radius=std::clamp(max_r/.88,.25,1.0);
+  std::vector<double> reference;
+  if(dab.average_surface_v31d>0 && (press||scrape)){
+    std::vector<Vec3> xy(n);std::vector<double> height(n);
+    for(std::size_t i=0;i<n;++i){
+      const Vec3 off=positions[i]-dab.center;
+      height[i]=dot(off,axis);xy[i]=off-axis*height[i];
+    }
+    if(average_reference_v31d(xy,height,w,out.projected_area,axis,dab.radius,reference)){
+      ++out.average_fits_v31d;
+      for(std::size_t i=0;i<n;++i)if(w[i]>0)
+        out.average_peak_v31d=std::max(out.average_peak_v31d,std::abs(reference[i]-height[i])/dab.radius);
+    }else reference.clear();
+  }
   std::vector<double> delta(n),rim(n);
   double removed=0,receiver=0,peak_rim=0;
   for(std::size_t i=0;i<n;++i)if(w[i]>0){
@@ -880,7 +932,10 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
     const double inner=1-smooth((rr-.30)/.49);
     // A bounded local indentation/cut is evaluated on the CURRENT point.
     // This intentionally differs from the old single-plane cutter.
-    const double nominal=std::max(0.0,dab.sign*(dot(positions[i]-dab.center,axis)-
+    const double actual_height=dot(positions[i]-dab.center,axis);
+    const double contact_height=reference.empty()?actual_height:
+        actual_height+(reference[i]-actual_height)*dab.average_surface_v31d;
+    const double nominal=std::max(0.0,dab.sign*(contact_height-
                         (dab.has_tool_plane?dab.tool_plane_height:-dab.sign*dab.tool_depth*dab.radius)));
     const double local_depth=std::max(nominal,.35*dab.tool_depth*dab.radius);
     const double cut=scrape?std::min(local_depth,amount*.85):
@@ -951,7 +1006,7 @@ inline ClaySurfaceResult solve_clay_surface(
       norm(dab.axis)<=1e-12 || !std::isfinite(norm(dab.direction)) ||
       !std::isfinite(dab.radius) || dab.radius<=1e-12 ||
       (dab.swept_v29 && (!std::isfinite(norm(dab.sweep_start)) || norm(dab.sweep_start-dab.center)>dab.radius*.500001)) ||
-      !interval(dab.dose) || !interval(dab.transport_load_v30b) ||
+      !interval(dab.dose) || !interval(dab.transport_load_v30b) || !interval(dab.average_surface_v31d) ||
       !std::isfinite(dab.push_gain_v30d) || dab.push_gain_v30d<.5 || dab.push_gain_v30d>4.0 || !std::isfinite(dab.intensity) || dab.intensity<0 ||
       dab.intensity>(dab.shape_transport?4.0:1.0) || !interval(dab.mobility) ||
       (dab.sign!=1 && dab.sign!=-1) ||
@@ -992,6 +1047,8 @@ inline ClaySurfaceResult solve_clay_surface(
   std::vector<double> support_area(recover_contact?n:0,0.0);
   std::vector<bool> mixed(recover_contact?n:0,false);
   const double depth_limit=recover_contact?.65:.50;
+  const bool average=average_transport_v31d(dab);
+  const double spatial_limit=1.5*dab.radius+(dab.swept_v29?norm(dab.sweep_start-dab.center):0.0);
   for(std::size_t i=0;i<n;++i) {
     if(!std::isfinite(norm(vertices[i].position)) || !interval(vertices[i].influence) ||
        (dab.plastic_v29 && !interval(vertices[i].compaction_v29)) ||
@@ -1004,11 +1061,11 @@ inline ClaySurfaceResult solve_clay_surface(
     if(!std::isfinite(h[i]) || !std::isfinite(norm(xy[i])))
       throw std::overflow_error("Invalid clay chart");
     // Explicit depth bound avoids gathering the back side of a thin mesh.
-    if(vertices[i].influence>0 && std::abs(h[i])>dab.radius*depth_limit)++out.depth_rejected_v30b;
-    if(std::abs(h[i])<=dab.radius*depth_limit &&
+    if(!average && vertices[i].influence>0 && std::abs(h[i])>dab.radius*depth_limit)++out.depth_rejected_v30b;
+    if((average?norm(offset)<spatial_limit:std::abs(h[i])<=dab.radius*depth_limit) &&
        ((dab.surface_contact && !dab.shape_transport) || chart_distance_v29(xy[i],dab,axis)<=dab.radius)) {
       w[i]=vertices[i].influence;
-      if(dab.shape_transport) {
+      if(dab.shape_transport && !average) {
         const double t=std::clamp((depth_limit-std::abs(h[i])/dab.radius)/.15,0.0,1.0);
         w[i]*=t*t*(3-2*t); // feather the chart depth boundary
       }
@@ -1077,6 +1134,38 @@ inline ClaySurfaceResult solve_clay_surface(
     }
   }
   if(seed==n || dab.dose==0 || dab.intensity==0) return out;
+  if(average){
+    // Fit only the pre-depth, positive-factor, front-facing component
+    // nearest the cursor. Existing chart rejects and real topology remain
+    // authoritative. Other islands retain their original depth envelope.
+    std::vector<std::size_t> parent(n);
+    for(std::size_t i=0;i<n;++i)parent[i]=i;
+    const auto root=[&](std::size_t i){
+      while(parent[i]!=i){parent[i]=parent[parent[i]];i=parent[i];}return i;
+    };
+    for(const auto &e:edges)if(w[e[0]]>0 && w[e[1]]>0){
+      const auto a=root(e[0]),b=root(e[1]);if(a!=b)parent[b]=a;
+    }
+    const auto component=root(seed);
+    auto weights=w;
+    for(std::size_t i=0;i<n;++i)if(w[i]>0 && root(i)!=component)weights[i]=0;
+    std::vector<double> reference;
+    const bool fitted=average_reference_v31d(xy,h,weights,out.projected_area,axis,dab.radius,reference);
+    if(fitted)++out.average_fits_v31d;
+    seed=n;nearest=std::numeric_limits<double>::infinity();
+    for(std::size_t i=0;i<n;++i)if(w[i]>0){
+      const bool supported=fitted && weights[i]>0;
+      const double depth=std::abs(h[i]-(supported?dab.average_surface_v31d*reference[i]:0.0));
+      if(supported)out.average_peak_v31d=std::max(out.average_peak_v31d,std::abs(reference[i]-h[i])/dab.radius);
+      if(depth>=depth_limit*dab.radius){w[i]=0;++out.depth_rejected_v30b;continue;}
+      if(std::abs(h[i])>depth_limit*dab.radius)++out.average_recovered_v31d;
+      const double feather=std::clamp((depth_limit-depth/dab.radius)/.15,0.0,1.0);
+      w[i]*=feather*feather*(3-2*feather);
+      const double dist=norm(vertices[i].position-dab.center);
+      if(w[i]>0 && dist<nearest){nearest=dist;seed=i;}
+    }
+    if(seed==n)return out;
+  }
   // V30C: separate topological support from writable transport components.
   // The halo includes incident faces, including zero-factor vertices.
   // Other disconnected mesh sheets are still excluded. Within the touched
@@ -1131,6 +1220,9 @@ inline ClaySurfaceResult solve_clay_surface(
         out.fine_transport_v30b+=part.fine_transport_v30b;
         out.melt_fit_failures_v30b+=part.melt_fit_failures_v30b;
         out.melt_affine_fallbacks_v31c+=part.melt_affine_fallbacks_v31c;
+        // Parent already counted pre-split candidate recovery; report
+        // the largest residual and avoid double-counting the same ids.
+        out.average_peak_v31d=std::max(out.average_peak_v31d,part.average_peak_v31d);
         out.melt_residual_peak_v30b=std::max(out.melt_residual_peak_v30b,part.melt_residual_peak_v30b);
         for(auto i:patch->ids){
           out.displacement[i]=part.displacement[i];
