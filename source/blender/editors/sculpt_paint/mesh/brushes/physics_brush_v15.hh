@@ -152,6 +152,14 @@ inline bool continuous_contact_v31d2_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_CONTINUOUS_V31D2");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled && average_surface_v31d_requested();
 }
+inline bool contact_reach_v31d4_requested()
+{
+  static const bool enabled=[](){
+    const char *v=std::getenv("BLENDER_SCULPT_REACH_V31D4");
+    return v && v[0]=='1' && v[1]=='\0';
+  }();
+  return enabled && continuous_contact_v31d2_requested();
+}
 inline bool motion_proxy_v31d3_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PROXY_V31D3");return v && v[0]=='1' && v[1]=='\0';}();
@@ -1285,6 +1293,7 @@ inline bool try_apply_intent(
          (clay.adaptive_v31 || average_transport_action_v31d(action)))
         clay.average_surface_v31d=material_override("BLENDER_SCULPT_V31D_AVERAGING",.65,0.0,1.0);
       clay.continuous_contact_v31d2=clay.average_surface_v31d>0 && continuous_contact_v31d2_requested();
+      clay.contact_reach_v31d4=clay.continuous_contact_v31d2 && contact_reach_v31d4_requested();
       if(clay.continuous_contact_v31d2)clay.gradient_v31c=gradient_v31c_requested();
       if(clay.continuous_contact_v31d2 && motion_proxy_v31d3_requested())
         clay.motion_proxy_v31d3=material_override("BLENDER_SCULPT_V31D3_PROXY_BLEND",.65,0.0,1.0);
@@ -1476,6 +1485,9 @@ inline bool try_apply_intent(
                      action,expected,missing,zero_factor,samples.size());
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      if(clay.contact_reach_v31d4 && profile_v26b_requested())
+        std::fprintf(stderr,"[V31D4 reach] action=%d extra_R=0.15 active=%zu goals=%zu component_rejected=%zu scale=%.7g\n",
+                     action,planned.active,goals.size(),planned.component_rejected_v30b,planned.accepted_scale);
       if(clay.motion_proxy_v31d3>0 && profile_v26b_requested())
         std::fprintf(stderr,"[V31D3 proxy] action=%d blend=%.3f passes=%zu rejected=%zu nodes=%zu strain_before=%.7g strain_after=%.7g budget_error=%.7g\n",action,clay.motion_proxy_v31d3,planned.proxy_passes_v31d3,planned.proxy_rejected_v31d3,planned.proxy_nodes_v31d3,planned.proxy_strain_before_v31d3,planned.proxy_strain_after_v31d3,planned.proxy_budget_error_v31d3);
       if(clay.continuous_contact_v31d2 && profile_v26b_requested())
