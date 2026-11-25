@@ -98,19 +98,29 @@ inline std::vector<Vec3> target(const Patch& s,Tool tool,Material m,Vec3 directi
 }
 // D10B: displacement-field Jacobi, pinned halo, existing global safety.
 // Choose only a lower target-error feasible candidate; no geometry smoothing.
-inline std::vector<Vec3> optimize(const Patch& s,std::vector<Vec3> desired){
+inline std::vector<Vec3> optimize(const Patch& s,std::vector<Vec3> desired,bool preserve_flux=false){
  if(desired.size()!=s.p.size())throw std::invalid_argument("target size");
  for(std::size_t i=0;i<desired.size();++i)if(s.weight[i]<=0)desired[i]={};
  auto safe=[&](std::vector<Vec3> u){double g=gradient_motion_scale_v31c(s.p,s.tris,u);
   for(auto& v:u)v=v*g;
   limit_local_contact(s.p,s.tris,u,true);return u;};
  auto error=[&](const std::vector<Vec3>& u){double e=0;for(std::size_t i=0;i<u.size();++i){auto v=u[i]-desired[i];e+=s.area[i]*dot(v,v);}return e;};
+ auto volume=[&](const std::vector<Vec3>& u){double v=0;for(std::size_t i=0;i<u.size();++i)v+=s.area[i]*dot(s.normal[i],u[i]);return v;};
  auto best=safe(desired),u=desired;double e=error(best);
+ const double reference=volume(best);
+ // Preserve the feasible baseline signed normal-area proxy, not exact volume.
+ auto balance=[&](std::vector<Vec3>& v){
+  double a=0;for(std::size_t i=0;i<v.size();++i)if(s.weight[i]>0)a+=s.area[i]*s.weight[i]*dot(s.normal[i],s.normal[i]);
+  if(a>0){double correction=(reference-volume(v))/a;
+   for(std::size_t i=0;i<v.size();++i)if(s.weight[i]>0)v[i]+=s.normal[i]*(correction*s.weight[i]);}
+ };
  for(int pass=0;pass<12;++pass){auto next=u;
   for(std::size_t i=0;i<u.size();++i)if(s.weight[i]>0&&!s.adj[i].empty()){
    Vec3 avg{};for(auto j:s.adj[i])avg+=u[j];
    next[i]=desired[i]*.35+avg*(.65/double(s.adj[i].size()));
-  }u=std::move(next);auto candidate=safe(u);double x=error(candidate);
+  }u=std::move(next);auto trial=u;if(preserve_flux)balance(trial);auto candidate=safe(trial);
+  if(preserve_flux&&std::abs(volume(candidate)-reference)>1e-10*std::max(1e-20,std::abs(reference)+std::abs(volume(desired))))continue;
+  double x=error(candidate);
   if(x<e){e=x;best=std::move(candidate);}
  }return best;
 }
