@@ -59,6 +59,7 @@ struct ClaySurfaceDab {
   bool contact_v30b=false;
   bool overlap_v30c=false;
   bool adaptive_v31=false; // adaptive selection, coherent per-dab direction
+  bool sculpt_footprint_v33=false; // host owns the writable footprint; keep topology/contact safety
   bool gradient_v31c=false, melt_fallback_v31c=false;
   double average_surface_v31d=0.0; // virtual reference blend; never smooth actual geometry
   bool continuous_contact_v31d2=false;
@@ -941,7 +942,7 @@ inline void connected_contact_v31d2(const std::vector<Vec3> &positions,
                                     const ClaySurfaceEdges &edges,Vec3 axis,
                                     std::size_t seed,double initial,double reach,double radius,
                                     double blend,std::vector<double> &w,
-                                    std::size_t &rejected)
+                                    std::size_t &rejected,bool native_weights=false)
 {
   const auto norm=[](Vec3 a){return std::hypot(a.x,a.y,a.z);};
   const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
@@ -995,8 +996,9 @@ inline void connected_contact_v31d2(const std::vector<Vec3> &positions,
   for(std::size_t i=0;i<n;++i)if(w[i]>0){
     const double averaged=.5*(dot(medium[i],axis)+dot(filtered[i],axis));
     const double facing=(1-blend)*dot(normal[i],axis)+blend*averaged;
-    w[i]*=(1-smooth((dist[i]-(reach-.25*radius))/(.25*radius)))*
-        (.15+.85*smooth(facing/.30));
+    if(!native_weights)
+      w[i]*=(1-smooth((dist[i]-(reach-.25*radius))/(.25*radius)))*
+          (.15+.85*smooth(facing/.30));
   }
 }
 inline bool adaptive_direct_v31(const ClaySurfaceDab &dab)
@@ -1066,7 +1068,8 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
     if(dot(normals[i],axis)<=.015){++out.chart_rejected_v30b;continue;}
     const Vec3 off=positions[i]-dab.center;
     radial[i]=chart_distance_v29(off-axis*dot(off,axis),dab,axis)/dab.radius;
-    if(radial[i]>=1)continue;
+    if(!dab.sculpt_footprint_v33 && radial[i]>=1)continue;
+    if(dab.sculpt_footprint_v33)radial[i]=std::min(radial[i],1.0);
     w[i]=vertices[i].influence;
     const double dist=norm(off);
     if(dist<nearest){nearest=dist;seed=i;}
@@ -1078,7 +1081,7 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   const bool continuous=dab.continuous_contact_v31d2 && dab.average_surface_v31d>0;
   if(continuous){
     connected_contact_v31d2(positions,dual,edges,axis,seed,nearest,reach,dab.radius,
-                             dab.average_surface_v31d,w,out.component_rejected_v30b);
+                             dab.average_surface_v31d,w,out.component_rejected_v30b,dab.sculpt_footprint_v33);
   }else{
   std::vector<std::vector<std::pair<std::size_t,double>>> adj(n);
   for(const auto &e:edges){
@@ -1106,10 +1109,10 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   for(std::size_t i=0;i<n;++i)if(w[i]>0){
     if(!continuous){
     if(!std::isfinite(distance[i])){w[i]=0;++out.component_rejected_v30b;continue;}
-    w[i]*=1-smooth((distance[i]-(reach-.25*dab.radius))/(.25*dab.radius));
-    // Coherent axial motion, with a smooth reduction on nearly vertical
-    // surfaces; no independent vertex-normal displacement or depth slab.
-    w[i]*=smooth(dot(normals[i],axis)/.30);
+    if(!dab.sculpt_footprint_v33){
+      w[i]*=1-smooth((distance[i]-(reach-.25*dab.radius))/(.25*dab.radius));
+      w[i]*=smooth(dot(normals[i],axis)/.30);
+    }
     }
     if(w[i]<=0)continue;
     ++out.adaptive_reached_v31;
@@ -1188,11 +1191,13 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   // Bound differential motion BEFORE the triangle guard. Uniform scaling
   // retains both the smooth profile and the signed budget; no individually
   // stalled vertices injected into a pressure field by the local limiter.
-  const double coherent=dab.gradient_v31c?
+  const double coherent=dab.sculpt_footprint_v33?1.0:(dab.gradient_v31c?
       gradient_motion_scale_v31c(positions,triangles,out.displacement):
-      coherent_motion_scale_v31b(positions,triangles,out.displacement);
+      coherent_motion_scale_v31b(positions,triangles,out.displacement));
   if(coherent<1)for(auto &v:out.displacement)v=v*coherent;
-  const auto safe=limit_local_contact(positions,triangles,out.displacement,true);
+  const auto safe=dab.sculpt_footprint_v33?
+      limit_balanced_contact_v30c(positions,triangles,out.displacement):
+      limit_local_contact(positions,triangles,out.displacement,true);
   out.slope_scale=coherent;
   out.accepted_scale=coherent*safe.final_scale;
   out.local_limited_v30b=safe.limited_vertices;
@@ -1263,8 +1268,9 @@ inline ClaySurfaceResult solve_clay_surface(
       dab.action==ClaySurfaceAction::Compress);
   const bool average=average_transport_v31d(dab);
   const bool continuous=average && dab.continuous_contact_v31d2;
-  std::vector<double> support_area((recover_contact||continuous)?n:0,0.0);
-  std::vector<bool> mixed((recover_contact||continuous)?n:0,false);
+  const bool native_support=dab.sculpt_footprint_v33;
+  std::vector<double> support_area((recover_contact||continuous||native_support)?n:0,0.0);
+  std::vector<bool> mixed((recover_contact||continuous||native_support)?n:0,false);
   std::vector<Vec3> dual(continuous?n:0);
   const double depth_limit=recover_contact?.65:.50;
   const double spatial_limit=1.5*dab.radius+(dab.swept_v29?norm(dab.sweep_start-dab.center):0.0);
@@ -1280,11 +1286,11 @@ inline ClaySurfaceResult solve_clay_surface(
     if(!std::isfinite(h[i]) || !std::isfinite(norm(xy[i])))
       throw std::overflow_error("Invalid clay chart");
     // Explicit depth bound avoids gathering the back side of a thin mesh.
-    if(!average && vertices[i].influence>0 && std::abs(h[i])>dab.radius*depth_limit)++out.depth_rejected_v30b;
-    if((average?norm(offset)<spatial_limit:std::abs(h[i])<=dab.radius*depth_limit) &&
-       ((dab.surface_contact && !dab.shape_transport) || chart_distance_v29(xy[i],dab,axis)<=dab.radius)) {
+    if(!native_support && !average && vertices[i].influence>0 && std::abs(h[i])>dab.radius*depth_limit)++out.depth_rejected_v30b;
+    if(native_support || ((average?norm(offset)<spatial_limit:std::abs(h[i])<=dab.radius*depth_limit) &&
+       ((dab.surface_contact && !dab.shape_transport) || chart_distance_v29(xy[i],dab,axis)<=dab.radius))) {
       w[i]=vertices[i].influence;
-      if(dab.shape_transport && !average) {
+      if(dab.shape_transport && !average && !native_support) {
         const double t=std::clamp((depth_limit-std::abs(h[i])/dab.radius)/.15,0.0,1.0);
         w[i]*=t*t*(3-2*t); // feather the chart depth boundary
       }
@@ -1306,7 +1312,7 @@ inline ClaySurfaceResult solve_clay_surface(
     // Reject cells incident on a back-facing or nearly edge-on triangle.
     // Keeping projected orientation fixed prevents chart folds; it does
     // not guarantee no collisions with other geometry.
-    if(recover_contact||continuous){
+    if(recover_contact||continuous||native_support){
       // Signed dual support from every incident triangle; no remapping here.
       for(auto i:t){
         if(area<=1e-24)bad[i]=true;
@@ -1334,7 +1340,7 @@ inline ClaySurfaceResult solve_clay_surface(
   double nearest=std::numeric_limits<double>::infinity();
   for(std::size_t i=0;i<n;++i) {
     if(!std::isfinite(out.projected_area[i])) throw std::overflow_error("Clay dual area overflow");
-    if(continuous){
+    if(continuous||native_support){
       // Keep actual positive signed support; a single steep incident face
       // no longer rejects an otherwise usable vertex. Never invent area.
       const double support=support_area[i]>1e-24?out.projected_area[i]/support_area[i]:0.0;
@@ -1364,7 +1370,7 @@ inline ClaySurfaceResult solve_clay_surface(
     std::vector<Vec3> positions(n);
     for(std::size_t i=0;i<n;++i)positions[i]=vertices[i].position;
     connected_contact_v31d2(positions,dual,edges,axis,seed,nearest,spatial_limit,dab.radius,
-                             dab.average_surface_v31d,w,out.component_rejected_v30b);
+                             dab.average_surface_v31d,w,out.component_rejected_v30b,native_support);
     std::vector<double> reference;
     const bool fitted=average_reference_v31d(xy,h,w,out.projected_area,axis,dab.radius,reference,true);
     if(fitted)++out.average_fits_v31d;
@@ -1376,7 +1382,7 @@ inline ClaySurfaceResult solve_clay_surface(
       if(fitted)out.average_peak_v31d=std::max(out.average_peak_v31d,std::abs(reference[i]-h[i])/dab.radius);
       if(std::abs(h[i])>depth_limit*dab.radius)++out.average_recovered_v31d;
       const double f=std::clamp((.85-depth/dab.radius)/.35,0.0,1.0);
-      w[i]*=.15+.85*f*f*(3-2*f);
+      if(!native_support)w[i]*=.15+.85*f*f*(3-2*f);
     }
     if(w[seed]<=0)return out;
     out.patches_v30c=1;
@@ -1403,10 +1409,10 @@ inline ClaySurfaceResult solve_clay_surface(
       const bool supported=fitted && weights[i]>0;
       const double depth=std::abs(h[i]-(supported?dab.average_surface_v31d*reference[i]:0.0));
       if(supported)out.average_peak_v31d=std::max(out.average_peak_v31d,std::abs(reference[i]-h[i])/dab.radius);
-      if(depth>=depth_limit*dab.radius){w[i]=0;++out.depth_rejected_v30b;continue;}
+      if(!native_support && depth>=depth_limit*dab.radius){w[i]=0;++out.depth_rejected_v30b;continue;}
       if(std::abs(h[i])>depth_limit*dab.radius)++out.average_recovered_v31d;
       const double feather=std::clamp((depth_limit-depth/dab.radius)/.15,0.0,1.0);
-      w[i]*=feather*feather*(3-2*feather);
+      if(!native_support)w[i]*=feather*feather*(3-2*feather);
       const double dist=norm(vertices[i].position-dab.center);
       if(w[i]>0 && dist<nearest){nearest=dist;seed=i;}
     }
