@@ -206,7 +206,8 @@ void do_clay_brush(const Depsgraph &depsgraph,
     Vector<float> factors;
     Vector<float> distances;
     Vector<float3> translations;
-    const bool footprint=autonomous && physics_v15::footprint_v30e_brush(object,brush);
+    const bool native_v33=autonomous && physics_v15::sculpt_footprint_v33_brush(object,brush);
+    const bool footprint=autonomous && !native_v33 && physics_v15::footprint_v30e_brush(object,brush);
     const bool audit=footprint && physics_v15::profile_v26b_requested();
     physics_v15::FootprintAuditV30E coverage;
     node_mask.foreach_index([&](const int ni) {
