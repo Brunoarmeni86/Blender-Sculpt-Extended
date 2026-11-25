@@ -40,6 +40,7 @@
 #  include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 
 #  include <algorithm>
+#  include <array>
 #  include <cmath>
 #  include <chrono>
 #  include <cstdio>
@@ -122,6 +123,63 @@ inline bool live_surface_v30_brush(const Object &object,const Brush &brush)
          !ss->deform_modifiers_active && !ss->shapekey_active &&
          bke::multires_layers::base_modifier(const_cast<Object &>(object))==nullptr;
 }
+inline bool d5_enabled(const char *name)
+{
+  const char *v=std::getenv(name);
+  return v && v[0]=='1' && v[1]=='\0';
+}
+inline bool mirror_v31d5_supported(const Sculpt &sd,const Object &object,const Brush &brush)
+{
+  if(!d5_enabled("BLENDER_SCULPT_MIRROR_V31D5") || brush.sculpt_physics_mode!=3 ||
+     !live_surface_v30_brush(object,brush))return false;
+  const auto &cache=*object.runtime->sculpt_session->cache;
+  const Mesh &mesh=*id_cast<Mesh *>(object.data);
+  return !cache.reference_symmetry && !cache.reference_combined &&
+      mesh.radial_symmetry[0]==1 && mesh.radial_symmetry[1]==1 && mesh.radial_symmetry[2]==1 &&
+      (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))==0 &&
+      cache.tile_pass==0 && cache.radial_symmetry_pass==0 &&
+      int(cache.mirror_symmetry_pass)>=0 && int(cache.mirror_symmetry_pass)<8;
+}
+// Scope spans PBVH gathering, planning and writing, including early returns.
+// Shared stroke settings remain shared; only pass-specific state is swapped.
+struct MirrorStrokeStateV31D5 {
+  std::shared_ptr<void> writer,contact,stroke,surface;
+  bool failed=false,logged=false,started=false,plane_valid=false;
+  double press_dose=0;
+  float3 last_center=float3(0),plane_origin=float3(0),plane_normal=float3(0);
+  void exchange(StrokeCache &c){
+    using std::swap;
+    swap(writer,c.xpbd_v15_state);
+    swap(contact,c.xpbd_v19_contact_history);
+    swap(stroke,c.xpbd_v27_stroke);
+    swap(surface,c.xpbd_v28_surface_history);
+    swap(failed,c.xpbd_v15_failed);
+    swap(logged,c.xpbd_v15_active_logged);
+    swap(started,c.xpbd_v17_intent_started);
+    swap(plane_valid,c.xpbd_v25_plane_valid);
+    swap(press_dose,c.xpbd_v26_press_dose);
+    swap(last_center,c.xpbd_v17_last_center);
+    swap(plane_origin,c.xpbd_v25_plane_origin);
+    swap(plane_normal,c.xpbd_v25_plane_normal);
+  }
+};
+struct MirrorStrokeScopeV31D5 {
+  StrokeCache *cache=nullptr;
+  MirrorStrokeStateV31D5 *state=nullptr;
+  MirrorStrokeScopeV31D5(const Sculpt &sd,const Object &object,const Brush &brush){
+    if(!mirror_v31d5_supported(sd,object,brush) ||
+       stroke_symmetry_xyz_get(object)==PAINT_SYMM_NONE)return;
+    cache=object.runtime->sculpt_session->cache;
+    using States=std::array<MirrorStrokeStateV31D5,8>;
+    if(!cache->xpbd_v31d5_mirror_states)cache->xpbd_v31d5_mirror_states=std::make_shared<States>();
+    auto states=std::static_pointer_cast<States>(cache->xpbd_v31d5_mirror_states);
+    state=&(*states)[int(cache->mirror_symmetry_pass)];
+    state->exchange(*cache);
+  }
+  ~MirrorStrokeScopeV31D5(){if(state)state->exchange(*cache);}
+  MirrorStrokeScopeV31D5(const MirrorStrokeScopeV31D5 &)=delete;
+  MirrorStrokeScopeV31D5 &operator=(const MirrorStrokeScopeV31D5 &)=delete;
+};
 inline bool transport_v30b_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_TRANSPORT_V30B");return v && v[0]=='1' && v[1]=='\0';}();
@@ -452,8 +510,11 @@ inline bool try_apply(const Sculpt &sd,
   const Mesh &mesh=*id_cast<Mesh *>(object.data);
   // Check the actual dispatcher configuration BEFORE its first pass.
   // Object mirror axes are not stored in Paint::symmetry_flags in this fork.
+  const Brush &symmetry_brush=*BKE_paint_brush_for_read(&sd.paint);
+  const bool experimental_mirror=conservative_clay && autonomous &&
+      mirror_v31d5_supported(sd,object,symmetry_brush);
   const bool unsupported_symmetry =
-      stroke_symmetry_xyz_get(object)!=PAINT_SYMM_NONE ||
+      (!experimental_mirror && stroke_symmetry_xyz_get(object)!=PAINT_SYMM_NONE) ||
       cache.reference_symmetry || cache.reference_combined ||
       mesh.radial_symmetry[0]!=1 || mesh.radial_symmetry[1]!=1 ||
       mesh.radial_symmetry[2]!=1 ||
@@ -463,7 +524,7 @@ inline bool try_apply(const Sculpt &sd,
       bke::multires_layers::base_modifier(object)!=nullptr ||
       unsupported_symmetry ||
       cache.tile_pass!=0 || cache.radial_symmetry_pass!=0 ||
-      cache.mirror_symmetry_pass!=0) {
+      (!experimental_mirror && cache.mirror_symmetry_pass!=0)) {
     // A previously active physical stroke must not switch abruptly to the
     // stock brush; freeze remaining dabs until the user releases the stroke.
     // Once a stroke chose native fallback, never enter the physical solver
@@ -964,6 +1025,10 @@ inline bool try_apply(const Sculpt &sd,
         peak=std::max(peak,std::hypot(double(t.x),double(t.y),double(t.z)));
       }
     }
+    if(d5_enabled("BLENDER_SCULPT_DIAG_V31D5") && profile)
+      std::fprintf(stderr,"[V31D5 accepted] action=%d mirror=%d dab=%zu peak_R=%.7g contact_scale=%.7g moved=%zu\n",
+          cache.xpbd_v16_clay_behavior,int(cache.mirror_symmetry_pass),state->autonomous_dabs+1,
+          peak/std::max(double(cache.radius),1e-12),contact_scale,moved_v30c);
     ++state->autonomous_dabs;
     state->autonomous_peak_sum+=peak;
     state->autonomous_peak=std::max(state->autonomous_peak,peak);
@@ -1228,6 +1293,14 @@ inline bool try_apply_intent(
       // are optimized. Other actions use radius-averaged segment dose.
       if(original_action!=1 && original_action!=4)intent.dose=stroke_step.dose;
     }
+    const double baseline_dose=intent.dose;
+    if(v27 && conservative && live_surface_v30_brush(object,brush) &&
+       brush.stroke_method==BRUSH_STROKE_SPACE &&
+       d5_enabled("BLENDER_SCULPT_EXPOSURE_V31D5")){
+      intent.dose=sculpt_physics::continuous_exposure_v31d5(
+          intent.dose,stroke->started,stroke_step.gap,
+          material_override("BLENDER_SCULPT_V31D5_EXPOSURE_BONUS",.20,0.0,.5));
+    }
     const int action=surface_v20 && original_action>=1 && original_action<=3 ?
                          original_action+3 :
                      drag_contact_requested() && original_action==2 ? 5 : original_action;
@@ -1308,6 +1381,11 @@ inline bool try_apply_intent(
         stage_transport_v30b(stroke_step,*stroke);
         if(action==6 || action==13){
           clay.direction=stroke_step.next.transport_direction_v30b;
+          if(d5_enabled("BLENDER_SCULPT_FRESH_DIRECTION_V31D5") && math::length(delta)>1e-12f){
+            const Vec3 tangent=convert(delta)-clay.axis*stroke_dot_v27(convert(delta),clay.axis)/stroke_dot_v27(clay.axis,clay.axis);
+            const double len=stroke_norm_v27(tangent);
+            if(len>1e-12)clay.direction=tangent/len;
+          }
           clay.transport_load_v30b=.55+.45*stroke_step.next.transport_load_v30b;
         }
       }
@@ -1550,6 +1628,12 @@ inline bool try_apply_intent(
       goals=plan_drag_contact(samples,intent,*history);
     }
     else goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
+    if(d5_enabled("BLENDER_SCULPT_DIAG_V31D5") && profile_v26b_requested()){
+      double peak=0;for(const auto &g:goals)peak=std::max(peak,sculpt_physics::stroke_norm_v27(g.translation));
+      std::fprintf(stderr,"[V31D5 request] action=%d mirror=%d sample=%zu base_dose=%.7g dose=%.7g intensity=%.7g travel_R=%.7g goals=%zu peak_R=%.7g\n",
+          action,int(cache.mirror_symmetry_pass),v27?stroke_step.next.samples:std::size_t(0),baseline_dose,intent.dose,intent.intensity,
+          double(math::length(delta))/intent.radius,goals.size(),peak/intent.radius);
+    }
     const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,conservative,
                                  plastic_dab.plastic_v29?&plastic_dab:nullptr);
     if (handled && !cache.xpbd_v15_failed) {
