@@ -390,8 +390,49 @@ static void transport_v30b_tests(){
     assert(motion>1e-6);
   }
 }
+static void contact_v30b_tests(){
+  constexpr int n=41;
+  std::vector<ClaySurfaceVertex> v;
+  std::vector<ClaySurfaceTriangle> tri;
+  for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+    const double px=2.*x/(n-1)-1,py=2.*y/(n-1)-1,r2=(px*px+py*py)/.64;
+    v.push_back({{px,py,-.12*std::exp(-80*(px*px+py*py))},r2<1?std::pow(1-r2,2):0});
+  }
+  for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+    const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
+    tri.push_back({a,b,d});tri.push_back({a,d,c});
+  }
+  ClaySurfaceDab dab;dab.radius=.8;dab.dose=.15;dab.direction={1,0,0};
+  dab.density_independent=true;dab.smooth_proxy=true;dab.shape_transport=true;
+  dab.tool_v25=true;dab.tool_v26=true;dab.stable_v28=true;dab.refine_v28b=true;
+  dab.live_surface_v30=true;dab.fast_v26b=true;dab.contact_v27b=true;
+  dab.has_tool_plane=true;dab.tool_plane_height=-.05;
+  dab.action=ClaySurfaceAction::Scrape;
+  const auto old=solve_clay_surface(v,tri,dab);
+  assert(old.displacement[n*n/2].z==0);
+  dab.contact_v30b=true;
+  const auto cut=solve_clay_surface(v,tri,dab);
+  assert(cut.displacement[n*n/2].z<0);
+  for(const auto &p:cut.displacement)assert(p.z<=1e-12);
+  v[std::size_t((n/2+4)*n+n/2+4)].position.z=.8;
+  const auto recovered=solve_clay_surface(v,tri,dab);
+  assert(recovered.chart_recovered_v30b>0);
+  for(auto action:{ClaySurfaceAction::Press,ClaySurfaceAction::Compress,ClaySurfaceAction::Compact}){
+    dab.action=action;const auto out=solve_clay_surface(v,tri,dab);
+    double motion=0;
+    for(std::size_t i=0;i<v.size();++i){
+      assert(std::isfinite(out.displacement[i].z));
+      if(v[i].influence==0)assert(out.displacement[i].z==0);
+      motion+=std::abs(out.displacement[i].z);
+    }
+    assert(motion>1e-8);
+    if(action==ClaySurfaceAction::Compact)assert(out.signed_swept_volume<=1e-9);
+    else assert(std::abs(out.signed_swept_volume)<1e-9);
+  }
+}
 int main(){
   stroke_context_v27_tests();
+  contact_v30b_tests();
   transport_v30b_tests();
   live_surface_v30_tests();
   collision_v29_tests();

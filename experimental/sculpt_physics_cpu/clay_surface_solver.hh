@@ -54,6 +54,7 @@ struct ClaySurfaceDab {
   bool stable_v28=false; // opt-in cumulative bounds and conservative proxy transport
   bool live_surface_v30=false; // incremental current-geometry safety, no stroke-start displacement cap
   bool transport_v30b=false;
+  bool contact_v30b=false;
   double transport_load_v30b=1.0;
   bool refine_v28b=false; // gradual capacities and curvature-aware Melt
   bool swept_v29=false;
@@ -89,6 +90,8 @@ struct ClaySurfaceResult {
   std::size_t history_limited=0;
   double slope_scale=1.0;
   double fine_transport_v30b=0.0;
+  std::size_t chart_rejected_v30b=0,chart_recovered_v30b=0,depth_rejected_v30b=0;
+  std::size_t component_rejected_v30b=0,local_limited_v30b=0;
 };
 
 // Qualitative hardening state. Units are normal displacement / brush radius,
@@ -547,32 +550,49 @@ inline void shape_clay_transport(
   const bool compress=dab.action==ClaySurfaceAction::Compress;
   std::vector<double> rim(w.size(),0.0);
   double removed=0,receiver=0,peak_rim=0;
+  double rim_radius=1.0;
+  if(dab.contact_v30b && (press||compact||compress)){
+    double max_r=0;
+    for(std::size_t i=0;i<w.size();++i)if(w[i]>.02)
+      max_r=std::max(max_r,chart_distance_v29(xy[i],dab,axis)/dab.radius);
+    rim_radius=std::clamp(max_r/.88,.25,1.0);
+  }
+  const auto penetration_v30b=[&](double height,double plane,double r){
+    double z=dab.sign*height,p=dab.sign*plane;
+    if(dab.contact_v30b){
+      // Follow shallow local depressions, bounded and feathered at the rim.
+      const double recover=std::clamp(p-z+.35*dab.tool_depth*dab.radius,0.0,.20*dab.radius);
+      p-=recover*(1-smooth((r-.42)/.45));
+    }
+    return std::max(0.0,z-p);
+  };
   for(std::size_t i=0;i<w.size();++i)if(w[i]>0) {
     const auto p=xy[i];const double r=chart_distance_v29(p,dab,axis)/dab.radius;
     if(scrape) {
       // A unilateral cutter removes only material beyond its plane.
       const double plane=dab.has_tool_plane?dab.tool_plane_height:-dab.sign*dab.tool_depth*dab.radius;
-      const double penetration=std::max(0.0,dab.sign*(h[i]-plane));
+      const double penetration=penetration_v30b(h[i],plane,r);
       delta[i]=-dab.sign*w[i]*std::min(penetration,amount*(dab.tool_v26?.85:.60));
     }
     else if(press||compact||compress) {
-      const double inner=dab.contact_v27b?1-smooth((r-.30)/.49):
+      const double rr=r/rim_radius;
+      const double inner=dab.contact_v27b?1-smooth((rr-.30)/.49):
           1-smooth((r-.42)/(dab.tool_v26&&press?.37:.29));
       const double plane=dab.has_tool_plane?dab.tool_plane_height:-dab.sign*(dab.tool_v25?dab.tool_depth:.065)*dab.radius;
-      double depth=press?std::max(0.0,dab.sign*(h[i]-plane)):amount*.30;
+      double depth=press?penetration_v30b(h[i],plane,r):amount*.30;
       if(dab.stable_v28 && !press)depth=std::min(depth,.08*dab.radius);
       // Reference-based taper is applied below, after the conservative
       // target has been assembled; no independent hidden pressure counter.
       delta[i]=-dab.sign*w[i]*inner*std::min(depth,amount*(dab.tool_v26&&press?.75:.55));
       // Broaden the receiving band while tapering its outer boundary.
-      rim[i]=dab.contact_v27b?w[i]*smooth((r-.22)/.40)*(1-smooth((r-.78)/.22)):
+      rim[i]=dab.contact_v27b?w[i]*smooth((rr-.22)/.40)*(1-smooth((rr-.78)/.22)):
           w[i]*smooth((r-(dab.tool_v26&&press?.38:.50))/.25);
       if(dab.stable_v28){
         // Feather the outer return profile. First-contact capacity is
         // enforced separately on final targets before budget balancing.
-        if(compact)rim[i]*=1-smooth((r-.65)/.35);
+        if(compact)rim[i]*=1-smooth((rr-.65)/.35);
         // Avoid a narrow high receiving band even on an asymmetric mask.
-        rim[i]*=1-smooth((r-.75)/.25);
+        rim[i]*=1-smooth((rr-.75)/.25);
       }
       peak_rim=std::max(peak_rim,rim[i]);
       removed-=delta[i]*area[i];receiver+=rim[i]*area[i];
@@ -712,6 +732,12 @@ inline ClaySurfaceResult solve_clay_surface(
   std::vector<double> h(n),delta(n,0.0),w(n,0.0);
   std::vector<Vec3> xy(n);
   std::vector<bool> bad(n,false);
+  const bool recover_contact=dab.contact_v30b && (dab.action==ClaySurfaceAction::Press ||
+      dab.action==ClaySurfaceAction::Scrape || dab.action==ClaySurfaceAction::Compact ||
+      dab.action==ClaySurfaceAction::Compress);
+  std::vector<double> support_area(recover_contact?n:0,0.0);
+  std::vector<bool> mixed(recover_contact?n:0,false);
+  const double depth_limit=recover_contact?.65:.50;
   for(std::size_t i=0;i<n;++i) {
     if(!std::isfinite(norm(vertices[i].position)) || !interval(vertices[i].influence) ||
        (dab.plastic_v29 && !interval(vertices[i].compaction_v29)) ||
@@ -724,11 +750,12 @@ inline ClaySurfaceResult solve_clay_surface(
     if(!std::isfinite(h[i]) || !std::isfinite(norm(xy[i])))
       throw std::overflow_error("Invalid clay chart");
     // Explicit depth bound avoids gathering the back side of a thin mesh.
-    if(std::abs(h[i])<=dab.radius*0.5 &&
+    if(vertices[i].influence>0 && std::abs(h[i])>dab.radius*depth_limit)++out.depth_rejected_v30b;
+    if(std::abs(h[i])<=dab.radius*depth_limit &&
        ((dab.surface_contact && !dab.shape_transport) || chart_distance_v29(xy[i],dab,axis)<=dab.radius)) {
       w[i]=vertices[i].influence;
       if(dab.shape_transport) {
-        const double t=std::clamp((.5-std::abs(h[i])/dab.radius)/.15,0.0,1.0);
+        const double t=std::clamp((depth_limit-std::abs(h[i])/dab.radius)/.15,0.0,1.0);
         w[i]*=t*t*(3-2*t); // feather the chart depth boundary
       }
     }
@@ -749,7 +776,15 @@ inline ClaySurfaceResult solve_clay_surface(
     // Reject cells incident on a back-facing or nearly edge-on triangle.
     // Keeping projected orientation fixed prevents chart folds; it does
     // not guarantee no collisions with other geometry.
-    if(area<=1e-24 || projected<=0.10*area) {
+    if(recover_contact){
+      // Signed dual support from every incident triangle; no remapping here.
+      for(auto i:t){
+        if(area<=1e-24)bad[i]=true;
+        if(projected<=.10*area)mixed[i]=true;
+        support_area[i]+=area/3.0;
+        out.projected_area[i]+=projected/3.0;
+      }
+    }else if(area<=1e-24 || projected<=0.10*area) {
       for(auto i:t) bad[i]=true;
     } else {
       for(auto i:t) out.projected_area[i]+=projected/3.0;
@@ -768,7 +803,20 @@ inline ClaySurfaceResult solve_clay_surface(
   double nearest=std::numeric_limits<double>::infinity();
   for(std::size_t i=0;i<n;++i) {
     if(!std::isfinite(out.projected_area[i])) throw std::overflow_error("Clay dual area overflow");
-    if(bad[i] || out.projected_area[i]<=1e-24) w[i]=0;
+    if(recover_contact){
+      const double support=support_area[i]>1e-24?out.projected_area[i]/support_area[i]:0.0;
+      if(support<=.06)bad[i]=true;
+      else if(w[i]>0 && !bad[i] && mixed[i]){
+        ++out.chart_recovered_v30b;
+        const double a=std::clamp((support-.06)/.24,0.0,1.0);
+        w[i]*=a*a*(3-2*a);
+      }
+    }
+    if(bad[i] || out.projected_area[i]<=1e-24){
+      if(w[i]>0)++out.chart_rejected_v30b;
+      w[i]=0;
+      if(out.projected_area[i]<0)out.projected_area[i]=0;
+    }
     if(w[i]>0) {
       const double d=norm(vertices[i].position-dab.center);
       if(d<nearest){nearest=d;seed=i;}
@@ -804,7 +852,7 @@ inline ClaySurfaceResult solve_clay_surface(
   }
   double floor=h[seed];
   for(std::size_t i=0;i<n;++i){
-    if(!seen[i])w[i]=0;
+    if(!seen[i]){if(w[i]>0)++out.component_rejected_v30b;w[i]=0;}
     else{floor=std::min(floor,h[i]);++out.active;}
   }
   // Finite effective substrate, recalculated from current chart per dab.
@@ -955,6 +1003,22 @@ inline ClaySurfaceResult solve_clay_surface(
                              dab.action==ClaySurfaceAction::Compress?.60:.45;
       for(std::size_t i=0;i<n;++i)if(delta[i]<0)
         delta[i]*=1-hardening*vertices[i].compaction_v29;
+    }
+    if(recover_contact && dab.live_surface_v30){
+      // Local reductions before signed budget rebalance and final check.
+      for(int pass=0;pass<3;++pass){
+        bool changed=false;
+        for(const auto &e:edges){
+          const auto a=e[0],b=e[1];
+          const double diff=std::abs(delta[a]-delta[b]);
+          const double limit=dab.relative_slope_limit*norm(vertices[a].position-vertices[b].position);
+          if(diff<=limit || diff<=1e-24)continue;
+          const double scale=limit/diff;
+          delta[a]*=scale;delta[b]*=scale;
+          ++out.local_limited_v30b;changed=true;
+        }
+        if(!changed)break;
+      }
     }
     balance_capacity_v28(delta,out.projected_area,pos,neg);
     double final_pos=0,final_neg=0;

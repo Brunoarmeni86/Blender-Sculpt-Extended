@@ -127,6 +127,11 @@ inline bool transport_v30b_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_TRANSPORT_V30B");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
+inline bool contact_v30b_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_CONTACT_V30B");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
 inline bool swept_v29_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_SWEEP_V29");return v && v[0]=='1' && v[1]=='\0';}();
@@ -648,7 +653,9 @@ inline bool try_apply(const Sculpt &sd,
     const auto contact_start=std::chrono::steady_clock::now();
     if (drag_contact_requested() && state->compact &&
         kind!=sculpt_physics::NativeSculptBrushKind::Gravity) {
-      const auto result=limit_drag_contact(mesh,current,changes,conservative_clay);
+      const bool local_scrape=live_surface && contact_v30b_requested() && autonomous &&
+                              cache.xpbd_v16_clay_behavior==14;
+      const auto result=limit_drag_contact(mesh,current,changes,conservative_clay && !local_scrape);
       contact_scale=result.final_scale;
       if (!cache.xpbd_v15_active_logged || result.final_scale<0.25) {
         std::fprintf(stderr,
@@ -1146,6 +1153,8 @@ inline bool try_apply_intent(
         clay.axis=convert(normal);
         if(v27)stroke_step.next.axis=clay.axis/stroke_norm_v27(clay.axis);
       }
+      clay.contact_v30b=clay.live_surface_v30 && clay.refine_v28b && contact_v30b_requested() &&
+                         (action==5 || action==7 || action==8 || action==14);
       clay.transport_v30b=clay.live_surface_v30 && clay.refine_v28b && transport_v30b_requested() &&
                           (action==6 || action==12 || action==13);
       if(clay.transport_v30b && v27){
@@ -1304,6 +1313,7 @@ inline bool try_apply_intent(
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
       if(clay.live_surface_v30 && profile_v26b_requested())std::fprintf(stderr,"[V30 live] action=%d candidates=%zu active=%zu goals=%zu scale=%.7g history_limited=%zu\n",action,samples.size(),planned.active,goals.size(),planned.accepted_scale,planned.history_limited);
+      if(clay.contact_v30b && profile_v26b_requested())std::fprintf(stderr,"[V30B contact] action=%d chart_rejected=%zu recovered=%zu depth_rejected=%zu component_rejected=%zu local_limits=%zu goals=%zu\n",action,planned.chart_rejected_v30b,planned.chart_recovered_v30b,planned.depth_rejected_v30b,planned.component_rejected_v30b,planned.local_limited_v30b,goals.size());
       if(clay.transport_v30b && profile_v26b_requested())std::fprintf(stderr,"[V30B transport] action=%d load=%.6f fine_volume=%.8g volume=%.8g nodes=%zu\n",action,clay.transport_load_v30b,planned.fine_transport_v30b,planned.transported_volume,planned.transport_nodes);
       if(clay.swept_v29 && profile_v26b_requested())std::fprintf(stderr,"[V29 sweep] action=%d length=%.7g active=%zu\n",action,double(math::length(delta)),planned.active);
       if(clay.stable_v28 && profile_v26b_requested())

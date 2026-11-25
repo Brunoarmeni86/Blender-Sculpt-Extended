@@ -52,6 +52,11 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     out.surface.trace_rejected+=step.trace_rejected;
     out.surface.history_limited+=step.history_limited;
     out.surface.fine_transport_v30b+=step.fine_transport_v30b;
+    out.surface.chart_rejected_v30b+=step.chart_rejected_v30b;
+    out.surface.chart_recovered_v30b+=step.chart_recovered_v30b;
+    out.surface.depth_rejected_v30b+=step.depth_rejected_v30b;
+    out.surface.component_rejected_v30b+=step.component_rejected_v30b;
+    out.surface.local_limited_v30b+=step.local_limited_v30b;
     out.surface.slope_scale=std::min(out.surface.slope_scale,step.slope_scale);
     out.surface.accepted_scale=std::min(out.surface.accepted_scale,step.accepted_scale);
     out.surface.transported_volume+=step.transported_volume;
