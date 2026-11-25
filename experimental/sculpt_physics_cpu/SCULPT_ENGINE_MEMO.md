@@ -1,0 +1,37 @@
+# Sculpt engine engineering memo — 2026-11-26
+
+Living checkpoint; update after each measured experiment. Do not confuse proposed architecture with shipped or validated behavior.
+
+## Baselines
+- D3 artistic reference: 6b8b6a05cc30.
+- D6 continuous transport: abb3149b4896. Moving dose, plane refresh, native overlap and optional tangential Push/Smear.
+- D7 multichart and D8 narrow receiver experiments did not establish a general fix; actual wall thickness is not measured.
+- D9 coverage diagnostic: 71cb6479f781 (MSVC iterator declaration fix). User successfully produced colored copy and CSV.
+- D10A writer-only local guard: f1f37895570e, branch experiment/physics-v31d10a-local-guard. Opt-in BLENDER_SCULPT_LOCAL_GUARD_V31D10A=1. Build/tests and artist A/B not yet confirmed.
+- Windows: C:/BlenderDev/blender-physics-v16, build-physics-v16, separate install-physics-v31d10a. Restore D3 environment from original diagnostic log and D6 flags. Verify executable hash. Wrap PowerShell scripts in & { ... }; check native exit codes. Never overwrite untracked diagnostic script during checkout.
+
+## Evidence from user session
+D9 Compact action 7: 3487 registered vertices; 2682 yellow, 610 red, 122 orange, 73 green. 536 excluded vertices reportedly had native influence >0.1. Writer log triangle_scale/final_scale=.21794; writes=2874. Earlier solver minimum substep scale .0664 and writer .2644. These figures are recorded from prior session analysis, not independently re-read in this memo update. Do not multiply minimum substep and final scales as overall displacement. Smooth partly restores response; narrow crests and concave folds stall, particularly with large radius. Actual thickness hypothesis unproven.
+
+## Code audit
+- brush_contact.hh gradient_motion_scale_v31c computes spectral norm of piecewise affine displacement gradient, cap .18; one bad triangle controls common scale. Degenerate moving triangle fails closed. This is not global CCD.
+- D10A limit_local_gradient_v31d10a: eight local attenuation passes, positive/negative oriented dual flux ratio rebalance, residual global gradient and projected area checks, fallback to original uniform field if retained ratio does not improve. Only scales existing vectors; cannot redirect or spread displacement. Global flux rebalance may still penalize distant regions. When original gradient >=1 it takes old path even if triangle constraint is limiting. No exact volume or collision guarantee.
+- clay_surface_solver.hh adaptive contact rejects dot(normal,axis)<=.015, uses projected footprint and connected seed; motion is axial. Rim receiver scarcity can zero Press/Compress. Compact hardening can reduce nominal motion; isolate state effects. Multiple substep guards plus final writer guard in physics_brush_v15.hh. material_transport_v21.hh integrates evolving geometry with fixed native footprint.
+- Distinguish native eligibility, contact acceptance, target generation, substep guards, executor and writer. Gray is not necessarily rejected. Never bypass mask/hidden/symmetry constraints.
+
+## External source audit (read actual files in this session)
+- libigl/libigl include/igl/arap.cpp blob 98ba929ebc16db7ad86fc50987e8c9d9270d1cfc: fit_rotations and min_quad_with_fixed_solve; local/global approach and reusable factorization. https://github.com/libigl/libigl/blob/main/include/igl/arap.cpp
+- InteractiveComputerGraphics/PositionBasedDynamics PositionBasedDynamics/XPBD.cpp blob 1efa560e6caf7e44d2140e9dd6c5717b78b1bf0f: distance, tetra volume, bending, FEM constraints; alpha=1/(stiffness*dt^2), accumulated lambda and inverse-mass-weighted correction. https://github.com/InteractiveComputerGraphics/PositionBasedDynamics/blob/master/PositionBasedDynamics/XPBD.cpp
+- nmwsharp/geometry-central src/surface/vector_heat_method.cpp blob 081ecbb36fb43249389d20b6c436b7274c461a53: lumped mass, connection Laplacian, complex vector heat solve and parallel transport. https://github.com/nmwsharp/geometry-central/blob/master/src/surface/vector_heat_method.cpp
+- Further research leads, not audited here: Pixar Kelvinlets, IPC Toolkit, NVIDIA Warp, GeoWarp MPM. Verify licenses per file and dependencies before copying. No external code imported.
+
+## Proposed foundation: hybrid adaptive sculpt
+Native input -> connected 3D contact -> action-specific desired motion/material law -> local constrained optimization -> geometry backend. Keep artist response as primary goal. CPU reference before GPU. No global simulation requirement.
+1. D10A A/B: same mesh, brush, radius, pressure, stroke and material state; record baseline/retained/residual gradient and triangle, per-vertex requested/written, timings.
+2. D10B prototype displacement-field optimization: minimize sum A_i*w_i*||u_i-target_i||² + lambda*sum c_ij*||u_i-u_j||², with positive area and edge weights, pinned halo, bounded writable support. Use iterative local projection or Jacobi/colored GS, then existing safety validator. Prefer smoothing displacement, not geometry. Preserve constant translation in unconstrained patch; no movement on pinned vertices. Compare objective and useful motion against uniform and D10A. Flux constraint only for appropriate material action, not universal. Revalidate after flux correction. Start with no new dependency; prototype standalone.
+3. D10C connected 3D contact: separate visibility, native falloff, local normals and geodesic reach. Transport tangent vectors across adjacent normals; avoid backside and disconnected leakage. Do not simply remove normal threshold. Direction depends on tool.
+4. D10D edge flux: antisymmetric pair transfers, bounded donor inventory, receiver capacity, no artificial circular rim requirement. Surface swept-volume approximation is not true mass; define units and state before claiming conservation.
+5. D11 separate deposit, removal, pressure, densification, tangential transport, viscosity and elastic/plastic response. D12 proxy/backend abstraction for Mesh and Multires, detail-preserving reconstruction. D13 GPU/Warp; D14 local volumetric MPM for granular/wax/mud only after stable surface foundation.
+
+## Acceptance gates
+Flat, concave, thin crest, deep fold, close opposing sheets, disconnected sheets, irregular/sliver triangles, masked boundary. Multiple densities, radii, repeated strokes and rotated views. Compare D3/D6/D9/D10A on identical inputs. Measure area-weighted native/contact coverage, requested/accepted/written displacement, signed flux error, triangle orientation and strain, p50/p95 dab time, allocations and memory. Record rejected reasons. No new motion outside allowed support; no masked writes; no regression on safe flat cases; no silent global stalls. Separate collision tests from local triangle checks. Thresholds for performance and artistic acceptance to be calibrated from actual baseline. Do not merge into main until tests and interactive validation pass.
