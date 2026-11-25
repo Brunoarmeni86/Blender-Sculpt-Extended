@@ -58,7 +58,7 @@ struct ClaySurfaceDab {
   bool transport_v30b=false;
   bool contact_v30b=false;
   bool overlap_v30c=false;
-  bool adaptive_v31=false; // direct surface contact on current local normals
+  bool adaptive_v31=false; // adaptive selection, coherent per-dab direction
   bool push_v30d=false; // stronger current-relief entrainment; Push only
   double push_gain_v30d=2.5;
   double transport_load_v30b=1.0;
@@ -722,7 +722,8 @@ inline bool adaptive_direct_v31(const ClaySurfaceDab &dab)
 
 /* V31A: direct contact on a bounded edge-geodesic patch. The native
  * footprint and artist masks remain authoritative. Current incident
- * triangles define the oriented dual-area vector and local motion axis.
+ * triangles define oriented dual areas and topology. All accepted targets
+ * move along the single current tool axis; local normals select, not deform.
  * Never bridge zero-influence vertices or disconnected sheets. This is
  * first-order volume accounting for nonparallel motions, not exact CCD
  * or a multi-chart advective solver. */
@@ -768,7 +769,8 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   std::size_t seed=n;
   double nearest=std::numeric_limits<double>::infinity();
   for(std::size_t i=0;i<n;++i){
-    const double area=norm(dual[i]);out.projected_area[i]=area;
+    const double area=norm(dual[i]);
+    out.projected_area[i]=std::max(0.0,dot(dual[i],axis));
     if(vertices[i].influence<=0)continue;
     ++out.adaptive_candidates_v31;
     if(bad[i] || area<=1e-24){++out.chart_rejected_v30b;continue;}
@@ -812,8 +814,9 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   for(std::size_t i=0;i<n;++i)if(w[i]>0){
     if(!std::isfinite(distance[i])){w[i]=0;++out.component_rejected_v30b;continue;}
     w[i]*=1-smooth((distance[i]-(reach-.25*dab.radius))/(.25*dab.radius));
-    // Gentle orientation taper on steep sides without a hard axial depth.
-    w[i]*=.25+.75*smooth(dot(normals[i],axis)/.30);
+    // Coherent axial motion, with a smooth reduction on nearly vertical
+    // surfaces; no independent vertex-normal displacement or depth slab.
+    w[i]*=smooth(dot(normals[i],axis)/.30);
     if(w[i]<=0)continue;
     ++out.adaptive_reached_v31;
     if(std::abs(dot(positions[i]-dab.center,axis))>dab.radius*(dab.contact_v30b?.65:.50))
@@ -866,12 +869,19 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   for(std::size_t i=0;i<n;++i){
     const double v=delta[i]*out.projected_area[i];
     pos+=std::max(0.0,v);neg+=std::max(0.0,-v);
-    out.displacement[i]=normals[i]*delta[i];
+    // A noisy vertex normal must never create a divergent displacement.
+    // Keep the tool direction coherent across the entire current dab.
+    out.displacement[i]=axis*delta[i];
   }
-  // Local area guard + signed budget restoration (nonparallel motion:
-  // first-order volume only). Every incident face participates.
-  const auto safe=limit_balanced_contact_v30c(positions,triangles,out.displacement);
-  out.accepted_scale=safe.minimum_scale;out.local_limited_v30b=safe.limited_vertices;
+  // Bound differential motion BEFORE the triangle guard. Uniform scaling
+  // retains both the smooth profile and the signed budget; no individually
+  // stalled vertices injected into a pressure field by the local limiter.
+  const double coherent=coherent_motion_scale_v31b(positions,triangles,out.displacement);
+  if(coherent<1)for(auto &v:out.displacement)v=v*coherent;
+  const auto safe=limit_local_contact(positions,triangles,out.displacement,true);
+  out.slope_scale=coherent;
+  out.accepted_scale=coherent*safe.final_scale;
+  out.local_limited_v30b=safe.limited_vertices;
   pos=0;neg=0;
   for(std::size_t i=0;i<n;++i){
     const double v=dot(dual[i],out.displacement[i]);

@@ -335,7 +335,7 @@ inline bool drag_contact_requested()
 inline sculpt_physics::LocalContactResult limit_drag_contact(
     const Mesh &mesh, const Span<float3> positions,
     std::unordered_map<std::size_t,float3> &changes, const bool uniform_only,
-    const bool balance_local=false)
+    const bool balance_local=false,const bool coherent_v31b=false)
 {
   const auto map=mesh.vert_to_face_map();
   const auto faces=mesh.faces();
@@ -373,8 +373,17 @@ inline sculpt_physics::LocalContactResult limit_drag_contact(
                            add_vertex(std::size_t(corners[c[2]]))});
     }
   }
-  const auto result=balance_local?sculpt_physics::limit_balanced_contact_v30c(p,triangles,motion):
-                                 sculpt_physics::limit_local_contact(p,triangles,motion,uniform_only);
+  double coherent=1.0;
+  if(coherent_v31b){
+    // Check the full accumulated native dab, not only solver substeps.
+    coherent=sculpt_physics::coherent_motion_scale_v31b(p,triangles,motion);
+    if(coherent<1)for(auto &v:motion)v=v*coherent;
+  }
+  auto result=balance_local && !coherent_v31b?sculpt_physics::limit_balanced_contact_v30c(p,triangles,motion):
+                                 sculpt_physics::limit_local_contact(p,triangles,motion,uniform_only || coherent_v31b);
+  result.final_scale*=coherent;result.minimum_scale*=coherent;
+  if(coherent_v31b && profile_v26b_requested())
+    std::fprintf(stderr,"[V31B guard] coherent_scale=%.7g final_scale=%.7g triangles=%zu\n",coherent,result.final_scale,triangles.size());
   for(std::size_t i=0;i<global.size();++i) {
     auto it=changes.find(global[i]);
     if(it!=changes.end()) {
@@ -723,7 +732,9 @@ inline bool try_apply(const Sculpt &sd,
       const bool balanced_local=live_surface && (overlap_v30c_requested() || adaptive_v31_requested()) && conservative_clay &&
                                 autonomous && cache.xpbd_v16_clay_behavior!=1 &&
                                 cache.xpbd_v16_clay_behavior!=4 && cache.xpbd_v16_clay_behavior!=14;
-      const auto result=limit_drag_contact(mesh,current,changes,conservative_clay && !local_scrape,balanced_local);
+      const bool coherent_v31b=autonomous && conservative_clay && adaptive_v31_requested() &&
+          footprint_v30e_brush(object,active_brush) && direct_material_action_v31(cache.xpbd_v16_clay_behavior);
+      const auto result=limit_drag_contact(mesh,current,changes,conservative_clay && !local_scrape,balanced_local,coherent_v31b);
       contact_scale=result.final_scale;
       if (!cache.xpbd_v15_active_logged || result.final_scale<0.25) {
         std::fprintf(stderr,

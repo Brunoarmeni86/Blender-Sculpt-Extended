@@ -263,4 +263,39 @@ inline LocalContactResult limit_balanced_contact_v30c(
   return out;
 }
 
+/* V31B: a single common reduction preserves the signed first-order
+ * budget and keeps a coherent displacement field. Bound differential
+ * motion relative to current edge lengths AND current triangle altitude.
+ * No stroke-start position limit, no smoothing of existing geometry.
+ * Every incident face participates, including fixed halo vertices.
+ * This is incremental conditioning, not global collision detection. */
+inline double coherent_motion_scale_v31b(
+    const std::vector<Vec3> &positions,
+    const std::vector<std::array<std::size_t,3>> &triangles,
+    const std::vector<Vec3> &motion,double relative=.18)
+{
+  if(positions.size()!=motion.size() || !std::isfinite(relative) || relative<=0 || relative>.3)
+    throw std::invalid_argument("V31B coherent motion input");
+  const auto norm=[](Vec3 a){return std::hypot(a.x,a.y,a.z);};
+  const auto cross=[](Vec3 a,Vec3 b){return Vec3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};};
+  double scale=1.0;
+  for(const auto &t:triangles){
+    for(auto i:t)if(i>=positions.size())throw std::out_of_range("V31B triangle index");
+    const Vec3 a=positions[t[1]]-positions[t[0]],b=positions[t[2]]-positions[t[0]];
+    const Vec3 da=motion[t[1]]-motion[t[0]],db=motion[t[2]]-motion[t[0]];
+    const double e0=norm(a),e1=norm(b),e2=norm(b-a);
+    const double m0=norm(da),m1=norm(db),m2=norm(db-da);
+    const double max_e=std::max({e0,e1,e2}),max_m=std::max({m0,m1,m2});
+    if(!std::isfinite(max_e)||!std::isfinite(max_m))throw std::overflow_error("V31B motion overflow");
+    if(max_m<=1e-24)continue;
+    const double altitude=max_e>1e-24?norm(cross(a,b))/max_e:0.0;
+    if(!std::isfinite(altitude))throw std::overflow_error("V31B altitude overflow");
+    scale=std::min(scale,relative*altitude/max_m);
+    if(m0>1e-24)scale=std::min(scale,relative*e0/m0);
+    if(m1>1e-24)scale=std::min(scale,relative*e1/m1);
+    if(m2>1e-24)scale=std::min(scale,relative*e2/m2);
+  }
+  return std::clamp(scale,0.0,1.0);
+}
+
 } // namespace sculpt_physics

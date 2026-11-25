@@ -548,6 +548,7 @@ static void adaptive_v31_tests(){
   for(std::size_t i=0;i<v.size();++i){
     const auto q=out.displacement[i];
     assert(std::isfinite(q.z));
+    assert(std::abs(q.x)<1e-14 && std::abs(q.y)<1e-14);
     if(i>=other || v[i].influence==0)assert(q.x==0 && q.y==0 && q.z==0);
     if(i<other && std::abs(v[i].position.z)>.65*dab.radius && q.z<0)deep_moved=true;
     assert(q.z<=1e-12);
@@ -561,8 +562,23 @@ static void adaptive_v31_tests(){
     else assert(step.signed_swept_volume<=1e-9);
   }
 }
+static void coherent_v31b_tests(){
+  // Triangle with a very short altitude: differential displacement must
+  // be constrained even when the original area guard alone would allow it.
+  std::vector<Vec3> p{{0,0,0},{1,0,0},{.5,.02,0}};
+  std::vector<Vec3> q{{0,0,0},{0,0,0},{0,0,.10}};
+  std::vector<ClaySurfaceTriangle> tri{{0,1,2}};
+  const double scale=coherent_motion_scale_v31b(p,tri,q);
+  assert(scale>0 && scale<=.036000001);
+  for(auto &v:q)v=v*scale;
+  assert(coherent_motion_scale_v31b(p,tri,q)>=.999999);
+  // Rigid translation is not deformation and must not be constrained.
+  for(auto &v:q)v={0,0,.1};
+  assert(coherent_motion_scale_v31b(p,tri,q)==1);
+}
 int main(){
   stroke_context_v27_tests();
+  coherent_v31b_tests();
   adaptive_v31_tests();
   push_v30d_tests();
   overlap_v30c_tests();
