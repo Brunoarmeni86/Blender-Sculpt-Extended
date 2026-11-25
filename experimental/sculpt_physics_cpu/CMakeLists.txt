@@ -385,3 +385,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_local_gradient_v31d10a PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_local_gradient_v31d10a_tests COMMAND test_local_gradient_v31d10a)
+
+add_executable(test_hybrid_foundation_v31d11 test_hybrid_foundation_v31d11.cc)
+target_link_libraries(test_hybrid_foundation_v31d11 PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_hybrid_foundation_v31d11_tests COMMAND test_hybrid_foundation_v31d11)
