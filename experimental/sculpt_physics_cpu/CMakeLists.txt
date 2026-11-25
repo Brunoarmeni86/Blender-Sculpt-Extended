@@ -355,3 +355,11 @@ add_test(NAME sculpt_volume_v25_tests COMMAND test_volume_v25)
 
 add_executable(volume_preview_v25 volume_preview_v25.cc)
 target_link_libraries(volume_preview_v25 PRIVATE sculpt_physics_reference)
+
+# V32: native-first qualitative response and conservative surface transport.
+add_executable(test_native_material_v32 test_native_material_v32.cc)
+target_link_libraries(test_native_material_v32 PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_native_material_v32 PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME native_material_v32_tests COMMAND test_native_material_v32)
