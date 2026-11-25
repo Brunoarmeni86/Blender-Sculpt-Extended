@@ -47,8 +47,21 @@ inline NativeTransportV32Result redistribute_native_v32(
   NativeTransportV32Result out;
   const auto norm=[](Vec3 v){return std::hypot(v.x,v.y,v.z);};
   const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
-  if(amount<=0 || radius<=0 || goals.empty())return out;
+  const auto finite=[](Vec3 v){
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+  };
+  if(!std::isfinite(amount) || !std::isfinite(radius) ||
+     !std::isfinite(anisotropy) || !finite(direction) ||
+     amount<=0 || radius<=0 || goals.empty())return out;
   const auto n=goals.size();
+  if(positions.size()!=n || area.size()!=n)return out;
+  for(std::size_t i=0;i<n;++i){
+    if(!finite(positions[i]) || !finite(goals[i]) || !std::isfinite(area[i]))return out;
+  }
+  for(const auto &e:edges){
+    if(e[0]>=n || e[1]>=n)return out;
+  }
+  anisotropy=std::clamp(anisotropy,0.0,1.0);
   std::vector<double> degree(n);
   std::vector<Vec3> change(n);
   const double dn=norm(direction);
@@ -76,8 +89,14 @@ inline NativeTransportV32Result redistribute_native_v32(
   for(std::size_t i=0;i<n;++i){
     const double len=norm(change[i]);
     if(len>1e-24)scale=std::min(scale,.30*norm(goals[i])/len);
-    absolute+=area[i]*norm(goals[i]);budget+=change[i]*area[i];
+    // Back-facing or degenerate projected dual areas are excluded from
+    // exchange and must not subtract from the positive motion budget.
+    if(area[i]>1e-24){
+      absolute+=area[i]*norm(goals[i]);
+      budget+=change[i]*area[i];
+    }
   }
+  if(!std::isfinite(absolute) || !finite(budget) || !std::isfinite(scale))return out;
   out.relative_budget_error=norm(budget)*scale/std::max(absolute,1e-24);
   if(!std::isfinite(out.relative_budget_error) || out.relative_budget_error>1e-8)return out;
   for(std::size_t i=0;i<n;++i)goals[i]+=change[i]*scale;
