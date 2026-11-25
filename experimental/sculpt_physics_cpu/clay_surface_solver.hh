@@ -64,6 +64,7 @@ struct ClaySurfaceDab {
   bool continuous_contact_v31d2=false;
   double motion_proxy_v31d3=0.0; // opt-in conservative two-scale motion reconstruction
   bool contact_reach_v31d4=false; // experimental +0.15R geodesic reach; same geometric candidate bound
+  bool coverage_v31d9=false; // diagnostic-only exact selected contact weights
   double tangential_gain_v31d6=0.0; // opt-in; retain selected weights for host tangential pass
   bool push_v30d=false; // stronger current-relief entrainment; Push only
   double push_gain_v30d=2.5;
@@ -94,6 +95,7 @@ struct ClaySurfaceResult {
   std::vector<Vec3> displacement;
   std::vector<double> projected_area;
   std::vector<double> tangent_weights_v31d6; // selected contact; zero for all fixed/removed candidates
+  std::vector<double> coverage_weights_v31d9; // max selected weight over material substeps
   double signed_swept_volume=0.0;
   double transported_volume=0.0;
   double accepted_scale=1.0;
@@ -1032,6 +1034,7 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   const std::size_t n=vertices.size();
   ClaySurfaceResult out;
   out.displacement.resize(n);out.projected_area.assign(n,0.0);
+  if(dab.coverage_v31d9)out.coverage_weights_v31d9.assign(n,0.0);
   std::vector<Vec3> positions(n),dual(n),normals(n);
   std::vector<double> w(n,0),radial(n),distance(n,std::numeric_limits<double>::infinity());
   std::vector<bool> bad(n,false);
@@ -1124,6 +1127,7 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
       ++out.adaptive_deep_v31;
     if(w[i]>.02)max_r=std::max(max_r,radial[i]);
   }
+  if(dab.coverage_v31d9)out.coverage_weights_v31d9=w;
   out.active=out.adaptive_reached_v31;
   out.patches_v30c=out.active?1:0;
   if(!out.active)return out;
@@ -1262,6 +1266,7 @@ inline ClaySurfaceResult solve_clay_surface(
   ClaySurfaceResult out;
   out.displacement.resize(n);
   out.projected_area.assign(n,0.0);
+  if(dab.coverage_v31d9)out.coverage_weights_v31d9.assign(n,0.0);
   std::vector<double> h(n),delta(n,0.0),w(n,0.0);
   std::vector<Vec3> xy(n);
   std::vector<bool> bad(n,false);
@@ -1479,6 +1484,8 @@ inline ClaySurfaceResult solve_clay_surface(
         out.melt_residual_peak_v30b=std::max(out.melt_residual_peak_v30b,part.melt_residual_peak_v30b);
         for(auto i:patch->ids){
           out.displacement[i]=part.displacement[i];
+          if(dab.coverage_v31d9 && part.coverage_weights_v31d9.size()==n)
+            out.coverage_weights_v31d9[i]=part.coverage_weights_v31d9[i];
           local_vertices[i].influence=0.0;
         }
       }
@@ -1524,6 +1531,7 @@ inline ClaySurfaceResult solve_clay_surface(
   // Finite effective substrate, recalculated from current chart per dab.
   // Lets Push work on existing clay as well as newly deposited relief.
   // Does not represent physical mass below the visible surface.
+  if(dab.coverage_v31d9)out.coverage_weights_v31d9=w;
   if(dab.tangential_gain_v31d6>0 && continuous)
     out.tangent_weights_v31d6=w;
   floor-=0.12*dab.radius;
