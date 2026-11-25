@@ -775,12 +775,14 @@ inline bool try_apply(const Sculpt &sd,
     const auto contact_start=std::chrono::steady_clock::now();
     if (drag_contact_requested() && state->compact &&
         kind!=sculpt_physics::NativeSculptBrushKind::Gravity) {
-      const bool local_scrape=live_surface && (contact_v30b_requested() || adaptive_v31_requested()) && autonomous &&
+      const bool native_v33=autonomous && conservative_clay && sculpt_footprint_v33_brush(object,active_brush);
+      const bool local_scrape=live_surface && (native_v33 || contact_v30b_requested() || adaptive_v31_requested()) && autonomous &&
                               cache.xpbd_v16_clay_behavior==14;
-      const bool balanced_local=live_surface && (overlap_v30c_requested() || adaptive_v31_requested()) && conservative_clay &&
-                                autonomous && cache.xpbd_v16_clay_behavior!=1 &&
-                                cache.xpbd_v16_clay_behavior!=4 && cache.xpbd_v16_clay_behavior!=14;
-      const bool coherent_v31b=autonomous && conservative_clay && footprint_v30e_brush(object,active_brush) &&
+      const bool balanced_local=live_surface && conservative_clay && autonomous &&
+          cache.xpbd_v16_clay_behavior!=14 && (native_v33 ||
+          ((overlap_v30c_requested() || adaptive_v31_requested()) &&
+           cache.xpbd_v16_clay_behavior!=1 && cache.xpbd_v16_clay_behavior!=4));
+      const bool coherent_v31b=!native_v33 && autonomous && conservative_clay && footprint_v30e_brush(object,active_brush) &&
           ((adaptive_v31_requested() && direct_material_action_v31(cache.xpbd_v16_clay_behavior)) ||
            (continuous_contact_v31d2_requested() && material_override("BLENDER_SCULPT_V31D_AVERAGING",.65,0.0,1.0)>0 &&
             average_transport_action_v31d(cache.xpbd_v16_clay_behavior)));
