@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <queue>
 #include <limits>
+#include <stdexcept>
+#include <functional>
 namespace sculpt_physics {
 namespace hybrid_v31d11 {
 using Tri=std::array<std::size_t,3>;
@@ -52,6 +54,7 @@ inline void contact(Patch& s,std::size_t seed,double reach){
 inline std::vector<double> flux(const Patch& s,const std::vector<double>& pressure,double radius){
  if(pressure.size()!=s.p.size()||!(radius>0))throw std::invalid_argument("flux input");
  std::vector<double> h(s.p.size()),budget(s.p.size());
+ for(double x:pressure)if(!std::isfinite(x))throw std::invalid_argument("pressure");
  for(std::size_t i=0;i<h.size();++i)budget[i]=s.area[i]*s.weight[i]*radius*.02;
  for(std::size_t i=0;i<h.size();++i)for(auto j:s.adj[i])if(i<j&&s.weight[i]>0&&s.weight[j]>0){
   double f=std::clamp((pressure[i]-pressure[j])*std::min(budget[i],budget[j]),-std::min(budget[i],budget[j]),std::min(budget[i],budget[j]));
@@ -65,6 +68,8 @@ struct Material {double mobility=.55,compressibility=.2,viscosity=.4;};
 // D11: stateless reference laws, no persistent plastic state yet.
 inline std::vector<Vec3> target(const Patch& s,Tool tool,Material m,Vec3 direction,double radius,double dose){
  std::vector<Vec3> u(s.p.size());double a=radius*std::clamp(dose,0.0,.08)*std::clamp(m.mobility,0.0,1.0);
+ if(!std::isfinite(radius)||radius<=0||!std::isfinite(dose))throw std::invalid_argument("dab input");
+ dose=std::clamp(dose,0.0,1.0);
  auto h=flux(s,s.weight,radius);
  for(std::size_t i=0;i<u.size();++i){if(s.weight[i]<=0)continue;
   Vec3 n=s.normal[i],t=direction-n*dot(direction,n);double w=s.weight[i];
