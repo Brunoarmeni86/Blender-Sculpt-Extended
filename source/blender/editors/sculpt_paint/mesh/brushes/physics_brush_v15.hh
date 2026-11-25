@@ -423,19 +423,31 @@ inline sculpt_physics::LocalContactResult limit_drag_contact(
   }
   double coherent=1.0,legacy_scale=1.0;
   const bool gradient=coherent_v31b && gradient_v31c_requested();
-  if(coherent_v31b){
-    // Check the full accumulated native dab, not only solver substeps.
-    if(!gradient || profile_v26b_requested())legacy_scale=sculpt_physics::coherent_motion_scale_v31b(p,triangles,motion);
-    coherent=gradient?sculpt_physics::gradient_motion_scale_v31c(p,triangles,motion):legacy_scale;
-    if(coherent<1)for(auto &v:motion)v=v*coherent;
-  }
-  auto result=balance_local && !coherent_v31b?sculpt_physics::limit_balanced_contact_v30c(p,triangles,motion):
+  sculpt_physics::LocalContactResult result;
+  if(gradient && stroke_option_v31d5("BLENDER_SCULPT_LOCAL_GUARD_V31D10A")){
+    const auto local=sculpt_physics::limit_local_gradient_v31d10a(p,triangles,motion);
+    result=local.contact;
+    if(profile_v26b_requested() || local.baseline_scale<.5 ||
+       std::getenv("BLENDER_SCULPT_COVERAGE_FILE_V31D9"))
+      std::fprintf(stderr,"[V31D10A guard] local=%d gradient=%.7g triangle=%.7g baseline=%.7g retained=%.7g residual_gradient=%.7g residual_triangle=%.7g min_vertex=%.7g limited=%zu triangle_visits=%zu\n",
+          int(local.used_local),local.original_gradient,local.original_triangle,
+          local.baseline_scale,local.retained_ratio,local.residual_gradient,
+          local.residual_triangle,result.minimum_scale,result.limited_vertices,local.local_triangles);
+  }else{
+    if(coherent_v31b){
+      // Check the full accumulated native dab, not only solver substeps.
+      if(!gradient || profile_v26b_requested())legacy_scale=sculpt_physics::coherent_motion_scale_v31b(p,triangles,motion);
+      coherent=gradient?sculpt_physics::gradient_motion_scale_v31c(p,triangles,motion):legacy_scale;
+      if(coherent<1)for(auto &v:motion)v=v*coherent;
+    }
+    result=balance_local && !coherent_v31b?sculpt_physics::limit_balanced_contact_v30c(p,triangles,motion):
                                  sculpt_physics::limit_local_contact(p,triangles,motion,uniform_only || coherent_v31b);
-  result.final_scale*=coherent;result.minimum_scale*=coherent;
-  if(gradient && profile_v26b_requested())
-    std::fprintf(stderr,"[V31C gradient] legacy_scale=%.7g gradient_scale=%.7g final_scale=%.7g triangles=%zu\n",legacy_scale,coherent,result.final_scale,triangles.size());
-  if(coherent_v31b && profile_v26b_requested())
-    std::fprintf(stderr,"[V31B guard] coherent_scale=%.7g final_scale=%.7g triangles=%zu\n",coherent,result.final_scale,triangles.size());
+    result.final_scale*=coherent;result.minimum_scale*=coherent;
+    if(gradient && profile_v26b_requested())
+      std::fprintf(stderr,"[V31C gradient] legacy_scale=%.7g gradient_scale=%.7g final_scale=%.7g triangles=%zu\n",legacy_scale,coherent,result.final_scale,triangles.size());
+    if(coherent_v31b && profile_v26b_requested())
+      std::fprintf(stderr,"[V31B guard] coherent_scale=%.7g final_scale=%.7g triangles=%zu\n",coherent,result.final_scale,triangles.size());
+  }
   for(std::size_t i=0;i<global.size();++i) {
     auto it=changes.find(global[i]);
     if(it!=changes.end()) {
