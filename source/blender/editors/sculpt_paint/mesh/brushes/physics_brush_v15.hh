@@ -505,6 +505,11 @@ inline bool try_apply(const Sculpt &sd,
   const auto total_start=std::chrono::steady_clock::now();
   double prepare_time=0.0,contact_time=0.0,stage_time=0.0;
   double contact_scale=1.0;
+  const bool diag_v31d5=autonomous && conservative_clay &&
+      stroke_option_v31d5("BLENDER_SCULPT_DIAG_V31D5");
+  double requested_v31d5=0,executor_v31d5=0,guarded_v31d5=0,written_v31d5=0;
+  if(diag_v31d5)for(const auto &s:native_translations)
+    requested_v31d5+=std::hypot(s.translation.x,s.translation.y,s.translation.z);
   sculpt_physics::PreparedNativeBrushDab result;
   std::shared_ptr<NativePhysicsStroke> state;
   try {
@@ -554,6 +559,7 @@ inline bool try_apply(const Sculpt &sd,
     }
     if (samples.empty()) {
       if(profile)std::fprintf(stderr,"[V27 no_write] stage=targets action=%d targets=0\n",cache.xpbd_v16_clay_behavior);
+      if(diag_v31d5)std::fprintf(stderr,"[V31D5 motion] action=%d requested=%.7g executor=0 guarded=0 written=0 stage=targets\n",cache.xpbd_v16_clay_behavior,requested_v31d5);
       return true;
     }
     const auto edge_at=[&](std::size_t id) {
@@ -747,6 +753,7 @@ inline bool try_apply(const Sculpt &sd,
     // clipping may otherwise modify stationary coordinates unexpectedly.
     if (result.writes().empty()) {
       if(profile)std::fprintf(stderr,"[V27 no_write] stage=executor action=%d targets=%zu\n",cache.xpbd_v16_clay_behavior,samples.size());
+      if(diag_v31d5)std::fprintf(stderr,"[V31D5 motion] action=%d requested=%.7g executor=0 guarded=0 written=0 stage=executor\n",cache.xpbd_v16_clay_behavior,requested_v31d5);
       // A solver can also legitimately return an empty batch (e.g. all
       // motion below writeback precision). Acknowledge it without touching
       // native geometry or invalidating PBVH caches.
@@ -773,6 +780,8 @@ inline bool try_apply(const Sculpt &sd,
       changes.emplace(global_id,displacement);
     }
 
+    if(diag_v31d5)for(const auto &it:changes)
+      executor_v31d5+=double(math::length(it.second));
     const auto contact_start=std::chrono::steady_clock::now();
     if (drag_contact_requested() && state->compact &&
         kind!=sculpt_physics::NativeSculptBrushKind::Gravity) {
@@ -818,6 +827,8 @@ inline bool try_apply(const Sculpt &sd,
       }
       if(guarded.scale<1)for(auto &item:changes)item.second*=float(guarded.scale);
     }
+    if(diag_v31d5)for(const auto &it:changes)
+      guarded_v31d5+=double(math::length(it.second));
     contact_time=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-contact_start).count();
     const auto stage_start=std::chrono::steady_clock::now();
     if (!cache.xpbd_v15_active_logged) {
@@ -943,7 +954,14 @@ inline bool try_apply(const Sculpt &sd,
       }
     }
     bke::pbvh::MeshNode &pbvh_node=nodes[node.id];
+    Vector<float3> before_v31d5;
+    if(diag_v31d5){
+      before_v31d5.resize(pbvh_node.verts().size());
+      for(const int i:pbvh_node.verts().index_range())before_v31d5[i]=current[pbvh_node.verts()[i]];
+    }
     position_data.deform(node.translations,pbvh_node.verts());
+    if(diag_v31d5)for(const int i:pbvh_node.verts().index_range())
+      written_v31d5+=double(math::length(position_data.eval[pbvh_node.verts()[i]]-before_v31d5[i]));
     bke::pbvh::update_node_bounds_mesh(position_data.eval,pbvh_node);
   }
   if(plastic_writer){
@@ -955,6 +973,8 @@ inline bool try_apply(const Sculpt &sd,
   pbvh.flush_bounds_to_parents();
   result.finish_editor_success();
   cache.xpbd_v15_state=state;
+  if(diag_v31d5)std::fprintf(stderr,"[V31D5 motion] action=%d requested=%.7g executor=%.7g guarded=%.7g written=%.7g contact_scale=%.7g\n",
+      cache.xpbd_v16_clay_behavior,requested_v31d5,executor_v31d5,guarded_v31d5,written_v31d5,contact_scale);
   if(profile && overlap_v30c_requested())std::fprintf(stderr,"[V30C write] action=%d targets=%zu staged=%zu moved=%zu contact_scale=%.7g\n",cache.xpbd_v16_clay_behavior,native_translations.size(),staged_v30c,moved_v30c,contact_scale);
   if(profile){
     const auto now=std::chrono::steady_clock::now();
