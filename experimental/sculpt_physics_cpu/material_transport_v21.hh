@@ -51,6 +51,7 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     out.surface.trace_attempts+=step.trace_attempts;
     out.surface.trace_rejected+=step.trace_rejected;
     out.surface.history_limited+=step.history_limited;
+    out.surface.fine_transport_v30b+=step.fine_transport_v30b;
     out.surface.slope_scale=std::min(out.surface.slope_scale,step.slope_scale);
     out.surface.accepted_scale=std::min(out.surface.accepted_scale,step.accepted_scale);
     out.surface.transported_volume+=step.transported_volume;

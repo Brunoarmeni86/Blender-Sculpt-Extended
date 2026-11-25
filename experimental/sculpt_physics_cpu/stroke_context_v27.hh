@@ -16,6 +16,8 @@ struct StrokeContextV27 {
   std::size_t samples=0;
   bool tool_plane_valid=false;
   Vec3 tool_reference{};
+  Vec3 transport_direction_v30b{};
+  double transport_load_v30b=0.0;
 };
 inline double stroke_norm_v27(Vec3 p){return std::hypot(p.x,p.y,p.z);}
 inline double stroke_dot_v27(Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
@@ -62,6 +64,29 @@ inline StrokeStepV27 stage_stroke_v27(const StrokeContextV27 &before,Vec3 center
     s.axis=mixed/stroke_norm_v27(mixed);
   }
   return out;
+}
+/* Stroke-local tool entrainment, not frozen geometry or material inventory. */
+inline void stage_transport_v30b(StrokeStepV27 &step,const StrokeContextV27 &before)
+{
+  auto &s=step.next;
+  const auto tangent=[&](Vec3 p){return p-s.axis*stroke_dot_v27(p,s.axis);};
+  const Vec3 motion=tangent(s.direction);
+  const double distance=stroke_norm_v27(motion);
+  Vec3 prior=tangent(before.transport_direction_v30b);
+  const double len=stroke_norm_v27(prior);
+  if(len>1e-12)prior=prior/len;else prior={};
+  if(distance<=1e-12){
+    s.transport_direction_v30b=step.gap?Vec3{}:prior;
+    s.transport_load_v30b=step.gap?0.0:before.transport_load_v30b;
+    return;
+  }
+  const Vec3 current=motion/distance;
+  const bool reset=step.gap || len<=1e-12 || stroke_dot_v27(prior,current)<0;
+  const double blend=1-std::exp(-distance/(.22*s.radius));
+  const Vec3 mixed=reset?current:prior*(1-blend)+current*blend;
+  s.transport_direction_v30b=mixed/stroke_norm_v27(mixed);
+  const double load=reset?0.0:before.transport_load_v30b;
+  s.transport_load_v30b=std::clamp(load+(1-load)*(1-std::exp(-distance/(.25*s.radius))),0.0,1.0);
 }
 /* Follow supported leading samples rather than the bottom of a newly
  * carved track. Only existing native candidates participate. */

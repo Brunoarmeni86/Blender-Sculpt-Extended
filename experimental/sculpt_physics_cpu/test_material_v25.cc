@@ -349,8 +349,50 @@ static void live_surface_v30_tests(){
   const auto second=solve_material_transport_v21(v,tri,dab,4,false).surface;
   assert(second.displacement[n*n/2].z< -1e-6);
 }
+static void transport_v30b_tests(){
+  StrokeContextV27 state;
+  auto step=stage_stroke_v27(state,{0,0,0},{0,0,1},1,1);
+  stage_transport_v30b(step,state);state=step.next;
+  step=stage_stroke_v27(state,{.08,0,0},{0,0,1},1,1);
+  stage_transport_v30b(step,state);state=step.next;
+  const double load=state.transport_load_v30b;
+  assert(load>0 && state.transport_direction_v30b.x>.99);
+  step=stage_stroke_v27(state,{.16,.02,0},{0,0,1},1,1);
+  stage_transport_v30b(step,state);
+  assert(step.next.transport_load_v30b>load && step.next.transport_direction_v30b.x>.95);
+  constexpr int n=41;
+  std::vector<ClaySurfaceVertex> v;
+  std::vector<ClaySurfaceTriangle> tri;
+  for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+    const double px=2.*x/(n-1)-1,py=2.*y/(n-1)-1,r2=(px*px+py*py)/.64;
+    v.push_back({{px,py,.008*std::sin(60*px)*std::cos(45*py)},r2<1 && py>-.2?std::pow(1-r2,2):0});
+  }
+  for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+    const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
+    tri.push_back({a,b,d});tri.push_back({a,d,c});
+  }
+  ClaySurfaceDab dab;dab.radius=.8;dab.dose=.15;dab.direction={1,0,0};
+  dab.density_independent=true;dab.smooth_proxy=true;dab.shape_transport=true;
+  dab.tool_v25=true;dab.tool_v26=true;dab.stable_v28=true;dab.refine_v28b=true;
+  dab.live_surface_v30=true;dab.transport_v30b=true;dab.fast_v26b=true;
+  for(auto action:{ClaySurfaceAction::Push,ClaySurfaceAction::Gather,ClaySurfaceAction::Smear}){
+    dab.action=action;auto work=v;double motion=0;
+    for(int k=0;k<12;++k){
+      const auto out=solve_material_transport_v21(work,tri,dab,4,false).surface;
+      assert(std::abs(out.signed_swept_volume)<1e-9);
+      if(action==ClaySurfaceAction::Smear)assert(out.fine_transport_v30b>0);
+      for(std::size_t i=0;i<work.size();++i){
+        assert(std::isfinite(out.displacement[i].z));
+        if(work[i].influence==0)assert(out.displacement[i].z==0);
+        work[i].position+=out.displacement[i];motion+=std::abs(out.displacement[i].z);
+      }
+    }
+    assert(motion>1e-6);
+  }
+}
 int main(){
   stroke_context_v27_tests();
+  transport_v30b_tests();
   live_surface_v30_tests();
   collision_v29_tests();
   compaction_v29_tests();

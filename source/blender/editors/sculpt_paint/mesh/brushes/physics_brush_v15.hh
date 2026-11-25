@@ -122,6 +122,11 @@ inline bool live_surface_v30_brush(const Object &object,const Brush &brush)
          !ss->deform_modifiers_active && !ss->shapekey_active &&
          bke::multires_layers::base_modifier(const_cast<Object &>(object))==nullptr;
 }
+inline bool transport_v30b_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_TRANSPORT_V30B");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
 inline bool swept_v29_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_SWEEP_V29");return v && v[0]=='1' && v[1]=='\0';}();
@@ -1141,6 +1146,15 @@ inline bool try_apply_intent(
         clay.axis=convert(normal);
         if(v27)stroke_step.next.axis=clay.axis/stroke_norm_v27(clay.axis);
       }
+      clay.transport_v30b=clay.live_surface_v30 && clay.refine_v28b && transport_v30b_requested() &&
+                          (action==6 || action==12 || action==13);
+      if(clay.transport_v30b && v27){
+        stage_transport_v30b(stroke_step,*stroke);
+        if(action==6 || action==13){
+          clay.direction=stroke_step.next.transport_direction_v30b;
+          clay.transport_load_v30b=.55+.45*stroke_step.next.transport_load_v30b;
+        }
+      }
       clay.swept_v29=clay.refine_v28b && swept_v29_active(cache,brush);
       if(clay.swept_v29)clay.sweep_start=convert(cache.xpbd_v17_last_center);
       if(clay.contact_v27b)clay.melt_local_gravity_v27b=material_override("BLENDER_SCULPT_V27B_MELT_LOCAL_GRAVITY",0.0,0.0,1.0);
@@ -1290,6 +1304,7 @@ inline bool try_apply_intent(
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
       if(clay.live_surface_v30 && profile_v26b_requested())std::fprintf(stderr,"[V30 live] action=%d candidates=%zu active=%zu goals=%zu scale=%.7g history_limited=%zu\n",action,samples.size(),planned.active,goals.size(),planned.accepted_scale,planned.history_limited);
+      if(clay.transport_v30b && profile_v26b_requested())std::fprintf(stderr,"[V30B transport] action=%d load=%.6f fine_volume=%.8g volume=%.8g nodes=%zu\n",action,clay.transport_load_v30b,planned.fine_transport_v30b,planned.transported_volume,planned.transport_nodes);
       if(clay.swept_v29 && profile_v26b_requested())std::fprintf(stderr,"[V29 sweep] action=%d length=%.7g active=%zu\n",action,double(math::length(delta)),planned.active);
       if(clay.stable_v28 && profile_v26b_requested())
         std::fprintf(stderr,"[V28 stability] action=%d history_limited=%zu slope_scale=%.6f history_size=%zu transport_nodes=%zu\n",

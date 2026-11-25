@@ -53,6 +53,8 @@ struct ClaySurfaceDab {
   bool contact_v27b=false; // broader contact/return profile
   bool stable_v28=false; // opt-in cumulative bounds and conservative proxy transport
   bool live_surface_v30=false; // incremental current-geometry safety, no stroke-start displacement cap
+  bool transport_v30b=false;
+  double transport_load_v30b=1.0;
   bool refine_v28b=false; // gradual capacities and curvature-aware Melt
   bool swept_v29=false;
   bool plastic_v29=false;
@@ -86,6 +88,7 @@ struct ClaySurfaceResult {
   std::size_t trace_attempts=0,trace_rejected=0;
   std::size_t history_limited=0;
   double slope_scale=1.0;
+  double fine_transport_v30b=0.0;
 };
 
 // Qualitative hardening state. Units are normal displacement / brush radius,
@@ -210,7 +213,8 @@ inline void coarse_clay_transport(
     const std::vector<double> &w,const std::vector<double> &area,
     const ClaySurfaceDab &dab,Vec3 axis,double floor,double travel,
     double mobility,double yield,double drag_gain,double pressure_gain,
-    std::vector<double> &delta,ClaySurfaceResult &out)
+    std::vector<double> &delta,ClaySurfaceResult &out,
+    const std::vector<std::array<std::size_t,2>> *fine_edges=nullptr)
 {
   using Key=std::array<int,2>;
   struct Node { double area=0,raw=0,height=0,source=0,pressure=0,volume=0,change=0,outgoing=0,incoming=0; };
@@ -231,8 +235,14 @@ inline void coarse_clay_transport(
       dab.action==ClaySurfaceAction::Press || dab.action==ClaySurfaceAction::PressureFlow ||
       dab.action==ClaySurfaceAction::HybridFlow || compact;
   std::array<double,6> background{};
+  const bool live_transport=dab.transport_v30b && (gather||smear||dab.action==ClaySurfaceAction::Push);
   const bool detrend=dab.refine_v28b && melt;
-  const bool fit_ok=!detrend || fit_quadratic_v28b(xy,h,w,area,ex,ey,dab.radius,background);
+  const bool fit_ok=!(detrend||live_transport) || fit_quadratic_v28b(xy,h,w,area,ex,ey,dab.radius,background);
+  const auto residual=[&](std::size_t i){
+    if((detrend||live_transport) && fit_ok)
+      return h[i]-quadratic_height_v28b(background,dot(xy[i],ex)/dab.radius,dot(xy[i],ey)/dab.radius);
+    return detrend?0.0:h[i]-(live_transport?floor+.12*dab.radius:0.0);
+  };
   std::map<Key,std::size_t> lookup;
   std::vector<Node> nodes;
   std::vector<std::array<Weight,9>> stencil(h.size());
@@ -279,7 +289,7 @@ inline void coarse_clay_transport(
       auto &g=nodes[id];
       const double m=area[i]*w[i]*b;
       g.area+=m;g.raw+=area[i]*b;
-      const double relief=detrend?(fit_ok?h[i]-quadratic_height_v28b(background,x*spacing/dab.radius,y*spacing/dab.radius):0.0):h[i];
+      const double relief=residual(i);
       g.height+=m*relief;g.source+=m*source;
       g.pressure+=m*tool;
     }
@@ -300,7 +310,8 @@ inline void coarse_clay_transport(
   for(auto &g:nodes) {
     if(g.area<=0||!std::isfinite(g.area))throw std::overflow_error("Invalid proxy area");
     g.height/=g.area;g.source/=g.area;g.pressure/=g.area;
-    g.volume=(detrend?.10*dab.radius:std::max(0.0,g.height+g.source-floor))*g.area;
+    g.volume=(live_transport?std::clamp(.08*dab.radius+.7*g.height,.015*dab.radius,.20*dab.radius):
+              detrend?.10*dab.radius:std::max(0.0,g.height+g.source-floor))*g.area;
   }
   const Vec3 dir=unit(dab.direction-axis*dot(dab.direction,axis))*dab.sign;
   std::vector<Link> flux;
@@ -314,7 +325,19 @@ inline void coarse_clay_transport(
     const Vec3 midpoint=ex*(.5*(keys[a][0]+keys[b][0])*spacing)+
                         ey*(.5*(keys[a][1]+keys[b][1])*spacing);
     Vec3 field=gather?unit(midpoint*(-1.0))*dab.sign:dir;
-    if(dab.refine_v28b && gather){
+    if(live_transport){
+      Vec3 q=midpoint;
+      if(dab.swept_v29){
+        const Vec3 segment=dab.sweep_start-dab.center;
+        const Vec3 tangent=segment-axis*dot(segment,axis);
+        const double den=dot(tangent,tangent);
+        if(den>1e-24)q=q-tangent*std::clamp(dot(q,tangent)/den,0.0,1.0);
+      }
+      const double r=std::hypot(q.x,q.y,q.z)/dab.radius;
+      const double taper=std::max(0.0,1-r*r);
+      if(gather)field=q*(-dab.sign/dab.radius)*(2.2*taper*taper);
+      else field=dir*(taper*taper*(smear?1.0:dab.transport_load_v30b));
+    }else if(dab.refine_v28b && gather){
       // A regular radial velocity vanishes at the center instead of
       // converging at finite speed into a singular point.
       const double r=std::hypot(midpoint.x,midpoint.y,midpoint.z)/dab.radius;
@@ -327,7 +350,7 @@ inline void coarse_clay_transport(
     if(directed) {
       const double available=align>=0?u.volume/u.area:v.volume/v.area;
       // Do not let a deepening virtual floor create ever larger flux.
-      const double thickness=dab.stable_v28?std::min(available,.10*dab.radius):available;
+      const double thickness=dab.stable_v28 && !live_transport?std::min(available,.10*dab.radius):available;
       f=align*thickness*width*travel*mobility*envelope*drag_gain*
         (smear?.30:dab.action==ClaySurfaceAction::HybridFlow?.45:
          dab.action==ClaySurfaceAction::PressureFlow?.15:1.0);
@@ -377,6 +400,40 @@ inline void coarse_clay_transport(
     for(const auto &b:stencil[i])if(b.value>0)
       d+=b.value*nodes[b.id].change/nodes[b.id].area;
     delta[i]+=w[i]*d;
+  }
+  if(live_transport && smear && fine_edges){
+    // Paired fine residual transfers on mesh edges, without another resampling trace.
+    std::vector<double> detail(h.size()),incoming(h.size()),outgoing(h.size()),change(h.size());
+    std::vector<Link> fine;
+    fine.reserve(fine_edges->size());
+    for(std::size_t i=0;i<h.size();++i)if(w[i]>0){
+      double reconstructed=0,total=0;
+      for(const auto &b:stencil[i])if(b.value>0){reconstructed+=b.value*nodes[b.id].height;total+=b.value;}
+      detail[i]=residual(i)-(total>0?reconstructed/total:0.0);
+    }
+    for(const auto &edge:*fine_edges){
+      auto a=edge[0],b=edge[1];
+      if(w[a]<=0||w[b]<=0)continue;
+      const Vec3 line=xy[b]-xy[a];const double len=std::hypot(line.x,line.y,line.z);
+      if(len<=1e-12)continue;
+      const double lo=std::min(area[a],area[b]),hi=std::max(area[a],area[b]);
+      if(lo<=0)continue;
+      const double dual=2*lo/(1+lo/hi),align=dot(dir,line/len);
+      const double step=std::min(.18*len,travel*mobility*std::min(w[a],w[b])*drag_gain);
+      const double upwind=align>=0?detail[a]:detail[b];
+      const double diffusion=(detail[a]-detail[b])*(.12+.28*align*align)*(1-.6*dab.detail_retention);
+      double f=(.65*align*upwind+diffusion)*dual/len*step;
+      if(!std::isfinite(f))throw std::overflow_error("V30B fine flux overflow");
+      if(f==0)continue;
+      if(f<0){std::swap(a,b);f=-f;}
+      outgoing[a]+=f;incoming[b]+=f;fine.push_back({a,b,f});
+    }
+    for(const auto &f:fine){
+      const double limit=.015*dab.radius;
+      const double mass=f.amount*std::min({1.0,limit*area[f.a]*w[f.a]/outgoing[f.a],limit*area[f.b]*w[f.b]/incoming[f.b]});
+      change[f.a]-=mass;change[f.b]+=mass;out.fine_transport_v30b+=mass;
+    }
+    for(std::size_t i=0;i<h.size();++i)if(w[i]>0)delta[i]+=change[i]/area[i];
   }
   out.transport_nodes=nodes.size();
 }
@@ -622,7 +679,7 @@ inline ClaySurfaceResult solve_clay_surface(
       norm(dab.axis)<=1e-12 || !std::isfinite(norm(dab.direction)) ||
       !std::isfinite(dab.radius) || dab.radius<=1e-12 ||
       (dab.swept_v29 && (!std::isfinite(norm(dab.sweep_start)) || norm(dab.sweep_start-dab.center)>dab.radius*.500001)) ||
-      !interval(dab.dose) || !std::isfinite(dab.intensity) || dab.intensity<0 ||
+      !interval(dab.dose) || !interval(dab.transport_load_v30b) || !std::isfinite(dab.intensity) || dab.intensity<0 ||
       dab.intensity>(dab.shape_transport?4.0:1.0) || !interval(dab.mobility) ||
       (dab.sign!=1 && dab.sign!=-1) ||
       !interval(dab.yield_slope) || !interval(dab.relative_slope_limit) ||
@@ -771,7 +828,7 @@ inline ClaySurfaceResult solve_clay_surface(
     // Existing paired proxy flux replaces repeated triangle traces. This
     // is an experimental relief transfer, not real tangential material IDs.
     coarse_clay_transport(xy,h,w,out.projected_area,dab,axis,floor,travel,
-                          mobility,yield,drag_gain,pressure_gain,delta,out);
+                          mobility,yield,drag_gain,pressure_gain,delta,out,&edges);
   } else if(dab.shape_transport && dab.action!=ClaySurfaceAction::FusionDeposit &&
             !(dab.tool_v26 && dab.action==ClaySurfaceAction::Melt && dab.density_independent)) {
     shape_clay_transport(xy,h,w,out.projected_area,triangles,dab,axis,travel,mobility,delta,out);
@@ -950,6 +1007,7 @@ inline ClaySurfaceResult solve_clay_surface(
     out.signed_swept_volume+=d*out.projected_area[i];
   }
   out.transported_volume*=out.accepted_scale;
+  out.fine_transport_v30b*=out.accepted_scale;
   if(!std::isfinite(out.signed_swept_volume)||!std::isfinite(out.transported_volume))
     throw std::overflow_error("Invalid clay surface volume");
   return out;
