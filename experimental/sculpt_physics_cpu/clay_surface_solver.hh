@@ -63,6 +63,7 @@ struct ClaySurfaceDab {
   double average_surface_v31d=0.0; // virtual reference blend; never smooth actual geometry
   bool continuous_contact_v31d2=false;
   double motion_proxy_v31d3=0.0; // opt-in conservative two-scale motion reconstruction
+  bool contact_reach_v31d4=false; // experimental +0.15R geodesic reach; same geometric candidate bound
   bool push_v30d=false; // stronger current-relief entrainment; Push only
   double push_gain_v30d=2.5;
   double transport_load_v30b=1.0;
@@ -941,12 +942,14 @@ inline void connected_contact_v31d2(const std::vector<Vec3> &positions,
                                     const ClaySurfaceEdges &edges,Vec3 axis,
                                     std::size_t seed,double initial,double reach,double radius,
                                     double blend,std::vector<double> &w,
-                                    std::size_t &rejected)
+                                    std::size_t &rejected,bool extend_reach_v31d4=false)
 {
   const auto norm=[](Vec3 a){return std::hypot(a.x,a.y,a.z);};
   const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
   const auto smooth=[](double v){v=std::clamp(v,0.0,1.0);return v*v*(3-2*v);};
   const auto n=w.size();
+  // Preserve original edge eligibility and positive-factor barriers.
+  const double path_reach=reach+(extend_reach_v31d4?.15*radius:0.0);
   std::vector<std::vector<std::pair<std::size_t,double>>> adj(n);
   for(const auto &e:edges){
     const auto a=e[0],b=e[1];
@@ -966,7 +969,7 @@ inline void connected_contact_v31d2(const std::vector<Vec3> &positions,
     if(d!=dist[i])continue;
     for(const auto &e:adj[i]){
       const double next=d+e.second;
-      if(next<reach && next<dist[e.first]){
+      if(next<path_reach && next<dist[e.first]){
         dist[e.first]=next;queue.push({next,e.first});
       }
     }
@@ -995,7 +998,9 @@ inline void connected_contact_v31d2(const std::vector<Vec3> &positions,
   for(std::size_t i=0;i<n;++i)if(w[i]>0){
     const double averaged=.5*(dot(medium[i],axis)+dot(filtered[i],axis));
     const double facing=(1-blend)*dot(normal[i],axis)+blend*averaged;
-    w[i]*=(1-smooth((dist[i]-(reach-.25*radius))/(.25*radius)))*
+    // Only widen the outer taper; keep the original inner plateau.
+    const double feather_width=(extend_reach_v31d4?.40:.25)*radius;
+    w[i]*=(1-smooth((dist[i]-(reach-.25*radius))/feather_width))*
         (.15+.85*smooth(facing/.30));
   }
 }
@@ -1078,7 +1083,7 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   const bool continuous=dab.continuous_contact_v31d2 && dab.average_surface_v31d>0;
   if(continuous){
     connected_contact_v31d2(positions,dual,edges,axis,seed,nearest,reach,dab.radius,
-                             dab.average_surface_v31d,w,out.component_rejected_v30b);
+                             dab.average_surface_v31d,w,out.component_rejected_v30b,dab.contact_reach_v31d4);
   }else{
   std::vector<std::vector<std::pair<std::size_t,double>>> adj(n);
   for(const auto &e:edges){
@@ -1364,7 +1369,7 @@ inline ClaySurfaceResult solve_clay_surface(
     std::vector<Vec3> positions(n);
     for(std::size_t i=0;i<n;++i)positions[i]=vertices[i].position;
     connected_contact_v31d2(positions,dual,edges,axis,seed,nearest,spatial_limit,dab.radius,
-                             dab.average_surface_v31d,w,out.component_rejected_v30b);
+                             dab.average_surface_v31d,w,out.component_rejected_v30b,dab.contact_reach_v31d4);
     std::vector<double> reference;
     const bool fitted=average_reference_v31d(xy,h,w,out.projected_area,axis,dab.radius,reference,true);
     if(fitted)++out.average_fits_v31d;
