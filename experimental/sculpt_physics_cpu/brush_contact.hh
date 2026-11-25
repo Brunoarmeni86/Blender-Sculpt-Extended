@@ -3,6 +3,7 @@
 #include "physical_brush_intent.hh"
 #include <array>
 #include <unordered_map>
+#include <utility>
 
 namespace sculpt_physics {
 
