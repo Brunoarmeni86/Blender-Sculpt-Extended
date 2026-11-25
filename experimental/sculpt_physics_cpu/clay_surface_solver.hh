@@ -26,6 +26,7 @@ struct ClaySurfaceVertex {
   // First eligible contact in this stroke; zero radius disables history.
   Vec3 contact_reference{};
   double contact_radius=0.0;
+  double compaction_v29=0.0;
 };
 using ClaySurfaceTriangle=std::array<std::size_t,3>;
 enum class ClaySurfaceAction { Buildup, Push, Gather, Spread, FusionDeposit, Compress, Compact, Press, PressureFlow, HybridFlow, Melt, Smear, Scrape };
@@ -53,6 +54,7 @@ struct ClaySurfaceDab {
   bool stable_v28=false; // opt-in cumulative bounds and conservative proxy transport
   bool refine_v28b=false; // gradual capacities and curvature-aware Melt
   bool swept_v29=false;
+  bool plastic_v29=false;
   Vec3 sweep_start{};
   double melt_local_gravity_v27b=0.0; // opt-in object-local downhill
   bool has_tool_plane=false;
@@ -85,6 +87,16 @@ struct ClaySurfaceResult {
   double slope_scale=1.0;
 };
 
+// Qualitative hardening state. Units are normal displacement / brush radius,
+// not measured volumetric plastic strain. Inverse compression can loosen it.
+inline double update_compaction_v29(double old,double normal_motion,double radius,double sign)
+{
+  if(!std::isfinite(old) || old<0 || old>1 || !std::isfinite(normal_motion) ||
+     !std::isfinite(radius) || radius<=0 || (sign!=1 && sign!=-1))
+    throw std::invalid_argument("Invalid V29 compaction");
+  const double dose=std::clamp(-normal_motion*sign/radius,0.0,1.0);
+  return sign>0 ? 1-(1-old)*std::exp(-4*dose) : old*std::exp(-4*dose);
+}
 inline double chart_distance_v29(Vec3 p,const ClaySurfaceDab &dab,Vec3 axis)
 {
   const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
@@ -644,6 +656,7 @@ inline ClaySurfaceResult solve_clay_surface(
   std::vector<bool> bad(n,false);
   for(std::size_t i=0;i<n;++i) {
     if(!std::isfinite(norm(vertices[i].position)) || !interval(vertices[i].influence) ||
+       (dab.plastic_v29 && !interval(vertices[i].compaction_v29)) ||
        (dab.stable_v28 && (!std::isfinite(vertices[i].contact_radius) || vertices[i].contact_radius<0 ||
                           !std::isfinite(norm(vertices[i].contact_reference)))))
       throw std::invalid_argument("Invalid clay surface vertex");
@@ -876,6 +889,14 @@ inline ClaySurfaceResult solve_clay_surface(
       }
       if(scale<1)++out.history_limited;
       delta[i]*=scale;
+    }
+    if(dab.plastic_v29 && dab.sign>0 &&
+       (dab.action==ClaySurfaceAction::Press || dab.action==ClaySurfaceAction::Compress ||
+        dab.action==ClaySurfaceAction::Compact)){
+      const double hardening=dab.action==ClaySurfaceAction::Compact?.85:
+                             dab.action==ClaySurfaceAction::Compress?.60:.45;
+      for(std::size_t i=0;i<n;++i)if(delta[i]<0)
+        delta[i]*=1-hardening*vertices[i].compaction_v29;
     }
     balance_capacity_v28(delta,out.projected_area,pos,neg);
     double final_pos=0,final_neg=0;

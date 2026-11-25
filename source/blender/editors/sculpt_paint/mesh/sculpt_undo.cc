@@ -38,6 +38,7 @@
 
 #include <limits>
 #include <mutex>
+#include <map>
 #include "BLI_set.hh"
 #include <zstd.h>
 
@@ -448,6 +449,7 @@ struct StepData {
   /** Storage of per-node undo data after creation of the undo step is finished. */
   Vector<std::unique_ptr<Node>> nodes;
   std::unique_ptr<PositionUndoStorage> position_step_storage;
+  std::map<int,float> physics_compaction_v29;
   size_t undo_size;
 
   /** Whether processing code needs to handle the current data as an undo step. */
@@ -736,6 +738,7 @@ struct SculptUndoStep {
 static size_t sculpt_metadata_memory_size(const StepData &data)
 {
   size_t size = data.base_layer_deltas.size() * sizeof(float3);
+  size=undo_memory_add(size,data.physics_compaction_v29.size()*(sizeof(std::pair<const int,float>)+4*sizeof(void *)));
   size = undo_memory_add(size, data.mask_master_claimed_grids.size_in_bytes());
   size = undo_memory_add(size, data.layer_frame.size() * sizeof(SculptLayerUndoFrameItem));
   size = undo_memory_add(size, data.layer_frame_modifier.size());
@@ -815,6 +818,32 @@ static StepData *get_step_data()
     return &us->data;
   }
   return nullptr;
+}
+
+bool capture_physics_compaction_v29(const Object &object,Span<int> ids,Span<float> values)
+{
+  StepData *step=get_step_data();
+  if(!step || step->type!=Type::Position || step->object_name!=object.id.name || ids.size()!=values.size())return false;
+  const Mesh &mesh=*id_cast<const Mesh *>(object.data);
+  for(const int i:ids.index_range())if(ids[i]<0 || ids[i]>=mesh.verts_num || !std::isfinite(values[i]) || values[i]<0 || values[i]>1)return false;
+  for(const int i:ids.index_range())step->physics_compaction_v29.try_emplace(ids[i],values[i]);
+  return true;
+}
+
+static void exchange_physics_compaction_v29(Mesh &mesh,StepData &step)
+{
+  if(step.physics_compaction_v29.empty())return;
+  auto writer=mesh.attributes_for_write().lookup_for_write_span<float>(".bse_plastic_compaction");
+  if(!writer || writer.domain!=bke::AttrDomain::Point || writer.span.size()!=mesh.verts_num){
+    if(writer)writer.finish();
+    std::fprintf(stderr,"[V29 plastic Undo] missing or incompatible attribute\n");
+    return;
+  }
+  for(const auto &[id,value]:step.physics_compaction_v29)if(id<0 || id>=writer.span.size()){
+    writer.finish();return;
+  }
+  for(auto &[id,value]:step.physics_compaction_v29){const float old=writer.span[id];writer.span[id]=value;value=old;}
+  writer.finish();
 }
 
 static bool use_multires_undo(const StepData &step_data, const SculptSession &ss)
@@ -2744,6 +2773,7 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         const Mesh &mesh = *id_cast<const Mesh *>(object.data);
         Array<bool> modified_verts(mesh.verts_num, false);
         restore_position_mesh(object, *step_data.position_step_storage, modified_verts);
+        exchange_physics_compaction_v29(*id_cast<Mesh *>(object.data),step_data);
 
         const IndexMask changed_nodes = IndexMask::from_predicate(
             node_mask,

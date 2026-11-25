@@ -288,8 +288,19 @@ static void swept_v29_tests(){
   dab.swept_v29=true;
   assert(std::abs(chart_distance_v29({-.2,.5,0},dab,{0,0,1})-.5)<1e-12);
 }
+static void compaction_v29_tests(){
+  double state=0;
+  for(int stroke=0;stroke<5;++stroke){
+    const double next=update_compaction_v29(state,-.05,1,1);
+    assert(next>state && next<1);state=next;
+  }
+  assert(update_compaction_v29(state,.05,1,1)==state);
+  assert(update_compaction_v29(state,.05,1,-1)<state);
+  assert(update_compaction_v29(state,0,1,1)==state);
+}
 int main(){
   stroke_context_v27_tests();
+  compaction_v29_tests();
   swept_v29_tests();
   refinement_v28b_tests();
   stability_v28_tests();

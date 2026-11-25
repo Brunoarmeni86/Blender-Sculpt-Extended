@@ -97,6 +97,8 @@ void push_enter_sculpt_mode(const Scene &scene, Object &ob, const wmOperator *op
  * must match operator name for redo panels to work.
  */
 void push_begin_ex(const Scene &scene, Object &ob, const char *name);
+// Sparse compaction snapshot, paired with native Position Undo/Redo.
+bool capture_physics_compaction_v29(const Object &object,Span<int> ids,Span<float> values);
 void push_end(Object &ob);
 void push_end_ex(Object &ob, bool use_nested_undo);
 

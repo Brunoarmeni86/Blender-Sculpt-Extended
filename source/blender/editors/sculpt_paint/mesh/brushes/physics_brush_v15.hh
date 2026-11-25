@@ -22,6 +22,8 @@
 #  include "stroke_context_v27.hh"
 
 #  include "BKE_mesh.hh"
+#  include "BKE_attribute.hh"
+#  include "editors/sculpt_paint/mesh/sculpt_undo.hh"
 #  include "BKE_brush.hh"
 #  include "BKE_colortools.hh"
 #  include "BKE_paint.hh"
@@ -106,7 +108,8 @@ inline bool swept_v29_requested()
 // Exclude Deposit and native assisted Clay (different footprint geometry).
 inline bool swept_v29_active(const StrokeCache &cache,const Brush &brush)
 {
-  if(!swept_v29_requested() || !stroke_v27_requested() ||
+  if(!swept_v29_requested() || !stroke_v27_requested() || !stable_v28_requested() ||
+     !refine_v28b_requested() ||
      brush.sculpt_physics_mode!=3 || brush.sculpt_physics_assist<=0 ||
      brush.falloff_shape!=PAINT_FALLOFF_SHAPE_SPHERE ||
      brush.sculpt_physics_clay_behavior<5 || brush.sculpt_physics_clay_behavior>14 ||
@@ -125,6 +128,11 @@ inline float swept_distance_v29(const StrokeCache &cache,float3 p,const float3 *
   const float den=math::dot(a,a);
   const float t=den>1e-20f?std::clamp(math::dot(p,a)/den,0.0f,1.0f):0.0f;
   return math::length(p-a*t);
+}
+inline bool plastic_v29_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PLASTIC_V29");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
 }
 inline bool profile_v26b_requested()
 {
@@ -280,7 +288,8 @@ inline bool try_apply(const Sculpt &sd,
                       const sculpt_physics::NativeSculptBrushKind kind,
                       const std::vector<sculpt_physics::NativeBrushTranslation> &native_translations,
                       const bool autonomous=false,
-                      const bool conservative_clay=false)
+                      const bool conservative_clay=false,
+                      const sculpt_physics::ClaySurfaceDab *plastic_dab=nullptr)
 {
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
@@ -328,6 +337,9 @@ inline bool try_apply(const Sculpt &sd,
     Vector<float3> translations;
   };
   std::vector<PreparedNode> editor_writes;
+  bke::SpanAttributeWriter<float> plastic_writer;
+  Vector<int> plastic_ids;
+  Vector<float> plastic_before,plastic_after;
   const bool profile=profile_v26b_requested();
   const auto total_start=std::chrono::steady_clock::now();
   double prepare_time=0.0,contact_time=0.0,stage_time=0.0;
@@ -684,10 +696,37 @@ inline bool try_apply(const Sculpt &sd,
         }
       }
     }
+    if(plastic_dab && plastic_dab->plastic_v29){
+      // Attribute must already exist on the original mesh, created outside
+      // Sculpt Mode. Never allocate an attribute in a position-only Undo step.
+      Mesh &wmesh=*id_cast<Mesh *>(object.data);
+      plastic_writer=wmesh.attributes_for_write().lookup_for_write_span<float>(".bse_plastic_compaction");
+      if(!plastic_writer || plastic_writer.domain!=bke::AttrDomain::Point ||
+         plastic_writer.span.size()!=mesh.verts_num)
+        throw std::runtime_error("V29 compaction attribute unavailable");
+      const auto ax=plastic_dab->axis;
+      const double len=std::hypot(ax.x,ax.y,ax.z);
+      if(len<=1e-12)throw std::runtime_error("Invalid V29 plastic axis");
+      for(const auto &node:editor_writes){
+        const Span<int> verts=nodes[node.id].verts();
+        for(const int i:verts.index_range()){
+          const auto &v=node.translations[i];
+          const double normal=(ax.x*v.x+ax.y*v.y+ax.z*v.z)/len;
+          const int id=verts[i];
+          const float old=plastic_writer.span[id];
+          const float next=float(sculpt_physics::update_compaction_v29(old,normal,plastic_dab->radius,plastic_dab->sign));
+          if(next!=old){plastic_ids.append(id);plastic_before.append(old);plastic_after.append(next);}
+        }
+      }
+      if(!plastic_ids.is_empty() &&
+         !undo::capture_physics_compaction_v29(object,plastic_ids.as_span(),plastic_before.as_span()))
+        throw std::runtime_error("V29 compaction requires native position Undo");
+    }
     stage_time=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-stage_start).count();
   }
   catch (const std::exception &ex) {
     std::fprintf(stderr,"[V15 physical brush] disabled before write: %s\n",ex.what());
+    if(plastic_writer)plastic_writer.finish();
     result.cancel();
     cache.xpbd_v15_state.reset();
     cache.xpbd_v15_failed=true;
@@ -701,6 +740,11 @@ inline bool try_apply(const Sculpt &sd,
     bke::pbvh::MeshNode &pbvh_node=nodes[node.id];
     position_data.deform(node.translations,pbvh_node.verts());
     bke::pbvh::update_node_bounds_mesh(position_data.eval,pbvh_node);
+  }
+  if(plastic_writer){
+    for(const int i:plastic_ids.index_range())plastic_writer.span[plastic_ids[i]]=plastic_after[i];
+    plastic_writer.finish();
+    if(profile)std::fprintf(stderr,"[V29 plastic] changed=%lld\n",static_cast<long long>(plastic_ids.size()));
   }
   pbvh.tag_positions_changed(node_mask);
   pbvh.flush_bounds_to_parents();
@@ -843,6 +887,7 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
     return {double(v.x),double(v.y),double(v.z)};
   };
   const MeshAttributeData attributes(mesh);
+  const auto plastic_attr=mesh.attributes().lookup<float>(".bse_plastic_compaction",bke::AttrDomain::Point);
   const auto vertex_faces=mesh.vert_to_face_map();
   const auto faces=mesh.faces();
   const auto corners=mesh.corner_verts();
@@ -872,6 +917,7 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
         (!attributes.mask.is_empty() && attributes.mask[vi]>=0.999f)) continue;
     const auto i=add_vertex(s.global_index);
     vertices[i].influence=s.envelope;
+    if(dab.plastic_v29 && plastic_attr)vertices[i].compaction_v29=(*plastic_attr)[vi];
     if(history && dab.dose>0 && dab.intensity>0){
       // Capture only the first eligible geometry, never requested or
       // unaccepted motion. Reference does not reset when a dab is clipped.
@@ -1018,6 +1064,7 @@ inline bool try_apply_intent(
     }
     std::vector<sculpt_physics::NativeBrushTranslation> goals;
     double pending_press_dose=cache.xpbd_v26_press_dose;
+    sculpt_physics::ClaySurfaceDab plastic_dab;
     if (conservative) {
       using namespace sculpt_physics;
       ClaySurfaceDab clay;
@@ -1158,6 +1205,10 @@ inline bool try_apply_intent(
       }
       const Mesh &mesh=*id_cast<Mesh *>(object.data);
       if (position_data.eval.size()!=mesh.verts_num) return false;
+      clay.plastic_v29=clay.stable_v28 && plastic_v29_requested() &&
+          (action==5 || action==7 || action==8) &&
+          bool(mesh.attributes().lookup<float>(".bse_plastic_compaction",bke::AttrDomain::Point));
+      if(clay.plastic_v29)plastic_dab=clay;
       const auto plan_start=std::chrono::steady_clock::now();
       std::shared_ptr<SurfaceContactHistoryV28> history;
       if(clay.stable_v28 && clay.action!=ClaySurfaceAction::Buildup &&
@@ -1209,7 +1260,8 @@ inline bool try_apply_intent(
       goals=plan_drag_contact(samples,intent,*history);
     }
     else goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
-    const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,conservative);
+    const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,conservative,
+                                 plastic_dab.plastic_v29?&plastic_dab:nullptr);
     if (handled && !cache.xpbd_v15_failed) {
       cache.xpbd_v17_intent_started=true;
       cache.xpbd_v17_last_center=center;
