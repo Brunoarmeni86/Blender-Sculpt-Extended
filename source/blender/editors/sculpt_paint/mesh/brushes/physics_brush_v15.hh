@@ -1039,6 +1039,7 @@ inline bool try_apply_native_v32(
   p.viscosity=material_override("BLENDER_SCULPT_V32_VISCOSITY",p.viscosity,0,1);
   p.stiffness=material_override("BLENDER_SCULPT_V32_STIFFNESS",p.stiffness,0,1);
   const double amount=material_override("BLENDER_SCULPT_V32_RESPONSE",.65,0,1)*cache.xpbd_v16_assist;
+  if(amount==0 && v32_mode()==V32Mode::Material)return false; // exact stock path
   const double gain=sculpt_physics::native_gain_v32(p,cache.xpbd_v16_clay_behavior,amount);
   const double transport=material_override("BLENDER_SCULPT_V32_TRANSPORT",0,0,1)*p.transport*amount*(1-.5*p.cohesion);
   // All input samples are already clipped by native mask/alpha/falloff.
@@ -1052,10 +1053,13 @@ inline bool try_apply_native_v32(
     if(std::hypot(v.x,v.y,v.z)<=1e-15)continue;
     auto [it,inserted]=index.emplace(sample.global_index,samples.size());
     if(inserted)samples.push_back({sample.global_index,v*gain});
+    else if(std::hypot(v.x,v.y,v.z)*gain>std::hypot(samples[it->second].translation.x,
+        samples[it->second].translation.y,samples[it->second].translation.z))
+      samples[it->second].translation=v*gain;
   }
   sculpt_physics::NativeTransportV32Result transfer;
   bool rejected=false;
-  if(transport>0 && samples.size()>1){
+  if(transport>0 && samples.size()>1 && math::length(axis)>.5f){
     using sculpt_physics::Vec3;
     std::vector<Vec3> positions,goals;
     std::vector<double> area(samples.size());

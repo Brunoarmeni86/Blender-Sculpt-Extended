@@ -449,13 +449,13 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
     if(!autonomous && physics_v15::v32_native_pipeline(brush) &&
        physics_v15::try_apply_native_v32(sd,object,node_mask,pos,
            sculpt_physics::NativeSculptBrushKind::ClayStrips,native,plane_normal))return;
-    if (autonomous ?
+    if (!physics_v15::v32_native_pipeline(brush) && (autonomous ?
         physics_v15::try_apply_intent(sd,object,node_mask,pos,
                                     sculpt_physics::NativeSculptBrushKind::ClayStrips,
                                     intent_samples,plane_normal) :
         physics_v15::try_apply(sd,object,node_mask,pos,
                               sculpt_physics::NativeSculptBrushKind::ClayStrips,
-                              native)) {
+                              native))) {
       return;
     }
   }
