@@ -100,6 +100,28 @@ inline bool refine_v28b_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_REFINE_V28B");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
+inline bool live_surface_v30_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_LIVE_SURFACE_V30");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+/* Only supported explicit physical Clay-family assets. Do not change stock
+ * brushes, nonaccumulating anchored stamps, or unsupported geometry modes. */
+inline bool live_surface_v30_brush(const Object &object,const Brush &brush)
+{
+  if(!live_surface_v30_requested() ||
+     (brush.sculpt_physics_mode!=2 && brush.sculpt_physics_mode!=3) ||
+     brush.sculpt_physics_assist<=0 ||
+     (brush.sculpt_brush_type!=SCULPT_BRUSH_TYPE_CLAY &&
+      brush.sculpt_brush_type!=SCULPT_BRUSH_TYPE_CLAY_STRIPS) ||
+     (brush.stroke_method!=BRUSH_STROKE_SPACE && brush.stroke_method!=BRUSH_STROKE_AIRBRUSH))
+    return false;
+  const auto *ss=object.runtime->sculpt_session;
+  const auto *pbvh=bke::object::pbvh_get(object);
+  return ss && pbvh && pbvh->type()==bke::pbvh::Type::Mesh &&
+         !ss->deform_modifiers_active && !ss->shapekey_active &&
+         bke::multires_layers::base_modifier(const_cast<Object &>(object))==nullptr;
+}
 inline bool swept_v29_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_SWEEP_V29");return v && v[0]=='1' && v[1]=='\0';}();
@@ -489,11 +511,12 @@ inline bool try_apply(const Sculpt &sd,
     // Native XPBD Sculpt assets keep Blender's original Clay plane and
     // pressure/falloff. They never invoke an autonomous material action.
     const Brush &active_brush=*BKE_paint_brush_for_read(&sd.paint);
+    const bool live_surface=live_surface_v30_brush(object,active_brush);
     const bool native_clay_assist=active_brush.sculpt_physics_mode==2 &&
         !autonomous && !dab.clay_material &&
         (kind==sculpt_physics::NativeSculptBrushKind::Clay ||
          kind==sculpt_physics::NativeSculptBrushKind::ClayStrips);
-    if (native_clay_assist && drag_contact_requested()) {
+    if (native_clay_assist && (drag_contact_requested() || live_surface)) {
       const auto brush_profile=sculpt_physics::experimental_native_brush_profile(kind);
       dab.compliance=brush_profile.target_compliance;
       dab.material=brush_profile.material;
@@ -563,6 +586,7 @@ inline bool try_apply(const Sculpt &sd,
       auto prepared=sculpt_physics::prepare_compact_native_brush_dab(
           *state->compact,samples,edge_at,
           [&](std::size_t id) {
+            if(live_surface)return current_position(id);
             const auto original=state->original_positions.find(id);
             return original==state->original_positions.end() ?
                        current_position(id) : original->second;
@@ -1110,6 +1134,13 @@ inline bool try_apply_intent(
       clay.contact_v27b=v27 && contact_v27b_requested();
       clay.stable_v28=stable_v28_requested() && v27;
       clay.refine_v28b=clay.stable_v28 && refine_v28b_requested();
+      clay.live_surface_v30=live_surface_v30_brush(object,brush);
+      if(clay.live_surface_v30){
+        // Refresh the geometric frame from the current sampled surface; the
+        // stroke retains travel and pressure, not the previous tool plane.
+        clay.axis=convert(normal);
+        if(v27)stroke_step.next.axis=clay.axis/stroke_norm_v27(clay.axis);
+      }
       clay.swept_v29=clay.refine_v28b && swept_v29_active(cache,brush);
       if(clay.swept_v29)clay.sweep_start=convert(cache.xpbd_v17_last_center);
       if(clay.contact_v27b)clay.melt_local_gravity_v27b=material_override("BLENDER_SCULPT_V27B_MELT_LOCAL_GRAVITY",0.0,0.0,1.0);
@@ -1183,7 +1214,15 @@ inline bool try_apply_intent(
       else clay.action=ClaySurfaceAction::Push;
       if (clay.tool_v25 && (action==8 || action==14) &&
           material_override("BLENDER_SCULPT_V25_LOCK_PLANE",1.0,0.0,1.0)>0.5) {
-        if(clay.contact_v27b){
+        if(clay.live_surface_v30){
+          // Cursor ray hits the accepted mesh. Apply an incremental cut/press
+          // relative to this contact instead of chasing a previous track.
+          clay.has_tool_plane=true;
+          clay.tool_plane_height=-sign*clay.tool_depth*clay.radius;
+          pending_press_dose=0.0;
+          if(v27){stroke_step.next.tool_reference=clay.center;stroke_step.next.tool_plane_valid=true;}
+          if(profile_v26b_requested())std::fprintf(stderr,"[V30 contact] action=%d fresh_plane=%.7g\n",action,clay.tool_plane_height);
+        }else if(clay.contact_v27b){
           const bool reset=!stroke->tool_plane_valid || stroke_step.gap ||
               stroke_dot_v27(stroke_step.next.axis,stroke->axis)<.85;
           const bool supported=track_tool_plane_v27(stroke_step,*stroke,samples,clay.refine_v28b);
@@ -1241,7 +1280,7 @@ inline bool try_apply_intent(
       if(clay.plastic_v29)plastic_dab=clay;
       const auto plan_start=std::chrono::steady_clock::now();
       std::shared_ptr<SurfaceContactHistoryV28> history;
-      if(clay.stable_v28 && clay.action!=ClaySurfaceAction::Buildup &&
+      if(clay.stable_v28 && !clay.live_surface_v30 && clay.action!=ClaySurfaceAction::Buildup &&
          clay.action!=ClaySurfaceAction::FusionDeposit){
         history=std::static_pointer_cast<SurfaceContactHistoryV28>(cache.xpbd_v28_surface_history);
         if(!history){
@@ -1250,6 +1289,7 @@ inline bool try_apply_intent(
         }
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      if(clay.live_surface_v30 && profile_v26b_requested())std::fprintf(stderr,"[V30 live] action=%d candidates=%zu active=%zu goals=%zu scale=%.7g history_limited=%zu\n",action,samples.size(),planned.active,goals.size(),planned.accepted_scale,planned.history_limited);
       if(clay.swept_v29 && profile_v26b_requested())std::fprintf(stderr,"[V29 sweep] action=%d length=%.7g active=%zu\n",action,double(math::length(delta)),planned.active);
       if(clay.stable_v28 && profile_v26b_requested())
         std::fprintf(stderr,"[V28 stability] action=%d history_limited=%zu slope_scale=%.6f history_size=%zu transport_nodes=%zu\n",

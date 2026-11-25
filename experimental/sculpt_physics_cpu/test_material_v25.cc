@@ -313,8 +313,45 @@ static void collision_v29_tests(){
   for(int i=0;i<3;++i)motion[i]={0,0,-2};
   assert(guard_global_collision_v29(tri.size(),tr,p,m).scale==1);
 }
+static void live_surface_v30_tests(){
+  // A patch whose prior sculpting already exceeded the old stroke-start
+  // budget must still permit a new incremental unilateral scrape.
+  constexpr int n=25;
+  std::vector<ClaySurfaceVertex> v;
+  std::vector<ClaySurfaceTriangle> tri;
+  for(int y=0;y<n;++y)for(int x=0;x<n;++x){
+    const double px=2.*x/(n-1)-1,py=2.*y/(n-1)-1;
+    const double r2=(px*px+py*py)/.64;
+    v.push_back({{px,py,-.6},r2<1?std::pow(1-r2,2):0,{px,py,0},.8});
+  }
+  for(int y=0;y<n-1;++y)for(int x=0;x<n-1;++x){
+    const auto a=std::size_t(y*n+x),b=a+1,c=a+n,d=c+1;
+    tri.push_back({a,b,d});tri.push_back({a,d,c});
+  }
+  ClaySurfaceDab dab;dab.action=ClaySurfaceAction::Scrape;dab.radius=.8;dab.dose=.15;
+  dab.center={0,0,-.6};dab.has_tool_plane=true;dab.tool_plane_height=-.05;
+  dab.density_independent=true;dab.smooth_proxy=true;dab.shape_transport=true;
+  dab.tool_v25=true;dab.tool_v26=true;dab.stable_v28=true;dab.refine_v28b=true;
+  const auto old=solve_material_transport_v21(v,tri,dab,4,false).surface;
+  assert(std::abs(old.displacement[n*n/2].z)<1e-12);
+  dab.live_surface_v30=true;
+  const auto first=solve_material_transport_v21(v,tri,dab,4,false).surface;
+  assert(first.displacement[n*n/2].z< -1e-6 && first.history_limited==0);
+  // Compare stale-history input against an independent fresh geometry.
+  auto fresh=v;for(auto &p:fresh){p.contact_radius=0;p.contact_reference=p.position;}
+  const auto same=solve_material_transport_v21(fresh,tri,dab,4,false).surface;
+  for(std::size_t i=0;i<v.size();++i){
+    assert(std::abs(first.displacement[i].z-same.displacement[i].z)<1e-12);
+    if(v[i].influence==0)assert(first.displacement[i].z==0);
+    v[i].position+=first.displacement[i];
+  }
+  dab.center=v[n*n/2].position;
+  const auto second=solve_material_transport_v21(v,tri,dab,4,false).surface;
+  assert(second.displacement[n*n/2].z< -1e-6);
+}
 int main(){
   stroke_context_v27_tests();
+  live_surface_v30_tests();
   collision_v29_tests();
   compaction_v29_tests();
   swept_v29_tests();

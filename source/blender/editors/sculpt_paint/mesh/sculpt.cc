@@ -3714,9 +3714,13 @@ void calc_brush_plane(const Depsgraph &depsgraph,
   r_area_no = float3(0.0f);
   r_area_co = float3(0.0f);
 
-  const bool use_original_plane = (brush.flag & BRUSH_ORIGINAL_PLANE) &&
+  bool live_surface=false;
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  live_surface=brushes::physics_v15::live_surface_v30_brush(ob,brush);
+#endif
+  const bool use_original_plane = !live_surface && (brush.flag & BRUSH_ORIGINAL_PLANE) &&
                                   brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_PLANE;
-  const bool use_original_normal = (brush.flag & BRUSH_ORIGINAL_NORMAL) &&
+  const bool use_original_normal = !live_surface && (brush.flag & BRUSH_ORIGINAL_NORMAL) &&
                                    brush.sculpt_brush_type != SCULPT_BRUSH_TYPE_PLANE;
 
   const bool needs_recalculation = stroke_is_first_brush_step_of_symmetry_pass(*ss.cache) ||
@@ -3920,9 +3924,18 @@ static brushes::CursorSampleResult calc_brush_node_mask(const Depsgraph &depsgra
   const SculptSession &ss = *ob.runtime->sculpt_session;
   const bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(ob);
 
-  const bool use_original = brush_type_needs_original(brush.sculpt_brush_type) ? true :
+  bool use_original = brush_type_needs_original(brush.sculpt_brush_type) ? true :
                                                                                  !ss.cache->accum;
   /* Build a list of all nodes that are potentially within the brush's area of influence */
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if(brushes::physics_v15::live_surface_v30_brush(ob,brush)){
+    // Clay Strips samples its plane while gathering, before the usual
+    // external-render-engine normal refresh. Update the dirty normals now.
+    ss.cache->accum=true;
+    use_original=false;
+    bke::pbvh::update_normals(depsgraph,ob,*bke::object::pbvh_get(ob));
+  }
+#endif
 
   if (brush_type_needs_all_pbvh_nodes(brush)) {
     /* These brushes need to update all nodes as they are not constrained by the brush radius */
@@ -7041,8 +7054,12 @@ static bool stroke_get_location_bvh_ex(Depsgraph &depsgraph,
 
   SculptSession &ss = *ob.runtime->sculpt_session;
   StrokeCache *cache = ss.cache;
-  const bool original = force_original || ((cache) ? !cache->accum : false);
+  bool original = force_original || ((cache) ? !cache->accum : false);
   const Brush *brush = BKE_paint_brush_for_read(&paint);
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if(sd && cache && brush && brushes::physics_v15::live_surface_v30_brush(ob,*brush))
+    original=false;
+#endif
 
   if (sd) {
     /* TODO: This code is shared by Sculpt, Vertex, and Weight paint. Ideally, we wouldn't need
@@ -7983,6 +8000,14 @@ void SculptPaintStroke::stroke_cache_init(const float mval[2])
       }
     }
   }
+
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if(brushes::physics_v15::live_surface_v30_brush(ob,*brush)){
+    cache->accum=true;
+    if(brushes::physics_v15::profile_v26b_requested())
+      std::fprintf(stderr,"[V30 surface] current geometry accumulation ACTIVE\n");
+  }
+#endif
 
   /* Original coordinates require the sculpt undo system, which isn't used
    * for image brushes. It's also not necessary, just disable it. */

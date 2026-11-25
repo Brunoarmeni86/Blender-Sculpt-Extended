@@ -666,7 +666,10 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
   /* TODO: Test to see if the sqrt2 extra factor can be removed */
   const float initial_radius_squared = math::square(ss.cache->radius * std::numbers::sqrt2);
 
-  const bool use_original = !ss.cache->accum;
+  bool use_original = !ss.cache->accum;
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if(physics_v15::live_surface_v30_brush(object,brush))use_original=false;
+#endif
   IndexMask initial_node_mask = gather_nodes(pbvh,
                                                    eBrushFalloffShape(brush.falloff_shape),
                                                    use_original,

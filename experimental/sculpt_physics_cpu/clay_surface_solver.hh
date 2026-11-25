@@ -52,6 +52,7 @@ struct ClaySurfaceDab {
   bool continuous_v26b=false; // retain supported portion of an interrupted trace
   bool contact_v27b=false; // broader contact/return profile
   bool stable_v28=false; // opt-in cumulative bounds and conservative proxy transport
+  bool live_surface_v30=false; // incremental current-geometry safety, no stroke-start displacement cap
   bool refine_v28b=false; // gradual capacities and curvature-aware Melt
   bool swept_v29=false;
   bool plastic_v29=false;
@@ -877,7 +878,7 @@ inline ClaySurfaceResult solve_clay_surface(
       const double v=delta[i]*out.projected_area[i];
       pos+=std::max(0.0,v);neg+=std::max(0.0,-v);
     }
-    for(std::size_t i=0;i<n;++i)if(delta[i]!=0 && vertices[i].contact_radius>0){
+    if(!dab.live_surface_v30)for(std::size_t i=0;i<n;++i)if(delta[i]!=0 && vertices[i].contact_radius>0){
       const double limit=history_radius_fraction_v28(dab.action)*vertices[i].contact_radius;
       const Vec3 offset=vertices[i].position-vertices[i].contact_reference;
       double scale=history_scale_v28(vertices[i].position,vertices[i].contact_reference,axis*delta[i],limit);
@@ -920,14 +921,18 @@ inline ClaySurfaceResult solve_clay_surface(
   if(!dab.density_independent || guarded) for(const auto &e:edges) {
     const double increment=delta[e[0]]-delta[e[1]];
     const double diff=std::abs(increment);
-    const double len=norm(xy[e[0]]-xy[e[1]]);
+    const double len=dab.live_surface_v30?norm(vertices[e[0]].position-vertices[e[1]].position):
+                                         norm(xy[e[0]]-xy[e[1]]);
     if(diff>0) {
       const double existing=h[e[0]]-h[e[1]];
       // Allow reduction of existing slope without treating it as a new
       // instability. Still bound any increase of absolute height slope.
       const double recovery=dab.surface_contact && existing*increment<0 ?
           std::abs(existing):0.0;
-      const double scale=guarded?
+      // V30 accepts a bounded increment on the CURRENT 3D edge rather than
+      // permanently freezing a steep but valid edge against an absolute slope.
+      // Native triangle contact validation still runs on the accepted batch.
+      const double scale=dab.live_surface_v30?dab.relative_slope_limit*len/diff:guarded?
           // Permit steep existing edges to recover without making the
           // opposite slope worse. Never increase an already-steep edge.
           std::min((recovery+dab.relative_slope_limit*len)/diff,
