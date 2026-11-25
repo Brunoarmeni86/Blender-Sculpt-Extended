@@ -343,4 +343,113 @@ inline double gradient_motion_scale_v31c(
   return std::clamp(scale,0.0,1.0);
 }
 
+/* D10A: writer-only local preconditioning. Never add a new target or
+ * relax the existing .18 gradient / .35 projected-area requirements.
+ * Keep the original positive/negative first-order dual flux ratio by
+ * reducing the larger surviving fraction. Revalidate every incident
+ * triangle after balancing. Fall back to the old uniform solution if
+ * local attenuation cannot improve BOTH nonempty flux budgets (or the
+ * displacement norm sum when both budgets vanish). No global CCD. */
+struct LocalGradientResultV31D10A {
+  LocalContactResult contact;
+  double original_gradient=1.0,original_triangle=1.0;
+  double residual_gradient=1.0,residual_triangle=1.0;
+  double baseline_scale=1.0,retained_ratio=1.0;
+  std::size_t local_triangles=0;
+  bool used_local=false;
+};
+
+inline LocalGradientResultV31D10A limit_local_gradient_v31d10a(
+    const std::vector<Vec3> &p,
+    const std::vector<std::array<std::size_t,3>> &tris,
+    std::vector<Vec3> &motion)
+{
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  const auto cross=[](Vec3 a,Vec3 b){return Vec3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};};
+  const auto norm=[](Vec3 a){return std::hypot(a.x,a.y,a.z);};
+  LocalGradientResultV31D10A out;
+  out.original_gradient=gradient_motion_scale_v31c(p,tris,motion);
+  const auto original=motion;
+  auto baseline=original;
+  for(auto &v:baseline)v=v*out.original_gradient;
+  const auto old=limit_local_contact(p,tris,baseline,true);
+  out.original_triangle=old.final_scale;
+  out.baseline_scale=out.original_gradient*old.final_scale;
+  out.contact=old;
+  out.contact.minimum_scale*=out.original_gradient;
+  out.contact.final_scale*=out.original_gradient;
+  out.retained_ratio=out.baseline_scale;
+  // Preserve the original path exactly when no gradient correction is needed.
+  if(out.original_gradient>=1.0){motion=std::move(baseline);return out;}
+  std::vector<Vec3> dual(p.size());
+  for(const auto &t:tris){
+    const auto a=cross(p[t[1]]-p[t[0]],p[t[2]]-p[t[0]])/6.0;
+    for(auto i:t)dual[i]+=a;
+  }
+  // Tiny scratch arrays reused for every triangle; no per-face allocation.
+  std::vector<Vec3> q(3),m(3);
+  const std::vector<std::array<std::size_t,3>> one{{0,1,2}};
+  std::vector<double> factors(p.size(),1.0);
+  for(int pass=0;pass<8;++pass){
+    std::fill(factors.begin(),factors.end(),1.0);
+    bool changed=false;
+    for(const auto &t:tris){
+      for(int j=0;j<3;++j){q[j]=p[t[j]];m[j]=motion[t[j]];}
+      const double s=gradient_motion_scale_v31c(q,one,m);
+      if(s>=1.0)continue;
+      ++out.local_triangles;
+      for(auto i:t)if(norm(motion[i])>0){
+        factors[i]=std::min(factors[i],.98*s);
+        changed=true;
+      }
+    }
+    if(!changed)break;
+    for(std::size_t i=0;i<motion.size();++i)motion[i]=motion[i]*factors[i];
+  }
+  const auto budget=[&](const std::vector<Vec3> &moves){
+    std::array<double,2> sum{};
+    for(std::size_t i=0;i<moves.size();++i){
+      const double v=dot(dual[i],moves[i]);
+      sum[0]+=std::max(0.0,v);sum[1]+=std::max(0.0,-v);
+    }
+    return sum;
+  };
+  const auto before=budget(original),after=budget(motion);
+  double ratio=1.0;
+  for(int j=0;j<2;++j)if(before[j]>0)
+    ratio=std::min(ratio,after[j]/before[j]);
+  for(std::size_t i=0;i<motion.size();++i){
+    // Use the original sign; attenuation cannot create new motion.
+    const double v=dot(dual[i],original[i]);
+    if(v==0)continue;
+    const int j=v>0?0:1;
+    if(after[j]>0)motion[i]=motion[i]*std::clamp(ratio*before[j]/after[j],0.0,1.0);
+  }
+  out.residual_gradient=gradient_motion_scale_v31c(p,tris,motion);
+  for(auto &v:motion)v=v*out.residual_gradient;
+  const auto safe=limit_local_contact(p,tris,motion,true);
+  out.residual_triangle=safe.final_scale;
+  ratio*=out.residual_gradient*safe.final_scale;
+  if(before[0]==0 && before[1]==0){
+    double a=0,b=0;
+    for(std::size_t i=0;i<motion.size();++i){a+=norm(original[i]);b+=norm(motion[i]);}
+    ratio=a>0?b/a:1.0;
+  }
+  if(!std::isfinite(ratio) || ratio<=out.baseline_scale+1e-8){
+    motion=std::move(baseline);
+    return out;
+  }
+  out.used_local=true;
+  out.retained_ratio=ratio;
+  out.contact.final_scale=out.residual_gradient*safe.final_scale;
+  out.contact.minimum_scale=1.0;
+  out.contact.limited_vertices=0;
+  for(std::size_t i=0;i<motion.size();++i)if(norm(original[i])>0){
+    const double s=norm(motion[i])/norm(original[i]);
+    out.contact.minimum_scale=std::min(out.contact.minimum_scale,s);
+    if(s<.999999)++out.contact.limited_vertices;
+  }
+  return out;
+}
+
 } // namespace sculpt_physics
