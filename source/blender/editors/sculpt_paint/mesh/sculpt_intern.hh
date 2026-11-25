@@ -252,6 +252,7 @@ struct StrokeCache {
   // V15 translation-based physical Clay/ClayStrips/Draw/Smooth research.
   // Only a runtime stroke cache; never serialized and OFF by default.
   std::shared_ptr<void> xpbd_v15_state;
+  std::shared_ptr<void> xpbd_v31d5_mirror_states; // stroke-local experimental mirror histories
   bool xpbd_v15_failed = false;
   bool xpbd_v15_active_logged = false;
   bool xpbd_v16_settings_initialized = false;
