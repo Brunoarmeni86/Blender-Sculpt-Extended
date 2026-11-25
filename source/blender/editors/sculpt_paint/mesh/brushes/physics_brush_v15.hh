@@ -122,6 +122,21 @@ inline bool live_surface_v30_brush(const Object &object,const Brush &brush)
          !ss->deform_modifiers_active && !ss->shapekey_active &&
          bke::multires_layers::base_modifier(const_cast<Object &>(object))==nullptr;
 }
+// V33 is opt-in, limited to supported explicit material assets.
+inline bool sculpt_footprint_v33_requested()
+{
+  static const bool enabled=[](){
+    const char *v=std::getenv("BLENDER_SCULPT_FOOTPRINT_V33");
+    return v && v[0]=='1' && v[1]=='\0';
+  }();
+  return enabled;
+}
+inline bool sculpt_footprint_v33_brush(const Object &object,const Brush &brush)
+{
+  return sculpt_footprint_v33_requested() && live_surface_v30_brush(object,brush) &&
+         brush.sculpt_physics_mode==3 && brush.sculpt_physics_clay_behavior>=1 &&
+         brush.sculpt_physics_clay_behavior<=14;
+}
 inline bool transport_v30b_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_TRANSPORT_V30B");return v && v[0]=='1' && v[1]=='\0';}();
@@ -194,7 +209,7 @@ inline bool swept_v29_requested()
 // Exclude Deposit and native assisted Clay (different footprint geometry).
 inline bool swept_v29_active(const StrokeCache &cache,const Brush &brush)
 {
-  if(!swept_v29_requested() || !stroke_v27_requested() || !stable_v28_requested() ||
+  if(sculpt_footprint_v33_requested() || !swept_v29_requested() || !stroke_v27_requested() || !stable_v28_requested() ||
      !refine_v28b_requested() ||
      brush.sculpt_physics_mode!=3 || brush.sculpt_physics_assist<=0 ||
      brush.falloff_shape!=PAINT_FALLOFF_SHAPE_SPHERE ||
@@ -1147,6 +1162,7 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
   goals.reserve(vertices.size());
   for (std::size_t i=0;i<vertices.size();++i) {
     const auto &v=result.displacement[i];
+    if(dab.sculpt_footprint_v33 && vertices[i].influence<=0.0)continue;
     if (std::hypot(v.x,v.y,v.z)>1e-15) goals.push_back({global[i],v});
   }
   return result;
@@ -1271,6 +1287,7 @@ inline bool try_apply_intent(
       clay.stable_v28=stable_v28_requested() && v27;
       clay.refine_v28b=clay.stable_v28 && refine_v28b_requested();
       clay.live_surface_v30=live_surface_v30_brush(object,brush);
+      clay.sculpt_footprint_v33=sculpt_footprint_v33_brush(object,brush);
       if(clay.live_surface_v30){
         // Refresh the geometric frame from the current sampled surface; the
         // stroke retains travel and pressure, not the previous tool plane.
@@ -1449,7 +1466,7 @@ inline bool try_apply_intent(
           cache.xpbd_v28_surface_history=history;
         }
       }
-      if(footprint_v30e_brush(object,brush) && footprint_audit_v30e_requested()){
+      if(!clay.sculpt_footprint_v33 && footprint_v30e_brush(object,brush) && footprint_audit_v30e_requested()){
         // Expensive independent reference, never changes the write mask.
         // Count geometrically eligible original mesh vertices absent from
         // gathered unique-node samples, before optional frontface/alpha.
@@ -1476,6 +1493,13 @@ inline bool try_apply_intent(
                      action,expected,missing,zero_factor,samples.size());
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      if(clay.sculpt_footprint_v33 && profile_v26b_requested()){
+        std::size_t eligible=0;
+        for(const auto &s:samples)if(s.writable && s.envelope>0)++eligible;
+        std::fprintf(stderr,"[V33 sculpt] action=%d eligible=%zu active=%zu goals=%zu chart_rejected=%zu component_rejected=%zu local_limits=%zu scale=%.7g\n",
+                     action,eligible,planned.active,goals.size(),planned.chart_rejected_v30b,
+                     planned.component_rejected_v30b,planned.local_limited_v30b,planned.accepted_scale);
+      }
       if(clay.motion_proxy_v31d3>0 && profile_v26b_requested())
         std::fprintf(stderr,"[V31D3 proxy] action=%d blend=%.3f passes=%zu rejected=%zu nodes=%zu strain_before=%.7g strain_after=%.7g budget_error=%.7g\n",action,clay.motion_proxy_v31d3,planned.proxy_passes_v31d3,planned.proxy_rejected_v31d3,planned.proxy_nodes_v31d3,planned.proxy_strain_before_v31d3,planned.proxy_strain_after_v31d3,planned.proxy_budget_error_v31d3);
       if(clay.continuous_contact_v31d2 && profile_v26b_requested())
