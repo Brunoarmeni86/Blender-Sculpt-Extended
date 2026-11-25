@@ -92,6 +92,8 @@ struct ClaySurfaceResult {
   double fine_transport_v30b=0.0;
   std::size_t chart_rejected_v30b=0,chart_recovered_v30b=0,depth_rejected_v30b=0;
   std::size_t component_rejected_v30b=0,local_limited_v30b=0;
+  std::size_t melt_fit_failures_v30b=0;
+  double melt_residual_peak_v30b=0.0;
 };
 
 // Qualitative hardening state. Units are normal displacement / brush radius,
@@ -246,6 +248,11 @@ inline void coarse_clay_transport(
       return h[i]-quadratic_height_v28b(background,dot(xy[i],ex)/dab.radius,dot(xy[i],ey)/dab.radius);
     return detrend?0.0:h[i]-(live_transport?floor+.12*dab.radius:0.0);
   };
+  if(detrend){
+    if(!fit_ok)++out.melt_fit_failures_v30b;
+    else for(std::size_t i=0;i<h.size();++i)if(w[i]>0)
+      out.melt_residual_peak_v30b=std::max(out.melt_residual_peak_v30b,std::abs(residual(i))/dab.radius);
+  }
   std::map<Key,std::size_t> lookup;
   std::vector<Node> nodes;
   std::vector<std::array<Weight,9>> stencil(h.size());

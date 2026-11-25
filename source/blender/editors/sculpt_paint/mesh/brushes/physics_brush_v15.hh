@@ -1313,6 +1313,8 @@ inline bool try_apply_intent(
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
       if(clay.live_surface_v30 && profile_v26b_requested())std::fprintf(stderr,"[V30 live] action=%d candidates=%zu active=%zu goals=%zu scale=%.7g history_limited=%zu\n",action,samples.size(),planned.active,goals.size(),planned.accepted_scale,planned.history_limited);
+      if(clay.live_surface_v30 && clay.refine_v28b && action==11 && profile_v26b_requested())
+        std::fprintf(stderr,"[V30B melt] fit_failures=%zu residual_peak_R=%.7g active=%zu proxy_nodes=%zu volume=%.8g scale=%.7g\n",planned.melt_fit_failures_v30b,planned.melt_residual_peak_v30b,planned.active,planned.transport_nodes,planned.transported_volume,planned.accepted_scale);
       if(clay.contact_v30b && profile_v26b_requested())std::fprintf(stderr,"[V30B contact] action=%d chart_rejected=%zu recovered=%zu depth_rejected=%zu component_rejected=%zu local_limits=%zu goals=%zu\n",action,planned.chart_rejected_v30b,planned.chart_recovered_v30b,planned.depth_rejected_v30b,planned.component_rejected_v30b,planned.local_limited_v30b,goals.size());
       if(clay.transport_v30b && profile_v26b_requested())std::fprintf(stderr,"[V30B transport] action=%d load=%.6f fine_volume=%.8g volume=%.8g nodes=%zu\n",action,clay.transport_load_v30b,planned.fine_transport_v30b,planned.transported_volume,planned.transport_nodes);
       if(clay.swept_v29 && profile_v26b_requested())std::fprintf(stderr,"[V29 sweep] action=%d length=%.7g active=%zu\n",action,double(math::length(delta)),planned.active);
