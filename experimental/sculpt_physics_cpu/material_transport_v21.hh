@@ -45,7 +45,15 @@ inline MaterialTransportV21Result solve_material_transport_v21(
   const bool cache_topology=(dab.tool_v26 || dab.fast_v26b) && reuse_topology;
   for(int k=0;k<substeps;++k) {
     const auto step=solve_clay_surface(work,triangles,dab,cache_topology?&dab_edges:nullptr);
-    if(k==0) out.surface.projected_area=step.projected_area;
+    if(k==0){
+      out.surface.projected_area=step.projected_area;
+      if(dab.tangential_gain_v31d6>0)out.surface.tangent_weights_v31d6=step.tangent_weights_v31d6;
+    }else if(dab.tangential_gain_v31d6>0){
+      auto &weights=out.surface.tangent_weights_v31d6;
+      if(weights.size()!=step.tangent_weights_v31d6.size())weights.clear();
+      else for(std::size_t i=0;i<weights.size();++i)
+        weights[i]=std::min(weights[i],step.tangent_weights_v31d6[i]);
+    }
     out.surface.active=std::max(out.surface.active,step.active);
     out.surface.transport_nodes=std::max(out.surface.transport_nodes,step.transport_nodes);
     out.surface.trace_attempts+=step.trace_attempts;
