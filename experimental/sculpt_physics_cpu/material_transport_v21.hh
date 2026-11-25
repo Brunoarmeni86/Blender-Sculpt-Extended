@@ -67,6 +67,12 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     out.surface.average_fits_v31d+=step.average_fits_v31d;
     out.surface.average_recovered_v31d=std::max(out.surface.average_recovered_v31d,step.average_recovered_v31d);
     out.surface.average_peak_v31d=std::max(out.surface.average_peak_v31d,step.average_peak_v31d);
+    out.surface.proxy_passes_v31d3+=step.proxy_passes_v31d3;
+    out.surface.proxy_rejected_v31d3+=step.proxy_rejected_v31d3;
+    out.surface.proxy_nodes_v31d3=std::max(out.surface.proxy_nodes_v31d3,step.proxy_nodes_v31d3);
+    out.surface.proxy_strain_before_v31d3=std::max(out.surface.proxy_strain_before_v31d3,step.proxy_strain_before_v31d3);
+    out.surface.proxy_strain_after_v31d3=std::max(out.surface.proxy_strain_after_v31d3,step.proxy_strain_after_v31d3);
+    out.surface.proxy_budget_error_v31d3=std::max(out.surface.proxy_budget_error_v31d3,step.proxy_budget_error_v31d3);
     out.surface.melt_residual_peak_v30b=std::max(out.surface.melt_residual_peak_v30b,step.melt_residual_peak_v30b);
     out.surface.slope_scale=std::min(out.surface.slope_scale,step.slope_scale);
     out.surface.accepted_scale=std::min(out.surface.accepted_scale,step.accepted_scale);

@@ -62,6 +62,7 @@ struct ClaySurfaceDab {
   bool gradient_v31c=false, melt_fallback_v31c=false;
   double average_surface_v31d=0.0; // virtual reference blend; never smooth actual geometry
   bool continuous_contact_v31d2=false;
+  double motion_proxy_v31d3=0.0; // opt-in conservative two-scale motion reconstruction
   bool push_v30d=false; // stronger current-relief entrainment; Push only
   double push_gain_v30d=2.5;
   double transport_load_v30b=1.0;
@@ -106,6 +107,8 @@ struct ClaySurfaceResult {
   std::size_t melt_fit_failures_v30b=0,melt_affine_fallbacks_v31c=0;
   std::size_t average_fits_v31d=0,average_recovered_v31d=0;
   double average_peak_v31d=0.0;
+  std::size_t proxy_passes_v31d3=0,proxy_rejected_v31d3=0,proxy_nodes_v31d3=0;
+  double proxy_strain_before_v31d3=0,proxy_strain_after_v31d3=0,proxy_budget_error_v31d3=0;
   double melt_residual_peak_v30b=0.0;
 };
 
@@ -799,6 +802,134 @@ inline void shape_clay_transport(
 
 using ClaySurfaceEdges=std::vector<std::array<std::size_t,2>>;
 
+/* V31D3: topology-separated trilinear partition of unity in object space.
+ * Each lattice corner has distinct unknowns for disconnected support.
+ * Restriction uses area * envelope; prolongation uses the same basis
+ * and reapplies the envelope. Consequently sum(A_i * delta_i) is
+ * conserved (roundoff aside). No smoothing of actual vertex positions,
+ * no diffusion across a zero-weight vertex, no projected-sheet mixing
+ * without an actual local mesh edge. */
+inline std::size_t motion_proxy_level_v31d3(
+    const std::vector<ClaySurfaceVertex> &vertices,const ClaySurfaceEdges &edges,
+    const std::vector<double> &w,const std::vector<double> &area,
+    const std::vector<double> &delta,Vec3 center,double spacing,
+    std::vector<double> &result)
+{
+  using Key=std::array<int,3>;
+  struct Sample {Key base{};std::array<double,8> phi{};};
+  const auto n=w.size();
+  const auto none=std::numeric_limits<std::size_t>::max();
+  std::vector<std::size_t> index(n,none),ids;
+  std::vector<Sample> samples;
+  for(std::size_t i=0;i<n;++i)if(w[i]>0 && area[i]>1e-24){
+    const Vec3 p=(vertices[i].position-center)/spacing;
+    const double coord[3]={p.x,p.y,p.z};
+    Sample a;double f[3];
+    for(int k=0;k<3;++k){
+      if(!std::isfinite(coord[k]) || std::abs(coord[k])>1e6)
+        return 0; // never cast an invalid grid coordinate
+      a.base[k]=int(std::floor(coord[k]));f[k]=coord[k]-a.base[k];
+    }
+    for(int j=0;j<8;++j){
+      double v=1;
+      for(int k=0;k<3;++k)v*=((j>>k)&1)?f[k]:1-f[k];
+      a.phi[j]=v;
+    }
+    index[i]=samples.size();ids.push_back(i);samples.push_back(a);
+  }
+  if(samples.empty())return 0;
+  const std::size_t slots=samples.size()*8;
+  std::vector<std::size_t> parent(slots);
+  for(std::size_t i=0;i<slots;++i)parent[i]=i;
+  const auto root=[&](std::size_t i){
+    while(parent[i]!=i){parent[i]=parent[parent[i]];i=parent[i];}
+    return i;
+  };
+  for(const auto &e:edges){
+    const auto ia=index[e[0]],ib=index[e[1]];
+    if(ia==none || ib==none)continue;
+    const auto &a=samples[ia],&b=samples[ib];
+    for(int j=0;j<8;++j)if(a.phi[j]>0){
+      int kcode=0;bool match=true;
+      for(int k=0;k<3;++k){
+        const int off=a.base[k]+((j>>k)&1)-b.base[k];
+        if(off<0 || off>1){match=false;break;}
+        kcode|=off<<k;
+      }
+      if(!match || b.phi[kcode]<=0)continue;
+      const auto ra=root(ia*8+j),rb=root(ib*8+kcode);
+      if(ra!=rb)parent[rb]=ra;
+    }
+  }
+  std::vector<double> mass(slots),flux(slots);
+  for(std::size_t j=0;j<samples.size();++j){
+    const auto i=ids[j];
+    for(int k=0;k<8;++k)if(samples[j].phi[k]>0){
+      const auto r=root(j*8+k);
+      const double a=area[i]*samples[j].phi[k];
+      mass[r]+=a*w[i];flux[r]+=a*delta[i];
+    }
+  }
+  std::size_t nodes=0;
+  for(std::size_t j=0;j<slots;++j)if(mass[j]>0)++nodes;
+  result=delta; // immutable zero-factor/unsupported vertices
+  for(std::size_t j=0;j<samples.size();++j){
+    const auto i=ids[j];double value=0;
+    for(int k=0;k<8;++k)if(samples[j].phi[k]>0){
+      const auto r=root(j*8+k);
+      if(mass[r]>0)value+=samples[j].phi[k]*(flux[r]/mass[r]);
+    }
+    result[i]=w[i]*value;
+    if(!std::isfinite(result[i]))return 0;
+  }
+  return nodes;
+}
+
+inline void reconstruct_motion_v31d3(
+    const std::vector<ClaySurfaceVertex> &vertices,const ClaySurfaceEdges &edges,
+    const std::vector<double> &w,const std::vector<double> &area,
+    const ClaySurfaceDab &dab,double blend,std::vector<double> &delta,
+    ClaySurfaceResult &out)
+{
+  if(blend<=0)return;
+  std::vector<double> fine,coarse;
+  const auto nf=motion_proxy_level_v31d3(vertices,edges,w,area,delta,dab.center,.12*dab.radius,fine);
+  const auto nc=motion_proxy_level_v31d3(vertices,edges,w,area,delta,dab.center,.25*dab.radius,coarse);
+  if(!nf || !nc){++out.proxy_rejected_v31d3;return;}
+  out.proxy_nodes_v31d3=std::max(out.proxy_nodes_v31d3,nf+nc);
+  std::vector<double> trial=delta;
+  double before=0,after=0,absolute=0,peak=0,trial_peak=0;
+  for(std::size_t i=0;i<delta.size();++i){
+    if(w[i]>0 && area[i]>1e-24)
+      trial[i]=(1-blend)*delta[i]+blend*(.65*fine[i]+.35*coarse[i]);
+    before+=area[i]*delta[i];after+=area[i]*trial[i];
+    absolute+=area[i]*std::abs(delta[i]);
+    peak=std::max(peak,std::abs(delta[i]));trial_peak=std::max(trial_peak,std::abs(trial[i]));
+  }
+  const double error=std::abs(after-before)/std::max(absolute,1e-24);
+  out.proxy_budget_error_v31d3=std::max(out.proxy_budget_error_v31d3,error);
+  // Never accept a numerically nonconservative field or create an
+  // excessive peak near a very small influence. Fall back to D2.
+  if(!std::isfinite(error) || error>1e-8 || trial_peak>1.15*peak+1e-24){
+    ++out.proxy_rejected_v31d3;return;
+  }
+  double strain0=0,strain1=0;
+  for(const auto &e:edges){
+    const auto a=e[0],b=e[1];
+    const Vec3 dp=vertices[a].position-vertices[b].position;
+    const double len=std::hypot(dp.x,dp.y,dp.z);
+    if(len<=1e-12)continue;
+    strain0=std::max(strain0,std::abs(delta[a]-delta[b])/len);
+    strain1=std::max(strain1,std::abs(trial[a]-trial[b])/len);
+  }
+  // Do not trade existing discontinuities for worse edge increments.
+  if(strain1>strain0*1.02+1e-12){++out.proxy_rejected_v31d3;return;}
+  out.proxy_strain_before_v31d3=std::max(out.proxy_strain_before_v31d3,strain0);
+  out.proxy_strain_after_v31d3=std::max(out.proxy_strain_after_v31d3,strain1);
+  ++out.proxy_passes_v31d3;delta.swap(trial);
+}
+
+
 /* V31D2: select a single bounded real-topology patch BEFORE applying
  * averaged orientation. The input weights already reject nonpositive
  * signed support, invalid triangles, mask/hidden and outside-footprint
@@ -1043,6 +1174,8 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
     for(std::size_t i=0;i<n;++i)
       delta[i]=delta[i]*((1-fraction)+fraction*accepted)+dab.sign*accepted*coefficient*rim[i];
   }
+  if(continuous && dab.motion_proxy_v31d3>0)
+    reconstruct_motion_v31d3(vertices,edges,w,out.projected_area,dab,dab.motion_proxy_v31d3,delta,out);
   // First-order signed budget using actual oriented dual vectors.
   double pos=0,neg=0;
   for(std::size_t i=0;i<n;++i){
@@ -1090,6 +1223,7 @@ inline ClaySurfaceResult solve_clay_surface(
       !std::isfinite(dab.radius) || dab.radius<=1e-12 ||
       (dab.swept_v29 && (!std::isfinite(norm(dab.sweep_start)) || norm(dab.sweep_start-dab.center)>dab.radius*.500001)) ||
       !interval(dab.dose) || !interval(dab.transport_load_v30b) || !interval(dab.average_surface_v31d) ||
+      !interval(dab.motion_proxy_v31d3) ||
       !std::isfinite(dab.push_gain_v30d) || dab.push_gain_v30d<.5 || dab.push_gain_v30d>4.0 || !std::isfinite(dab.intensity) || dab.intensity<0 ||
       dab.intensity>(dab.shape_transport?4.0:1.0) || !interval(dab.mobility) ||
       (dab.sign!=1 && dab.sign!=-1) ||
@@ -1546,6 +1680,11 @@ inline ClaySurfaceResult solve_clay_surface(
       }
     }
     balance_capacity_v28(delta,out.projected_area,pos,neg);
+    if(continuous && dab.motion_proxy_v31d3>0){
+      const double strength=dab.motion_proxy_v31d3*
+          ((dab.action==ClaySurfaceAction::Melt || dab.action==ClaySurfaceAction::Smear)?.5:.75);
+      reconstruct_motion_v31d3(vertices,edges,w,out.projected_area,dab,strength,delta,out);
+    }
     double final_pos=0,final_neg=0;
     for(std::size_t i=0;i<n;++i){
       const double v=delta[i]*out.projected_area[i];

@@ -670,8 +670,35 @@ static void continuous_v31d2_tests(){
   }
   assert(e1<e0);
 }
+static void motion_proxy_v31d3_tests(){
+  const std::vector<ClaySurfaceVertex> v{
+      {{.01,.01,0},1},{{.03,.01,0},1},{{.05,.01,0},1},
+      {{.07,.01,0},0},{{.09,.01,0},1},{{.04,.01,.001},1}};
+  const ClaySurfaceEdges edges{{0,1},{1,2},{2,3},{3,4}};
+  const std::vector<double> w{1,.5,1,0,1,1},area{1,2,3,1,1,1};
+  const std::vector<double> delta{.03,-.02,.01,0,.04,-.05};
+  std::vector<double> f;
+  assert(motion_proxy_level_v31d3(v,edges,w,area,delta,{},.12,f)>0);
+  double b=0,a=0;
+  for(std::size_t i=0;i<v.size();++i){b+=area[i]*delta[i];a+=area[i]*f[i];}
+  assert(std::abs(b-a)<1e-12);
+  assert(f[3]==0 && std::abs(f[4]-.04)<1e-12 && std::abs(f[5]+.05)<1e-12);
+  assert(std::abs(f[0]-f[1])<std::abs(delta[0]-delta[1]));
+  std::vector<double> constant(w.size());
+  for(std::size_t i=0;i<w.size();++i)constant[i]=.02*w[i];
+  assert(motion_proxy_level_v31d3(v,edges,w,area,constant,{},.25,f)>0);
+  for(std::size_t i=0;i<w.size();++i)assert(std::abs(f[i]-constant[i])<1e-12);
+  ClaySurfaceDab dab;dab.radius=1;
+  ClaySurfaceResult out;auto smoothed=delta;
+  reconstruct_motion_v31d3(v,edges,w,area,dab,.65,smoothed,out);
+  assert(out.proxy_passes_v31d3==1 && out.proxy_rejected_v31d3==0);
+  assert(out.proxy_budget_error_v31d3<1e-12);
+  assert(out.proxy_strain_after_v31d3<=out.proxy_strain_before_v31d3*1.02+1e-12);
+  assert(smoothed[3]==0 && std::abs(smoothed[4]-.04)<1e-12);
+}
 int main(){
   stroke_context_v27_tests();
+  motion_proxy_v31d3_tests();
   continuous_v31d2_tests();
   average_v31d_tests();
   gradient_v31c_tests();
