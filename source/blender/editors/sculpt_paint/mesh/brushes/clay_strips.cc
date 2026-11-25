@@ -446,6 +446,9 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       }
     });
     if(audit)coverage.report(ss.cache->xpbd_v16_clay_behavior);
+    if(!autonomous && physics_v15::v32_native_pipeline(brush) &&
+       physics_v15::try_apply_native_v32(sd,object,node_mask,pos,
+           sculpt_physics::NativeSculptBrushKind::ClayStrips,native,plane_normal))return;
     if (autonomous ?
         physics_v15::try_apply_intent(sd,object,node_mask,pos,
                                     sculpt_physics::NativeSculptBrushKind::ClayStrips,
@@ -714,7 +717,7 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
 
   bool independent_contact=false;
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
-  independent_contact=brush.sculpt_physics_mode==3 &&
+  independent_contact=!physics_v15::v32_native_pipeline(brush) && brush.sculpt_physics_mode==3 &&
       ((physics_v15::shape_v24_requested() &&
         brush.sculpt_physics_clay_behavior>=2 && brush.sculpt_physics_clay_behavior<=14 &&
         brush.sculpt_physics_clay_behavior!=4) ||

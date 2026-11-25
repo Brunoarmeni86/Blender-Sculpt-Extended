@@ -18,6 +18,7 @@
 #  include "clay_surface_solver.hh"
 #  include "material_transport_v21.hh"
 #  include "material_profiles_v25.hh"
+#  include "native_material_v32.hh"
 #  include "brush_contact.hh"
 #  include "global_collision_v29.hh"
 #  include "stroke_context_v27.hh"
@@ -100,6 +101,27 @@ inline bool refine_v28b_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_REFINE_V28B");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
+enum class V32Mode { Legacy, Native, Material, Xpbd };
+inline V32Mode v32_mode()
+{
+  static const auto mode=[](){
+    const char *v=std::getenv("BLENDER_SCULPT_V32_MODE");
+    const std::string_view value=v?v:"";
+    if(value=="NATIVE")return V32Mode::Native;
+    if(value=="MATERIAL")return V32Mode::Material;
+    if(value=="XPBD")return V32Mode::Xpbd;
+    // SIMULATION and unset deliberately retain the existing V31 dispatcher.
+    return V32Mode::Legacy;
+  }();
+  return mode;
+}
+inline bool v32_native_pipeline(const Brush &brush)
+{
+  return v32_mode()!=V32Mode::Legacy &&
+         (brush.sculpt_physics_mode==2 || brush.sculpt_physics_mode==3) &&
+         (brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY ||
+          brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY_STRIPS);
+}
 inline bool live_surface_v30_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_LIVE_SURFACE_V30");return v && v[0]=='1' && v[1]=='\0';}();
@@ -109,7 +131,7 @@ inline bool live_surface_v30_requested()
  * brushes, nonaccumulating anchored stamps, or unsupported geometry modes. */
 inline bool live_surface_v30_brush(const Object &object,const Brush &brush)
 {
-  if(!live_surface_v30_requested() ||
+  if(v32_native_pipeline(brush) || !live_surface_v30_requested() ||
      (brush.sculpt_physics_mode!=2 && brush.sculpt_physics_mode!=3) ||
      brush.sculpt_physics_assist<=0 ||
      (brush.sculpt_brush_type!=SCULPT_BRUSH_TYPE_CLAY &&
@@ -314,6 +336,7 @@ inline bool requested(Object &object,const Brush &brush)
   if (cache.xpbd_v16_settings_initialized) return cache.xpbd_v16_enabled;
   cache.xpbd_v16_settings_initialized=true;
   if (brush.sculpt_physics_mode==1) return false;
+  if(v32_native_pipeline(brush) && v32_mode()==V32Mode::Native)return false;
   const bool explicit_mode=brush.sculpt_physics_mode==2 || brush.sculpt_physics_mode==3;
   const char *value=std::getenv("BLENDER_SCULPT_XPBD_OTHER_BRUSHES_V15");
   const char *material=std::getenv("BLENDER_SCULPT_XPBD_V16_CLAY_MATERIAL");
@@ -322,8 +345,8 @@ inline bool requested(Object &object,const Brush &brush)
       std::isfinite(cache.xpbd_v16_assist) && cache.xpbd_v16_assist>0.0 &&
       cache.xpbd_v16_assist<=1.0;
   cache.xpbd_v16_compact=explicit_mode || compact_requested();
-  cache.xpbd_v16_clay_material=explicit_mode ? brush.sculpt_physics_mode==3 :
-      (material && material[0]=='1' && material[1]=='\0');
+  cache.xpbd_v16_clay_material=!v32_native_pipeline(brush) && (explicit_mode ? brush.sculpt_physics_mode==3 :
+      (material && material[0]=='1' && material[1]=='\0'));
   if (explicit_mode) {
     cache.xpbd_v16_clay_behavior=brush.sculpt_physics_clay_behavior;
     cache.xpbd_v16_clay_yield=brush.sculpt_physics_yield;
@@ -343,7 +366,7 @@ inline bool freeze_if_mode_changed(Object &object, const bke::pbvh::Tree &pbvh,c
   if (!requested(object,brush) || pbvh.type()==bke::pbvh::Type::Mesh) return false;
   StrokeCache &cache=*object.runtime->sculpt_session->cache;
   cache.xpbd_v15_failed=true;
-  const bool strict_material=brush.sculpt_physics_mode==3 &&
+  const bool strict_material=!v32_native_pipeline(brush) && brush.sculpt_physics_mode==3 &&
       (tool_v25_requested() || brush.sculpt_physics_clay_behavior==14);
   if (strict_material && !cache.xpbd_v15_active_logged)
     std::fprintf(stderr,"[V25] Material tools require supported Mesh topology; no stock fallback.\n");
@@ -629,16 +652,18 @@ inline bool try_apply(const Sculpt &sd,
     // pressure/falloff. They never invoke an autonomous material action.
     const Brush &active_brush=*BKE_paint_brush_for_read(&sd.paint);
     const bool live_surface=live_surface_v30_brush(object,active_brush);
-    const bool native_clay_assist=active_brush.sculpt_physics_mode==2 &&
+    const bool v32_xpbd=v32_native_pipeline(active_brush) && v32_mode()==V32Mode::Xpbd;
+    if(v32_xpbd)dab.assist=material_override("BLENDER_SCULPT_V32_XPBD_ASSIST",.20,0.0,1.0)*cache.xpbd_v16_assist;
+    const bool native_clay_assist=(active_brush.sculpt_physics_mode==2 || v32_xpbd) &&
         !autonomous && !dab.clay_material &&
         (kind==sculpt_physics::NativeSculptBrushKind::Clay ||
          kind==sculpt_physics::NativeSculptBrushKind::ClayStrips);
-    if (native_clay_assist && (drag_contact_requested() || live_surface)) {
+    if (native_clay_assist && (drag_contact_requested() || live_surface || v32_xpbd)) {
       const auto brush_profile=sculpt_physics::experimental_native_brush_profile(kind);
       dab.compliance=brush_profile.target_compliance;
       dab.material=brush_profile.material;
       dab.current_rest=true;
-      if(stable_v28_requested() && refine_v28b_requested() && dab.assist>0.0){
+      if(!v32_xpbd && stable_v28_requested() && refine_v28b_requested() && dab.assist>0.0){
         dab.post_stability_v28=true;
         dab.stability.relative_limit=material_override("BLENDER_SCULPT_V28_CLAY_EDGE_LIMIT",.35,.05,.8);
         dab.stability.relaxation=0.0;
@@ -703,7 +728,7 @@ inline bool try_apply(const Sculpt &sd,
       auto prepared=sculpt_physics::prepare_compact_native_brush_dab(
           *state->compact,samples,edge_at,
           [&](std::size_t id) {
-            if(live_surface)return current_position(id);
+            if(live_surface || v32_xpbd)return current_position(id);
             const auto original=state->original_positions.find(id);
             return original==state->original_positions.end() ?
                        current_position(id) : original->second;
@@ -976,6 +1001,134 @@ inline bool try_apply(const Sculpt &sd,
                       cache.xpbd_v16_clay_behavior==3 ? "Clay V3 Flow" : "Clay V2") : "assist");
     cache.xpbd_v15_active_logged=true;
   }
+  return true;
+}
+
+/* V32: use the SAME finished native Clay targets as the stock brush.
+ * Material mode uses the native editor writer directly, not the autonomous
+ * V31 selection, proxy, history, or global dab attenuation. XPBD is a
+ * separate opt-in backend. Unsupported geometry falls back to stock. */
+inline bool try_apply_native_v32(
+    const Sculpt &sd,Object &object,const IndexMask &node_mask,
+    const PositionDeformData &position_data,sculpt_physics::NativeSculptBrushKind kind,
+    const std::vector<sculpt_physics::NativeBrushTranslation> &native,
+    const float3 &axis)
+{
+  const Brush &brush=*BKE_paint_brush_for_read(&sd.paint);
+  if(!v32_native_pipeline(brush) || v32_mode()==V32Mode::Native)return false;
+  SculptSession &ss=*object.runtime->sculpt_session;
+  StrokeCache &cache=*ss.cache;
+  auto &pbvh=*bke::object::pbvh_get(object);
+  if(pbvh.type()!=bke::pbvh::Type::Mesh || ss.deform_modifiers_active ||
+     ss.shapekey_active || bke::multires_layers::base_modifier(object)!=nullptr)
+    return false;
+  const auto &mesh=*id_cast<Mesh *>(object.data);
+  const auto current=position_data.eval;
+  const std::string_view name(brush.id.name+2);
+  std::string_view family="Clay";
+  for(const auto f:{"Clay","Wax","Stone","Wood","Flesh","Mud","Fabric","Foam"}){
+    const std::string_view v(f);
+    if(name.size()>4+v.size() && name.substr(0,4)=="V32 " &&
+       name.substr(4,v.size())==v && name[4+v.size()]==' '){family=v;break;}
+  }
+  if(const char *v=std::getenv("BLENDER_SCULPT_V32_FAMILY"))
+    if(*v && std::string_view(v)!="AUTO")family=v;
+  auto p=sculpt_physics::native_material_v32(family);
+  p.plasticity=material_override("BLENDER_SCULPT_V32_PLASTICITY",p.plasticity,0,1);
+  p.cohesion=material_override("BLENDER_SCULPT_V32_COHESION",p.cohesion,0,1);
+  p.viscosity=material_override("BLENDER_SCULPT_V32_VISCOSITY",p.viscosity,0,1);
+  p.stiffness=material_override("BLENDER_SCULPT_V32_STIFFNESS",p.stiffness,0,1);
+  const double amount=material_override("BLENDER_SCULPT_V32_RESPONSE",.65,0,1)*cache.xpbd_v16_assist;
+  const double gain=sculpt_physics::native_gain_v32(p,cache.xpbd_v16_clay_behavior,amount);
+  const double transport=material_override("BLENDER_SCULPT_V32_TRANSPORT",0,0,1)*p.transport*amount*(1-.5*p.cohesion);
+  // All input samples are already clipped by native mask/alpha/falloff.
+  // Do not reapply those factors, or expand the stock footprint.
+  std::unordered_map<std::size_t,std::size_t> index;
+  std::vector<sculpt_physics::NativeBrushTranslation> samples;
+  for(const auto &sample:native){
+    const auto &v=sample.translation;
+    if(sample.global_index>=std::size_t(current.size()) ||
+       !std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z))return false;
+    if(std::hypot(v.x,v.y,v.z)<=1e-15)continue;
+    auto [it,inserted]=index.emplace(sample.global_index,samples.size());
+    if(inserted)samples.push_back({sample.global_index,v*gain});
+  }
+  sculpt_physics::NativeTransportV32Result transfer;
+  bool rejected=false;
+  if(transport>0 && samples.size()>1){
+    using sculpt_physics::Vec3;
+    std::vector<Vec3> positions,goals;
+    std::vector<double> area(samples.size());
+    for(const auto &sample:samples){
+      const float3 pos=current[int(sample.global_index)];
+      positions.push_back({double(pos.x),double(pos.y),double(pos.z)});
+      goals.push_back(sample.translation);
+    }
+    std::vector<int> face_ids;
+    const auto vf=mesh.vert_to_face_map();
+    for(const auto &sample:samples)for(int f:vf[int(sample.global_index)])face_ids.push_back(f);
+    std::sort(face_ids.begin(),face_ids.end());
+    face_ids.erase(std::unique(face_ids.begin(),face_ids.end()),face_ids.end());
+    const auto faces=mesh.faces();const auto corners=mesh.corner_verts();const auto tris=mesh.corner_tris();
+    std::vector<std::array<std::size_t,2>> edges;
+    for(int f:face_ids){
+      const auto face=faces[f];
+      for(int j=0;j<face.size();++j){
+        const auto a=index.find(std::size_t(corners[face[j]]));
+        const auto b=index.find(std::size_t(corners[face[(j+1)%face.size()]]));
+        if(a!=index.end() && b!=index.end() && a->second!=b->second)
+          edges.push_back({std::min(a->second,b->second),std::max(a->second,b->second)});
+      }
+      for(int t:bke::mesh::face_triangles_range(faces,f)){
+        const int3 tri=tris[t];
+        const auto a=current[corners[tri[0]]],b=current[corners[tri[1]]],c=current[corners[tri[2]]];
+        const double projected=double(math::dot(math::cross(b-a,c-a),axis))/6.0;
+        for(int k=0;k<3;++k){
+          const auto it=index.find(std::size_t(corners[tri[k]]));
+          if(it!=index.end())area[it->second]+=projected;
+        }
+      }
+    }
+    std::sort(edges.begin(),edges.end());edges.erase(std::unique(edges.begin(),edges.end()),edges.end());
+    const float3 direction=cache.first_time?float3(0):cache.location_symm-cache.last_location_symm;
+    transfer=sculpt_physics::redistribute_native_v32(positions,area,edges,
+        {double(direction.x),double(direction.y),double(direction.z)},double(cache.radius),
+        transport,p.anisotropy,goals);
+    if(transfer.correction_scale>0){
+      // Validate only the optional material correction. Do not scale the
+      // original native dab because of a failed experimental correction.
+      std::unordered_map<std::size_t,float3> trial;
+      for(std::size_t i=0;i<samples.size();++i)
+        trial.emplace(samples[i].global_index,float3(float(goals[i].x),float(goals[i].y),float(goals[i].z)));
+      const auto guard=limit_drag_contact(mesh,current,trial,true);
+      rejected=guard.final_scale<.999999;
+      if(!rejected)for(std::size_t i=0;i<samples.size();++i)samples[i].translation=goals[i];
+    }
+  }
+  if(profile_v26b_requested())std::fprintf(stderr,
+      "[V32 native] action=%d mode=%d family=%.*s targets=%zu gain=%.6g transport=%.6g links=%zu correction_scale=%.6g rejected=%d budget_error=%.7g\n",
+      cache.xpbd_v16_clay_behavior,int(v32_mode()),int(family.size()),family.data(),
+      samples.size(),gain,transport,transfer.links,transfer.correction_scale,int(rejected),transfer.relative_budget_error);
+  if(v32_mode()==V32Mode::Xpbd){
+    // Forward declaration avoided: this bridge is placed AFTER try_apply.
+    if(try_apply(sd,object,node_mask,position_data,kind,samples))return true;
+  }
+  // Stock clipping and PBVH writeback, same Undo nodes as native brush.
+  auto nodes=pbvh.nodes<bke::pbvh::MeshNode>();
+  node_mask.foreach_index([&](const int ni){
+    auto &node=nodes[ni];const Span<int> verts=node.verts();
+    Vector<float3> translations(verts.size(),float3(0));
+    for(const int j:verts.index_range()){
+      const auto it=index.find(std::size_t(verts[j]));
+      if(it==index.end())continue;
+      const auto &v=samples[it->second].translation;
+      translations[j]=float3(float(v.x),float(v.y),float(v.z));
+    }
+    clip_and_lock_translations(sd,ss,current,verts,translations);
+    position_data.deform(translations,verts);
+    bke::pbvh::update_node_bounds_mesh(position_data.eval,node);
+  });
+  pbvh.tag_positions_changed(node_mask);pbvh.flush_bounds_to_parents();
   return true;
 }
 

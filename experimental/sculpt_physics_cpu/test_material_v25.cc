@@ -3,6 +3,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "material_transport_v21.hh"
 #include "material_profiles_v25.hh"
+#include "native_material_v32.hh"
 #ifdef NDEBUG
 # undef NDEBUG
 #endif
@@ -696,8 +697,26 @@ static void motion_proxy_v31d3_tests(){
   assert(out.proxy_strain_after_v31d3<=out.proxy_strain_before_v31d3*1.02+1e-12);
   assert(smoothed[3]==0 && std::abs(smoothed[4]-.04)<1e-12);
 }
+static void native_material_v32_tests(){
+  using namespace sculpt_physics;
+  for(const auto family:{"Clay","Wax","Stone","Wood","Flesh","Mud","Fabric","Foam"}){
+    const auto p=native_material_v32(family);
+    assert(native_gain_v32(p,1,0)==1);
+    assert(native_gain_v32(p,1,1)>=.75 && native_gain_v32(p,1,1)<=1.08);
+  }
+  std::vector<Vec3> pos{{0,0,0},{.1,0,0},{.2,0,0},{.3,0,0},{.4,0,0}};
+  std::vector<Vec3> goals{{0,0,.1},{0,0,.02},{},{0,0,.03},{0,0,-.02}};
+  const std::vector<double> area{1,2,1,1,1};
+  const std::vector<std::array<std::size_t,2>> edges{{0,1},{1,2},{2,3},{3,4}};
+  const auto r=redistribute_native_v32(pos,area,edges,{1,0,0},1,.25,.5,goals);
+  assert(r.links==1 && r.correction_scale>0 && r.relative_budget_error<1e-12);
+  assert(std::abs(goals[0].z+2*goals[1].z-.14)<1e-12);
+  assert(goals[2].z==0 && goals[3].z==.03 && goals[4].z==-.02);
+  assert(goals[0].z<.1 && goals[1].z>.02);
+}
 int main(){
   stroke_context_v27_tests();
+  native_material_v32_tests();
   motion_proxy_v31d3_tests();
   continuous_v31d2_tests();
   average_v31d_tests();

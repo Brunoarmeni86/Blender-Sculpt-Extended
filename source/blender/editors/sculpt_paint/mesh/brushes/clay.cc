@@ -255,6 +255,9 @@ void do_clay_brush(const Depsgraph &depsgraph,
       }
     });
     if(audit)coverage.report(ss.cache->xpbd_v16_clay_behavior);
+    if(!autonomous && physics_v15::v32_native_pipeline(brush) &&
+       physics_v15::try_apply_native_v32(sd,object,node_mask,pos,
+           sculpt_physics::NativeSculptBrushKind::Clay,native,area_no))return;
     if (autonomous ?
         physics_v15::try_apply_intent(sd,object,node_mask,pos,
                                     sculpt_physics::NativeSculptBrushKind::Clay,
