@@ -134,7 +134,11 @@ inline bool mirror_v31d5_supported(const Sculpt &sd,const Object &object,const B
      !live_surface_v30_brush(object,brush))return false;
   const auto &cache=*object.runtime->sculpt_session->cache;
   const Mesh &mesh=*id_cast<Mesh *>(object.data);
-  return !cache.reference_symmetry && !cache.reference_combined &&
+  // Secondary physical passes have their own evaluator and are not yet
+  // supported by the mirror experiment. Require them off or isolated.
+  return (brush.autosmooth_factor<=0 || d5_enabled("BLENDER_SCULPT_NO_AUTOSMOOTH_V31D5")) &&
+      (sd.gravity_factor<=0 || d5_enabled("BLENDER_SCULPT_NO_GRAVITY_V31D5")) &&
+      !cache.reference_symmetry && !cache.reference_combined &&
       mesh.radial_symmetry[0]==1 && mesh.radial_symmetry[1]==1 && mesh.radial_symmetry[2]==1 &&
       (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))==0 &&
       cache.tile_pass==0 && cache.radial_symmetry_pass==0 &&
@@ -500,7 +504,8 @@ inline bool try_apply(const Sculpt &sd,
                       const std::vector<sculpt_physics::NativeBrushTranslation> &native_translations,
                       const bool autonomous=false,
                       const bool conservative_clay=false,
-                      const sculpt_physics::ClaySurfaceDab *plastic_dab=nullptr)
+                      const sculpt_physics::ClaySurfaceDab *plastic_dab=nullptr,
+                      std::size_t intent_sample_v31d5=0)
 {
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
@@ -607,6 +612,9 @@ inline bool try_apply(const Sculpt &sd,
     }
     if (samples.empty()) {
       if(profile)std::fprintf(stderr,"[V27 no_write] stage=targets action=%d targets=0\n",cache.xpbd_v16_clay_behavior);
+      if(autonomous && profile && d5_enabled("BLENDER_SCULPT_DIAG_V31D5"))
+        std::fprintf(stderr,"[V31D5 accepted] action=%d mirror=%d sample=%zu peak_R=0 contact_scale=1 moved=0\n",
+            cache.xpbd_v16_clay_behavior,int(cache.mirror_symmetry_pass),intent_sample_v31d5);
       return true;
     }
     const auto edge_at=[&](std::size_t id) {
@@ -987,7 +995,7 @@ inline bool try_apply(const Sculpt &sd,
   const auto write_start=std::chrono::steady_clock::now();
   std::size_t moved_v30c=0,staged_v30c=0;
   for (PreparedNode &node : editor_writes) {
-    if(profile && overlap_v30c_requested()){
+    if(profile && (overlap_v30c_requested() || (autonomous && d5_enabled("BLENDER_SCULPT_DIAG_V31D5")))){
       const Span<int> ids=nodes[node.id].verts();
       for(const int i:ids.index_range()){
         const float3 p=current[ids[i]],q=p+node.translations[i];
@@ -1026,8 +1034,8 @@ inline bool try_apply(const Sculpt &sd,
       }
     }
     if(d5_enabled("BLENDER_SCULPT_DIAG_V31D5") && profile)
-      std::fprintf(stderr,"[V31D5 accepted] action=%d mirror=%d dab=%zu peak_R=%.7g contact_scale=%.7g moved=%zu\n",
-          cache.xpbd_v16_clay_behavior,int(cache.mirror_symmetry_pass),state->autonomous_dabs+1,
+      std::fprintf(stderr,"[V31D5 accepted] action=%d mirror=%d sample=%zu peak_R=%.7g contact_scale=%.7g moved=%zu\n",
+          cache.xpbd_v16_clay_behavior,int(cache.mirror_symmetry_pass),intent_sample_v31d5,
           peak/std::max(double(cache.radius),1e-12),contact_scale,moved_v30c);
     ++state->autonomous_dabs;
     state->autonomous_peak_sum+=peak;
@@ -1630,12 +1638,13 @@ inline bool try_apply_intent(
     else goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
     if(d5_enabled("BLENDER_SCULPT_DIAG_V31D5") && profile_v26b_requested()){
       double peak=0;for(const auto &g:goals)peak=std::max(peak,sculpt_physics::stroke_norm_v27(g.translation));
-      std::fprintf(stderr,"[V31D5 request] action=%d mirror=%d sample=%zu base_dose=%.7g dose=%.7g intensity=%.7g travel_R=%.7g goals=%zu peak_R=%.7g\n",
-          action,int(cache.mirror_symmetry_pass),v27?stroke_step.next.samples:std::size_t(0),baseline_dose,intent.dose,intent.intensity,
+      std::fprintf(stderr,"[V31D5 request] action=%d resolved=%d mirror=%d sample=%zu base_dose=%.7g dose=%.7g intensity=%.7g travel_R=%.7g goals=%zu peak_R=%.7g\n",
+          original_action,action,int(cache.mirror_symmetry_pass),v27?stroke_step.next.samples:std::size_t(0),baseline_dose,intent.dose,intent.intensity,
           double(math::length(delta))/intent.radius,goals.size(),peak/intent.radius);
     }
     const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,conservative,
-                                 plastic_dab.plastic_v29?&plastic_dab:nullptr);
+                                 plastic_dab.plastic_v29?&plastic_dab:nullptr,
+                                  v27?stroke_step.next.samples:std::size_t(0));
     if (handled && !cache.xpbd_v15_failed) {
       cache.xpbd_v17_intent_started=true;
       cache.xpbd_v17_last_center=center;
