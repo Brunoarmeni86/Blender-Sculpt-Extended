@@ -412,7 +412,9 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
         for (const int j:verts.index_range()) {
           const float3 d=pos.eval[verts[j]]-ss.cache->location_symm;
           const float3 tangent=d-axis*math::dot(d,axis);
-          distances[j]=math::length(tangent)/std::max(ss.cache->radius,1e-12f);
+          const float dist=physics_v15::swept_v29_active(*ss.cache,brush)?
+              physics_v15::swept_distance_v29(*ss.cache,pos.eval[verts[j]],&axis):math::length(tangent);
+          distances[j]=dist/std::max(ss.cache->radius,1e-12f);
         }
       }
       else calc_brush_cube_distances<float2>(brush,tls.xy_positions,distances);

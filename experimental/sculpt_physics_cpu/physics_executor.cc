@@ -9,6 +9,10 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+#if defined(WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
+#  include "BLI_task.hh"
+#  include <atomic>
+#endif
 
 namespace sculpt_physics {
 namespace {
@@ -266,12 +270,12 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
             throw std::runtime_error("Target position/multiplier overflow");
           }
         }
-        for (const std::size_t k : scratch_active_bonds_) {
+        const auto solve_bond=[&](const std::size_t k) {
           const GpuLocalBond &bond=island_.bonds[k];
           Vec3 diff=next[bond.b]-next[bond.a];
           const double dist=length(diff);
           if (!std::isfinite(dist)) throw std::runtime_error("Bond distance overflow");
-          if (dist<=1e-12) continue;
+          if (dist<=1e-12) return;
           const Coefficients &coeff=scratch_bond_coefficients_[k];
           const double alpha=coeff.alpha;
           const double w0=coeff.w0;
@@ -288,6 +292,30 @@ class CpuXpbdExecutor final : public IPhysicsExecutor {
           if (!finite(next[bond.a]) || !finite(next[bond.b])) {
             throw std::runtime_error("Bond XPBD position overflow");
           }
+        };
+#if defined(WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
+        if(colored_ && island_.bonds.size()>=2048){
+          // A barrier between colors preserves the serial colored math.
+          // No endpoints (including pinned endpoints) are shared within a color.
+          for(std::size_t color=0;color+1<batches_.offsets.size();++color){
+            const auto start=batches_.offsets[color],end=batches_.offsets[color+1];
+            std::atomic<bool> failed{false};
+            blender::threading::parallel_for(blender::IndexRange(int64_t(end-start)),256,
+                [&](blender::IndexRange range){
+              for(const int64_t i:range){
+                if(failed.load(std::memory_order_relaxed))break;
+                const auto k=batches_.bond_ids[start+std::size_t(i)];
+                const auto &bond=island_.bonds[k];
+                if(island_.inverse_masses[bond.a]==0.0 && island_.inverse_masses[bond.b]==0.0)continue;
+                try{solve_bond(k);}catch(...){failed.store(true,std::memory_order_relaxed);break;}
+              }
+            });
+            if(failed.load(std::memory_order_relaxed))throw std::runtime_error("Parallel XPBD bond solve failed");
+          }
+        }else
+#endif
+        {
+          for(const auto k:scratch_active_bonds_)solve_bond(k);
         }
       }
     }

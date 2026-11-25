@@ -134,6 +134,9 @@
 #include "bmesh.hh"
 
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+#  include "editors/sculpt_paint/mesh/brushes/physics_brush_v15.hh"
+#endif
 #include "mesh_brush_common.hh"
 
 namespace blender {
@@ -5447,6 +5450,23 @@ static void do_brush_action(const Depsgraph &depsgraph,
   } detail_scope;
   brushes::CursorSampleResult cursor_sample_result = calc_brush_node_mask(
       depsgraph, ob, brush, memory);
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  // Expand the real dispatched PBVH mask BEFORE automasking and Undo.
+  // Enclosing sphere is a conservative broad phase for the capsule.
+  // Fine distance is evaluated in the physical Clay brush factors.
+  if ((brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY ||
+       brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY_STRIPS) &&
+      bke::object::pbvh_get(ob)->type()==bke::pbvh::Type::Mesh &&
+      !ss.deform_modifiers_active && !ss.shapekey_active &&
+      bke::multires_layers::base_modifier(ob)==nullptr &&
+      brushes::physics_v15::swept_v29_active(*ss.cache,brush)){
+    const float3 a=ss.cache->xpbd_v17_last_center,b=ss.cache->location_symm;
+    const float r=ss.cache->radius+math::length(b-a)*.5f;
+    const IndexMask swept=gather_nodes(*bke::object::pbvh_get(ob),PAINT_FALLOFF_SHAPE_SPHERE,
+                                      false,(a+b)*.5f,r*r,std::nullopt,memory);
+    cursor_sample_result.node_mask=IndexMask::from_union(cursor_sample_result.node_mask,swept,memory);
+  }
+#endif
   const double sculpt_mesh_v3_probe_after_node_gather = BLI_time_now_seconds();
   cursor_sample_result.node_mask = layer_detail_v01::extend_shared_region(
       ob, brush, cursor_sample_result.node_mask, memory);
@@ -9900,8 +9920,17 @@ void calc_factors_common_mesh_indexed(const Depsgraph &depsgraph,
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
   }
 
-  calc_brush_distances(
-      ss, vert_positions, verts, eBrushFalloffShape(brush.falloff_shape), distances);
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+  if(brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY &&
+     brushes::physics_v15::swept_v29_active(cache,brush)){
+    for(const int i:verts.index_range())
+      distances[i]=brushes::physics_v15::swept_distance_v29(cache,vert_positions[verts[i]]);
+  }else
+#endif
+  {
+    calc_brush_distances(
+        ss, vert_positions, verts, eBrushFalloffShape(brush.falloff_shape), distances);
+  }
   filter_distances_with_radius(cache.radius, distances, factors);
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);

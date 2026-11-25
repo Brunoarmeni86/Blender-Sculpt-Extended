@@ -97,6 +97,35 @@ inline bool refine_v28b_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_REFINE_V28B");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
+inline bool swept_v29_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_SWEEP_V29");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+// Explicit material sphere brush, normal Mesh, short supported segment.
+// Exclude Deposit and native assisted Clay (different footprint geometry).
+inline bool swept_v29_active(const StrokeCache &cache,const Brush &brush)
+{
+  if(!swept_v29_requested() || !stroke_v27_requested() ||
+     brush.sculpt_physics_mode!=3 || brush.sculpt_physics_assist<=0 ||
+     brush.falloff_shape!=PAINT_FALLOFF_SHAPE_SPHERE ||
+     brush.sculpt_physics_clay_behavior<5 || brush.sculpt_physics_clay_behavior>14 ||
+     !cache.xpbd_v17_intent_started || cache.xpbd_v15_failed ||
+     cache.reference_symmetry || cache.reference_combined ||
+     cache.tile_pass!=0 || cache.radial_symmetry_pass!=0 || cache.mirror_symmetry_pass!=0)
+    return false;
+  const double distance=math::length(cache.location_symm-cache.xpbd_v17_last_center);
+  return std::isfinite(distance) && cache.radius>0 && distance>1e-12 && distance<=cache.radius*.5;
+}
+inline float swept_distance_v29(const StrokeCache &cache,float3 p,const float3 *axis=nullptr)
+{
+  float3 a=cache.xpbd_v17_last_center-cache.location_symm;
+  p-=cache.location_symm;
+  if(axis){a-=*axis*math::dot(a,*axis);p-=*axis*math::dot(p,*axis);}
+  const float den=math::dot(a,a);
+  const float t=den>1e-20f?std::clamp(math::dot(p,a)/den,0.0f,1.0f):0.0f;
+  return math::length(p-a*t);
+}
 inline bool profile_v26b_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PROFILE_V26");return v && v[0]=='1' && v[1]=='\0';}();
@@ -1004,6 +1033,8 @@ inline bool try_apply_intent(
       clay.contact_v27b=v27 && contact_v27b_requested();
       clay.stable_v28=stable_v28_requested() && v27;
       clay.refine_v28b=clay.stable_v28 && refine_v28b_requested();
+      clay.swept_v29=clay.refine_v28b && swept_v29_active(cache,brush);
+      if(clay.swept_v29)clay.sweep_start=convert(cache.xpbd_v17_last_center);
       if(clay.contact_v27b)clay.melt_local_gravity_v27b=material_override("BLENDER_SCULPT_V27B_MELT_LOCAL_GRAVITY",0.0,0.0,1.0);
       if (surface_v20) {
         clay.surface_contact=true;
@@ -1138,6 +1169,7 @@ inline bool try_apply_intent(
         }
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get());
+      if(clay.swept_v29 && profile_v26b_requested())std::fprintf(stderr,"[V29 sweep] action=%d length=%.7g active=%zu\n",action,double(math::length(delta)),planned.active);
       if(clay.stable_v28 && profile_v26b_requested())
         std::fprintf(stderr,"[V28 stability] action=%d history_limited=%zu slope_scale=%.6f history_size=%zu transport_nodes=%zu\n",
                      action,planned.history_limited,planned.slope_scale,history?history->size():0,planned.transport_nodes);

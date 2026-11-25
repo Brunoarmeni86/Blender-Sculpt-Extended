@@ -280,8 +280,17 @@ static void refinement_v28b_tests(){
   assert(track_tool_plane_v27(step,first,narrow,true));
   assert(step.next.tool_reference.z<0 && step.next.tool_reference.z>=-.04);
 }
+static void swept_v29_tests(){
+  ClaySurfaceDab dab;dab.center={.4,0,0};dab.radius=1;dab.sweep_start={0,0,0};dab.swept_v29=true;
+  assert(std::abs(chart_distance_v29({-1.3,0,0},dab,{0,0,1})-.9)<1e-12);
+  dab.swept_v29=false;
+  assert(chart_distance_v29({-1.3,0,0},dab,{0,0,1})>1);
+  dab.swept_v29=true;
+  assert(std::abs(chart_distance_v29({-.2,.5,0},dab,{0,0,1})-.5)<1e-12);
+}
 int main(){
   stroke_context_v27_tests();
+  swept_v29_tests();
   refinement_v28b_tests();
   stability_v28_tests();
   contact_v27b_tests();

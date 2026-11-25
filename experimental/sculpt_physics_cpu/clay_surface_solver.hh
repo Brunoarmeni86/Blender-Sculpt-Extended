@@ -52,6 +52,8 @@ struct ClaySurfaceDab {
   bool contact_v27b=false; // broader contact/return profile
   bool stable_v28=false; // opt-in cumulative bounds and conservative proxy transport
   bool refine_v28b=false; // gradual capacities and curvature-aware Melt
+  bool swept_v29=false;
+  Vec3 sweep_start{};
   double melt_local_gravity_v27b=0.0; // opt-in object-local downhill
   bool has_tool_plane=false;
   double tool_plane_height=0.0; // relative to chart center, along chart axis
@@ -83,6 +85,18 @@ struct ClaySurfaceResult {
   double slope_scale=1.0;
 };
 
+inline double chart_distance_v29(Vec3 p,const ClaySurfaceDab &dab,Vec3 axis)
+{
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  if(dab.swept_v29){
+    const Vec3 delta=dab.sweep_start-dab.center;
+    const Vec3 a=delta-axis*dot(delta,axis);
+    const double den=dot(a,a);
+    const double t=den>1e-24?std::clamp(dot(p,a)/den,0.0,1.0):0.0;
+    p=p-a*t;
+  }
+  return std::hypot(p.x,p.y,p.z);
+}
 /* Keep the original positive/negative projected budget ratio after
  * individual capacity clamps. This preserves zero net volume for balanced
  * actions and the configured sink fraction for Compact. Never amplify a
@@ -464,7 +478,7 @@ inline void shape_clay_transport(
   std::vector<double> rim(w.size(),0.0);
   double removed=0,receiver=0,peak_rim=0;
   for(std::size_t i=0;i<w.size();++i)if(w[i]>0) {
-    const auto p=xy[i];const double r=norm(p)/dab.radius;
+    const auto p=xy[i];const double r=chart_distance_v29(p,dab,axis)/dab.radius;
     if(scrape) {
       // A unilateral cutter removes only material beyond its plane.
       const double plane=dab.has_tool_plane?dab.tool_plane_height:-dab.sign*dab.tool_depth*dab.radius;
@@ -594,6 +608,7 @@ inline ClaySurfaceResult solve_clay_surface(
   if (!std::isfinite(norm(dab.center)) || !std::isfinite(norm(dab.axis)) ||
       norm(dab.axis)<=1e-12 || !std::isfinite(norm(dab.direction)) ||
       !std::isfinite(dab.radius) || dab.radius<=1e-12 ||
+      (dab.swept_v29 && (!std::isfinite(norm(dab.sweep_start)) || norm(dab.sweep_start-dab.center)>dab.radius*.500001)) ||
       !interval(dab.dose) || !std::isfinite(dab.intensity) || dab.intensity<0 ||
       dab.intensity>(dab.shape_transport?4.0:1.0) || !interval(dab.mobility) ||
       (dab.sign!=1 && dab.sign!=-1) ||
@@ -639,7 +654,7 @@ inline ClaySurfaceResult solve_clay_surface(
       throw std::overflow_error("Invalid clay chart");
     // Explicit depth bound avoids gathering the back side of a thin mesh.
     if(std::abs(h[i])<=dab.radius*0.5 &&
-       ((dab.surface_contact && !dab.shape_transport) || norm(xy[i])<=dab.radius)) {
+       ((dab.surface_contact && !dab.shape_transport) || chart_distance_v29(xy[i],dab,axis)<=dab.radius)) {
       w[i]=vertices[i].influence;
       if(dab.shape_transport) {
         const double t=std::clamp((.5-std::abs(h[i])/dab.radius)/.15,0.0,1.0);
