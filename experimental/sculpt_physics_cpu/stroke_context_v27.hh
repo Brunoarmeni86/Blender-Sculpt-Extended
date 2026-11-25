@@ -65,6 +65,42 @@ inline StrokeStepV27 stage_stroke_v27(const StrokeContextV27 &before,Vec3 center
   }
   return out;
 }
+/* D5: independent opt-in experiments. Native uniform accumulation reports
+ * a ratio relative to the nominal 10% diameter spacing (0.2R).
+ * The sampled ratio is NOT a physical world-space arc length. Use it only
+ * for moving, non-gap dabs in the host's supported uniform sampler.
+ * Do not impose a per-event dose floor or inject energy on a stationary
+ * SPACE stroke. Keep the initial dab unchanged. */
+inline double continuous_dose_v31d5(double original,bool moving,bool gap,
+                                      bool use_native,double native_overlap,double gain)
+{
+  if(!moving || gap || original<=0) return original;
+  if(!std::isfinite(original) || !std::isfinite(gain) || gain<1 || gain>2)
+    throw std::invalid_argument("Invalid D5 dose input");
+  double dose=original;
+  if(use_native && std::isfinite(native_overlap) && native_overlap>0)
+    dose=std::clamp(.2*native_overlap,0.0,1.0);
+  return std::clamp(dose*gain,0.0,1.0);
+}
+inline bool refresh_contact_v31d5(StrokeStepV27 &step,const StrokeContextV27 &before,
+                                  double interval)
+{
+  if(!std::isfinite(interval) || interval<=0)
+    throw std::invalid_argument("Invalid D5 refresh interval");
+  if(!before.started || step.gap || step.dose<=0 ||
+     std::floor(before.normalized_travel/interval)>=
+     std::floor(step.next.normalized_travel/interval))return false;
+  // Refresh only local contact, not the native stroke, load, dose or Undo.
+  step.next.tool_plane_valid=false;
+  return true;
+}
+inline void refresh_transport_direction_v31d5(StrokeStepV27 &step)
+{
+  auto &s=step.next;
+  const Vec3 motion=s.direction-s.axis*stroke_dot_v27(s.direction,s.axis);
+  const double len=stroke_norm_v27(motion);
+  if(len>1e-12)s.transport_direction_v30b=motion/len;
+}
 /* Stroke-local tool entrainment, not frozen geometry or material inventory. */
 inline void stage_transport_v30b(StrokeStepV27 &step,const StrokeContextV27 &before)
 {
