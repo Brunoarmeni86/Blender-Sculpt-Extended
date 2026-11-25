@@ -18,5 +18,12 @@ int main(){
  check(h::norm(u[3])==0&&h::norm(u[4])==0);
  check(gradient_motion_scale_v31c(p,t,u)>=1-1e-10);
  }
+ auto uniform=h::make_patch(p,t,{1,1,1,1,0,0,0});
+ auto press=h::target(uniform,h::Tool::Press,{},Vec3{0,0,1},1,.05);
+ check(press[0].z<0);
+ auto u=h::optimize(uniform,press,true);
+ check(u[0].z<0&&h::norm(u[4])==0);
+ auto v=h::flux(uniform,uniform.weight,1);
+ for(double x:v)check(std::abs(x)<1e-12);
  std::cout<<"hybrid foundation tests passed\n";
 }
