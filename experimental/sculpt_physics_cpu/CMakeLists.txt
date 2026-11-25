@@ -355,3 +355,11 @@ add_test(NAME sculpt_volume_v25_tests COMMAND test_volume_v25)
 
 add_executable(volume_preview_v25 volume_preview_v25.cc)
 target_link_libraries(volume_preview_v25 PRIVATE sculpt_physics_reference)
+
+# Native footprint regression tests, independent of Blender and GPU.
+add_executable(test_sculpt_footprint_v33 test_sculpt_footprint_v33.cc)
+target_link_libraries(test_sculpt_footprint_v33 PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_sculpt_footprint_v33 PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_footprint_v33_tests COMMAND test_sculpt_footprint_v33)
