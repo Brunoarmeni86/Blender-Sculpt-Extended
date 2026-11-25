@@ -142,6 +142,16 @@ inline bool push_v30d_requested()
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_PUSH_V30D");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
+inline bool gradient_v31c_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_GRADIENT_V31C");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+inline bool melt_fallback_v31c_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_MELT_FALLBACK_V31C");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
 inline bool adaptive_v31_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_ADAPTIVE_V31");return v && v[0]=='1' && v[1]=='\0';}();
@@ -373,15 +383,19 @@ inline sculpt_physics::LocalContactResult limit_drag_contact(
                            add_vertex(std::size_t(corners[c[2]]))});
     }
   }
-  double coherent=1.0;
+  double coherent=1.0,legacy_scale=1.0;
+  const bool gradient=coherent_v31b && gradient_v31c_requested();
   if(coherent_v31b){
     // Check the full accumulated native dab, not only solver substeps.
-    coherent=sculpt_physics::coherent_motion_scale_v31b(p,triangles,motion);
+    if(!gradient || profile_v26b_requested())legacy_scale=sculpt_physics::coherent_motion_scale_v31b(p,triangles,motion);
+    coherent=gradient?sculpt_physics::gradient_motion_scale_v31c(p,triangles,motion):legacy_scale;
     if(coherent<1)for(auto &v:motion)v=v*coherent;
   }
   auto result=balance_local && !coherent_v31b?sculpt_physics::limit_balanced_contact_v30c(p,triangles,motion):
                                  sculpt_physics::limit_local_contact(p,triangles,motion,uniform_only || coherent_v31b);
   result.final_scale*=coherent;result.minimum_scale*=coherent;
+  if(gradient && profile_v26b_requested())
+    std::fprintf(stderr,"[V31C gradient] legacy_scale=%.7g gradient_scale=%.7g final_scale=%.7g triangles=%zu\n",legacy_scale,coherent,result.final_scale,triangles.size());
   if(coherent_v31b && profile_v26b_requested())
     std::fprintf(stderr,"[V31B guard] coherent_scale=%.7g final_scale=%.7g triangles=%zu\n",coherent,result.final_scale,triangles.size());
   for(std::size_t i=0;i<global.size();++i) {
@@ -1245,6 +1259,8 @@ inline bool try_apply_intent(
       clay.overlap_v30c=clay.live_surface_v30 && clay.stable_v28 && overlap_v30c_requested();
       clay.adaptive_v31=footprint_v30e_brush(object,brush) && adaptive_v31_requested() &&
                         (action==5 || action==7 || action==8 || action==14);
+      clay.gradient_v31c=clay.adaptive_v31 && gradient_v31c_requested();
+      clay.melt_fallback_v31c=clay.live_surface_v30 && clay.refine_v28b && action==11 && melt_fallback_v31c_requested();
       clay.contact_v30b=clay.live_surface_v30 && clay.refine_v28b && contact_v30b_requested() &&
                          (action==5 || action==7 || action==8 || action==14);
       clay.transport_v30b=clay.live_surface_v30 && clay.refine_v28b && transport_v30b_requested() &&
@@ -1442,6 +1458,8 @@ inline bool try_apply_intent(
       if(clay.live_surface_v30 && profile_v26b_requested())std::fprintf(stderr,"[V30 live] action=%d candidates=%zu active=%zu goals=%zu scale=%.7g history_limited=%zu\n",action,samples.size(),planned.active,goals.size(),planned.accepted_scale,planned.history_limited);
       if(clay.live_surface_v30 && clay.refine_v28b && action==11 && profile_v26b_requested())
         std::fprintf(stderr,"[V30B melt] fit_failures=%zu residual_peak_R=%.7g active=%zu proxy_nodes=%zu volume=%.8g scale=%.7g\n",planned.melt_fit_failures_v30b,planned.melt_residual_peak_v30b,planned.active,planned.transport_nodes,planned.transported_volume,planned.accepted_scale);
+      if(clay.melt_fallback_v31c && profile_v26b_requested())
+        std::fprintf(stderr,"[V31C melt] quadratic_failures=%zu affine_fallbacks=%zu active=%zu\n",planned.melt_fit_failures_v30b,planned.melt_affine_fallbacks_v31c,planned.active);
       if(clay.contact_v30b && profile_v26b_requested())std::fprintf(stderr,"[V30B contact] action=%d chart_rejected=%zu recovered=%zu depth_rejected=%zu component_rejected=%zu local_limits=%zu goals=%zu\n",action,planned.chart_rejected_v30b,planned.chart_recovered_v30b,planned.depth_rejected_v30b,planned.component_rejected_v30b,planned.local_limited_v30b,goals.size());
       if(clay.push_v30d && profile_v26b_requested())
         std::fprintf(stderr,"[V30D push] gain=%.3f load=%.5f dose=%.6f active=%zu goals=%zu volume=%.8g fine=%.8g scale=%.7g\n",clay.push_gain_v30d,clay.transport_load_v30b,clay.dose,planned.active,goals.size(),planned.transported_volume,planned.fine_transport_v30b,planned.accepted_scale);

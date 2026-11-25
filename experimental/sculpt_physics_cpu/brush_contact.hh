@@ -298,4 +298,49 @@ inline double coherent_motion_scale_v31b(
   return std::clamp(scale,0.0,1.0);
 }
 
+/* V31C: derivative of the piecewise-affine displacement in the current
+ * triangle tangent plane. A common multiplier bounds its spectral norm;
+ * for the coherent axial field this is the exact scalar gradient norm.
+ * In contrast to V31B, motion along a long edge is not penalized just
+ * because the perpendicular altitude is short. No threshold increase.
+ * A degenerate moving triangle fails closed. This is not global CCD. */
+inline double gradient_motion_scale_v31c(
+    const std::vector<Vec3> &positions,
+    const std::vector<std::array<std::size_t,3>> &triangles,
+    const std::vector<Vec3> &motion,double relative=.18)
+{
+  if(positions.size()!=motion.size() || !std::isfinite(relative) || relative<=0 || relative>.3)
+    throw std::invalid_argument("V31C gradient motion input");
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  const auto norm=[](Vec3 a){return std::hypot(a.x,a.y,a.z);};
+  const auto cross=[](Vec3 a,Vec3 b){return Vec3{a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};};
+  double scale=1.0;
+  for(const auto &t:triangles){
+    for(auto i:t)if(i>=positions.size())throw std::out_of_range("V31C triangle index");
+    int longest=0;double len=0;
+    for(int j=0;j<3;++j){
+      const double l=norm(positions[t[(j+1)%3]]-positions[t[j]]);
+      if(!std::isfinite(l))throw std::overflow_error("V31C edge overflow");
+      if(l>len){len=l;longest=j;}
+    }
+    const auto i=t[longest],j=t[(longest+1)%3],k=t[(longest+2)%3];
+    const Vec3 a=positions[j]-positions[i],b=positions[k]-positions[i];
+    const Vec3 da=motion[j]-motion[i],db=motion[k]-motion[i];
+    const double ma=norm(da),mb=norm(db);
+    if(!std::isfinite(ma)||!std::isfinite(mb))throw std::overflow_error("V31C motion overflow");
+    if(ma<=1e-24 && mb<=1e-24)continue;
+    if(len<=1e-24)return 0.0;
+    const Vec3 ex=a/len;
+    const double x=dot(b,ex),alt=norm(cross(ex,b));
+    if(!std::isfinite(alt)||!std::isfinite(x))throw std::overflow_error("V31C altitude overflow");
+    if(alt<=std::max(1e-24,len*1e-12))return 0.0;
+    const Vec3 dx=da/len,dy=(db-dx*x)/alt;
+    const double xx=dot(dx,dx),yy=dot(dy,dy),xy=dot(dx,dy);
+    const double sigma=std::sqrt(std::max(0.0,.5*(xx+yy+std::hypot(xx-yy,2*xy))));
+    if(!std::isfinite(sigma))throw std::overflow_error("V31C gradient overflow");
+    if(sigma>relative)scale=std::min(scale,relative/sigma);
+  }
+  return std::clamp(scale,0.0,1.0);
+}
+
 } // namespace sculpt_physics

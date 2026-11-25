@@ -59,6 +59,7 @@ struct ClaySurfaceDab {
   bool contact_v30b=false;
   bool overlap_v30c=false;
   bool adaptive_v31=false; // adaptive selection, coherent per-dab direction
+  bool gradient_v31c=false, melt_fallback_v31c=false;
   bool push_v30d=false; // stronger current-relief entrainment; Push only
   double push_gain_v30d=2.5;
   double transport_load_v30b=1.0;
@@ -100,7 +101,7 @@ struct ClaySurfaceResult {
   std::size_t component_rejected_v30b=0,local_limited_v30b=0;
   std::size_t patches_v30c=0,patch_budget_skipped_v30c=0;
   std::size_t adaptive_candidates_v31=0,adaptive_reached_v31=0,adaptive_deep_v31=0;
-  std::size_t melt_fit_failures_v30b=0;
+  std::size_t melt_fit_failures_v30b=0,melt_affine_fallbacks_v31c=0;
   double melt_residual_peak_v30b=0.0;
 };
 
@@ -210,6 +211,42 @@ inline bool fit_quadratic_v28b(const std::vector<Vec3> &xy,const std::vector<dou
   for(int j=0;j<6;++j){coeff[j]=a[j][6];if(!std::isfinite(coeff[j]))return false;}
   return true;
 }
+/* Weighted affine regression in the actually supported directions.
+ * Rank-one masks are allowed; unsupported slopes remain zero.
+ * The centered 2x2 covariance avoids an arbitrary ridge on all terms
+ * and preserves constant and affine surfaces on the sampled support. */
+inline bool fit_affine_v31c(const std::vector<Vec3> &xy,const std::vector<double> &h,
+                           const std::vector<double> &w,const std::vector<double> &area,
+                           Vec3 ex,Vec3 ey,double radius,std::array<double,6> &coeff)
+{
+  const auto dot=[](Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
+  double total=0,mx=0,my=0,mz=0;
+  for(std::size_t i=0;i<h.size();++i)if(w[i]>0 && area[i]>0){
+    const double m=area[i]*w[i];
+    total+=m;mx+=m*dot(xy[i],ex)/radius;my+=m*dot(xy[i],ey)/radius;mz+=m*h[i];
+  }
+  if(!(total>0)||!std::isfinite(total))return false;
+  mx/=total;my/=total;mz/=total;
+  double xx=0,yy=0,xy_cov=0,xz=0,yz=0;
+  for(std::size_t i=0;i<h.size();++i)if(w[i]>0 && area[i]>0){
+    const double m=area[i]*w[i]/total;
+    const double x=dot(xy[i],ex)/radius-mx,y=dot(xy[i],ey)/radius-my,z=h[i]-mz;
+    xx+=m*x*x;yy+=m*y*y;xy_cov+=m*x*y;xz+=m*x*z;yz+=m*y*z;
+  }
+  if(!std::isfinite(xx)||!std::isfinite(yy)||!std::isfinite(xy_cov)||
+     !std::isfinite(xz)||!std::isfinite(yz))return false;
+  const double angle=.5*std::atan2(2*xy_cov,xx-yy);
+  const double c=std::cos(angle),s=std::sin(angle);
+  const double l0=c*c*xx+2*c*s*xy_cov+s*s*yy;
+  const double l1=s*s*xx-2*c*s*xy_cov+c*c*yy;
+  const double tol=std::max(1e-12,l0*1e-7);
+  const double g0=l0>tol?(c*xz+s*yz)/l0:0;
+  const double g1=l1>tol?(-s*xz+c*yz)/l1:0;
+  const double gx=c*g0-s*g1,gy=s*g0+c*g1;
+  coeff={mz-gx*mx-gy*my,gx,gy,0,0,0};
+  for(double v:coeff)if(!std::isfinite(v))return false;
+  return true;
+}
 inline double quadratic_height_v28b(const std::array<double,6> &c,double x,double y)
 {
   return c[0]+c[1]*x+c[2]*y+c[3]*x*x+c[4]*x*y+c[5]*y*y;
@@ -251,19 +288,23 @@ inline void coarse_clay_transport(
   const bool live_transport=dab.transport_v30b && (gather||smear||dab.action==ClaySurfaceAction::Push);
   const bool plough=dab.push_v30d && live_transport && dab.action==ClaySurfaceAction::Push;
   const bool detrend=dab.refine_v28b && melt;
-  const bool fit_ok=!(detrend||(live_transport&&!plough)) || fit_quadratic_v28b(xy,h,w,area,ex,ey,dab.radius,background);
+  const bool quadratic_ok=!(detrend||(live_transport&&!plough)) || fit_quadratic_v28b(xy,h,w,area,ex,ey,dab.radius,background);
+  const bool affine_fallback=detrend && !quadratic_ok && dab.melt_fallback_v31c &&
+      fit_affine_v31c(xy,h,w,area,ex,ey,dab.radius,background);
+  const bool fit_ok=quadratic_ok || affine_fallback;
+  if(affine_fallback)++out.melt_affine_fallbacks_v31c;
   const auto residual=[&](std::size_t i){
     // A broad pile is part of the material Push must entrain. Unlike Melt,
     // do not subtract a quadratic fit through the pile itself. Use the
     // current connected chart's low support, with bounded effective depth.
     if(plough)return std::clamp(h[i]-(floor+.12*dab.radius),0.0,.30*dab.radius);
     if((detrend||live_transport) && fit_ok)
-      return h[i]-quadratic_height_v28b(background,dot(xy[i],ex)/dab.radius,dot(xy[i],ey)/dab.radius);
+      return (affine_fallback?.35:1.0)*(h[i]-quadratic_height_v28b(background,dot(xy[i],ex)/dab.radius,dot(xy[i],ey)/dab.radius));
     return detrend?0.0:h[i]-(live_transport?floor+.12*dab.radius:0.0);
   };
   if(detrend){
-    if(!fit_ok)++out.melt_fit_failures_v30b;
-    else for(std::size_t i=0;i<h.size();++i)if(w[i]>0)
+    if(!quadratic_ok)++out.melt_fit_failures_v30b;
+    if(fit_ok)for(std::size_t i=0;i<h.size();++i)if(w[i]>0)
       out.melt_residual_peak_v30b=std::max(out.melt_residual_peak_v30b,std::abs(residual(i))/dab.radius);
   }
   std::map<Key,std::size_t> lookup;
@@ -876,7 +917,9 @@ inline ClaySurfaceResult solve_adaptive_contact_v31(
   // Bound differential motion BEFORE the triangle guard. Uniform scaling
   // retains both the smooth profile and the signed budget; no individually
   // stalled vertices injected into a pressure field by the local limiter.
-  const double coherent=coherent_motion_scale_v31b(positions,triangles,out.displacement);
+  const double coherent=dab.gradient_v31c?
+      gradient_motion_scale_v31c(positions,triangles,out.displacement):
+      coherent_motion_scale_v31b(positions,triangles,out.displacement);
   if(coherent<1)for(auto &v:out.displacement)v=v*coherent;
   const auto safe=limit_local_contact(positions,triangles,out.displacement,true);
   out.slope_scale=coherent;
@@ -1087,6 +1130,7 @@ inline ClaySurfaceResult solve_clay_surface(
         out.transported_volume+=part.transported_volume;
         out.fine_transport_v30b+=part.fine_transport_v30b;
         out.melt_fit_failures_v30b+=part.melt_fit_failures_v30b;
+        out.melt_affine_fallbacks_v31c+=part.melt_affine_fallbacks_v31c;
         out.melt_residual_peak_v30b=std::max(out.melt_residual_peak_v30b,part.melt_residual_peak_v30b);
         for(auto i:patch->ids){
           out.displacement[i]=part.displacement[i];

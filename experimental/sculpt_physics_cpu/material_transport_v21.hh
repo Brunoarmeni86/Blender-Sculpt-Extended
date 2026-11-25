@@ -63,6 +63,7 @@ inline MaterialTransportV21Result solve_material_transport_v21(
     out.surface.patches_v30c=std::max(out.surface.patches_v30c,step.patches_v30c);
     out.surface.patch_budget_skipped_v30c+=step.patch_budget_skipped_v30c;
     out.surface.melt_fit_failures_v30b+=step.melt_fit_failures_v30b;
+    out.surface.melt_affine_fallbacks_v31c+=step.melt_affine_fallbacks_v31c;
     out.surface.melt_residual_peak_v30b=std::max(out.surface.melt_residual_peak_v30b,step.melt_residual_peak_v30b);
     out.surface.slope_scale=std::min(out.surface.slope_scale,step.slope_scale);
     out.surface.accepted_scale=std::min(out.surface.accepted_scale,step.accepted_scale);

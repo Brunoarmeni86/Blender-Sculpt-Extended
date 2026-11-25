@@ -576,8 +576,36 @@ static void coherent_v31b_tests(){
   for(auto &v:q)v={0,0,.1};
   assert(coherent_motion_scale_v31b(p,tri,q)==1);
 }
+static void gradient_v31c_tests(){
+  const std::vector<Vec3> p{{0,0,0},{1,0,0},{.5,.02,0}};
+  const std::vector<ClaySurfaceTriangle> tri{{0,1,2}};
+  // Displacement gradient along the long edge is mild despite small altitude.
+  std::vector<Vec3> q{{0,0,0},{0,0,.10},{0,0,.05}};
+  assert(coherent_motion_scale_v31b(p,tri,q)<.04);
+  assert(gradient_motion_scale_v31c(p,tri,q)==1);
+  // Perpendicular gradient remains tightly constrained.
+  q={{0,0,0},{0,0,0},{0,0,.10}};
+  const double scale=gradient_motion_scale_v31c(p,tri,q);
+  assert(std::abs(scale-.036)<1e-10);
+  for(auto &v:q)v=v*scale;
+  assert(gradient_motion_scale_v31c(p,tri,q)>=.999999);
+  for(auto &v:q)v={1,2,3};
+  assert(gradient_motion_scale_v31c(p,tri,q)==1);
+  // Rank-one affine support: exactly preserve a slope along the line.
+  std::vector<Vec3> xy;std::vector<double> h,w,a;
+  for(int i=0;i<11;++i){
+    const double x=(i-5)*.1;
+    xy.push_back({x,x,0});h.push_back(.3+.7*x);w.push_back(1);a.push_back(1);
+  }
+  std::array<double,6> coeff{};
+  assert(!fit_quadratic_v28b(xy,h,w,a,{1,0,0},{0,1,0},1,coeff));
+  assert(fit_affine_v31c(xy,h,w,a,{1,0,0},{0,1,0},1,coeff));
+  for(std::size_t i=0;i<h.size();++i)
+    assert(std::abs(h[i]-quadratic_height_v28b(coeff,xy[i].x,xy[i].y))<1e-10);
+}
 int main(){
   stroke_context_v27_tests();
+  gradient_v31c_tests();
   coherent_v31b_tests();
   adaptive_v31_tests();
   push_v30d_tests();
