@@ -386,7 +386,8 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
     const bool autonomous=physics_v15::autonomous_requested(*ss.cache);
     const bool round_contact=autonomous && (physics_v15::shape_v24_requested() || ss.cache->xpbd_v16_clay_behavior==14) &&
         ss.cache->xpbd_v16_clay_behavior!=1 && ss.cache->xpbd_v16_clay_behavior!=4;
-    const bool footprint=autonomous && physics_v15::footprint_v30e_brush(object,brush);
+    const bool native_v33=autonomous && physics_v15::sculpt_footprint_v33_brush(object,brush);
+    const bool footprint=autonomous && !native_v33 && physics_v15::footprint_v30e_brush(object,brush);
     const bool audit=footprint && physics_v15::profile_v26b_requested();
     physics_v15::FootprintAuditV30E coverage;
     LocalData tls;
@@ -402,7 +403,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       MutableSpan<float> distances=tls.distances;
       if(footprint){
         for(const int j:verts.index_range())distances[j]=physics_v15::footprint_distance_v30e(*ss.cache,brush,pos.eval[verts[j]],plane_normal)/std::max(ss.cache->radius,1e-12f);
-      }else if (round_contact) {
+      }else if (round_contact && !native_v33) {
         const float3 axis=math::normalize(plane_normal);
         for (const int j:verts.index_range()) {
           const float3 d=pos.eval[verts[j]]-ss.cache->location_symm;
@@ -419,7 +420,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       if(audit)coverage.base+=coverage.count(factors,distances,1.0f);
       if(brush.flag & BRUSH_FRONTFACE)calc_front_face(ss.cache->view_normal_symm,normals,verts,factors);
       if(audit)coverage.front+=coverage.count(factors,distances,1.0f);
-      if(!autonomous)apply_z_axis_factors(tls.z_positions,factors);
+      if(!autonomous || native_v33)apply_z_axis_factors(tls.z_positions,factors);
       apply_plane_trim_factors(brush,tls.z_positions,factors);
       if(audit)coverage.trim+=coverage.count(factors,distances,1.0f);
       filter_distances_with_radius(1.0f,distances,factors);
