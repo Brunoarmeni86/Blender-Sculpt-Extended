@@ -23,6 +23,16 @@ struct CompactNativeBrushDab {
   std::vector<std::size_t> local_to_global;
 };
 
+/* One-entry cache, owned by a native stroke. Only topology is reused;
+ * current positions, rest lengths, mass, targets and lambdas are rebuilt.
+ * Exact active-set equality is mandatory, even after a mask change. */
+struct CompactRegionCacheV27 {
+  const CompactBrushTopology *topology=nullptr;
+  std::uint64_t generation=0;
+  std::vector<std::size_t> active;
+  CompactBrushTopology::Region region;
+  std::size_t hits=0,misses=0;
+};
 template<class EdgeAt, class RestAt, class CurrentAt, class InverseMassAt>
 CompactNativeBrushDab prepare_compact_native_brush_dab(
     const CompactBrushTopology &topology,
@@ -32,7 +42,8 @@ CompactNativeBrushDab prepare_compact_native_brush_dab(
     CurrentAt current_at,
     InverseMassAt inverse_mass_at,
     const NativeBrushDab &dab,
-    bool direct_surface=false)
+    bool direct_surface=false,
+    CompactRegionCacheV27 *region_cache=nullptr)
 {
   CompactNativeBrushDab out;
   std::vector<std::size_t> active;
@@ -82,8 +93,30 @@ CompactNativeBrushDab prepare_compact_native_brush_dab(
     out.prepared=PreparedNativeBrushDab(nullptr,std::move(batch));
     return out;
   }
-  auto region=topology.gather(active,edge_at);
-  out.local_to_global=std::move(region.vertices);
+  CompactBrushTopology::Region uncached;
+  const CompactBrushTopology::Region *region=nullptr;
+  if(region_cache){
+    auto &cache=*region_cache;
+    if(cache.topology==&topology && cache.generation==dab.topology_generation &&
+       cache.active==active){
+      ++cache.hits;
+    }else{
+      // Build before publishing the key, so a failed gather cannot leave
+      // an apparently valid entry for a different active region.
+      auto fresh=topology.gather(active,edge_at);
+      cache.active=active;
+      cache.region=std::move(fresh);
+      cache.topology=&topology;
+      cache.generation=dab.topology_generation;
+      ++cache.misses;
+    }
+    region=&cache.region;
+    out.local_to_global=region->vertices;
+  }else{
+    uncached=topology.gather(active,edge_at);
+    region=&uncached;
+    out.local_to_global=std::move(uncached.vertices);
+  }
   const auto local_id=[&](std::size_t global) {
     const auto it=std::lower_bound(out.local_to_global.begin(),out.local_to_global.end(),global);
     if (it==out.local_to_global.end() || *it!=global) {
@@ -104,9 +137,15 @@ CompactNativeBrushDab prepare_compact_native_brush_dab(
   island.writable.reserve(n);
   std::vector<Vec3> rest;
   rest.reserve(n);
+  std::size_t active_cursor=0;
   for (std::size_t i=0;i<n;++i) {
     const std::size_t id=out.local_to_global[i];
-    const bool writable=std::binary_search(active.begin(),active.end(),id);
+    // Both lists are sorted. Keep the exact pinning policy without a
+    // binary search per local vertex on the optimized path.
+    while(region_cache && active_cursor<active.size() && active[active_cursor]<id)++active_cursor;
+    const bool writable=region_cache ?
+        active_cursor<active.size() && active[active_cursor]==id :
+        std::binary_search(active.begin(),active.end(),id);
     const double mass=writable ? inverse_mass_at(id) : 0.0;
     const Vec3 p=rest_at(id);
     if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) ||
@@ -120,8 +159,8 @@ CompactNativeBrushDab prepare_compact_native_brush_dab(
     island.radii.push_back(0.05);
     island.writable.push_back(writable);
   }
-  island.bonds.reserve(region.edges.size());
-  for (const auto edge_id : region.edges) {
+  island.bonds.reserve(region->edges.size());
+  for (const auto edge_id : region->edges) {
     const auto [a,b]=edge_at(edge_id);
     const auto i=local_id(a),j=local_id(b);
     const Vec3 p=rest[i]-rest[j];

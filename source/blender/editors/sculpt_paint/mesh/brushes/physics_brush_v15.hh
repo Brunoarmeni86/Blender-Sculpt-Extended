@@ -54,6 +54,7 @@ struct NativePhysicsStroke {
   sculpt_physics::World rest_world;
   std::unique_ptr<sculpt_physics::GpuTopologyBondIndex> topology;
   std::shared_ptr<const sculpt_physics::CompactBrushTopology> compact;
+  sculpt_physics::CompactRegionCacheV27 region_cache;
   std::unordered_map<std::size_t, sculpt_physics::Vec3> original_positions;
   const Mesh *mesh_identity = nullptr;
   const int2 *edge_data = nullptr;
@@ -77,6 +78,11 @@ inline bool stroke_v27_requested()
 inline bool contact_v27b_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_CONTACT_V27B");return v && v[0]=='1' && v[1]=='\0';}();
+  return enabled;
+}
+inline bool optimize_v27c_requested()
+{
+  static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_OPTIMIZE_V27C");return v && v[0]=='1' && v[1]=='\0';}();
   return enabled;
 }
 inline bool profile_v26b_requested()
@@ -312,6 +318,10 @@ inline bool try_apply(const Sculpt &sd,
           !std::isfinite(sample.translation.z)) {
         throw std::invalid_argument("V15 non-finite stock brush translation");
       }
+      // Zero targets cannot win the existing largest-translation rule
+      // and are discarded later anyway. Avoid inserting whole PBVH leaves.
+      if(optimize_v27c_requested() &&
+         std::hypot(sample.translation.x,sample.translation.y,sample.translation.z)<=1e-15)continue;
       const auto it=dedup.find(sample.global_index);
       if (it==dedup.end()) dedup.emplace(sample.global_index,sample.translation);
       else {
@@ -488,7 +498,13 @@ inline bool try_apply(const Sculpt &sd,
             const auto original=state->original_positions.find(id);
             return original==state->original_positions.end() ?
                        current_position(id) : original->second;
-          },current_position,inverse_mass,dab,stroke_v27_requested() && conservative_clay);
+          },current_position,inverse_mass,dab,stroke_v27_requested() && conservative_clay,
+          optimize_v27c_requested()?&state->region_cache:nullptr);
+      if(profile && optimize_v27c_requested() && !conservative_clay){
+        std::fprintf(stderr,"[V27C region] kind=%d hits=%zu misses=%zu active=%zu halo=%zu\n",
+          int(kind),state->region_cache.hits,state->region_cache.misses,
+          state->region_cache.active.size(),state->region_cache.region.vertices.size());
+      }
       local_to_global=std::move(prepared.local_to_global);
       result=std::move(prepared.prepared);
     }

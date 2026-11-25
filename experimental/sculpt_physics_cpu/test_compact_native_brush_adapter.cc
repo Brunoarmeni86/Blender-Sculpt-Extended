@@ -75,6 +75,39 @@ int main()
     full.finish_editor_success();
     small.prepared.finish_editor_success();
   }
+  // Compare cached and uncached real XPBD with current-rest Clay/Strips,
+  // moving active sets, overlapping repeated dabs and a changing pin.
+  CompactRegionCacheV27 cache;
+  for(const auto kind:{NativeSculptBrushKind::Clay,NativeSculptBrushKind::ClayStrips}){
+    current=initial;
+    std::size_t pinned=0;
+    const auto dynamic_mass=[&](std::size_t id){return id==pinned?0.0:1.0;};
+    NativeBrushDab trial_dab;
+    trial_dab.kind=kind;trial_dab.topology_generation=5;
+    trial_dab.current_rest=true;trial_dab.assist=.75;
+    const auto profile=experimental_native_brush_profile(kind);
+    trial_dab.compliance=profile.target_compliance;trial_dab.material=profile.material;
+    for(int step=0;step<16;++step){
+      if(step==8)pinned=1;
+      const auto seed=std::size_t(1+(step/4)%3);
+      const std::vector<NativeBrushTranslation> targets{
+          {seed,{.01,.02,.03}},{seed+1,{-.01,.01,.02}},{0,{.01,0,0}}};
+      auto old=prepare_compact_native_brush_dab(compact,targets,edge_at,rest_at,current_at,dynamic_mass,trial_dab);
+      auto fast=prepare_compact_native_brush_dab(compact,targets,edge_at,rest_at,current_at,dynamic_mass,trial_dab,false,&cache);
+      assert(old.local_to_global==fast.local_to_global);
+      assert(old.prepared.writes().size()==fast.prepared.writes().size());
+      for(std::size_t i=0;i<old.prepared.writes().size();++i){
+        const auto &x=old.prepared.writes()[i],&y=fast.prepared.writes()[i];
+        assert(x.global_index==y.global_index);
+        assert(fast.local_to_global.at(y.global_index)!=pinned);
+        assert(x.position.x==y.position.x && x.position.y==y.position.y && x.position.z==y.position.z);
+        current[fast.local_to_global.at(y.global_index)]=y.position;
+      }
+      old.prepared.finish_editor_success();fast.prepared.finish_editor_success();
+    }
+  }
+  assert(cache.hits>0 && cache.misses>0);
+  current[0]=initial[0];
   assert(!saved.empty());
   assert(current[0].x==initial[0].x && current[0].y==initial[0].y);
   NativeBrushDab dab;
