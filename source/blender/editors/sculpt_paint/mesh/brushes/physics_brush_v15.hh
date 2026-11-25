@@ -1234,7 +1234,8 @@ inline void export_coverage_v31d9(
       if((!s.writable || s.envelope<=0) &&
          (math::length(p-cache.location_symm)>1.51*radius ||
           footprint_distance_v30e(cache,brush,p,normal)>=radius))continue;
-      const auto w=coverage.find(s.global_index),g=requested.find(s.global_index);
+      const auto w=coverage.find(s.global_index);
+      const auto g=requested.find(s.global_index);
       const auto q=current[int(s.global_index)];
       const double actual=std::hypot(double(q.x)-s.position.x,
           double(q.y)-s.position.y,double(q.z)-s.position.z);
