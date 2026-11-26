@@ -47,3 +47,6 @@ Commits 2f50c250f066 and 520b43cf1877: simultaneous edge demand and endpoint cap
 
 ## CI checkpoint
 3e2020a284cc: D10A local candidate compared against uniform baseline; Compact parameter response differentiated from Press, not persistent plasticity. 3b25cada69e9: GitHub Actions workflow .github/workflows/sculpt-physics-reference.yml, push on D11 branch, Linux and Windows Debug build and all standalone CTest tests, logs uploaded. No run result verified yet. Connector workflow listing only covers PR-triggered runs; push run visibility may require Actions UI. No Blender runtime validation.
+
+## D11 CI and conservation review
+Run 45725872585 at d47bc864fb99: Linux and Windows configure/build/CTest/upload all successful. Exact counts and durations not inspected. 4878fa9df9c1 fixes cancellation-sensitive signed proxy tolerance using absolute contributions and rejects nonfinite radius/target. 9d35e082f61c adds zero-net transport and invalid-input regressions. Source review: signed proxy remains a feasible-baseline constraint, not physical mass; no density-invariance claim. New CI pending. Next: permutation and irregular-density tests, local contact and material state. No Blender runtime test.
