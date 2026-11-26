@@ -692,7 +692,12 @@ inline std::vector<Vec3> material_target(const Patch& s,Tool tool,MaterialKind k
    Vec3 inward_axis=unit(n*.75+dir*.25);
    double sink=a*m.compressibility;
    if(tool==Tool::Compact)sink*=1.5;
-   if(tool==Tool::Compress)sink*=.35+.65*alignment;
+   if(tool==Tool::Compress){
+    // D11.8 preview: coherent axial compression on steep contact.
+    // Keep normal transport separate; retain the flat-surface response.
+    inward_axis=norm(dir)>0?dir:inward_axis;
+    sink*=.85+.15*alignment;
+   }
    result[i]=n*(tool==Tool::Compact?.35*b:b)-inward_axis*sink;
    continue;
   }
