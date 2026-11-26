@@ -464,5 +464,64 @@ int main(){
   check(std::abs(net)<1e-12&&std::abs(varied[0])>0);
   bool bad=false;try{h::aggregate_flux(a,{2,0,0,0,0,0});}catch(const std::invalid_argument&){bad=true;}check(bad);
  }
+ // D11.5 certified block study: strict per-coefficient bound, not
+ // a guaranteed relative norm bound in the presence of cancellation.
+ for(int density:{1,2,4,8}){
+  auto patch=grid(4*density,false);
+  // Include fractional falloff: no change from min(weight_i,weight_j).
+  for(std::size_t i=0;i<patch.p.size();++i)patch.weight[i]=.25+.75*patch.p[i].x;
+  auto exact_stencil=h::transport_stencil(patch,1);
+  for(int tol_case:{0,1,2}){
+   double tolerance=tol_case==0?.05:(tol_case==1?.15:.30);
+   auto start=std::chrono::steady_clock::now();
+   auto block=h::block_transport(patch,1,.125,tolerance);
+   auto built=std::chrono::steady_clock::now();
+   check(block.exact.size()+block.represented_pairs==exact_stencil.pairs.size());
+   int id=10*density+tol_case;
+   metric("block_exact_pairs",id,double(block.exact.size()));
+   metric("block_compressed_pairs",id,double(block.represented_pairs));
+   metric("block_count",id,double(block.blocks.size()));
+   metric("block_build_us",id,std::chrono::duration<double,std::micro>(built-start).count());
+   // Smooth pressure and sharp edge: evaluate both against the same stencil.
+   for(int shape:{0,1}){
+    std::vector<double> pressure;
+    for(auto v:patch.p)pressure.push_back(shape==0?.5+.5*std::cos(3.141592653589793*v.x):(v.x<.5?1.:0.));
+    auto es=std::chrono::steady_clock::now();
+    auto exact=h::transport_flux(exact_stencil,pressure);
+    auto ee=std::chrono::steady_clock::now();
+    auto approx=h::block_flux(block,pressure);
+    auto be=std::chrono::steady_clock::now();
+    double net=0,error=0,ref=0,ab=0,eb=0,energy=0,maximum=0;
+    for(std::size_t i=0;i<exact.size();++i){
+     double a=patch.area[i],d=approx[i]-exact[i];
+     check(std::abs(d)<=tolerance*.02*patch.weight[i]+1e-12);
+     check(std::abs(approx[i])<=.02*patch.weight[i]+1e-12);
+     net+=a*approx[i];energy+=a*pressure[i]*approx[i];
+     error+=a*d*d;ref+=a*exact[i]*exact[i];ab+=a*std::abs(approx[i]);eb+=a*std::abs(exact[i]);
+     maximum=std::max(maximum,std::abs(d));
+    }
+    check(std::abs(net)<1e-12&&energy<=1e-12&&ref>0&&eb>0);
+    int k=2*id+shape;
+    metric("block_relative_rms",k,std::sqrt(error/ref));
+    metric("block_absolute_ratio",k,ab/eb);
+    metric("block_max_absolute_error",k,maximum);
+    metric("block_net",k,net);
+    metric("block_exact_apply_us",k,std::chrono::duration<double,std::micro>(ee-es).count());
+    metric("block_apply_us",k,std::chrono::duration<double,std::micro>(be-ee).count());
+   }
+  }
+ }
+ // Exercise actual nontrivial compression on two tight connected groups
+ // with complete far-field support, not merely the all-exact fallback.
+ {
+  std::vector<Vec3> p{{0,0,0},{.001,0,0},{0,.001,0},{.25,0,0},{.251,0,0},{.25,.001,0}};
+  auto s=h::make_patch(p,{{0,1,2},{3,4,5},{1,3,2},{2,3,5}},std::vector<double>(6,1));
+  auto b=h::block_transport(s,1,.125,.15);
+  check(!b.blocks.empty()&&b.represented_pairs>0);
+  std::vector<double> pressure{1,.8,.6,.4,.2,0};
+  auto a=h::transport_flux(h::transport_stencil(s,1),pressure),f=h::block_flux(b,pressure);
+  double net=0;for(std::size_t i=0;i<f.size();++i){net+=s.area[i]*f[i];check(std::abs(a[i]-f[i])<=.003+1e-12);}
+  check(std::abs(net)<1e-12);
+ }
  std::cout<<"hybrid foundation tests passed\n";
 }

@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include <functional>
+#include <map>
 namespace sculpt_physics {
 namespace hybrid_v31d11 {
 using Tri=std::array<std::size_t,3>;
@@ -220,7 +221,7 @@ struct AggregateTransport {
  std::vector<double> support,area,weight;
  double radius=0;
 };
-inline AggregateTransport aggregate_transport(const Patch& s,double radius,double cell_fraction=.125){
+inline AggregateTransport aggregate_transport(const Patch& s,double radius,double cell_fraction=.125,bool build_pairs=true){
  if(!std::isfinite(radius)||radius<=0||!std::isfinite(cell_fraction)||
     cell_fraction<=0||cell_fraction>.25||!(radius*cell_fraction>0)||!(radius*.5>0))
   throw std::invalid_argument("aggregate transport scale");
@@ -263,6 +264,7 @@ inline AggregateTransport aggregate_transport(const Patch& s,double radius,doubl
   for(auto i:g.members){double d=norm(s.p[i]-origin-center);if(d<best){best=d;g.representative=i;}}
   rep[g.representative]=id;
  }
+ if(!build_pairs)return out; // internal grouping-only path for block study
  out.support.resize(out.groups.size());
  for(std::size_t i=0;i<out.groups.size();++i)out.support[i]=out.groups[i].mass;
  struct Edge {std::size_t j;double length;};
@@ -322,6 +324,96 @@ inline std::vector<double> aggregate_flux(const AggregateTransport& s,const std:
  }
  for(std::size_t a=0;a<m;++a)for(auto i:s.groups[a].members)
   out[i]=s.radius*.02*s.weight[i]*(moment[a]-row[a]*pressure[i]);
+ return out;
+}
+// D11.5 certified block study: compress the exact stencil, not the graph
+// metric. Build remains expensive; this measures safe compression potential.
+// Only disjoint complete cross-group blocks with sufficiently uniform
+// normalized coefficients are eligible. Incomplete blocks and near field
+// remain exact. No approximation to masks or support normalization.
+struct BlockTransport {
+ struct Group {std::vector<std::size_t> members;double area=0;Vec3 lo{},hi{};};
+ struct Block {std::size_t a,b;double coefficient;};
+ std::vector<Group> groups;
+ std::vector<Block> blocks;
+ std::vector<TransportStencil::Pair> exact;
+ std::vector<double> area;
+ std::size_t represented_pairs=0;
+};
+inline BlockTransport block_transport(const Patch& s,double radius,double cell_fraction=.125,
+ double tolerance=.05){
+ if(!std::isfinite(tolerance)||tolerance<0||tolerance>=1)throw std::invalid_argument("block tolerance");
+ auto partition=aggregate_transport(s,radius,cell_fraction,false);
+ auto reference=transport_stencil(s,radius);
+ BlockTransport out;out.area=s.area;
+ const auto invalid=std::numeric_limits<std::size_t>::max();
+ std::vector<std::size_t> ids(s.p.size(),invalid);
+ for(const auto& g:partition.groups){
+  auto id=out.groups.size();out.groups.emplace_back();
+  auto& v=out.groups.back();v.members=g.members;v.lo=v.hi=s.p[g.members.front()];
+  for(auto i:g.members){
+   ids[i]=id;v.area+=s.area[i];auto p=s.p[i];
+   v.lo.x=std::min(v.lo.x,p.x);v.lo.y=std::min(v.lo.y,p.y);v.lo.z=std::min(v.lo.z,p.z);
+   v.hi.x=std::max(v.hi.x,p.x);v.hi.y=std::max(v.hi.y,p.y);v.hi.z=std::max(v.hi.z,p.z);
+  }
+ }
+ using Key=std::pair<std::size_t,std::size_t>;
+ struct Stat {std::size_t count=0;double lo=std::numeric_limits<double>::infinity(),hi=0;bool compress=false;};
+ std::map<Key,Stat> stats;
+ auto key=[&](std::size_t i,std::size_t j)->Key{return {std::min(ids[i],ids[j]),std::max(ids[i],ids[j])};};
+ auto gap=[](double alo,double ahi,double blo,double bhi){return std::max(0.0,std::max(alo-bhi,blo-ahi));};
+ auto far=[&](Key k){
+  const auto& a=out.groups[k.first];const auto& b=out.groups[k.second];
+  return norm(Vec3{gap(a.lo.x,a.hi.x,b.lo.x,b.hi.x),gap(a.lo.y,a.hi.y,b.lo.y,b.hi.y),
+                   gap(a.lo.z,a.hi.z,b.lo.z,b.hi.z)})>=radius*.125;
+ };
+ for(auto e:reference.pairs){
+  auto k=key(e.i,e.j);
+  if(k.first==k.second)continue;
+  auto& v=stats[k];
+  double c=e.coefficient/s.area[e.i]/s.area[e.j];
+  ++v.count;v.lo=std::min(v.lo,c);v.hi=std::max(v.hi,c);
+ }
+ for(auto& entry:stats){
+  const auto k=entry.first;auto& v=entry.second;
+  const auto a=out.groups[k.first].members.size(),b=out.groups[k.second].members.size();
+  // Division avoids overflow of a*b on large input.
+  bool complete=a>0&&b>0&&v.count/a==b&&v.count%a==0;
+  // A block must save at least one explicit pair. All its coefficients
+  // are reduced by no more than tolerance, never increased.
+  if(complete&&v.count>1&&far(k)&&v.hi>0&&std::isfinite(v.hi)&&v.lo>0&&v.lo>=(1-tolerance)*v.hi){
+   v.compress=true;out.blocks.push_back({k.first,k.second,v.lo});
+   out.represented_pairs+=v.count;
+  }
+ }
+ for(auto e:reference.pairs){
+  auto k=key(e.i,e.j);
+  auto it=stats.find(k);
+  if(it==stats.end()||!it->second.compress)out.exact.push_back(e);
+ }
+ return out;
+}
+// Valid for pressure [0,1], where the exact pairwise clamp is inactive.
+// Each accepted block is a positive rank-one pair coefficient A_i*A_j*c.
+// Symmetry gives cancellation; coefficients <= exact preserve capacity.
+inline std::vector<double> block_flux(const BlockTransport& s,const std::vector<double>& pressure){
+ if(pressure.size()!=s.area.size())throw std::invalid_argument("block pressure size");
+ for(double x:pressure)if(!std::isfinite(x)||x<0||x>1)throw std::invalid_argument("block pressure range");
+ std::vector<double> out(pressure.size()),mean(s.groups.size()),row(s.groups.size()),moment(s.groups.size());
+ for(auto e:s.exact){
+  double f=e.coefficient*(pressure[e.i]-pressure[e.j]);out[e.i]-=f;out[e.j]+=f;
+ }
+ for(std::size_t a=0;a<s.groups.size();++a){
+  const auto& g=s.groups[a];for(auto i:g.members)mean[a]+=s.area[i]*pressure[i]/g.area;
+ }
+ for(auto b:s.blocks){
+  double ab=b.coefficient*s.groups[b.b].area,ba=b.coefficient*s.groups[b.a].area;
+  row[b.a]+=ab;moment[b.a]+=ab*mean[b.b];
+  row[b.b]+=ba;moment[b.b]+=ba*mean[b.a];
+ }
+ for(std::size_t i=0;i<out.size();++i)if(s.area[i]>0)out[i]/=s.area[i];
+ for(std::size_t a=0;a<s.groups.size();++a)for(auto i:s.groups[a].members)
+  out[i]+=moment[a]-row[a]*pressure[i];
  return out;
 }
 enum class Tool {Deposit,Press,Compact,Compress,Scrape,Push,Smear,Melt,Grab};
