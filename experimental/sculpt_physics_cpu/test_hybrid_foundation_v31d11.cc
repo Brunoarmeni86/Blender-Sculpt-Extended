@@ -523,5 +523,136 @@ int main(){
   double net=0;for(std::size_t i=0;i<f.size();++i){net+=s.area[i]*f[i];check(std::abs(a[i]-f[i])<=.003+1e-12);}
   check(std::abs(net)<1e-12);
  }
+ // D11.5 geodesic cache: compare against freshly rebuilt reference for
+ // every sample, including shape/pressure changes and candidate crossings.
+ for(int density:{1,2,4,8}){
+  auto base=grid(4*density,false);
+  h::GeodesicCache cache;
+  double worst=0,worst_bound=0,worst_net=0,exact_us=0,cache_us=0;
+  int reused=0;
+  for(int step=0;step<8;++step){
+   auto p=base.p;auto w=base.weight;
+   for(std::size_t i=0;i<p.size();++i){
+    p[i].x+=.0001*step*std::sin(3.141592653589793*p[i].x)*std::cos(3.141592653589793*p[i].y);
+    p[i].z+=.0003*step*std::sin(6*p[i].x)*std::sin(4*p[i].y);
+    w[i]=.25+.75*p[i].x;
+   }
+   auto patch=h::make_patch(p,base.tris,w);
+   std::vector<double> pressure;for(auto v:p)pressure.push_back(.5+.5*std::cos(3.141592653589793*v.x+.1*step));
+   auto start=std::chrono::steady_clock::now();
+   auto exact=h::transport_flux(h::transport_stencil(patch,1),pressure);
+   auto mid=std::chrono::steady_clock::now();
+   auto f=h::cached_geodesic_flux(cache,patch,pressure,1);
+   auto end=std::chrono::steady_clock::now();
+   exact_us+=std::chrono::duration<double,std::micro>(mid-start).count();
+   cache_us+=std::chrono::duration<double,std::micro>(end-mid).count();
+   reused+=f.reused;
+   double err=0,ref=0,net=0;
+   for(std::size_t i=0;i<p.size();++i){
+    double d=std::abs(exact[i]-f.flux[i]);
+    check(d<=f.error_bound[i]+1e-12&&std::abs(f.flux[i])<=.02*patch.weight[i]+1e-12);
+    err+=patch.area[i]*d*d;ref+=patch.area[i]*exact[i]*exact[i];net+=patch.area[i]*f.flux[i];
+   }
+   check(ref>0&&std::abs(net)<1e-12);
+   double rel=std::sqrt(err/ref);
+   check(rel<=f.relative_bound+1e-10&&f.relative_bound<=.02+1e-12);
+   worst=std::max(worst,rel);worst_bound=std::max(worst_bound,f.relative_bound);worst_net=std::max(worst_net,std::abs(net));
+  }
+  check(reused>0);
+  metric("cache_density_reused",density,reused);
+  metric("cache_density_candidates",density,double(cache.pairs.size()));
+  metric("cache_density_rms_max",density,worst);
+  metric("cache_density_bound_max",density,worst_bound);
+  metric("cache_density_net_max",density,worst_net);
+  metric("cache_density_exact_us",density,exact_us);
+  metric("cache_density_total_us",density,cache_us);
+ }
+ // Actual accepted writes on a pinned closed prism top. Exact and cached
+ // flux evaluated on the same evolving geometry to isolate cache error.
+ {
+  auto patch=grid(4,true);
+  h::GeodesicCache cache;
+  auto top_volume=[&](const std::vector<Vec3>& p){
+   double v=0;for(auto tri:patch.tris)v+=h::dot(p[tri[0]],h::cross(p[tri[1]],p[tri[2]]))/6;return v;
+  };
+  double initial=top_volume(patch.p),signed_proxy=0,absolute_proxy=0;
+  double exact_us=0,cache_us=0,max_error=0,max_bound=0;
+  int reused=0;
+  for(int step=1;step<=1000;++step){
+   std::vector<double> pressure;for(auto v:patch.p)pressure.push_back(std::clamp(1-v.x,0.0,1.0));
+   auto a=std::chrono::steady_clock::now();
+   auto exact=h::transport_flux(h::transport_stencil(patch,1),pressure);
+   auto b=std::chrono::steady_clock::now();
+   auto f=h::cached_geodesic_flux(cache,patch,pressure,1);
+   auto c=std::chrono::steady_clock::now();
+   exact_us+=std::chrono::duration<double,std::micro>(b-a).count();cache_us+=std::chrono::duration<double,std::micro>(c-b).count();
+   reused+=f.reused;
+   double err=0,ref=0;
+   std::vector<Vec3> desired(f.flux.size());
+   for(std::size_t i=0;i<f.flux.size();++i){
+    double d=std::abs(f.flux[i]-exact[i]);
+    check(d<=f.error_bound[i]+1e-12);
+    err+=patch.area[i]*d*d;ref+=patch.area[i]*exact[i]*exact[i];
+    desired[i]=patch.normal[i]*(.02*f.flux[i]);
+   }
+   check(ref>0);
+   double relative=std::sqrt(err/ref);
+   check(relative<=f.relative_bound+1e-10&&f.relative_bound<=.02+1e-12);
+   max_error=std::max(max_error,relative);max_bound=std::max(max_bound,f.relative_bound);
+   auto accepted=h::optimize(patch,desired,true);
+   check(gradient_motion_scale_v31c(patch.p,patch.tris,accepted)>=1-1e-10);
+   auto p=patch.p;double net=0,ab=0;
+   for(std::size_t i=0;i<p.size();++i){
+    if(patch.weight[i]==0)check(h::norm(accepted[i])==0);
+    double v=patch.area[i]*h::dot(patch.normal[i],accepted[i]);net+=v;ab+=std::abs(v);p[i]+=accepted[i];
+   }
+   check(std::abs(net)<=1e-12+1e-9*ab);signed_proxy+=net;absolute_proxy+=ab;
+   patch=h::make_patch(p,patch.tris,patch.weight);
+   if(step==100||step==1000){
+    double drift=top_volume(patch.p)-initial;
+    check(std::isfinite(drift)&&absolute_proxy>0&&reused>0);
+    metric("cache_repeat_reused",step,reused);
+    metric("cache_repeat_exact_us",step,exact_us);
+    metric("cache_repeat_total_us",step,cache_us);
+    metric("cache_repeat_relative_error_max",step,max_error);
+    metric("cache_repeat_relative_bound_max",step,max_bound);
+    metric("cache_repeat_signed_proxy",step,signed_proxy);
+    metric("cache_repeat_absolute_proxy",step,absolute_proxy);
+    metric("cache_repeat_closed_volume_drift",step,drift);
+    metric("cache_repeat_volume_drift_relative",step,std::abs(drift)/absolute_proxy);
+   }
+  }
+ }
+ // Invalidation and newly entering support, partial mask updates, zero mask
+ // barriers, disconnected sheets, permutation (topology snapshot changes).
+ {
+  auto p=grid(8,false);h::GeodesicCache cache;
+  std::vector<double> pressure;for(auto v:p.p)pressure.push_back(1-v.x);
+  auto f=h::cached_geodesic_flux(cache,p,pressure,1);
+  check(!f.reused);
+  auto same=h::cached_geodesic_flux(cache,p,pressure,1);check(same.reused);
+  auto moved=p.p;for(auto& v:moved){v.x*=.99;v.y*=.99;}
+  auto scaled=h::make_patch(moved,p.tris,p.weight);
+  auto scaled_f=h::cached_geodesic_flux(cache,scaled,pressure,1);
+  check(scaled_f.reused);
+  auto exact=h::transport_flux(h::transport_stencil(scaled,1),pressure);
+  for(std::size_t i=0;i<exact.size();++i)check(std::abs(exact[i]-scaled_f.flux[i])<=scaled_f.error_bound[i]+1e-12);
+  scaled.weight[0]=.2;check(h::cached_geodesic_flux(cache,scaled,pressure,1).reused);
+  for(std::size_t i=0;i<scaled.p.size();++i)if(p.p[i].x==.5)scaled.weight[i]=0;
+  for(std::size_t i=0;i<pressure.size();++i)pressure[i]=p.p[i].x<.5?1:0;
+  auto masked=h::cached_geodesic_flux(cache,scaled,pressure,1);check(!masked.reused);
+  double leak=0;for(auto x:masked.flux)leak=std::max(leak,std::abs(x));
+  check(leak<1e-12);metric("cache_mask_leak",0,leak);
+  auto changed=scaled.p;for(auto& v:changed)v.x*=1.1;
+  auto distorted=h::make_patch(changed,scaled.tris,scaled.weight);
+  check(!h::cached_geodesic_flux(cache,distorted,pressure,1).reused);
+  std::reverse(distorted.tris.begin(),distorted.tris.end());
+  check(!h::cached_geodesic_flux(cache,distorted,pressure,1).reused);
+  check(!h::cached_geodesic_flux(cache,distorted,pressure,.8).reused);
+  std::vector<Vec3> q{{0,0,0},{.05,0,0},{0,.05,0},{0,0,.001},{.05,0,.001},{0,.05,.001}};
+  auto sheets=h::make_patch(q,{{0,1,2},{3,4,5}},std::vector<double>(6,1));
+  auto isolated=h::cached_geodesic_flux(cache,sheets,{1,1,1,0,0,0},1);
+  check(!isolated.reused);for(auto x:isolated.flux)check(std::abs(x)<1e-12);
+ }
  std::cout<<"hybrid foundation tests passed\n";
 }

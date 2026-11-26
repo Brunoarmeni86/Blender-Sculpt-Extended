@@ -209,6 +209,140 @@ inline std::vector<double> transport_flux(const TransportStencil& s,
  for(std::size_t i=0;i<h.size();++i)if(s.area[i]>0)h[i]/=s.area[i];
  return h;
 }
+// D11.5 opt-in distance cache. A fixed graph and edge length ratios
+// L <= new_length/old_length <= U imply L*d0 <= d <= U*d0 for every
+// shortest path, even if the shortest path itself changes. Cache candidates
+// out to reach/min_ratio to cover pairs newly entering the support.
+struct GeodesicCache {
+ struct Edge {std::size_t i,j;double length;};
+ struct Pair {std::size_t i,j;double distance;};
+ std::vector<Tri> tris;
+ std::vector<std::vector<std::size_t>> adj;
+ std::vector<unsigned char> allowed;
+ std::vector<Edge> edges;
+ std::vector<Pair> pairs;
+ double radius=0;
+ static constexpr double min_ratio=.98,max_ratio=1.02;
+};
+inline GeodesicCache build_geodesic_cache(const Patch& s,double radius){
+ if(!std::isfinite(radius)||radius<=0||!(radius*.5>0))throw std::invalid_argument("cache radius");
+ const double reach=radius*.5/GeodesicCache::min_ratio*(1+1e-12);
+ if(!std::isfinite(reach))throw std::invalid_argument("cache reach");
+ GeodesicCache out;out.radius=radius;out.tris=s.tris;out.adj=s.adj;
+ const auto n=s.p.size();out.allowed.resize(n);
+ struct Edge {std::size_t j;double length;};
+ std::vector<std::vector<Edge>> edges(n);
+ for(std::size_t i=0;i<n;++i)out.allowed[i]=s.weight[i]>0&&s.area[i]>0;
+ for(std::size_t i=0;i<n;++i)if(out.allowed[i])for(auto j:s.adj[i])if(out.allowed[j]){
+  double length=norm(s.p[i]-s.p[j]);
+  if(!std::isfinite(length))throw std::invalid_argument("cache edge");
+  edges[i].push_back({j,length});
+  if(i<j)out.edges.push_back({i,j,length});
+ }
+ using Q=std::pair<double,std::size_t>;
+ std::vector<Q> heap;heap.reserve(n);
+ std::vector<std::size_t> touched;touched.reserve(n);
+ std::vector<double> dist(n,std::numeric_limits<double>::infinity());
+ auto push=[&](Q q){heap.push_back(q);std::push_heap(heap.begin(),heap.end(),std::greater<Q>{});};
+ for(std::size_t i=0;i<n;++i)if(out.allowed[i]){
+  dist[i]=0;touched.push_back(i);push({0,i});
+  while(!heap.empty()){
+   std::pop_heap(heap.begin(),heap.end(),std::greater<Q>{});
+   auto [d,j]=heap.back();heap.pop_back();if(d!=dist[j])continue;
+   if(j>i)out.pairs.push_back({i,j,d});
+   for(auto e:edges[j]){
+    double next=d+e.length;
+    if(next<reach&&next<dist[e.j]){
+     if(!std::isfinite(dist[e.j]))touched.push_back(e.j);
+     dist[e.j]=next;push({next,e.j});
+    }
+   }
+  }
+  for(auto j:touched)dist[j]=std::numeric_limits<double>::infinity();
+  touched.clear();
+ }
+ return out;
+}
+inline bool geodesic_cache_ratios(const GeodesicCache& c,const Patch& s,double radius,
+ double& lo,double& hi){
+ if(c.radius!=radius||c.allowed.size()!=s.p.size()||c.tris!=s.tris||c.adj!=s.adj)return false;
+ for(std::size_t i=0;i<s.p.size();++i)
+  if(bool(c.allowed[i])!=(s.weight[i]>0&&s.area[i]>0))return false;
+ lo=std::numeric_limits<double>::infinity();hi=0;
+ for(auto e:c.edges){
+  double length=norm(s.p[e.i]-s.p[e.j]);
+  if(e.length==0){if(length!=0)return false;continue;}
+  double q=length/e.length;
+  if(!std::isfinite(q)||q<GeodesicCache::min_ratio||q>GeodesicCache::max_ratio)return false;
+  lo=std::min(lo,q);hi=std::max(hi,q);
+ }
+ if(hi==0){lo=hi=1;return true;}
+ // Pad the interval for floating point path accumulation. The analytical
+ // bound is in real arithmetic, not a directed-rounding interval library.
+ lo*=1-1e-12;hi*=1+1e-12;
+ return lo>=GeodesicCache::min_ratio&&hi<=GeodesicCache::max_ratio;
+}
+struct CachedFlux {
+ std::vector<double> flux,error_bound;
+ double relative_bound=0;
+ bool reused=false;
+};
+inline CachedFlux evaluate_geodesic_cache(const GeodesicCache& c,const Patch& s,
+ const std::vector<double>& pressure,double lo,double hi){
+ const auto n=s.p.size();const double reach=c.radius*.5,mid=lo+(hi-lo)*.5;
+ CachedFlux out;out.flux.resize(n);out.error_bound.resize(n);
+ std::vector<double> low(n),high(n),est(n);
+ for(std::size_t i=0;i<n;++i)if(c.allowed[i])low[i]=high[i]=est[i]=s.area[i];
+ auto kernel=[&](double d){double x=std::clamp(1-d/reach,0.0,1.0);return x*x*(3-2*x);};
+ auto add=[&](std::vector<double>& support,const GeodesicCache::Pair& e,double k){
+  support[e.i]+=s.area[e.j]*k;support[e.j]+=s.area[e.i]*k;
+ };
+ for(auto e:c.pairs){
+  add(low,e,kernel(e.distance*hi));add(high,e,kernel(e.distance*lo));add(est,e,kernel(e.distance*mid));
+ }
+ for(auto e:c.pairs){
+  auto i=e.i,j=e.j;
+  // Recompute current areas, fractional mask and normalization, not stale
+  // coefficients. All three coefficient estimates are symmetric.
+  double common=c.radius*.02*std::min(s.weight[i],s.weight[j])*s.area[i];
+  auto coeff=[&](const std::vector<double>& support,double k){
+   return common*(s.area[j]/std::max(support[i],support[j]))*k;
+  };
+  double a=coeff(high,kernel(e.distance*hi)),b=coeff(low,kernel(e.distance*lo));
+  double v=coeff(est,kernel(e.distance*mid));
+  double delta=std::clamp(pressure[i]-pressure[j],-1.0,1.0);
+  double f=v*delta,err=std::max(std::abs(v-a),std::abs(b-v))*std::abs(delta);
+  out.flux[i]-=f;out.flux[j]+=f;out.error_bound[i]+=err;out.error_bound[j]+=err;
+ }
+ double sq=0,esq=0;
+ for(std::size_t i=0;i<n;++i)if(s.area[i]>0){
+  out.flux[i]/=s.area[i];out.error_bound[i]/=s.area[i];
+  sq+=s.area[i]*out.flux[i]*out.flux[i];
+  esq+=s.area[i]*out.error_bound[i]*out.error_bound[i];
+ }
+ // ||exact|| >= ||estimate||-||error||, weighted by current area.
+ // Thus this is an upper bound on relative L2 error if denominator > 0.
+ double magnitude=std::sqrt(sq),error=std::sqrt(esq);
+ out.relative_bound=error==0?0:(magnitude>error?error/(magnitude-error):std::numeric_limits<double>::infinity());
+ return out;
+}
+inline CachedFlux cached_geodesic_flux(GeodesicCache& c,const Patch& s,
+ const std::vector<double>& pressure,double radius,double tolerance=.02){
+ if(pressure.size()!=s.p.size()||!std::isfinite(tolerance)||tolerance<0||tolerance>=1||
+    !std::isfinite(radius)||radius<=0||!(radius*.5>0))throw std::invalid_argument("cached flux input");
+ for(double x:pressure)if(!std::isfinite(x))throw std::invalid_argument("cache pressure");
+ double lo=1,hi=1;
+ if(geodesic_cache_ratios(c,s,radius,lo,hi)){
+  auto result=evaluate_geodesic_cache(c,s,pressure,lo,hi);
+  if(result.relative_bound<=tolerance){result.reused=true;return result;}
+ }
+ // No uncertain result escapes. Build from the current geometry.
+ // When evaluated with lo=hi=1, this is the reference distance kernel.
+ auto next=build_geodesic_cache(s,radius);
+ auto result=evaluate_geodesic_cache(next,s,pressure,1,1);
+ c=std::move(next);
+ return result;
+}
 // D11.5 experimental aggregated quadrature; exact transport remains default.
 // Each aggregate is connected within a spatial cell, and representative
 // distances use the ORIGINAL allowed graph (no coarse-graph shortcuts).
