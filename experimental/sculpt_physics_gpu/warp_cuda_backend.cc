@@ -707,7 +707,7 @@ class ArtisticPressureCuda final : public artistic_v31d1110::PressureLocalBacken
     capacity_=capacity;
     return true;
   }
-  template<class T> bool upload(std::size_t i,const std::vector<T>& v){
+  template<class T> bool upload(std::size_t i,std::vector<T>& v){
     return wp_memcpy_h2d(context_,device_[i],v.data(),sizeof(T)*v.size());
   }
  public:
