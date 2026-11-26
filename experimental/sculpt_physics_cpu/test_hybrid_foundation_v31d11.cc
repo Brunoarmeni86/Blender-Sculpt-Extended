@@ -3,7 +3,7 @@
 #include <iostream>
 using namespace sculpt_physics;
 namespace h=hybrid_v31d11;
-void check(bool x){if(!x)std::exit(1);}
+#define check(x) do { if(!(x)) { std::cerr << "failure at line " << __LINE__ << ": " << #x << "\n"; std::exit(1); } } while(false)
 int main(){
  std::vector<Vec3> p{{0,0,0},{1,0,0},{0,1,0},{1,1,0},{3,0,0},{4,0,0},{3,1,0}};
  std::vector<h::Tri> t{{0,1,2},{1,3,2},{4,5,6}};
@@ -46,5 +46,24 @@ int main(){
  try{h::optimize(s,desired);}
  catch(const std::invalid_argument&){rejected=true;}
  check(rejected);
+ // Reindex an irregular patch, preserving triangle winding and physical inputs.
+ std::vector<Vec3> q{{0,0,0},{.3,0,0},{0,1,0},{1,1,.1}};
+ std::vector<h::Tri> qt{{0,1,2},{1,3,2}};
+ std::vector<double> w{1,.7,.3,.1};
+ auto original=h::make_patch(q,qt,w);
+ std::vector<std::size_t> perm{2,0,3,1};
+ auto qp=q;auto wp=w;auto tp=qt;
+ for(std::size_t i=0;i<q.size();++i){qp[perm[i]]=q[i];wp[perm[i]]=w[i];}
+ for(auto& tri:tp)for(auto& i:tri)i=perm[i];
+ auto reordered=h::make_patch(qp,tp,wp);
+ h::contact(original,0,4);h::contact(reordered,perm[0],4);
+ auto fa=h::flux(original,original.weight,1);
+ auto fb=h::flux(reordered,reordered.weight,1);
+ for(std::size_t i=0;i<q.size();++i)check(std::abs(fa[i]-fb[perm[i]])<1e-12);
+ for(auto tool:{h::Tool::Deposit,h::Tool::Press,h::Tool::Compact,h::Tool::Compress,h::Tool::Scrape,h::Tool::Push,h::Tool::Smear,h::Tool::Melt,h::Tool::Grab}){
+  auto ua=h::optimize(original,h::target(original,tool,{},Vec3{1,0,0},1,.05));
+  auto ub=h::optimize(reordered,h::target(reordered,tool,{},Vec3{1,0,0},1,.05));
+  for(std::size_t i=0;i<q.size();++i)check(h::norm(ua[i]-ub[perm[i]])<1e-10);
+ }
  std::cout<<"hybrid foundation tests passed\n";
 }
