@@ -5,9 +5,21 @@ namespace sculpt_physics::artistic_v31d1110 {
 namespace h=hybrid_v31d11;
 // Equal/opposite area-weighted transport proposal; not exact mesh volume.
 inline std::vector<double> pair_transport(const h::Patch& s,
- const std::vector<double>& drive,double radius,double dose) {
- if(!std::isfinite(dose)||dose<0)throw std::invalid_argument("transport dose");
- auto flux=h::transport_flux(h::transport_stencil(s,radius),drive);
+ const std::vector<double>& drive,double radius,double dose,
+ h::GeodesicCache* cache=nullptr) {
+ if(!std::isfinite(dose)||dose<0||!std::isfinite(radius)||radius<=0||
+    drive.size()!=s.p.size())throw std::invalid_argument("transport inputs");
+ bool have=false,nonuniform=false;
+ double first=0.;
+ for(std::size_t i=0;i<drive.size();++i){
+  if(!std::isfinite(drive[i]))throw std::invalid_argument("transport drive");
+  if(s.weight[i]<=0||s.area[i]<=0)continue;
+  if(!have){first=drive[i];have=true;}
+  else if(drive[i]!=first)nonuniform=true;
+ }
+ if(dose==0||!nonuniform)return std::vector<double>(s.p.size());
+ auto flux=cache?h::cached_geodesic_flux(*cache,s,drive,radius).flux:
+                  h::transport_flux(h::transport_stencil(s,radius),drive);
  for(auto& x:flux)x*=dose/radius;
  return flux;
 }
@@ -17,7 +29,7 @@ inline std::vector<Vec3> geometry_target(const h::Patch& s, Action action,
  Material material, const std::vector<double>& native_deposit,
  const std::vector<double>& compaction, Vec3 axis, Vec3 center,
  double dose_length,double pressure,double transport_radius=0,
- const std::vector<double>* exposure=nullptr) {
+ const std::vector<double>* exposure=nullptr,h::GeodesicCache* cache=nullptr) {
  const auto n=s.p.size();
  if(native_deposit.size()!=n||compaction.size()!=n||(exposure&&exposure->size()!=n)||
  !std::isfinite(h::norm(axis))||!std::isfinite(h::norm(center)))
@@ -47,7 +59,7 @@ inline std::vector<Vec3> geometry_target(const h::Patch& s, Action action,
  if(!std::isfinite(transport_radius)||transport_radius<0)
   throw std::invalid_argument("transport radius");
  if(transport_radius>0&&dose_length>0){
-  auto flux=pair_transport(s,transport_drive,transport_radius,dose_length);
+  auto flux=pair_transport(s,transport_drive,transport_radius,dose_length,cache);
   for(std::size_t i=0;i<n;++i)desired[i]+=s.normal[i]*flux[i];
  }
  return h::optimize(s,std::move(desired),transport_radius>0);
