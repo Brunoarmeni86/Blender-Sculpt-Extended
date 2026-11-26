@@ -163,5 +163,90 @@ int main(){
   bool bad=false;try{h::swept_contact(patch,{cp.size()},cp[0],cp[1],.5,2,visible,permit);}
   catch(const std::invalid_argument&){bad=true;}check(bad);
  }
+ // D11.4: fixed physical unit square, 1x/2x/4x/8x linear resolution.
+ // Density means samples per axis here (triangle count scales quadratically).
+ auto grid=[](int cells,bool pin){
+  std::vector<Vec3> p;std::vector<h::Tri> t;std::vector<double> w;
+  for(int y=0;y<=cells;++y)for(int x=0;x<=cells;++x){
+   p.push_back({double(x)/cells,double(y)/cells,1});
+   w.push_back(pin&&(x==0||y==0||x==cells||y==cells)?0.:1.);
+  }
+  for(int y=0;y<cells;++y)for(int x=0;x<cells;++x){
+   std::size_t a=std::size_t(y)*(cells+1)+x,b=a+1,c=a+cells+1,d=c+1;
+   t.push_back({a,b,c});t.push_back({b,d,c});
+  }
+  return h::make_patch(p,t,w);
+ };
+ for(int density:{1,2,4,8}){
+  auto patch=grid(4*density,false);
+  std::vector<double> pressure;for(auto v:patch.p)pressure.push_back(.5+.5*std::cos(3.141592653589793*v.x));
+  auto start=std::chrono::steady_clock::now();
+  auto stencil=h::transport_stencil(patch,1);
+  auto end=std::chrono::steady_clock::now();
+  auto f=h::transport_flux(stencil,pressure);
+  auto old=h::flux(patch,pressure,1);
+  double net=0,absolute=0,old_abs=0,moment=0;
+  for(std::size_t i=0;i<f.size();++i){
+   check(std::isfinite(f[i])&&std::abs(f[i])<=.02+1e-12);
+   net+=patch.area[i]*f[i];absolute+=patch.area[i]*std::abs(f[i]);
+   old_abs+=patch.area[i]*std::abs(old[i]);moment+=patch.area[i]*patch.p[i].x*f[i];
+  }
+  check(std::abs(net)<1e-12&&absolute>0&&moment>0);
+  auto reverse=patch.p;auto rt=patch.tris;auto rw=patch.weight;auto rp=pressure;
+  std::reverse(reverse.begin(),reverse.end());std::reverse(rw.begin(),rw.end());std::reverse(rp.begin(),rp.end());
+  for(auto& tri:rt)for(auto& i:tri)i=reverse.size()-1-i;
+  std::reverse(rt.begin(),rt.end());
+  auto back=h::transport_flux(h::transport_stencil(h::make_patch(reverse,rt,rw),1),rp);
+  double permutation=0;for(std::size_t i=0;i<f.size();++i)permutation=std::max(permutation,std::abs(f[i]-back[f.size()-1-i]));
+  check(permutation<1e-12);
+  metric("density_vertices",density,double(f.size()));
+  metric("density_pairs",density,double(stencil.pairs.size()));
+  metric("density_legacy_absolute_proxy",density,old_abs);
+  metric("density_nonlocal_absolute_proxy",density,absolute);
+  metric("density_nonlocal_net",density,net);
+  metric("density_nonlocal_x_moment",density,moment);
+  metric("density_permutation_max",density,permutation);
+  metric("density_stencil_build_us",density,std::chrono::duration<double,std::micro>(end-start).count());
+ }
+ // Rebuild on evolving geometry, apply the accepted displacement only.
+ // Closed unit prism with fixed bottom and sides: difference of signed
+ // tetrahedron sums on the moving top equals actual enclosed volume change.
+ {
+  auto patch=grid(4,true);
+  const auto original=patch.p;
+  auto volume_top=[&](const std::vector<Vec3>& pos){
+   double v=0;for(auto tri:patch.tris)v+=h::dot(pos[tri[0]],h::cross(pos[tri[1]],pos[tri[2]]))/6;
+   return v;
+  };
+  const double initial_volume_top=volume_top(original);
+  double cumulative_proxy=0,cumulative_abs=0;
+  auto start=std::chrono::steady_clock::now();
+  for(int step=1;step<=1000;++step){
+   std::vector<double> pressure;for(auto v:original)pressure.push_back(1-v.x);
+   auto f=h::transport_flux(h::transport_stencil(patch,1),pressure);
+   std::vector<Vec3> desired(f.size());for(std::size_t i=0;i<f.size();++i)desired[i]=patch.normal[i]*(.02*f[i]);
+   auto accepted=h::optimize(patch,desired,true);
+   check(gradient_motion_scale_v31c(patch.p,patch.tris,accepted)>=1-1e-10);
+   double net=0,absolute=0;
+   for(std::size_t i=0;i<f.size();++i){
+    if(patch.weight[i]==0)check(h::norm(accepted[i])==0);
+    double v=patch.area[i]*h::dot(patch.normal[i],accepted[i]);
+    net+=v;absolute+=std::abs(v);
+   }
+   check(std::abs(net)<=1e-12+1e-9*absolute);
+   cumulative_proxy+=net;cumulative_abs+=absolute;
+   auto pos=patch.p;for(std::size_t i=0;i<pos.size();++i)pos[i]+=accepted[i];
+   patch=h::make_patch(pos,patch.tris,patch.weight);
+   if(step==100||step==1000){
+    double drift=volume_top(patch.p)-initial_volume_top;
+    check(std::isfinite(drift)&&cumulative_abs>0);
+    metric("repeat_cumulative_signed_proxy",step,cumulative_proxy);
+    metric("repeat_cumulative_absolute_proxy",step,cumulative_abs);
+    metric("repeat_closed_volume_drift",step,drift);
+    metric("repeat_volume_drift_relative",step,std::abs(drift)/cumulative_abs);
+    metric("repeat_elapsed_ms",step,std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+   }
+  }
+ }
  std::cout<<"hybrid foundation tests passed\n";
 }

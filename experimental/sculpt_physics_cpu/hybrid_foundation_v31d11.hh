@@ -127,6 +127,78 @@ inline std::vector<double> flux(const Patch& s,const std::vector<double>& pressu
  for(std::size_t i=0;i<h.size();++i)if(s.area[i]>0)h[i]/=s.area[i];
  return h;
 }
+// D11.4: experimental finite-radius graph transport, mass-lumped
+// surface quadrature. Coefficients have units of swept volume (L^3).
+// A fixed physical support avoids shrinking transport to one edge upon
+// refinement. Graph distance is approximate; not actual mass or volume.
+// Rebuild after accepted geometry/contact changes; no host caching yet.
+struct TransportStencil {
+ struct Pair {std::size_t i,j;double coefficient;};
+ std::size_t size=0;
+ std::vector<double> area;
+ std::vector<Pair> pairs;
+};
+inline TransportStencil transport_stencil(const Patch& s,double radius){
+ if(!std::isfinite(radius)||radius<=0)throw std::invalid_argument("transport radius");
+ TransportStencil out;out.size=s.p.size();out.area=s.area;
+ const double reach=radius*.5;
+ if(!(reach>0))throw std::invalid_argument("transport reach");
+ const std::size_t n=out.size;
+ struct Raw {std::size_t i,j;double kernel;};
+ std::vector<Raw> raw;
+ std::vector<double> support(n),dist(n,std::numeric_limits<double>::infinity());
+ std::vector<std::size_t> touched;
+ using Q=std::pair<double,std::size_t>;
+ auto allowed=[&](std::size_t i){return s.weight[i]>0&&s.area[i]>0;};
+ for(std::size_t i=0;i<n;++i){
+  if(!allowed(i))continue;
+  support[i]+=s.area[i]; // self quadrature, no self transfer
+  std::priority_queue<Q,std::vector<Q>,std::greater<Q>> q;
+  dist[i]=0;touched.push_back(i);q.push({0,i});
+  while(!q.empty()){
+   auto [d,j]=q.top();q.pop();if(d!=dist[j])continue;
+   if(j>i){
+    double x=1-d/reach;
+    double k=x*x*(3-2*x);
+    raw.push_back({i,j,k});
+    support[i]+=s.area[j]*k;
+    support[j]+=s.area[i]*k;
+   }
+   for(auto k:s.adj[j])if(allowed(k)){
+    double next=d+norm(s.p[k]-s.p[j]);
+    if(next<reach&&next<dist[k]){
+     if(!std::isfinite(dist[k]))touched.push_back(k);
+     dist[k]=next;q.push({next,k});
+    }
+   }
+  }
+  for(auto j:touched)dist[j]=std::numeric_limits<double>::infinity();
+  touched.clear();
+ }
+ for(auto e:raw){
+  const auto i=e.i,j=e.j;
+  double c=radius*.02*std::min(s.weight[i],s.weight[j])*s.area[i]*
+           (s.area[j]/std::max(support[i],support[j]))*e.kernel;
+  if(!std::isfinite(c))throw std::overflow_error("transport coefficient");
+  out.pairs.push_back({i,j,c});
+ }
+ return out;
+}
+// Each pair contributes equal and opposite amounts simultaneously.
+// max(row supports) ensures gross incident transfer <= area*weight*radius*.02
+// for bounded pressure differences, without index-ordered capacity spending.
+inline std::vector<double> transport_flux(const TransportStencil& s,
+ const std::vector<double>& pressure){
+ if(pressure.size()!=s.size)throw std::invalid_argument("transport pressure size");
+ for(double x:pressure)if(!std::isfinite(x))throw std::invalid_argument("transport pressure");
+ std::vector<double> h(s.size);
+ for(auto e:s.pairs){
+  const double f=std::clamp(pressure[e.i]-pressure[e.j],-1.0,1.0)*e.coefficient;
+  h[e.i]-=f;h[e.j]+=f;
+ }
+ for(std::size_t i=0;i<h.size();++i)if(s.area[i]>0)h[i]/=s.area[i];
+ return h;
+}
 enum class Tool {Deposit,Press,Compact,Compress,Scrape,Push,Smear,Melt,Grab};
 struct Material {double mobility=.55,compressibility=.2,viscosity=.4;};
 // D11: stateless reference laws, no persistent plastic state yet.
