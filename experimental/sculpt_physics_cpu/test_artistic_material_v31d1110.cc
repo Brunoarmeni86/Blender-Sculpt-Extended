@@ -1,5 +1,5 @@
 #include "artistic_geometry_v31d1110.hh"
-#include "artistic_stroke_v31d1111.hh"
+#include "artistic_swept_v31d1111.hh"
 #include <cstdlib>
 #include <limits>
 using namespace sculpt_physics::artistic_v31d1110;
@@ -63,6 +63,15 @@ int main(){
     {0,0,0},{0,.8,0},{0,0,1},{.3,.3,0},.01,1,4);
  check(h::norm(transported[2])==0);
  for(auto v:transported)check(std::isfinite(h::norm(v)));
+ auto sweep=swept_exposure(patch,{0,1},{0,0,0},{1,0,0},.2,2,1,1,1,
+    {1,1,1},{1,1,0});
+ check(sweep.moving[0]>0 && sweep.moving[1]>0 && sweep.moving[2]==0);
+ auto dwell=swept_exposure(patch,{0},{0,0,0},{0,0,0},.2,2,2,.5,.5,
+    {1,1,1},{1,1,0});
+ check(dwell.moving[0]==0 && std::abs(dwell.time[0]-1)<1e-12);
+ auto blocked=swept_exposure(patch,{0,1},{0,0,0},{1,0,0},.2,2,1,1,1,
+    {1,0,1},{1,1,0});
+ check(blocked.moving[1]==0);
  bool rejected=false;
  try{evaluate(Material::Mud,std::numeric_limits<double>::quiet_NaN(),0,1);}
  catch(const std::invalid_argument&){rejected=true;}
