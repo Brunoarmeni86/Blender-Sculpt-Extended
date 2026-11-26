@@ -109,6 +109,20 @@ int main(){
   }
   check(error(hybrid)<=error(local)+1e-12);
   check(error(hybrid)<error(global));
+  // A merely equal D10A fallback is no longer sufficient on this fixture.
+  check(error(hybrid)<.95*error(local));
+  check(hybrid[5].z>=local[5].z-1e-12);
+  // Reorder both vertices and face list, preserving winding and support.
+  auto rp=sp;auto rt=st;auto rr=request;auto rw=patch.weight;
+  std::reverse(rp.begin(),rp.end());std::reverse(rr.begin(),rr.end());std::reverse(rw.begin(),rw.end());
+  for(auto& tri:rt)for(auto& i:tri)i=sp.size()-1-i;
+  std::reverse(rt.begin(),rt.end());
+  auto reversed=h::optimize(h::make_patch(rp,rt,rw),rr);
+  double permutation_error=0;
+  for(std::size_t i=0;i<sp.size();++i)permutation_error=std::max(permutation_error,h::norm(hybrid[i]-reversed[sp.size()-1-i]));
+  metric("stress_permutation_max",shape,permutation_error);
+  check(permutation_error<1e-7);
+
   std::size_t changed=0;for(std::size_t i=0;i<request.size();++i)if(h::norm(hybrid[i]-request[i])>1e-12)++changed;
   check(changed>0);
   metric("stress_initial_gradient_scale",shape,initial);

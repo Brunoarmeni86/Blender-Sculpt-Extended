@@ -120,6 +120,48 @@ inline std::vector<Vec3> optimize(const Patch& s,std::vector<Vec3> desired,bool 
  auto local=desired;
  limit_local_gradient_v31d10a(s.p,s.tris,local);
  if((!preserve_flux||std::abs(volume(local)-reference)<=proxy_tol)&&error(local)<e){e=error(local);best=std::move(local);}
+ // D11.2: recover target motion from a feasible field with simultaneous
+ // incident-face constrained vertex steps. A triangle sees at most three
+ // independent proposals; averaging with 1/3 preserves the convex gradient
+ // bound in exact arithmetic. Revalidate projected area and gradient globally.
+ // This is not a collision solver; signed-proxy mode retains the old path.
+ if(e==0)return best;
+ if(!preserve_flux){
+  std::vector<std::vector<std::size_t>> incident(s.p.size());
+  for(std::size_t k=0;k<s.tris.size();++k)for(auto i:s.tris[k])incident[i].push_back(k);
+  const std::vector<Tri> one{{0,1,2}};
+  std::vector<Vec3> q(3),m(3);
+  for(int pass=0;pass<16;++pass){
+   auto trial=best;
+   for(std::size_t i=0;i<best.size();++i){
+    if(s.weight[i]<=0||incident[i].empty())continue;
+    const Vec3 d=desired[i]-best[i];
+    if(norm(d)<=1e-12*std::max(1e-12,norm(desired[i])))continue;
+    auto feasible=[&](double a){
+     for(auto k:incident[i]){
+      const auto& t=s.tris[k];
+      ContactTriangle ct{};
+      for(int j=0;j<3;++j){
+       q[j]=s.p[t[j]];m[j]=best[t[j]];
+       if(t[j]==i)m[j]+=d*a;
+       ct.position[j]=q[j];ct.motion[j]=m[j];
+      }
+      if(gradient_motion_scale_v31c(q,one,m)<1.0||contact_triangle_scale(ct)<1.0)return false;
+     }return true;
+    };
+    double lo=0,hi=1;
+    if(feasible(1))lo=1;
+    else for(int it=0;it<22;++it){double mid=(lo+hi)*.5;if(feasible(mid))lo=mid;else hi=mid;}
+    trial[i]+=d*(lo/3.0);
+   }
+   auto candidate=safe(std::move(trial));
+   double x=error(candidate);
+   if(!(x<e))break;
+   double improvement=e-x;
+   best=std::move(candidate);e=x;
+   if(improvement<=1e-12*e)break;
+  }
+ }
  // Preserve the feasible baseline signed normal-area proxy, not exact volume.
  auto balance=[&](std::vector<Vec3>& v){
   double a=0;for(std::size_t i=0;i<v.size();++i)if(s.weight[i]>0)a+=s.area[i]*s.weight[i]*dot(s.normal[i],s.normal[i]);
