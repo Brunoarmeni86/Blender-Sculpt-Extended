@@ -694,6 +694,9 @@ int main(){
   check(c.seed<n);
   for(std::size_t i=n;i<p.size();++i)check(c.weight[i]==0);
   check(c.weight[4]>0&&c.weight[10]>0);
+  auto wall_hit=h::feature_contact(patch,{-.02,0,.1},{0,0,1},{-.02,0,.1},.12);
+  check(wall_hit.seed<n);
+  check(wall_hit.weight[4]>0);
   metric("feature_vertical_weight",0,c.weight[4]);
   auto full=patch;for(std::size_t i=n;i<p.size();++i)full.weight[i]=0;
   h::PlasticState plastic(p.size());

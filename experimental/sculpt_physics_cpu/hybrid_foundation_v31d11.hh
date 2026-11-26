@@ -160,7 +160,9 @@ inline FeatureContact feature_contact(const Patch& s,Vec3 center,Vec3 axis,Vec3 
   double x=std::clamp((alignment+.025)/.025,0.,1.);
   permission[i]=x*x*(3-2*x)*(.6+.4*std::clamp(alignment/.3,0.,1.));
   double d=norm(s.p[i]-center);
-  if(alignment>.15&&d<nearest){nearest=d;out.seed=i;}
+  // A thin wall can be the entire hit region. Its near-vertical vertices
+  // must be allowed to seed the same connected contact they can receive.
+  if(permission[i]>0&&d<nearest){nearest=d;out.seed=i;}
  }
  if(out.seed==std::numeric_limits<std::size_t>::max()||nearest>=.65*radius){
   out.seed=std::numeric_limits<std::size_t>::max();return out;
