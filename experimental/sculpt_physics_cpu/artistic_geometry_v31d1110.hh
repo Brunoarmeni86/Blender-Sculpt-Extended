@@ -16,9 +16,10 @@ inline std::vector<double> pair_transport(const h::Patch& s,
 inline std::vector<Vec3> geometry_target(const h::Patch& s, Action action,
  Material material, const std::vector<double>& native_deposit,
  const std::vector<double>& compaction, Vec3 axis, Vec3 center,
- double dose_length,double pressure,double transport_radius=0) {
+ double dose_length,double pressure,double transport_radius=0,
+ const std::vector<double>* exposure=nullptr) {
  const auto n=s.p.size();
- if(native_deposit.size()!=n||compaction.size()!=n||
+ if(native_deposit.size()!=n||compaction.size()!=n||(exposure&&exposure->size()!=n)||
  !std::isfinite(h::norm(axis))||!std::isfinite(h::norm(center)))
   throw std::invalid_argument("artistic patch inputs");
  axis=h::unit(axis);
@@ -28,7 +29,8 @@ inline std::vector<Vec3> geometry_target(const h::Patch& s, Action action,
   if(s.weight[i]<=0)continue;
   const auto normal=s.normal[i];
   const auto tangent=axis-normal*h::dot(axis,normal);
-  auto t=target(action,material,{native_deposit[i],dose_length*s.weight[i],
+  const double local_dose=exposure?(*exposure)[i]:dose_length*s.weight[i];
+  auto t=target(action,material,{native_deposit[i],local_dose,
                                  pressure,compaction[i],std::abs(h::dot(axis,h::unit(tangent)))});
   if(dose_length>0)transport_drive[i]=t.transport/dose_length;
   auto radial=center-s.p[i];radial=radial-normal*h::dot(radial,normal);
