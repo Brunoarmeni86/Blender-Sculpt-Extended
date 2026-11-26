@@ -515,13 +515,21 @@ inline bool try_apply(const Sculpt &sd,
 
   MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
   const Span<float3> current=position_data.eval;
+  // Native clip may snap zero translations on a mirror plane; preserve the
+  // established full-leaf path in that case. Ordinary mesh writes use
+  // actual unique vertex IDs with the same PositionDeformData/Undo writer.
   const bool sparse_nodes=conservative_clay && autonomous &&
+      cache.mirror_modifier_clip.flag==0 &&
       stroke_option_v31d5("BLENDER_SCULPT_D11_FAST");
   struct PreparedNode {
     int id;
+    Vector<int> vertices;
     Vector<float3> translations;
   };
   std::vector<PreparedNode> editor_writes;
+  const auto write_vertices=[&](const PreparedNode& node)->Span<int>{
+    return sparse_nodes?node.vertices.as_span():nodes[node.id].verts();
+  };
   bke::SpanAttributeWriter<float> plastic_writer;
   Vector<int> plastic_ids;
   Vector<float> plastic_before,plastic_after;
@@ -879,26 +887,29 @@ inline bool try_apply(const Sculpt &sd,
       PreparedNode node;
       node.id=ni;
       const Span<int> verts=nodes[ni].verts();
-      // Do not stage a leaf with no requested changes. Keep the existing
-      // full-leaf clipping and write contract for all touched leaves.
       if(sparse_nodes){
-        bool has_changes=false;
-        for(int vi:verts)if(changes.find(std::size_t(vi))!=changes.end() &&
-                            covered.find(std::size_t(vi))==covered.end()){
-          has_changes=true;break;
+        // Scan only the already supplied native Undo nodes. Do not allocate
+        // a dense translation array, snapshot, or deform untouched vertices.
+        for(int vi:verts){
+          const auto it=changes.find(std::size_t(vi));
+          if(it==changes.end() || !covered.insert(std::size_t(vi)).second)continue;
+          node.vertices.append(vi);
+          node.translations.append(it->second);
         }
-        if(!has_changes)return;
+        if(node.vertices.is_empty())return;
+      }else{
+        node.translations.resize(verts.size());
+        for(const int i:verts.index_range()){
+          const std::size_t vi=std::size_t(verts[i]);
+          const auto it=changes.find(vi);
+          const bool first=it!=changes.end() && covered.insert(vi).second;
+          node.translations[i]=first?it->second:float3(0.0f);
+        }
       }
-      node.translations.resize(verts.size());
-      for (const int i : verts.index_range()) {
-        const std::size_t vi=std::size_t(verts[i]);
-        const auto it=changes.find(vi);
-        const bool first=it!=changes.end() && covered.insert(vi).second;
-        node.translations[i]=first ? it->second : float3(0.0f);
-      }
+      const Span<int> ids=write_vertices(node);
       const Vector<float3> before_clip=node.translations;
-      clip_and_lock_translations(sd,ss,current,verts,node.translations);
-      for (const int i : verts.index_range()) {
+      clip_and_lock_translations(sd,ss,current,ids,node.translations);
+      for (const int i : ids.index_range()) {
         const float3 wanted=before_clip[i];
         const float3 got=node.translations[i];
         // A zero translation must remain exactly zero, even if native
@@ -927,7 +938,7 @@ inline bool try_apply(const Sculpt &sd,
       // Record only vertices actually about to move, before any editor write.
       // This also covers tiny corrections produced by native clipping.
       for (const PreparedNode &node : editor_writes) {
-        const Span<int> verts=nodes[node.id].verts();
+        const Span<int> verts=write_vertices(node);
         for (const int i : verts.index_range()) {
           const float3 t=node.translations[i];
           if (t.x!=0.0f || t.y!=0.0f || t.z!=0.0f) {
@@ -949,7 +960,7 @@ inline bool try_apply(const Sculpt &sd,
       const double len=std::hypot(ax.x,ax.y,ax.z);
       if(len<=1e-12)throw std::runtime_error("Invalid V29 plastic axis");
       for(const auto &node:editor_writes){
-        const Span<int> verts=nodes[node.id].verts();
+        const Span<int> verts=write_vertices(node);
         for(const int i:verts.index_range()){
           const auto &v=node.translations[i];
           const double normal=(ax.x*v.x+ax.y*v.y+ax.z*v.z)/len;
@@ -985,7 +996,7 @@ inline bool try_apply(const Sculpt &sd,
   std::size_t moved_v30c=0,staged_v30c=0;
   for (PreparedNode &node : editor_writes) {
     if(profile && overlap_v30c_requested()){
-      const Span<int> ids=nodes[node.id].verts();
+      const Span<int> ids=write_vertices(node);
       for(const int i:ids.index_range()){
         const float3 p=current[ids[i]],q=p+node.translations[i];
         ++staged_v30c;
@@ -993,16 +1004,23 @@ inline bool try_apply(const Sculpt &sd,
       }
     }
     bke::pbvh::MeshNode &pbvh_node=nodes[node.id];
+    const Span<int> ids=write_vertices(node);
     Vector<float3> before_v31d5;
     if(diag_v31d5){
-      before_v31d5.resize(pbvh_node.verts().size());
-      for(const int i:pbvh_node.verts().index_range())before_v31d5[i]=current[pbvh_node.verts()[i]];
+      before_v31d5.resize(ids.size());
+      for(const int i:ids.index_range())before_v31d5[i]=current[ids[i]];
     }
-    position_data.deform(node.translations,pbvh_node.verts());
-    if(diag_v31d5)for(const int i:pbvh_node.verts().index_range())
-      written_v31d5+=double(math::length(position_data.eval[pbvh_node.verts()[i]]-before_v31d5[i]));
-    bke::pbvh::update_node_bounds_mesh(position_data.eval,pbvh_node);
+    position_data.deform(node.translations,ids);
+    if(diag_v31d5)for(const int i:ids.index_range())
+      written_v31d5+=double(math::length(position_data.eval[ids[i]]-before_v31d5[i]));
+    if(!sparse_nodes)bke::pbvh::update_node_bounds_mesh(position_data.eval,pbvh_node);
   }
+  // Shared boundary vertices may be owned by a different staged leaf.
+  // Refresh original Undo-region bounds after all sparse writes, even for
+  // leaves with no unique writes; keep the original PBVH invalidation mask.
+  if(sparse_nodes)node_mask.foreach_index([&](const int ni){
+    bke::pbvh::update_node_bounds_mesh(position_data.eval,nodes[ni]);
+  });
   if(plastic_writer){
     for(const int i:plastic_ids.index_range())plastic_writer.span[plastic_ids[i]]=plastic_after[i];
     plastic_writer.finish();
