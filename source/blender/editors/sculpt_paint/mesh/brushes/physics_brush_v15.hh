@@ -1168,6 +1168,12 @@ inline bool d11_preview_target(
   const bool pressure_tool=dab.action==ClaySurfaceAction::Press ||
       dab.action==ClaySurfaceAction::Compress || dab.action==ClaySurfaceAction::Compact;
   const bool feature=direct || (d11_feature_requested() && (!artistic_enabled || pressure_tool));
+  const bool relief_tool=dab.action==ClaySurfaceAction::Push ||
+      dab.action==ClaySurfaceAction::Smear || dab.action==ClaySurfaceAction::Gather ||
+      dab.action==ClaySurfaceAction::Melt;
+  // Brush-scale proxy avoids the pressure tools' all-source geodesic graph.
+  // Larger budget is opt-in and still requires runtime timing validation.
+  const std::size_t active_budget=direct && relief_tool?4096:1024;
   if((!feature && result.coverage_weights_v31d9.size()!=vertices.size()) ||
      result.displacement.size()!=vertices.size()){
     if(report)std::fprintf(stderr,"[D11.6] legacy fallback: missing contact weights\n");
@@ -1194,7 +1200,7 @@ inline bool d11_preview_target(
     w.push_back(std::clamp(weight,0.,1.));
     if(w.back()>0)++active;
   }
-  if(active==0 || (!feature && active>1024) || vertices.size()>8192){
+  if(active==0 || (!feature && active>active_budget) || vertices.size()>8192){
     if(report)std::fprintf(stderr,"[D11.6] legacy fallback: active=%zu patch=%zu (preview budget)\n",active,vertices.size());
     return false;
   }
@@ -1212,7 +1218,7 @@ inline bool d11_preview_target(
         if(h::norm(result.displacement[i])<=1e-15)++recovered_contact;
         if(std::abs(h::dot(patch.normal[i],h::unit(dab.axis)))<.15)++vertical;
       }
-      if(active==0 || active>1024){
+      if(active==0 || active>active_budget){
         if(report)std::fprintf(stderr,"[D11.7] legacy fallback: feature active=%zu outside preview budget\n",active);
         return false;
       }
