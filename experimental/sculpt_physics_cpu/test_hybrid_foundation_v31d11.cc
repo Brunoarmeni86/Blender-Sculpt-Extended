@@ -7,6 +7,54 @@
 using namespace sculpt_physics;
 namespace h=hybrid_v31d11;
 #define check(x) do { if(!(x)) { std::cerr << "failure at line " << __LINE__ << ": " << #x << "\n"; std::exit(1); } } while(false)
+// Frozen D11.4 builder for same-run numerical and timing A/B.
+inline h::TransportStencil reference_stencil(const h::Patch& s,double radius){
+ if(!std::isfinite(radius)||radius<=0)throw std::invalid_argument("transport radius");
+ h::TransportStencil out;out.size=s.p.size();out.area=s.area;
+ const double reach=radius*.5;
+ if(!(reach>0))throw std::invalid_argument("transport reach");
+ const std::size_t n=out.size;
+ struct Raw {std::size_t i,j;double kernel;};
+ std::vector<Raw> raw;
+ std::vector<double> support(n),dist(n,std::numeric_limits<double>::infinity());
+ std::vector<std::size_t> touched;
+ using Q=std::pair<double,std::size_t>;
+ auto allowed=[&](std::size_t i){return s.weight[i]>0&&s.area[i]>0;};
+ for(std::size_t i=0;i<n;++i){
+  if(!allowed(i))continue;
+  support[i]+=s.area[i]; // self quadrature, no self transfer
+  std::priority_queue<Q,std::vector<Q>,std::greater<Q>> q;
+  dist[i]=0;touched.push_back(i);q.push({0,i});
+  while(!q.empty()){
+   auto [d,j]=q.top();q.pop();if(d!=dist[j])continue;
+   if(j>i){
+    double x=1-d/reach;
+    double k=x*x*(3-2*x);
+    raw.push_back({i,j,k});
+    support[i]+=s.area[j]*k;
+    support[j]+=s.area[i]*k;
+   }
+   for(auto k:s.adj[j])if(allowed(k)){
+    double next=d+h::norm(s.p[k]-s.p[j]);
+    if(next<reach&&next<dist[k]){
+     if(!std::isfinite(dist[k]))touched.push_back(k);
+     dist[k]=next;q.push({next,k});
+    }
+   }
+  }
+  for(auto j:touched)dist[j]=std::numeric_limits<double>::infinity();
+  touched.clear();
+ }
+ for(auto e:raw){
+  const auto i=e.i,j=e.j;
+  double c=radius*.02*std::min(s.weight[i],s.weight[j])*s.area[i]*
+           (s.area[j]/std::max(support[i],support[j]))*e.kernel;
+  if(!std::isfinite(c))throw std::overflow_error("transport coefficient");
+  out.pairs.push_back({i,j,c});
+ }
+ return out;
+}
+
 int main(){
  std::cout.imbue(std::locale::classic());
  std::cout<<std::scientific<<std::setprecision(17);
@@ -184,6 +232,21 @@ int main(){
   auto stencil=h::transport_stencil(patch,1);
   auto end=std::chrono::steady_clock::now();
   auto f=h::transport_flux(stencil,pressure);
+  auto ref_start=std::chrono::steady_clock::now();
+  auto ref=reference_stencil(patch,1);
+  auto ref_end=std::chrono::steady_clock::now();
+  auto ref_flux=h::transport_flux(ref,pressure);
+  check(ref.pairs.size()==stencil.pairs.size());
+  double coefficient_error=0,flux_error=0;
+  for(std::size_t i=0;i<ref.pairs.size();++i){
+   check(ref.pairs[i].i==stencil.pairs[i].i&&ref.pairs[i].j==stencil.pairs[i].j);
+   coefficient_error=std::max(coefficient_error,std::abs(ref.pairs[i].coefficient-stencil.pairs[i].coefficient));
+  }
+  for(std::size_t i=0;i<f.size();++i)flux_error=std::max(flux_error,std::abs(ref_flux[i]-f[i]));
+  check(coefficient_error<1e-14&&flux_error<1e-12);
+  metric("transport_reference_build_us",density,std::chrono::duration<double,std::micro>(ref_end-ref_start).count());
+  metric("transport_ab_coefficient_max",density,coefficient_error);
+  metric("transport_ab_flux_max",density,flux_error);
   auto old=h::flux(patch,pressure,1);
   double net=0,absolute=0,old_abs=0,moment=0;
   for(std::size_t i=0;i<f.size();++i){
@@ -313,6 +376,22 @@ int main(){
   auto left=h::material_target(pinned,h::Tool::Push,kind,initial,Vec3{-1,0,0},1,.05);
   for(std::size_t i=0;i<right.size();++i)check(h::norm(right[i]+left[i])<1e-12);
   metric("plastic_masked_write_rejected",0,rejected?1:0);
+ }
+ // Nonuniform state and masked/irregular geometry must retain reference flux.
+ {
+  auto patch=grid(4,true);
+  auto pos=patch.p;pos[12].z+=.17;pos[7].x+=.03;
+  patch=h::make_patch(pos,patch.tris,patch.weight);
+  std::vector<double> pressure;for(auto v:pos)pressure.push_back(v.x-v.z);
+  auto a=h::transport_flux(reference_stencil(patch,1),pressure);
+  auto b=h::transport_flux(h::transport_stencil(patch,1),pressure);
+  for(std::size_t i=0;i<a.size();++i){check(std::abs(a[i]-b[i])<1e-12);if(patch.weight[i]==0)check(b[i]==0);}
+  auto flat=grid(4,true);h::PlasticState fresh(flat.p.size());
+  auto start=std::chrono::steady_clock::now();
+  auto req=h::material_target(flat,h::Tool::Press,h::MaterialKind::Clay,fresh,Vec3{0,0,1},1,.05);
+  auto finish=std::chrono::steady_clock::now();
+  for(std::size_t i=0;i<req.size();++i)check(std::abs(req[i].z+(flat.weight[i]>0?.008125:0))<1e-12);
+  metric("uniform_material_target_us",0,std::chrono::duration<double,std::micro>(finish-start).count());
  }
  std::cout<<"hybrid foundation tests passed\n";
 }

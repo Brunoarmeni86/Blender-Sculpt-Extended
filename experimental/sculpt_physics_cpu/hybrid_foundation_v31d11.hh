@@ -144,43 +144,52 @@ inline TransportStencil transport_stencil(const Patch& s,double radius){
  const double reach=radius*.5;
  if(!(reach>0))throw std::invalid_argument("transport reach");
  const std::size_t n=out.size;
- struct Raw {std::size_t i,j;double kernel;};
- std::vector<Raw> raw;
  std::vector<double> support(n),dist(n,std::numeric_limits<double>::infinity());
  std::vector<std::size_t> touched;
  using Q=std::pair<double,std::size_t>;
- auto allowed=[&](std::size_t i){return s.weight[i]>0&&s.area[i]>0;};
+ std::vector<unsigned char> allowed(n);
+ for(std::size_t i=0;i<n;++i)allowed[i]=s.weight[i]>0&&s.area[i]>0;
+ struct Edge {std::size_t j;double length;};
+ std::vector<std::vector<Edge>> edges(n);
+ for(std::size_t i=0;i<n;++i)if(allowed[i]){
+  edges[i].reserve(s.adj[i].size());
+  for(auto j:s.adj[i])if(allowed[j])edges[i].push_back({j,norm(s.p[j]-s.p[i])});
+ }
+ // Reuse a single heap across sources.
+ std::vector<Q> heap;heap.reserve(n);touched.reserve(n);
+ auto push=[&](Q x){heap.push_back(x);std::push_heap(heap.begin(),heap.end(),std::greater<Q>{});};
  for(std::size_t i=0;i<n;++i){
-  if(!allowed(i))continue;
+  if(!allowed[i])continue;
   support[i]+=s.area[i]; // self quadrature, no self transfer
-  std::priority_queue<Q,std::vector<Q>,std::greater<Q>> q;
-  dist[i]=0;touched.push_back(i);q.push({0,i});
-  while(!q.empty()){
-   auto [d,j]=q.top();q.pop();if(d!=dist[j])continue;
+  dist[i]=0;touched.push_back(i);push({0,i});
+  while(!heap.empty()){
+   std::pop_heap(heap.begin(),heap.end(),std::greater<Q>{});
+   auto [d,j]=heap.back();heap.pop_back();if(d!=dist[j])continue;
    if(j>i){
     double x=1-d/reach;
     double k=x*x*(3-2*x);
-    raw.push_back({i,j,k});
+    out.pairs.push_back({i,j,k}); // temporary kernel, normalized below
     support[i]+=s.area[j]*k;
     support[j]+=s.area[i]*k;
    }
-   for(auto k:s.adj[j])if(allowed(k)){
-    double next=d+norm(s.p[k]-s.p[j]);
+   for(auto edge:edges[j]){
+    auto k=edge.j;
+    double next=d+edge.length;
     if(next<reach&&next<dist[k]){
      if(!std::isfinite(dist[k]))touched.push_back(k);
-     dist[k]=next;q.push({next,k});
+     dist[k]=next;push({next,k});
     }
    }
   }
   for(auto j:touched)dist[j]=std::numeric_limits<double>::infinity();
   touched.clear();
  }
- for(auto e:raw){
+ for(auto& e:out.pairs){
   const auto i=e.i,j=e.j;
   double c=radius*.02*std::min(s.weight[i],s.weight[j])*s.area[i]*
-           (s.area[j]/std::max(support[i],support[j]))*e.kernel;
+           (s.area[j]/std::max(support[i],support[j]))*e.coefficient;
   if(!std::isfinite(c))throw std::overflow_error("transport coefficient");
-  out.pairs.push_back({i,j,c});
+  e.coefficient=c;
  }
  return out;
 }
@@ -273,7 +282,15 @@ inline std::vector<Vec3> material_target(const Patch& s,Tool tool,MaterialKind k
            (1+m.hardening*(state[i].deformation+state[i].compaction));
  }
  std::vector<double> flow(s.p.size());
- if(compression_tool(tool)&&dt>0)flow=transport_flux(transport_stencil(s,radius),drive);
+ // Exactly uniform drive has zero pair flux even across masked regions.
+ if(compression_tool(tool)&&dt>0&&!drive.empty()){
+  double first=0;bool have=false,nonuniform=false;
+  for(std::size_t i=0;i<drive.size();++i)if(s.weight[i]>0&&s.area[i]>0){
+   if(!have){first=drive[i];have=true;}
+   else if(drive[i]!=first){nonuniform=true;break;}
+  }
+  if(nonuniform)flow=transport_flux(transport_stencil(s,radius),drive);
+ }
  std::vector<Vec3> result(s.p.size());
  for(std::size_t i=0;i<result.size();++i){
   if(s.weight[i]<=0)continue;
