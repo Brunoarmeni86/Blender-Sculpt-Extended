@@ -10,12 +10,14 @@ namespace sculpt_physics::artistic_v31d1110 {
 inline std::vector<Vec3> relief_target(const h::Patch& patch, Action action,
  Material material,Vec3 center,Vec3 direction,Vec3 tool_axis,
  double radius,double dose,double pressure,bool fast=false,
- const std::vector<double>* compaction=nullptr){
+ const std::vector<double>* compaction=nullptr,
+ PairedFluxBackend* accelerator=nullptr,bool* gpu_used=nullptr){
  if(action!=Action::Push&&action!=Action::Smear&&action!=Action::Gather&&action!=Action::Melt)
   throw std::invalid_argument("relief action");
  if(!std::isfinite(radius)||radius<=0||!std::isfinite(dose)||dose<0||
     !std::isfinite(h::norm(center))||!std::isfinite(h::norm(direction))||
     !std::isfinite(h::norm(tool_axis)))throw std::invalid_argument("relief inputs");
+ if(gpu_used)*gpu_used=false;
  const auto response=evaluate(material,pressure,0,1);
  const auto profile_data=profile(material);
  const auto n=patch.p.size();
@@ -67,6 +69,7 @@ inline std::vector<Vec3> relief_target(const h::Patch& patch, Action action,
   dab.push_v30d=action==Action::Push;dab.push_gain_v30d=2.5;
   dab.detail_retention=std::clamp(1.-profile_data.flow,0.,1.);
   dab.tool_v26=false; // no implicit gravity
+  dab.artistic_flux_backend=accelerator;
   ClaySurfaceResult diagnostics;
   // Flow is a material response; adhesion separately modulates smear.
   // Smear is adhesion-led, Push is flow-led. Gather uses the radial
@@ -76,6 +79,7 @@ inline std::vector<Vec3> relief_target(const h::Patch& patch, Action action,
   const double travel=dose*(action==Action::Gather?1.4:action==Action::Melt?1.8:1.);
   coarse_clay_transport(xy,height,weight,patch.area,dab,axis,floor-.12*radius,
       travel,mobility,profile_data.yield,drag,1.,delta,diagnostics,&edges);
+  if(gpu_used)*gpu_used=*gpu_used||diagnostics.artistic_flux_gpu;
   for(auto i:ids)out[i]=patch.normal[i]*delta[i];
  }
  // Area-weighted normal-height proxy; the existing optimizer retains
