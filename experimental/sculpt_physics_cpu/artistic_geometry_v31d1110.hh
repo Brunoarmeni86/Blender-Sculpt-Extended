@@ -23,6 +23,20 @@ inline std::vector<double> pair_transport(const h::Patch& s,
  for(auto& x:flux)x*=dose/radius;
  return flux;
 }
+// Fast conservative acceptance: one common scale retains the signed
+// normal-area proxy of paired transport. No iterative recovery. The native
+// writer still validates its own final region, clipping and Undo coverage.
+inline std::vector<Vec3> accept_fast(const h::Patch& patch,std::vector<Vec3> desired){
+ if(desired.size()!=patch.p.size())throw std::invalid_argument("target shape");
+ for(std::size_t i=0;i<desired.size();++i){
+  if(!std::isfinite(h::norm(desired[i])))throw std::invalid_argument("nonfinite target");
+  if(patch.weight[i]<=0)desired[i]={};
+ }
+ const double scale=gradient_motion_scale_v31c(patch.p,patch.tris,desired);
+ for(auto& d:desired)d=d*scale;
+ limit_local_contact(patch.p,patch.tris,desired,true);
+ return desired;
+}
 // Opt-in reference adapter. Native deposition already includes host factors;
 // other channels use the patch weight once. No direct editor writeback.
 inline std::vector<Vec3> geometry_target(const h::Patch& s, Action action,
