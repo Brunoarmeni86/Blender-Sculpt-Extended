@@ -364,6 +364,12 @@ def main():
             brush.sculpt_physics_assist=1.0
             if "SMOOTH" in props["curve_distance_falloff_preset"].enum_items.keys():
                 brush.curve_distance_falloff_preset="SMOOTH"
+            if props.get("sculpt_physics_engine") is not None:
+                brush.sculpt_physics_engine = {
+                    "AUTONOMOUS_DEPOSIT": "CLAY",
+                    "AUTONOMOUS_SMEAR": "FLESH",
+                    "AUTONOMOUS_MELT": "MELT_SURFACE",
+                }[action]
             brush["bse_engine_generation"]="D12"
         brush.asset_mark()
         brush.asset_data.catalog_id = CATALOGS[category]
