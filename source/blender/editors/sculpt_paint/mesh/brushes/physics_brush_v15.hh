@@ -1189,6 +1189,7 @@ struct D11PreviewState {
   sculpt_physics::artistic_v31d1110::PlaneState artistic_plane{};
   // Reuse only the existing stroke-owned storage/reset lifecycle, not D11 math.
   sculpt_physics::dedicated_d12::Frame d12_clay_frame{};
+  std::unordered_map<std::size_t,sculpt_physics::dedicated_d12::ClayReference> d12_clay_reference;
   sculpt_physics::dedicated_d12::FleshState d12_flesh_state{};
   std::size_t d12_dabs=0;
 };
@@ -1658,7 +1659,7 @@ inline bool try_apply_intent(
         const double radius=intent.radius;
         if(!std::isfinite(radius)||radius<=0)throw std::invalid_argument("D12 radius");
         const double travel=double(math::length(delta))/radius;
-        const double dose=cache.xpbd_v17_intent_started?(travel<=1.5?travel:0.):.10;
+        double dose=cache.xpbd_v17_intent_started?(travel<=1.5?travel:0.):.10;
         const double intensity=std::clamp(strength,0.,4.)*std::clamp(pressure,0.,1.)*
                                cache.xpbd_v16_assist;
         std::vector<NativeBrushTranslation> goals;
@@ -1670,12 +1671,23 @@ inline bool try_apply_intent(
           // Two modes are tool geometry, not separate material solvers.
           params.roundness=kind==NativeSculptBrushKind::ClayStrips?
               std::clamp(double(brush.tip_roundness),0.,1.):.95;
-          params.offset=kind==NativeSculptBrushKind::ClayStrips?.18:.12;
+          params.offset=kind==NativeSculptBrushKind::ClayStrips?.115:.085;
           next_frame=d::clay_frame(samples,intent.center,convert(normal),convert(delta),
                                    radius,next_frame,params);
+          // A cursor riding up its own ridge is not extra artist travel.
+          // Count tangential motion only, and bound a single accepted dab.
+          const auto motion=convert(delta);
+          const auto tangent=motion-next_frame.axis*d::dot(motion,next_frame.axis);
+          dose=cache.xpbd_v17_intent_started?(travel<=1.5?
+              std::min(.25,d::norm(tangent)/radius):0.):.06;
           const auto kernel=d::prepare_clay(next_frame,radius,dose,intensity,sign,params);
           for(const auto& sample:samples){
-            const auto displacement=d::clay_vertex(kernel,sample);
+            if(!d::valid_sample(sample))continue;
+            // Captured before any writer changes on first contact. The
+            // existing stroke-owned cache is reset with the StrokeCache.
+            const auto ref=state->d12_clay_reference.try_emplace(sample.global_index,
+                d::ClayReference{sample.position,sample.surface_normal,radius}).first;
+            const auto displacement=d::clay_vertex(kernel,sample,&ref->second);
             if(d::norm2(displacement)>1e-30)goals.push_back({sample.global_index,displacement});
           }
         }else{
