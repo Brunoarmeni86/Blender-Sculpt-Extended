@@ -47,4 +47,17 @@ inline Response evaluate(Material m, double drive, double compaction,
          drive*p.compression*p.recovery,
          plastic*p.compression*(1.-p.recovery)};
 }
+// Persistent, dimensionless compaction proxy. Update only from actual
+// accepted inward displacement, never requested displacement. The elastic
+// fraction must not accumulate as permanent compaction.
+inline double compaction_after_write(Material m,double old,double inward,double radius,
+ double rate_multiplier=1.){
+ if(!std::isfinite(old)||old<0||old>1||!std::isfinite(inward)||
+    !std::isfinite(radius)||radius<=0||!std::isfinite(rate_multiplier)||rate_multiplier<0)
+  throw std::invalid_argument("artistic compaction input");
+ const auto p=profile(m);
+ const double rate=4.*p.compression*(1.-p.recovery)*rate_multiplier;
+ const double dose=std::max(0.,inward)/radius;
+ return old+(1.-old)*(-std::expm1(-rate*dose));
+}
 } // namespace sculpt_physics::artistic_v31d1110
