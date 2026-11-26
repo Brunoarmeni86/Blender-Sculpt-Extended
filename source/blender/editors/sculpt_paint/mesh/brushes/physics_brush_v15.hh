@@ -25,6 +25,9 @@
 #  include "hybrid_foundation_v31d11.hh"
 #  include "artistic_csr_smooth_v31d1112.hh"
 #  include "artistic_relief_v31d1110.hh"
+#  ifdef WITH_SCULPT_WARP_CUDA
+#    include "warp_cuda_backend.hh"
+#  endif
 #  include <cstring>
 
 #  include "BKE_mesh.hh"
@@ -1154,6 +1157,8 @@ struct D11PreviewState {
   std::vector<std::size_t> global;
   std::size_t dabs=0;
   int artistic_material=1;
+  bool artistic_gpu_attempted=false;
+  std::unique_ptr<sculpt_physics::artistic_v31d1110::PressureLocalBackend> artistic_gpu;
   bool artistic_plane_valid=false;
   bool artistic_previous_valid=false;
   sculpt_physics::Vec3 artistic_previous_center{};
@@ -1280,11 +1285,18 @@ inline bool d11_preview_target(
       for(std::size_t i=0;i<p.size();++i)exposure[i]=dose*patch.weight[i];
       std::vector<sculpt_physics::Vec3> artistic;
       const bool fast=stroke_option_v31d5("BLENDER_SCULPT_D11_FAST");
+      bool gpu_used=false;
       if(pressure_tool){
+#  ifdef WITH_SCULPT_WARP_CUDA
+        if(!state.artistic_gpu_attempted && stroke_option_v31d5("BLENDER_SCULPT_D11_WARP")){
+          state.artistic_gpu_attempted=true;
+          state.artistic_gpu=sculpt_physics::create_artistic_pressure_cuda();
+        }
+#  endif
         const double plane_height=dab.has_tool_plane?dab.tool_plane_height:-dab.tool_depth*dab.radius;
         artistic=a::pressure_target(patch,action,material,dab.center,dab.axis,
             dab.radius,dose,drive,plane_height,compaction,
-            mode==D11PreviewMode::Adaptive?&state.distances:nullptr,fast);
+            mode==D11PreviewMode::Adaptive?&state.distances:nullptr,fast,state.artistic_gpu.get(),&gpu_used);
       }else if(dab.action==ClaySurfaceAction::Buildup || dab.action==ClaySurfaceAction::FusionDeposit){
         // Keep the already resolved native deposition vector and pressure.
         artistic=result.displacement;
@@ -1317,8 +1329,8 @@ inline bool d11_preview_target(
           throw std::runtime_error("invalid artistic motion");
       result.displacement=std::move(artistic);
       if(feature)result.coverage_weights_v31d9=patch.weight;
-      if(report)std::fprintf(stderr,"[D11 artistic CPU] action=%d material=%d active=%zu fast=%d ms=%.3f\n",
-                            int(dab.action),int(material),active,int(fast),
+      if(report)std::fprintf(stderr,"[D11 artistic %s] action=%d material=%d active=%zu fast=%d ms=%.3f\n",
+                            gpu_used?"Warp local + CPU transport":"CPU",int(dab.action),int(material),active,int(fast),
                             std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
       result.active=active;
       return true;
