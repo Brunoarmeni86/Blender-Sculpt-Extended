@@ -99,3 +99,20 @@ Automated evidence for this increment must be recorded separately from Blender r
 ## D11.9 Windows build handoff
 
 Commit `34315fecac54e65b159375cc02c6b6da659e8525` was compiled with Visual Studio 2022, installed and started successfully in background mode on 2026-11-26. The standalone reference suite previously passed 43/43. Interactive D11.9 brush validation remains pending and must not be inferred from the successful startup. Exact directories, the `/Z7` build-tree workaround for MSVC/PDB error C1902, GPU configuration, commands and remaining validation gaps are recorded in `doc/sculpt_extended/D11_9_WINDOWS_VS2022_HANDOFF_20261126.md`.
+
+## Per-brush Warp material checkpoint
+
+Branch `experiment/physics-d11.9-multibrush-integration`, commit `43eaca557656`, introduces a material enum stored in each Brush instead of relying on a single process-wide material selection. Available artistic profiles are Soft Clay, Firm Clay, Mud, Wax, Flesh, Foam, Stone, Wood and Putty. The D11 surface path consumes the selected profile; the Warp finish and Clay Strips preview also use it. This is intended to make asset-specific responses reproducible and visibly different.
+
+The Windows VS2022 build compiled and started headlessly, reported Blender 5.2.3 LTS hash `43eaca557656`, and found `blender.shared/warp.dll`. Targeted standalone tests `sculpt_material_v25_tests`, `sculpt_hybrid_foundation_v31d11_tests` and `sculpt_brush_solver_backend_tests` passed. The complete 44-test suite was not executed in this checkpoint. Interactive strokes were not tested by Codex and remain user validation.
+
+Local outputs:
+
+- Runnable build: `C:\BlenderDev\install-physics-material-brush-warp\blender.exe`
+- Asset library: `C:\BlenderDev\assets-material-brush-warp-v01`
+- VS2022 build tree: `C:\BlenderDev\build-physics-v16`
+- Source checkout: `C:\BlenderDev\blender-physics-v16`
+
+The asset library contains 17 artist-oriented brushes. Chisel and Knife were deliberately removed because continuous cutting and narrow-surface behavior are not reliable. Do not reintroduce them by merely changing presets; they require a dedicated cutting/contact algorithm. Stone Form and Wood Form remain broad shaping tools, not fracture or anisotropic cutting simulations.
+
+Next work should start with interactive A/B tests of Soft/Firm Clay, Mud, Wax, Flesh, Foam and Putty on identical 300k and 1M meshes. Record first-dab latency, continuous-stroke latency, narrow-feature response, mask/Undo behavior and whether material identities remain visibly distinct. Tune profiles only after those observations. Preserve native brushes as default, keep Multires unsupported until explicitly implemented, and do not merge to `main` or publish a release without approval.

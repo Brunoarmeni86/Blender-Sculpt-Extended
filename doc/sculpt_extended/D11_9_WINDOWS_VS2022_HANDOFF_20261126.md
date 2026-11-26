@@ -137,3 +137,48 @@ Do not convert automated standalone results into runtime claims. The headless st
 - **Multires physical integration:** not completed.
 - **Release readiness:** no; this is a developer preview/checkpoint.
 
+## Continuation checkpoint: artistic Warp Material Brushes
+
+The current continuation branch is `experiment/physics-d11.9-multibrush-integration` at commit `43eaca557656` (`Add per-brush Warp material profiles`). It includes earlier D11.9/Warp integration commits and preserves `main`, stable tags and releases.
+
+### Current local outputs
+
+| Purpose | Path |
+|---|---|
+| Source | `C:\BlenderDev\blender-physics-v16` |
+| Incremental VS2022 build | `C:\BlenderDev\build-physics-v16` |
+| Runnable Material Brush build | `C:\BlenderDev\install-physics-material-brush-warp` |
+| Executable | `C:\BlenderDev\install-physics-material-brush-warp\blender.exe` |
+| Artist brush asset library | `C:\BlenderDev\assets-material-brush-warp-v01` |
+
+The final startup check reported Blender 5.2.3 LTS hash `43eaca557656`; `warp.dll` was present. The asset generator wrote 17 brushes and verified the saved `.blend` library. Thumbnail-cache writes under the user profile emitted non-fatal OpenImageIO warnings, while the asset library itself completed successfully.
+
+### Implemented
+
+- Physical material choice is stored per Brush/RNA asset.
+- Profiles: Soft Clay, Firm Clay, Mud, Wax, Flesh, Foam, Stone, Wood and Putty.
+- D11 material parameters, Clay Strips response and optional Warp finish read the per-brush profile.
+- New artist library covers Build, Push, Smear, Gather, Compress, Press, Compact and surface Melt combinations.
+- Chisel, Wax Knife and Wood Chisel were removed from the generated library because the current algorithm cannot provide reliable continuous cutting.
+- Native brushes remain available and unchanged by default.
+
+### Executed validation
+
+- VS2022/MSVC v143 Blender compilation: passed.
+- Clean install into the dedicated Material Brush folder: passed.
+- Headless factory startup and RNA enum inspection: passed.
+- Warp DLL presence check: passed.
+- `sculpt_material_v25_tests`: passed.
+- `sculpt_hybrid_foundation_v31d11_tests`: passed.
+- `sculpt_brush_solver_backend_tests`: passed.
+
+The complete 44-test suite was not rerun. No interactive sculpt stroke was performed by Codex, so artistic quality, runtime performance, mask/Undo behavior and density consistency remain manual validation, not confirmed fixes.
+
+### How to continue in a normal chat
+
+Give the next assistant this repository instruction:
+
+> Work in `C:\BlenderDev\blender-physics-v16`, repository `Brunoarmeni86/Blender-Sculpt-Extended`, branch `experiment/physics-d11.9-multibrush-integration`. Read `AGENTS.md`, `experimental/sculpt_physics_cpu/SCULPT_ENGINE_MEMO.md` and `doc/sculpt_extended/D11_9_WINDOWS_VS2022_HANDOFF_20261126.md` completely before editing. Verify HEAD is at least `43eaca557656` and check for concurrent or uncommitted changes. Use only Visual Studio 2022/MSVC v143 and preserve the incremental build tree `C:\BlenderDev\build-physics-v16`. The runnable checkpoint is `C:\BlenderDev\install-physics-material-brush-warp\blender.exe`; the asset library is `C:\BlenderDev\assets-material-brush-warp-v01`. Continue the per-brush Warp Material Brush work, keeping native brushes as default and leaving Chisel/Knife disabled. First use my manual A/B observations to tune material differentiation, continuous strokes, narrow features and high-density performance. Preserve D11.9 field separation, Sculpt Layers, Multires data, masks, Face Sets, Undo and PBVH optimizations. Do not modify or merge `main`, publish releases, or claim runtime validation without actual Blender tests. Distinguish code changes, automated tests and my manual artist validation.
+
+Recommended manual matrix: identical 300k and 1M ordinary meshes; Soft/Firm Clay, Mud, Wax, Flesh, Foam and Putty; short dab and long continuous stroke; broad and narrow features; mask boundary; Undo/Redo. Record first-dab delay, steady stroke response, visible material distinction, artifacts and any console `[D11]`/Warp diagnostics. Only then change profile constants or solver stages.
+
