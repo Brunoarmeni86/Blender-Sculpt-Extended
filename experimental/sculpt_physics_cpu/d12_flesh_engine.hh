@@ -17,7 +17,7 @@ struct FleshParams {
 struct FleshState {bool valid=false;Vec3 velocity{};};
 struct FleshKernel {
  Vec3 center{},axis{},drag{},direction{};
- double radius=1.,ratio=0.,bulge=0.,max_depth=.5;
+ double radius=1.,ratio=0.,bulge=0.,max_depth=.5,drag_length=0.;
  FleshState next{};
 };
 // Reduce once per dab. Drag measured in object units, filtered spatially.
@@ -38,7 +38,7 @@ inline FleshKernel prepare_flesh(Vec3 center,Vec3 axis,Vec3 motion,double radius
  Vec3 direction=unit(tangent);
  // No stationary creep or long jumps after loss of contact.
  if(travel<=1e-9||travel>1.5||norm(direction)<.5)
-  return {center,axis,{}, {},radius,0.,p.bulge,p.max_depth,{}};
+  return {center,axis,{}, {},radius,0.,p.bulge,p.max_depth,0.,{}};
  if(previous.valid&&p.viscosity>0){
   const double a=std::exp(-travel/p.viscosity);
   const Vec3 old=previous.velocity-axis*dot(previous.velocity,axis);
@@ -49,11 +49,11 @@ inline FleshKernel prepare_flesh(Vec3 center,Vec3 axis,Vec3 motion,double radius
  // b/a = 1/(4(1-nu)); normalization makes center follow drag exactly.
  const double ratio=1./(4.*(1.-p.poisson));
  return {center,axis,direction*length,direction,radius,ratio,p.bulge,
-         p.max_depth,{true,direction}};
+         p.max_depth,length,{true,direction}};
 }
 inline Vec3 flesh_vertex(const FleshKernel& k,const PhysicalBrushIntentSample& s){
- if(!valid_sample(s)||norm(k.drag)==0)return {};
- const Vec3 local_n=unit(s.surface_normal);
+ if(!valid_sample(s)||k.drag_length==0)return {};
+ const Vec3 local_n=unit_normal(s.surface_normal);
  if(dot(local_n,k.axis)<.05)return {};
  const Vec3 q=(s.position-k.center)/k.radius;
  if(std::abs(dot(q,k.axis))>k.max_depth)return {};
@@ -70,7 +70,7 @@ inline Vec3 flesh_vertex(const FleshKernel& k,const PhysicalBrushIntentSample& s
  // The compression-side lift and trailing-side depression are a bounded
  // artistic surface proxy; not an assertion of volume conservation.
  const double lead=std::clamp(dot(q,k.direction),-1.,1.);
- d+=local_n*(norm(k.drag)*k.bulge*lead*(1.-r2));
+ d+=local_n*(k.drag_length*k.bulge*lead*(1.-r2));
  return d*s.envelope;
 }
 }
