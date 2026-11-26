@@ -1,4 +1,4 @@
-#include "artistic_geometry_v31d1110.hh"
+#include "artistic_relief_v31d1110.hh"
 #include "artistic_swept_v31d1111.hh"
 #include "artistic_csr_smooth_v31d1112.hh"
 #include <cstdlib>
@@ -94,6 +94,57 @@ int main(){
  auto uniform_grid=pair_transport(grid,std::vector<double>(grid_p.size(),.5),.25,.1,&empty_cache);
  check(empty_cache.pairs.empty());
  for(auto x:uniform_grid)check(x==0.);
+ // Brush-scale relief tests on a triangulated disk footprint.
+ std::vector<sculpt_physics::Vec3> relief_p;
+ std::vector<h::Tri> relief_t;
+ std::vector<double> relief_w;
+ constexpr std::size_t dim=33;
+ for(std::size_t y=0;y<dim;++y)for(std::size_t x=0;x<dim;++x){
+  const double a=2.*double(x)/double(dim-1)-1.;
+  const double b=2.*double(y)/double(dim-1)-1.;
+  relief_p.push_back({a,b,0});
+  relief_w.push_back(std::max(0.,1.-a*a-b*b));
+  if(x+1<dim&&y+1<dim){
+   const auto k=y*dim+x;
+   relief_t.push_back({k,k+1,k+dim});
+   relief_t.push_back({k+1,k+dim+1,k+dim});
+  }
+ }
+ auto flat=h::make_patch(relief_p,relief_t,relief_w);
+ auto push_relief=relief_target(flat,Action::Push,Material::Mud,
+    {0,0,0},{1,0,0},{0,0,1},1.,.04,1.);
+ auto gather_relief=relief_target(flat,Action::Gather,Material::Mud,
+    {0,0,0},{1,0,0},{0,0,1},1.,.04,1.);
+ double push_moment=0.,gather_center=0.,push_net=0.,gather_net=0.;
+ for(std::size_t k=0;k<relief_p.size();++k){
+  const double area=flat.area[k];
+  push_moment+=relief_p[k].x*push_relief[k].z*area;
+  gather_center+=gather_relief[k].z*area*(1.-h::norm(relief_p[k]));
+  push_net+=push_relief[k].z*area;gather_net+=gather_relief[k].z*area;
+  if(relief_w[k]==0)check(h::norm(push_relief[k])==0&&h::norm(gather_relief[k])==0);
+ }
+ check(push_moment>0.&&gather_center>0.);
+ check(std::abs(push_net)<1e-10&&std::abs(gather_net)<1e-10);
+ for(auto& q:relief_p)q.z=.08*std::exp(-20.*(q.x*q.x+q.y*q.y));
+ auto bump=h::make_patch(relief_p,relief_t,relief_w);
+ auto melt=relief_target(bump,Action::Melt,Material::Mud,
+    {0,0,0},{1,0,0},{0,0,1},1.,.04,1.);
+ const auto mid=dim*(dim/2)+dim/2;
+ check(h::dot(melt[mid],bump.normal[mid])<0.);
+ auto smear_relief=relief_target(bump,Action::Smear,Material::Putty,
+    {0,0,0},{1,0,0},{0,0,1},1.,.04,1.);
+ double smear_peak=0.;
+ for(std::size_t k=0;k<smear_relief.size();++k){
+  smear_peak=std::max(smear_peak,h::norm(smear_relief[k]));
+  if(relief_w[k]==0)check(h::norm(smear_relief[k])==0.);
+ }
+ check(smear_peak>0.);
+ std::vector<sculpt_physics::Vec3> deposit_relief(flat.p.size());
+ for(std::size_t k=0;k<flat.p.size();++k)
+  deposit_relief[k]={0,0,.01*std::pow(relief_w[k],8)};
+ auto soft_spread=spread_deposit(flat,deposit_relief,Material::SoftClay,1.,.04,1.);
+ auto firm_spread=spread_deposit(flat,deposit_relief,Material::FirmClay,1.,.04,1.);
+ check(soft_spread[mid].z<firm_spread[mid].z);
  auto transported=geometry_target(patch,Action::Press,Material::Mud,
     {0,0,0},{0,.8,0},{0,0,1},{.3,.3,0},.01,1,4);
  check(h::norm(transported[2])==0);
