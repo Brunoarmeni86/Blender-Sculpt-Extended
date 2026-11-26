@@ -654,5 +654,25 @@ int main(){
   auto isolated=h::cached_geodesic_flux(cache,sheets,{1,1,1,0,0,0},1);
   check(!isolated.reused);for(auto x:isolated.flux)check(std::abs(x)<1e-12);
  }
+ // D11.6 material transport selection: same target on unchanged geometry,
+ // cached pressure transport only for compression tools.
+ {
+  auto patch=grid(8,true);
+  for(std::size_t i=0;i<patch.p.size();++i)if(patch.weight[i]>0)patch.weight[i]=.3+.7*patch.p[i].x;
+  h::PlasticState plastic(patch.p.size());h::GeodesicCache cache;
+  for(auto tool:{h::Tool::Press,h::Tool::Compact,h::Tool::Compress}){
+   h::CachedFlux d;
+   auto a=h::material_target(patch,tool,h::MaterialKind::Clay,plastic,{0,0,1},1,.05);
+   auto b=h::material_target(patch,tool,h::MaterialKind::Clay,plastic,{0,0,1},1,.05,&cache,&d);
+   for(std::size_t i=0;i<a.size();++i)check(h::norm(a[i]-b[i])<1e-12);
+   check(!d.flux.empty()&&d.relative_bound<=.02);
+   if(tool!=h::Tool::Press)check(d.reused);
+  }
+  h::CachedFlux d;
+  auto a=h::material_target(patch,h::Tool::Push,h::MaterialKind::Clay,plastic,{1,0,0},1,.05);
+  auto b=h::material_target(patch,h::Tool::Push,h::MaterialKind::Clay,plastic,{1,0,0},1,.05,&cache,&d);
+  for(std::size_t i=0;i<a.size();++i)check(h::norm(a[i]-b[i])==0);
+  check(d.flux.empty());
+ }
  std::cout<<"hybrid foundation tests passed\n";
 }

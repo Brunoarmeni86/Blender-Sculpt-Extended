@@ -611,7 +611,8 @@ inline bool plastic_tool(Tool t){
 // Transport is evaluated simultaneously with shared material mobility, not
 // per-endpoint post-scaling (which would break the signed proxy).
 inline std::vector<Vec3> material_target(const Patch& s,Tool tool,MaterialKind kind,
- const PlasticState& state,Vec3 direction,double radius,double dose){
+ const PlasticState& state,Vec3 direction,double radius,double dose,
+ GeodesicCache* cache=nullptr,CachedFlux* diagnostics=nullptr){
  validate_plastic(s,state,radius);
  if(!std::isfinite(dose)||!std::isfinite(norm(direction)))throw std::invalid_argument("material dab");
  auto m=material_law(kind);
@@ -623,6 +624,7 @@ inline std::vector<Vec3> material_target(const Patch& s,Tool tool,MaterialKind k
   drive[i]=std::clamp((s.weight[i]-threshold)/(1-threshold),0.0,1.0)/
            (1+m.hardening*(state[i].deformation+state[i].compaction));
  }
+ if(diagnostics)*diagnostics=CachedFlux{};
  std::vector<double> flow(s.p.size());
  // Exactly uniform drive has zero pair flux even across masked regions.
  if(compression_tool(tool)&&dt>0&&!drive.empty()){
@@ -631,7 +633,14 @@ inline std::vector<Vec3> material_target(const Patch& s,Tool tool,MaterialKind k
    if(!have){first=drive[i];have=true;}
    else if(drive[i]!=first){nonuniform=true;break;}
   }
-  if(nonuniform)flow=transport_flux(transport_stencil(s,radius),drive);
+  if(nonuniform){
+   if(cache){
+    auto result=cached_geodesic_flux(*cache,s,drive,radius);
+    flow=result.flux;
+    if(diagnostics)*diagnostics=std::move(result);
+   }
+   else flow=transport_flux(transport_stencil(s,radius),drive);
+  }
  }
  std::vector<Vec3> result(s.p.size());
  for(std::size_t i=0;i<result.size();++i){

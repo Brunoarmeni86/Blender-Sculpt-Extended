@@ -265,6 +265,8 @@ struct StrokeCache {
   double xpbd_v26_press_dose = 0.0;
   std::shared_ptr<void> xpbd_v27_stroke;
   std::shared_ptr<void> xpbd_v28_surface_history;
+  // D11.6 preview: stroke-local, nonserialized distance cache only.
+  std::shared_ptr<void> xpbd_v31d11_preview;
   float3 xpbd_v25_plane_origin = float3(0.0f);
   float3 xpbd_v25_plane_normal = float3(0.0f);
   int xpbd_v16_clay_behavior = 0;
