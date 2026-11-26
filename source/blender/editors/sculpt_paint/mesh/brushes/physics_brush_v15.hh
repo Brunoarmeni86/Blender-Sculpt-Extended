@@ -1683,6 +1683,25 @@ inline bool try_apply_intent(
     if (!std::isfinite(strength) || !std::isfinite(pressure)) {
       throw std::invalid_argument("Invalid autonomous strength/pressure");
     }
+    // Do not silently run an unrelated legacy material law when an explicit
+    // dedicated engine is unsupported. Automatic keeps the old fallback.
+    const int selected_engine=explicit_engine(brush);
+    if(selected_engine>=2){
+      const Mesh& mesh=*id_cast<const Mesh*>(object.data);
+      const bool supported=live_surface_v30_brush(object,brush) &&
+          (selected_engine==4 || brush.stroke_method==BRUSH_STROKE_SPACE) &&
+          (selected_engine!=4 || sign>0) &&
+          stroke_symmetry_xyz_get(object)==PAINT_SYMM_NONE &&
+          !cache.reference_symmetry && !cache.reference_combined &&
+          mesh.radial_symmetry[0]==1 && mesh.radial_symmetry[1]==1 && mesh.radial_symmetry[2]==1 &&
+          (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))==0 &&
+          cache.tile_pass==0 && cache.radial_symmetry_pass==0 && cache.mirror_symmetry_pass==0;
+      if(!supported){
+        std::fprintf(stderr,"[D12 Engine] unsupported geometry/stroke; no physical write\n");
+        cache.xpbd_v15_failed=true;
+        return true;
+      }
+    }
     // Dedicated D12 planner runs before any legacy material solver. It
     // consumes exactly the native writable samples, and the same compact
     // executor, local geometry guard and Undo/PBVH writer accept its goals.
