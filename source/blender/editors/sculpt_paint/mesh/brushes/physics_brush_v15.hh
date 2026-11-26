@@ -26,6 +26,8 @@
 #  include "artistic_csr_smooth_v31d1112.hh"
 #  include "artistic_relief_v31d1110.hh"
 #  include "artistic_build_v31d1114.hh"
+#  include "d12_clay_engine.hh"
+#  include "d12_flesh_engine.hh"
 #  ifdef WITH_SCULPT_WARP_CUDA
 #    include "warp_cuda_backend.hh"
 #  endif
@@ -473,7 +475,8 @@ inline bool try_apply(const Sculpt &sd,
                       const std::vector<sculpt_physics::NativeBrushTranslation> &native_translations,
                       const bool autonomous=false,
                       const bool conservative_clay=false,
-                      const sculpt_physics::ClaySurfaceDab *plastic_dab=nullptr)
+                      const sculpt_physics::ClaySurfaceDab *plastic_dab=nullptr,
+                      const bool dedicated_d12=false)
 {
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
@@ -521,7 +524,7 @@ inline bool try_apply(const Sculpt &sd,
   // actual unique vertex IDs with the same PositionDeformData/Undo writer.
   const bool sparse_nodes=conservative_clay && autonomous &&
       cache.mirror_modifier_clip.flag==0 &&
-      stroke_option_v31d5("BLENDER_SCULPT_D11_FAST");
+      (dedicated_d12 || stroke_option_v31d5("BLENDER_SCULPT_D11_FAST"));
   struct PreparedNode {
     int id;
     Vector<int> vertices;
@@ -816,7 +819,7 @@ inline bool try_apply(const Sculpt &sd,
     if(diag_v31d5)for(const auto &it:changes)
       executor_v31d5+=double(math::length(it.second));
     const auto contact_start=std::chrono::steady_clock::now();
-    if (drag_contact_requested() && state->compact &&
+    if ((dedicated_d12 || drag_contact_requested()) && state->compact &&
         kind!=sculpt_physics::NativeSculptBrushKind::Gravity) {
       const bool local_scrape=live_surface && (contact_v30b_requested() || adaptive_v31_requested()) && autonomous &&
                               cache.xpbd_v16_clay_behavior==14;
@@ -1184,6 +1187,10 @@ struct D11PreviewState {
   bool artistic_previous_valid=false;
   sculpt_physics::Vec3 artistic_previous_center{};
   sculpt_physics::artistic_v31d1110::PlaneState artistic_plane{};
+  // Reuse only the existing stroke-owned storage/reset lifecycle, not D11 math.
+  sculpt_physics::dedicated_d12::Frame d12_clay_frame{};
+  sculpt_physics::dedicated_d12::FleshState d12_flesh_state{};
+  std::size_t d12_dabs=0;
 };
 inline sculpt_physics::hybrid_v31d11::MaterialKind d11_preview_material()
 {
@@ -1625,6 +1632,76 @@ inline bool try_apply_intent(
         double(BKE_curvemapping_evaluateF(brush.curve_strength,0,cache.pressure)) : 1.0;
     if (!std::isfinite(strength) || !std::isfinite(pressure)) {
       throw std::invalid_argument("Invalid autonomous strength/pressure");
+    }
+    // Dedicated D12 planner runs before any legacy material solver. It
+    // consumes exactly the native writable samples, and the same compact
+    // executor, local geometry guard and Undo/PBVH writer accept its goals.
+    if(stroke_option_v31d5("BLENDER_SCULPT_D12") && conservative &&
+       cache.xpbd_v16_compact && brush.sculpt_physics_mode==3 &&
+       brush.stroke_method==BRUSH_STROKE_SPACE && live_surface_v30_brush(object,brush)){
+      using namespace sculpt_physics;
+      namespace d=dedicated_d12;
+      const int behavior=cache.xpbd_v16_clay_behavior;
+      const int material=brush.sculpt_physics_material;
+      const bool clay_tool=(behavior==1 || behavior==4) && (material==0 || material==1);
+      const bool flesh_tool=material==4 && (behavior==3 || behavior==6 || behavior==13);
+      const Mesh& mesh=*id_cast<const Mesh*>(object.data);
+      const bool supported=stroke_symmetry_xyz_get(object)==PAINT_SYMM_NONE &&
+          !cache.reference_symmetry && !cache.reference_combined &&
+          mesh.radial_symmetry[0]==1 && mesh.radial_symmetry[1]==1 && mesh.radial_symmetry[2]==1 &&
+          (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))==0 &&
+          cache.tile_pass==0 && cache.radial_symmetry_pass==0 && cache.mirror_symmetry_pass==0;
+      if(supported && (clay_tool || flesh_tool)){
+        const auto started=std::chrono::steady_clock::now();
+        auto state=std::static_pointer_cast<D11PreviewState>(cache.xpbd_v31d11_preview);
+        if(!state)state=std::make_shared<D11PreviewState>();
+        const double radius=intent.radius;
+        if(!std::isfinite(radius)||radius<=0)throw std::invalid_argument("D12 radius");
+        const double travel=double(math::length(delta))/radius;
+        const double dose=cache.xpbd_v17_intent_started?(travel<=1.5?travel:0.):.10;
+        const double intensity=std::clamp(strength,0.,4.)*std::clamp(pressure,0.,1.)*
+                               cache.xpbd_v16_assist;
+        std::vector<NativeBrushTranslation> goals;
+        goals.reserve(samples.size());
+        d::Frame next_frame=state->d12_clay_frame;
+        d::FleshState next_flesh=state->d12_flesh_state;
+        if(clay_tool){
+          d::ClayParams params;
+          // Two modes are tool geometry, not separate material solvers.
+          params.roundness=kind==NativeSculptBrushKind::ClayStrips?.25:.95;
+          params.offset=kind==NativeSculptBrushKind::ClayStrips?.18:.12;
+          next_frame=d::clay_frame(samples,intent.center,convert(normal),convert(delta),
+                                   radius,next_frame,params);
+          const auto kernel=d::prepare_clay(next_frame,radius,dose,intensity,sign,params);
+          for(const auto& sample:samples){
+            const auto displacement=d::clay_vertex(kernel,sample);
+            if(d::norm(displacement)>1e-15)goals.push_back({sample.global_index,displacement});
+          }
+        }else{
+          d::FleshParams params;
+          const auto kernel=d::prepare_flesh(intent.center,convert(normal),convert(delta)*sign,
+                                              radius,intensity,next_flesh,params);
+          next_flesh=kernel.next;
+          for(const auto& sample:samples){
+            const auto displacement=d::flesh_vertex(kernel,sample);
+            if(d::norm(displacement)>1e-15)goals.push_back({sample.global_index,displacement});
+          }
+        }
+        const double plan_ms=std::chrono::duration<double,std::milli>(
+            std::chrono::steady_clock::now()-started).count();
+        const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,true,nullptr,true);
+        if(handled&&!cache.xpbd_v15_failed){
+          state->d12_clay_frame=next_frame;
+          state->d12_flesh_state=next_flesh;
+          cache.xpbd_v31d11_preview=state;
+          cache.xpbd_v17_intent_started=true;
+          cache.xpbd_v17_last_center=center;
+          if(state->d12_dabs++%32==0 || profile_v26b_requested())
+            std::fprintf(stderr,"[D12 %s CPU] samples=%zu goals=%zu plan_ms=%.3f dose=%.5f\n",
+                         clay_tool?"Clay":"Flesh",samples.size(),goals.size(),plan_ms,dose);
+        }
+        return handled;
+      }
     }
     const bool v24=(shape_v24_requested() || cache.xpbd_v16_clay_behavior==14) &&
         cache.xpbd_v16_clay_behavior!=1 && cache.xpbd_v16_clay_behavior!=4;
