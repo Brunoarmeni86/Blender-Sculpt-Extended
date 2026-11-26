@@ -332,7 +332,8 @@ struct Brush {
   /** Artistic surface material preset. Stored per brush so asset libraries do
    * not depend on process-wide environment state. See eBrushSculptPhysicsMaterial. */
   int sculpt_physics_material = 0;
-  int _pad_sculpt_physics = 0;
+  /** 0=launch/asset compatibility, 1=Legacy D11, 2=Clay, 3=Flesh, 4=Melt Surface. */
+  int sculpt_physics_engine = 0;
   /** 0=V2, 1-3=V3, 4-6=V17, 7-10=V18-B Compact/Press/Pressure Flow/Hybrid Flow, 11-13=V23 Melt/Gather/Smear. */
   int sculpt_physics_clay_behavior = 1;
 
