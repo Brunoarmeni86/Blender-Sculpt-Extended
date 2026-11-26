@@ -1491,9 +1491,13 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
             header.label(text="GPU Smooth")
             if gpu_smooth_panel is not None:
                 runtime = context.window_manager
-                gpu_smooth_panel.prop(runtime, "sculpt_gpu_smooth_a1", text="NVIDIA Warp A3")
+                gpu_smooth_panel.prop(runtime, "sculpt_gpu_smooth_a1", text="NVIDIA Warp Smooth")
                 if runtime.sculpt_gpu_smooth_a1:
                     gpu_smooth_panel.prop(runtime, "sculpt_gpu_smooth_mode", text="Mode")
+                    if runtime.sculpt_gpu_smooth_mode == 'STRONG':
+                        gpu_smooth_panel.label(text="D12 multiscale · CPU fallback available")
+                        if brush.use_smooth_shape_preserve:
+                            gpu_smooth_panel.label(text="Preserve Shape reduces normal motion by 80%", icon='INFO')
                     gpu_smooth_panel.label(text="Experimental · ordinary mesh only", icon='EXPERIMENTAL')
 
         if brush.sculpt_brush_type == 'INFLATE':
