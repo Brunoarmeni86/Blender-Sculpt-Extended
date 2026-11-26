@@ -1,6 +1,6 @@
 #include "artistic_geometry_v31d1110.hh"
 #include "artistic_swept_v31d1111.hh"
-#include "artistic_surface_v31d1111.hh"
+#include "artistic_csr_smooth_v31d1112.hh"
 #include <cstdlib>
 #include <limits>
 using namespace sculpt_physics::artistic_v31d1110;
@@ -90,6 +90,14 @@ int main(){
  auto clay=surface_target(patch,SurfaceAction::Clay,Material::FirmClay,
     capture_plane({0,0,0},{0,0,1}),{0,0,0},{1,0,0},{.1,.1,0},1,1);
  check(clay[0].z>0 && clay[0].z<=.1);
+ auto work=pack_workset(patch,{.1,.1,0});
+ check(work.offsets.size()==4 && work.offsets.back()==6);
+ auto csr=csr_smooth(work,Material::Mud,1,1,true);
+ auto ref=surface_target(patch,SurfaceAction::SmoothTangent,Material::Mud,
+    capture_plane({0,0,0},{0,0,1}),{0,0,0},{1,0,0},{.1,.1,0},1,1);
+ auto safe=h::optimize(patch,csr);
+ for(std::size_t k=0;k<safe.size();++k)check(h::norm(safe[k]-ref[k])<1e-7);
+ check(h::norm(csr[2])==0);
  bool rejected=false;
  try{evaluate(Material::Mud,std::numeric_limits<double>::quiet_NaN(),0,1);}
  catch(const std::invalid_argument&){rejected=true;}
