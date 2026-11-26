@@ -145,6 +145,32 @@ int main(){
  auto soft_spread=spread_deposit(flat,deposit_relief,Material::SoftClay,1.,.04,1.);
  auto firm_spread=spread_deposit(flat,deposit_relief,Material::FirmClay,1.,.04,1.);
  check(soft_spread[mid].z<firm_spread[mid].z);
+ // Fast acceptance must retain the actual directional relief response
+ // and keep pinned vertices fixed, not merely return finite numbers.
+ auto quick=relief_target(flat,Action::Push,Material::Mud,
+    {0,0,0},{1,0,0},{0,0,1},1.,.04,1.,true);
+ double quick_moment=0.,quick_net=0.;
+ for(std::size_t k=0;k<quick.size();++k){
+  quick_moment+=flat.p[k].x*quick[k].z*flat.area[k];
+  quick_net+=quick[k].z*flat.area[k];
+  if(flat.weight[k]==0)check(h::norm(quick[k])==0.);
+ }
+ check(quick_moment>0.&&std::abs(quick_net)<1e-10);
+ std::vector<double> state_flat(flat.p.size(),0.);
+ auto press_shallow=pressure_target(flat,Action::Press,Material::FirmClay,
+    {0,0,0},{0,0,1},1.,.04,1.,.01,state_flat,nullptr,true);
+ for(auto x:press_shallow)check(h::norm(x)==0.);
+ auto press_deep=pressure_target(flat,Action::Press,Material::FirmClay,
+    {0,0,0},{0,0,1},1.,.04,1.,-.08,state_flat,nullptr,true);
+ auto compress=pressure_target(flat,Action::Compress,Material::FirmClay,
+    {0,0,0},{0,0,1},1.,.04,1.,-.08,state_flat,nullptr,true);
+ auto compacted=pressure_target(flat,Action::Compact,Material::FirmClay,
+    {0,0,0},{0,0,1},1.,.04,1.,-.08,state_flat,nullptr,true);
+ check(press_deep[mid].z<0.&&compress[mid].z<0.&&compacted[mid].z<0.);
+ check(std::abs(press_deep[mid].z-compress[mid].z)>1e-6);
+ check(std::abs(compacted[mid].z-compress[mid].z)>1e-6);
+ for(std::size_t k=0;k<flat.p.size();++k)if(flat.weight[k]==0)
+  check(h::norm(press_deep[k])+h::norm(compress[k])+h::norm(compacted[k])==0.);
  auto transported=geometry_target(patch,Action::Press,Material::Mud,
     {0,0,0},{0,.8,0},{0,0,1},{.3,.3,0},.01,1,4);
  check(h::norm(transported[2])==0);
