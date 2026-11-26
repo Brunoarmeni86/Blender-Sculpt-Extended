@@ -37,13 +37,24 @@ inline std::vector<Vec3> accept_fast(const h::Patch& patch,std::vector<Vec3> des
  limit_local_contact(patch.p,patch.tris,desired,true);
  return desired;
 }
+// Optional accelerator for independent local pressure proposals. The CPU
+// still owns conservative pair transport and geometric acceptance.
+class PressureLocalBackend {
+ public:
+  virtual ~PressureLocalBackend()=default;
+  virtual bool evaluate_local(const h::Patch&,Action,Material,Vec3 center,Vec3 axis,
+      double radius,double dose,double pressure,double plane_height,
+      const std::vector<double>& compaction,std::vector<Vec3>& motion,
+      std::vector<double>& drive)=0;
+};
 // Distinct pressure tools: Press approaches a tool plane, Compress
 // moves along the tool axis, Compact sinks locally with little lateral flow.
 // All remain surface proxies. No elastic recovery until persistent state.
 inline std::vector<Vec3> pressure_target(const h::Patch& patch,Action action,
  Material material,Vec3 center,Vec3 axis,double radius,double dose,double pressure,
  double plane_height,const std::vector<double>& compaction,
- h::GeodesicCache* cache=nullptr,bool fast=false){
+ h::GeodesicCache* cache=nullptr,bool fast=false,
+ PressureLocalBackend* accelerator=nullptr,bool* gpu_used=nullptr){
  if(action!=Action::Press&&action!=Action::Compress&&action!=Action::Compact)
   throw std::invalid_argument("pressure action");
  if(!std::isfinite(radius)||radius<=0||!std::isfinite(dose)||dose<0||
@@ -53,7 +64,23 @@ inline std::vector<Vec3> pressure_target(const h::Patch& patch,Action action,
  axis=h::unit(axis);
  std::vector<Vec3> out(patch.p.size());
  std::vector<double> drive(out.size());
- for(std::size_t i=0;i<out.size();++i){
+ bool accelerated=false;
+ if(accelerator){
+  try{
+   accelerated=accelerator->evaluate_local(patch,action,material,center,axis,radius,
+       dose,pressure,plane_height,compaction,out,drive);
+   if(out.size()!=patch.p.size()||drive.size()!=patch.p.size())accelerated=false;
+   if(accelerated)for(std::size_t i=0;i<out.size();++i)
+    if(!std::isfinite(h::norm(out[i]))||!std::isfinite(drive[i])||
+       drive[i]<0||drive[i]>1|| (patch.weight[i]<=0&&(h::norm(out[i])>0||drive[i]!=0)))
+     {accelerated=false;break;}
+  }catch(const std::exception&){accelerated=false;}
+ }
+ if(gpu_used)*gpu_used=accelerated;
+ if(!accelerated){
+  out.assign(patch.p.size(),Vec3{});drive.assign(patch.p.size(),0.);
+ }
+ for(std::size_t i=0;!accelerated&&i<out.size();++i){
   if(patch.weight[i]<=0)continue;
   const auto r=evaluate(material,pressure,compaction[i],1.);
   const double e=dose*patch.weight[i];
