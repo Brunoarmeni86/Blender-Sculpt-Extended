@@ -72,7 +72,6 @@ struct ClaySurfaceDab {
   bool refine_v28b=false; // gradual capacities and curvature-aware Melt
   bool swept_v29=false;
   bool plastic_v29=false;
-  int artistic_compaction_material=-1; // D11.13 read-only material state unless native writer opts in
   Vec3 sweep_start{};
   double melt_local_gravity_v27b=0.0; // opt-in object-local downhill
   bool has_tool_plane=false;
@@ -85,6 +84,7 @@ struct ClaySurfaceDab {
   double friction=0.7, viscosity=0.4, cohesion=0.6, stiffness=0.5;
   double plasticity=0.85, volume_preservation=0.9;
   double fusion=0.5;
+  int artistic_compaction_material=-1; // D11.13 read-only material state unless native writer opts in
 
 };
 // Bounded local pressure target; cumulative dose is in brush-radius units.
@@ -93,7 +93,6 @@ inline double progressive_press_depth_v26(double base,double cumulative_dose)
   return std::min(.25,base+.08*(1-std::exp(-3*std::max(0.0,cumulative_dose))));
 }
 struct ClaySurfaceResult {
-  int artistic_material_used=-1; // set only after a successful artistic target
   std::vector<Vec3> displacement;
   std::vector<double> projected_area;
   std::vector<double> tangent_weights_v31d6; // selected contact; zero for all fixed/removed candidates
@@ -117,6 +116,7 @@ struct ClaySurfaceResult {
   std::size_t proxy_passes_v31d3=0,proxy_rejected_v31d3=0,proxy_nodes_v31d3=0;
   double proxy_strain_before_v31d3=0,proxy_strain_after_v31d3=0,proxy_budget_error_v31d3=0;
   double melt_residual_peak_v30b=0.0;
+  int artistic_material_used=-1; // set only after a successful artistic target
 };
 
 // Qualitative hardening state. Units are normal displacement / brush radius,
