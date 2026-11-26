@@ -1,0 +1,17 @@
+name: Artistic brush reference
+on:
+  push:
+    branches: ['experiment/physics-d11.10-13-artistic-engine']
+  workflow_dispatch:
+jobs:
+  reference:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S experimental/sculpt_physics_cpu -B build-artistic -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build-artistic --config Release --target test_artistic_material_v31d1110
+      - run: ctest --test-dir build-artistic -C Release -R sculpt_artistic_material_v31d1110_tests --output-on-failure --no-tests=error
