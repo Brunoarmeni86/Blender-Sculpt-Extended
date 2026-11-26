@@ -1312,7 +1312,7 @@ inline bool d11_preview_target(
               (dab.has_tool_plane?dab.tool_plane_height:-dab.tool_depth*dab.radius),dab.axis);
           state.artistic_plane_valid=true;
         }
-        artistic=a::scrape_plane(patch,state.artistic_plane,material,exposure,dab.radius,drive);
+        artistic=a::scrape_plane(patch,state.artistic_plane,material,exposure,dab.radius,drive,&compaction,fast);
       }else if(dab.action==ClaySurfaceAction::Melt || dab.action==ClaySurfaceAction::Push ||
                dab.action==ClaySurfaceAction::Smear || dab.action==ClaySurfaceAction::Gather){
         const auto relief_action=dab.action==ClaySurfaceAction::Push?a::Action::Push:
@@ -1321,7 +1321,7 @@ inline bool d11_preview_target(
         // Reuse the V30 paired finite-volume relief proxy. Tangential CSR
         // smoothing remains a separate reference, not a substitute for Melt.
         artistic=a::relief_target(patch,relief_action,material,dab.center,dab.direction,
-                                  h::unit(dab.axis),dab.radius,dose,drive,fast);
+                                  h::unit(dab.axis),dab.radius,dose,drive,fast,&compaction);
       }else return false;
       for(std::size_t i=0;i<artistic.size();++i)
         if(!std::isfinite(h::norm(artistic[i])) ||
