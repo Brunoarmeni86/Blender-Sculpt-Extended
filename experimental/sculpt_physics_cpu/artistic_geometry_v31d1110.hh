@@ -37,6 +37,47 @@ inline std::vector<Vec3> accept_fast(const h::Patch& patch,std::vector<Vec3> des
  limit_local_contact(patch.p,patch.tris,desired,true);
  return desired;
 }
+// Distinct pressure tools: Press approaches a tool plane, Compress
+// moves along the tool axis, Compact sinks locally with little lateral flow.
+// All remain surface proxies. No elastic recovery until persistent state.
+inline std::vector<Vec3> pressure_target(const h::Patch& patch,Action action,
+ Material material,Vec3 center,Vec3 axis,double radius,double dose,double pressure,
+ double plane_height,const std::vector<double>& compaction,
+ h::GeodesicCache* cache=nullptr,bool fast=false){
+ if(action!=Action::Press&&action!=Action::Compress&&action!=Action::Compact)
+  throw std::invalid_argument("pressure action");
+ if(!std::isfinite(radius)||radius<=0||!std::isfinite(dose)||dose<0||
+    !std::isfinite(plane_height)||!std::isfinite(h::norm(center))||
+    !std::isfinite(h::norm(axis))||h::norm(axis)<1e-12||
+    compaction.size()!=patch.p.size())throw std::invalid_argument("pressure input");
+ axis=h::unit(axis);
+ std::vector<Vec3> out(patch.p.size());
+ std::vector<double> drive(out.size());
+ for(std::size_t i=0;i<out.size();++i){
+  if(patch.weight[i]<=0)continue;
+  const auto r=evaluate(material,pressure,compaction[i],1.);
+  const double e=dose*patch.weight[i];
+  const auto normal=patch.normal[i];
+  if(action==Action::Press){
+   const double gap=std::max(0.,h::dot(patch.p[i]-center,axis)-plane_height);
+   const double sink=std::min(gap,gap*(-std::expm1(-4.*e/radius*r.sink)));
+   out[i]=axis*(-sink);
+   drive[i]=patch.weight[i]*r.transport*std::clamp(gap/radius,0.,1.);
+  }else if(action==Action::Compress){
+   // Continuous tool-axis action on narrow walls, including vertical faces.
+   out[i]=axis*(-e*r.sink);
+   drive[i]=.5*patch.weight[i]*r.transport;
+  }else{
+   out[i]=normal*(-1.5*e*r.plastic_sink);
+   drive[i]=.05*patch.weight[i]*r.transport;
+  }
+ }
+ if(action!=Action::Compact){
+  auto flux=pair_transport(patch,drive,radius,dose,cache);
+  for(std::size_t i=0;i<out.size();++i)out[i]+=patch.normal[i]*flux[i];
+ }
+ return fast?accept_fast(patch,std::move(out)):h::optimize(patch,std::move(out),true);
+}
 // Opt-in reference adapter. Native deposition already includes host factors;
 // other channels use the patch weight once. No direct editor writeback.
 inline std::vector<Vec3> geometry_target(const h::Patch& s, Action action,
