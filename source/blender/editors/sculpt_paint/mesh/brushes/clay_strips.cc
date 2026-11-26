@@ -1004,7 +1004,11 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       if(brush.flag & BRUSH_FRONTFACE)calc_front_face(ss.cache->view_normal_symm,normals,verts,factors);
       if(audit)coverage.front+=coverage.count(factors,distances,1.0f);
       if(!autonomous)apply_z_axis_factors(tls.z_positions,factors);
-      apply_plane_trim_factors(brush,tls.z_positions,factors);
+      // The material solver owns the tool plane. Applying the native Clay
+      // Strips trim first can discard the entire side of a narrow feature.
+      if (!autonomous) {
+        apply_plane_trim_factors(brush,tls.z_positions,factors);
+      }
       if(audit)coverage.trim+=coverage.count(factors,distances,1.0f);
       filter_distances_with_radius(1.0f,distances,factors);
       apply_hardness_to_distances(1.0f,ss.cache->hardness,distances);
