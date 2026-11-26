@@ -1192,6 +1192,7 @@ struct D11PreviewState {
   std::unordered_map<std::size_t,sculpt_physics::dedicated_d12::ClayReference> d12_clay_reference;
   sculpt_physics::dedicated_d12::FleshState d12_flesh_state{};
   std::size_t d12_dabs=0;
+  bool d12_melt=false;
 };
 inline sculpt_physics::hybrid_v31d11::MaterialKind d11_preview_material()
 {
@@ -1215,7 +1216,8 @@ inline bool d11_preview_target(
   using sculpt_physics::ClaySurfaceAction;
   const auto start=std::chrono::steady_clock::now();
   const bool report=state.dabs++%32==0 || profile_v26b_requested();
-  const bool artistic_enabled=stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC");
+  const bool dedicated_melt=state.d12_melt && dab.action==ClaySurfaceAction::Melt;
+  const bool artistic_enabled=dedicated_melt || stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC");
   const bool pressure_tool=dab.action==ClaySurfaceAction::Press ||
       dab.action==ClaySurfaceAction::Compress || dab.action==ClaySurfaceAction::Compact;
   const bool feature=direct || (d11_feature_requested() && (!artistic_enabled || pressure_tool));
@@ -1294,7 +1296,7 @@ inline bool d11_preview_target(
     if(artistic_enabled){
       namespace a=sculpt_physics::artistic_v31d1110;
       auto material=static_cast<a::Material>(std::clamp(state.artistic_material,0,8));
-      const char *name=std::getenv("BLENDER_SCULPT_D11_MATERIAL");
+      const char *name=dedicated_melt?nullptr:std::getenv("BLENDER_SCULPT_D11_MATERIAL");
       if(name){
         if(std::strcmp(name,"soft_clay")==0)material=a::Material::SoftClay;
         else if(std::strcmp(name,"mud")==0)material=a::Material::Mud;
@@ -1318,7 +1320,7 @@ inline bool d11_preview_target(
       std::vector<double> exposure(p.size());
       for(std::size_t i=0;i<p.size();++i)exposure[i]=dose*patch.weight[i];
       std::vector<sculpt_physics::Vec3> artistic;
-      const bool fast=stroke_option_v31d5("BLENDER_SCULPT_D11_FAST");
+      const bool fast=dedicated_melt || stroke_option_v31d5("BLENDER_SCULPT_D11_FAST");
       bool gpu_used=false,flux_gpu_used=false;
       if(pressure_tool){
 #  ifdef WITH_SCULPT_WARP_CUDA
@@ -1368,7 +1370,8 @@ inline bool d11_preview_target(
           throw std::runtime_error("invalid artistic motion");
       result.displacement=std::move(artistic);
       if(feature)result.coverage_weights_v31d9=patch.weight;
-      if(report)std::fprintf(stderr,"[D11 artistic %s] action=%d material=%d active=%zu fast=%d ms=%.3f\n",
+      if(report)std::fprintf(stderr,"[%s %s] action=%d material=%d active=%zu fast=%d ms=%.3f\n",
+                            dedicated_melt?"D12 Melt":"D11 artistic",
                             gpu_used?"Warp local + CPU transport":flux_gpu_used?"Warp flux exchange + CPU chart":"CPU",int(dab.action),int(material),active,int(fast),
                             std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
       result.active=active;
@@ -1474,7 +1477,7 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
                            add_vertex(std::size_t(corners[tri[2]]))});
     }
   }
-  if(d11_state && (d11_feature_requested() || stroke_option_v31d5("BLENDER_SCULPT_D11_DIRECT"))){
+  if(d11_state && (d11_state->d12_melt || d11_feature_requested() || stroke_option_v31d5("BLENDER_SCULPT_D11_DIRECT"))){
     // Stable global-ID order whenever the candidate set is unchanged.
     std::vector<std::size_t> order(global.size()),remap(global.size());
     for(std::size_t i=0;i<order.size();++i)order[i]=i;
@@ -1488,15 +1491,23 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
   }
   ClaySurfaceResult result;
   // Direct path is a separate opt-in. Build keeps the native deposit reference.
+  const bool dedicated_melt=d11_state && d11_state->d12_melt && dab.action==ClaySurfaceAction::Melt;
   const bool try_direct=d11_state && d11_mode!=D11PreviewMode::Legacy &&
-      stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC") &&
-      stroke_option_v31d5("BLENDER_SCULPT_D11_DIRECT") &&
+      (dedicated_melt || (stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC") &&
+       stroke_option_v31d5("BLENDER_SCULPT_D11_DIRECT"))) &&
       dab.action!=ClaySurfaceAction::Buildup && dab.action!=ClaySurfaceAction::FusionDeposit;
   bool direct_done=false;
   if(try_direct && vertices.size()<=8192){
     result.displacement.resize(vertices.size());
     direct_done=d11_preview_target(vertices,triangles,global,dab,result,*d11_state,d11_mode,true);
     if(!direct_done)result=ClaySurfaceResult{};
+  }
+  if(dedicated_melt && !direct_done){
+    // No silent change to a different deformation law when a chart is rejected.
+    result=ClaySurfaceResult{};
+    result.displacement.resize(vertices.size());
+    std::fprintf(stderr,"[D12 Melt] no write: local chart/contact/budget rejected patch=%zu\n",vertices.size());
+    return result;
   }
   if (!direct_done && dab.extended_material) {
     const int substeps=int(material_override("BLENDER_SCULPT_V21_SUBSTEPS",4.0,1.0,16.0));
@@ -1798,6 +1809,7 @@ inline bool try_apply_intent(
     std::unordered_map<std::size_t,double> coverage_v31d9;
     double pending_press_dose=cache.xpbd_v26_press_dose;
     sculpt_physics::ClaySurfaceDab plastic_dab;
+    bool dedicated_melt_write=false;
     if (conservative) {
       using namespace sculpt_physics;
       ClaySurfaceDab clay;
@@ -2039,10 +2051,12 @@ inline bool try_apply_intent(
         std::fprintf(stderr,"[V30E audit] action=%d expected=%zu missing_pbvh=%zu zero_factor=%zu samples=%zu\n",
                      action,expected,missing,zero_factor,samples.size());
       }
-      const auto d11_mode=d11_preview_mode();
+      const bool dedicated_melt=stroke_option_v31d5("BLENDER_SCULPT_D12") &&
+          brush.sculpt_physics_mode==3 && action==11 && brush.sculpt_physics_material==2;
+      const auto d11_mode=dedicated_melt?D11PreviewMode::Adaptive:d11_preview_mode();
       std::shared_ptr<D11PreviewState> d11_state;
       // No inverted action, symmetry, Multires or unsupported topology.
-      const bool artistic_enabled=stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC");
+      const bool artistic_enabled=dedicated_melt || stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC");
       const bool artistic_action=(action>=4 && action<=8) || (action>=11 && action<=14);
       if(d11_mode!=D11PreviewMode::Legacy && clay.live_surface_v30 &&
          (artistic_enabled || (clay.gradient_v31c && drag_contact_requested())) && sign>0 &&
@@ -2058,6 +2072,8 @@ inline bool try_apply_intent(
           cache.xpbd_v31d11_preview=d11_state;
         }
         d11_state->artistic_material=brush.sculpt_physics_material;
+        d11_state->d12_melt=dedicated_melt;
+        dedicated_melt_write=dedicated_melt;
         const bool gap=v27 && stroke_step.gap;
         if(gap)d11_state->artistic_plane_valid=false;
         d11_state->artistic_previous_valid=cache.xpbd_v17_intent_started && !gap;
@@ -2138,7 +2154,7 @@ inline bool try_apply_intent(
     }
     else goals=sculpt_physics::plan_physical_brush_intent(samples,intent);
     const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,conservative,
-                                 plastic_dab.plastic_v29?&plastic_dab:nullptr);
+                                 plastic_dab.plastic_v29?&plastic_dab:nullptr,dedicated_melt_write);
     if(capture_v31d9){
       const Mesh &mesh=*id_cast<const Mesh *>(object.data);
       export_coverage_v31d9(coverage_path,mesh,cache,brush,normal,position_data.eval,
