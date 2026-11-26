@@ -496,7 +496,7 @@ inline BlockTransport block_transport(const Patch& s,double radius,double cell_f
  std::map<Key,Stat> stats;
  auto key=[&](std::size_t i,std::size_t j)->Key{return {std::min(ids[i],ids[j]),std::max(ids[i],ids[j])};};
  auto gap=[](double alo,double ahi,double blo,double bhi){return std::max(0.0,std::max(alo-bhi,blo-ahi));};
- auto far=[&](Key k){
+ auto blocks_well_separated=[&](Key k){
   const auto& a=out.groups[k.first];const auto& b=out.groups[k.second];
   return norm(Vec3{gap(a.lo.x,a.hi.x,b.lo.x,b.hi.x),gap(a.lo.y,a.hi.y,b.lo.y,b.hi.y),
                    gap(a.lo.z,a.hi.z,b.lo.z,b.hi.z)})>=radius*.125;
@@ -515,7 +515,7 @@ inline BlockTransport block_transport(const Patch& s,double radius,double cell_f
   bool complete=a>0&&b>0&&v.count/a==b&&v.count%a==0;
   // A block must save at least one explicit pair. All its coefficients
   // are reduced by no more than tolerance, never increased.
-  if(complete&&v.count>1&&far(k)&&v.hi>0&&std::isfinite(v.hi)&&v.lo>0&&v.lo>=(1-tolerance)*v.hi){
+  if(complete&&v.count>1&&blocks_well_separated(k)&&v.hi>0&&std::isfinite(v.hi)&&v.lo>0&&v.lo>=(1-tolerance)*v.hi){
    v.compress=true;out.blocks.push_back({k.first,k.second,v.lo});
    out.represented_pairs+=v.count;
   }
