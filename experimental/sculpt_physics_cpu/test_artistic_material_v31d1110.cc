@@ -1,4 +1,5 @@
 #include "artistic_relief_v31d1110.hh"
+#include "artistic_build_v31d1114.hh"
 #include "artistic_swept_v31d1111.hh"
 #include "artistic_csr_smooth_v31d1112.hh"
 #include <cstdlib>
@@ -240,6 +241,41 @@ int main(){
     {{0,1,.6},{0,2,.4}}, {.5,.3,.2,0.},{.3,.3,.3,0.},change,moved);
  check(!used_exchange&&std::abs(change[0]+.5)<1e-12&&change[3]==0.);
  check(std::abs(change[0]+change[1]+change[2])<1e-12);
+ // Build shapes must differ after normalizing amplitude, not merely
+ // because of the material's deposit coefficient. Use a uniform native
+ // weighted footprint and a distinct pinned interior vertex.
+ auto build_patch=flat;
+ build_patch.weight[mid+2]=0.;
+ std::vector<sculpt_physics::Vec3> native_build(build_patch.p.size());
+ for(std::size_t k=0;k<native_build.size();++k)
+  native_build[k]={0,0,.005*build_patch.weight[k]};
+ const std::vector<double> fresh(build_patch.p.size(),0.);
+ auto shape=[&](Material m,sculpt_physics::Vec3 dir){
+  return build_profile_target(build_patch,native_build,m,{0,0,0},{0,0,1},
+      dir,1.,fresh,true);
+ };
+ auto soft_build=shape(Material::SoftClay,{1,0,0});
+ auto firm_build=shape(Material::FirmClay,{1,0,0});
+ auto mud_build=shape(Material::Mud,{1,0,0});
+ auto wax_build=shape(Material::Wax,{1,0,0});
+ auto putty_build=shape(Material::Putty,{1,0,0});
+ const auto shoulder=mid+8*dim;
+ check(soft_build[mid].z>0.&&firm_build[mid].z>0.&&mud_build[mid].z>0.&&wax_build[mid].z>0.&&putty_build[mid].z>0.);
+ auto ratio=[&](const auto& motion){return motion[shoulder].z/motion[mid].z;};
+ check(ratio(mud_build)>ratio(soft_build)+.15);
+ check(ratio(soft_build)>ratio(firm_build)+.2);
+ check(ratio(wax_build)<ratio(soft_build)-.2);
+ check(ratio(putty_build)<ratio(soft_build)-.2);
+ auto wax_rotated=shape(Material::Wax,{0,1,0});
+ check(wax_rotated[shoulder].z>wax_build[shoulder].z);
+ for(int material=0;material<9;++material){
+  auto q=shape(static_cast<Material>(material),{1,0,0});
+  for(std::size_t k=0;k<q.size();++k){
+   check(std::isfinite(h::norm(q[k])));
+   if(build_patch.weight[k]==0)check(h::norm(q[k])==0.);
+   check(q[k].z>=0.);
+  }
+ }
  auto transported=geometry_target(patch,Action::Press,Material::Mud,
     {0,0,0},{0,.8,0},{0,0,1},{.3,.3,0},.01,1,4);
  check(h::norm(transported[2])==0);
