@@ -3505,6 +3505,21 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Physical Mode", "Experimental coordinate-only sculpt physics; requires an enabled research build");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  static const EnumPropertyItem physics_engines[] = {
+      {0, "AUTO", 0, "Automatic / Launch", "Keep existing action and launch settings"},
+      {1, "LEGACY_D11", 0, "Legacy D11", "Previous experimental material engine"},
+      {2, "CLAY", 0, "Clay Buildup", "Dedicated D12 plane deposition"},
+      {3, "FLESH", 0, "Flesh Flow", "Dedicated D12 analytical tissue flow"},
+      {4, "MELT_SURFACE", 0, "Melt Surface", "Dedicated D12 surface relaxation, not thermal simulation"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_physics_engine", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_physics_engine");
+  RNA_def_property_enum_items(prop, physics_engines);
+  RNA_def_property_enum_default(prop, 0);
+  RNA_def_property_ui_text(prop, "Engine", "Experimental per-brush engine for Clay and Clay Strips");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   static const EnumPropertyItem physics_materials[] = {
       {0, "SOFT_CLAY", 0, "Soft Clay", "Smooth cohesive clay with broad plastic flow"},
       {1, "FIRM_CLAY", 0, "Firm Clay", "Stiffer clay that holds planes and detail"},
