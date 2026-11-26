@@ -3,6 +3,7 @@
 
 #include "physics_core.hh"
 #include "brush_contact.hh"
+#include "artistic_paired_flux.hh"
 #include <queue>
 #include <algorithm>
 #include <array>
@@ -84,6 +85,8 @@ struct ClaySurfaceDab {
   double friction=0.7, viscosity=0.4, cohesion=0.6, stiffness=0.5;
   double plasticity=0.85, volume_preservation=0.9;
   double fusion=0.5;
+  PairedFluxBackend* artistic_flux_backend=nullptr; // transient, owned by stroke
+  int artistic_compaction_material=-1; // D11.13 read-only material state unless native writer opts in
 
 };
 // Bounded local pressure target; cumulative dose is in brush-radius units.
@@ -115,6 +118,8 @@ struct ClaySurfaceResult {
   std::size_t proxy_passes_v31d3=0,proxy_rejected_v31d3=0,proxy_nodes_v31d3=0;
   double proxy_strain_before_v31d3=0,proxy_strain_after_v31d3=0,proxy_budget_error_v31d3=0;
   double melt_residual_peak_v30b=0.0;
+  bool artistic_flux_gpu=false;
+  int artistic_material_used=-1; // set only after a successful artistic target
 };
 
 // Qualitative hardening state. Units are normal displacement / brush radius,
@@ -509,6 +514,19 @@ inline void coarse_clay_transport(
     if(f<0){std::swap(a,b);f=-f;}
     nodes[a].outgoing+=f;nodes[b].incoming+=f;flux.push_back({a,b,f});
   }
+  if(dab.artistic_flux_backend && dab.stable_v28 && !fusion && !flux.empty()){
+    std::vector<PairedFluxLink> links;links.reserve(flux.size());
+    std::vector<double> donor(nodes.size()),receiver(nodes.size()),change;
+    for(const auto& f:flux)links.push_back({f.a,f.b,f.amount});
+    for(std::size_t i=0;i<nodes.size();++i){
+      donor[i]=std::min(nodes[i].volume*.25,.035*dab.radius*nodes[i].area);
+      receiver[i]=.035*dab.radius*nodes[i].area;
+    }
+    double transferred=0.;
+    out.artistic_flux_gpu=paired_flux_dispatch(dab.artistic_flux_backend,links,donor,receiver,change,transferred);
+    for(std::size_t i=0;i<nodes.size();++i)nodes[i].change=change[i];
+    out.transported_volume+=transferred;
+  }else{
   for(const auto &f:flux) {
     auto &u=nodes[f.a];auto &v=nodes[f.b];
     const double cap=u.volume*.25;
@@ -522,6 +540,7 @@ inline void coarse_clay_transport(
     }
     const double mass=f.amount*scale;
     u.change-=mass;v.change+=mass;out.transported_volume+=mass;
+  }
   }
   for(std::size_t i=0;i<h.size();++i) if(w[i]>0) {
     double d=0;
@@ -556,10 +575,21 @@ inline void coarse_clay_transport(
       if(f<0){std::swap(a,b);f=-f;}
       outgoing[a]+=f;incoming[b]+=f;fine.push_back({a,b,f});
     }
-    for(const auto &f:fine){
-      const double limit=.015*dab.radius;
-      const double mass=f.amount*std::min({1.0,limit*area[f.a]*w[f.a]/outgoing[f.a],limit*area[f.b]*w[f.b]/incoming[f.b]});
-      change[f.a]-=mass;change[f.b]+=mass;out.fine_transport_v30b+=mass;
+    if(dab.artistic_flux_backend && !fine.empty()){
+      std::vector<PairedFluxLink> links;links.reserve(fine.size());
+      for(const auto& f:fine)links.push_back({f.a,f.b,f.amount});
+      std::vector<double> cap(h.size());
+      for(std::size_t i=0;i<cap.size();++i)cap[i]=.015*dab.radius*area[i]*w[i];
+      double transferred=0.;
+      const bool used=paired_flux_dispatch(dab.artistic_flux_backend,links,cap,cap,change,transferred);
+      out.artistic_flux_gpu=out.artistic_flux_gpu||used;
+      out.fine_transport_v30b+=transferred;
+    }else{
+      for(const auto &f:fine){
+        const double limit=.015*dab.radius;
+        const double mass=f.amount*std::min({1.0,limit*area[f.a]*w[f.a]/outgoing[f.a],limit*area[f.b]*w[f.b]/incoming[f.b]});
+        change[f.a]-=mass;change[f.b]+=mass;out.fine_transport_v30b+=mass;
+      }
     }
     for(std::size_t i=0;i<h.size();++i)if(w[i]>0)delta[i]+=change[i]/area[i];
   }

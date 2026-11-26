@@ -23,6 +23,12 @@
 #  include "stroke_context_v27.hh"
 #  include "tangential_transport_v31d6.hh"
 #  include "hybrid_foundation_v31d11.hh"
+#  include "artistic_csr_smooth_v31d1112.hh"
+#  include "artistic_relief_v31d1110.hh"
+#  include "artistic_build_v31d1114.hh"
+#  ifdef WITH_SCULPT_WARP_CUDA
+#    include "warp_cuda_backend.hh"
+#  endif
 #  include <cstring>
 
 #  include "BKE_mesh.hh"
@@ -510,11 +516,21 @@ inline bool try_apply(const Sculpt &sd,
 
   MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
   const Span<float3> current=position_data.eval;
+  // Native clip may snap zero translations on a mirror plane; preserve the
+  // established full-leaf path in that case. Ordinary mesh writes use
+  // actual unique vertex IDs with the same PositionDeformData/Undo writer.
+  const bool sparse_nodes=conservative_clay && autonomous &&
+      cache.mirror_modifier_clip.flag==0 &&
+      stroke_option_v31d5("BLENDER_SCULPT_D11_FAST");
   struct PreparedNode {
     int id;
+    Vector<int> vertices;
     Vector<float3> translations;
   };
   std::vector<PreparedNode> editor_writes;
+  const auto write_vertices=[&](const PreparedNode& node)->Span<int>{
+    return sparse_nodes?node.vertices.as_span():nodes[node.id].verts();
+  };
   bke::SpanAttributeWriter<float> plastic_writer;
   Vector<int> plastic_ids;
   Vector<float> plastic_before,plastic_after;
@@ -872,16 +888,29 @@ inline bool try_apply(const Sculpt &sd,
       PreparedNode node;
       node.id=ni;
       const Span<int> verts=nodes[ni].verts();
-      node.translations.resize(verts.size());
-      for (const int i : verts.index_range()) {
-        const std::size_t vi=std::size_t(verts[i]);
-        const auto it=changes.find(vi);
-        const bool first=it!=changes.end() && covered.insert(vi).second;
-        node.translations[i]=first ? it->second : float3(0.0f);
+      if(sparse_nodes){
+        // Scan only the already supplied native Undo nodes. Do not allocate
+        // a dense translation array, snapshot, or deform untouched vertices.
+        for(int vi:verts){
+          const auto it=changes.find(std::size_t(vi));
+          if(it==changes.end() || !covered.insert(std::size_t(vi)).second)continue;
+          node.vertices.append(vi);
+          node.translations.append(it->second);
+        }
+        if(node.vertices.is_empty())return;
+      }else{
+        node.translations.resize(verts.size());
+        for(const int i:verts.index_range()){
+          const std::size_t vi=std::size_t(verts[i]);
+          const auto it=changes.find(vi);
+          const bool first=it!=changes.end() && covered.insert(vi).second;
+          node.translations[i]=first?it->second:float3(0.0f);
+        }
       }
+      const Span<int> ids=write_vertices(node);
       const Vector<float3> before_clip=node.translations;
-      clip_and_lock_translations(sd,ss,current,verts,node.translations);
-      for (const int i : verts.index_range()) {
+      clip_and_lock_translations(sd,ss,current,ids,node.translations);
+      for (const int i : ids.index_range()) {
         const float3 wanted=before_clip[i];
         const float3 got=node.translations[i];
         // A zero translation must remain exactly zero, even if native
@@ -910,7 +939,7 @@ inline bool try_apply(const Sculpt &sd,
       // Record only vertices actually about to move, before any editor write.
       // This also covers tiny corrections produced by native clipping.
       for (const PreparedNode &node : editor_writes) {
-        const Span<int> verts=nodes[node.id].verts();
+        const Span<int> verts=write_vertices(node);
         for (const int i : verts.index_range()) {
           const float3 t=node.translations[i];
           if (t.x!=0.0f || t.y!=0.0f || t.z!=0.0f) {
@@ -932,13 +961,18 @@ inline bool try_apply(const Sculpt &sd,
       const double len=std::hypot(ax.x,ax.y,ax.z);
       if(len<=1e-12)throw std::runtime_error("Invalid V29 plastic axis");
       for(const auto &node:editor_writes){
-        const Span<int> verts=nodes[node.id].verts();
+        const Span<int> verts=write_vertices(node);
         for(const int i:verts.index_range()){
           const auto &v=node.translations[i];
           const double normal=(ax.x*v.x+ax.y*v.y+ax.z*v.z)/len;
           const int id=verts[i];
           const float old=plastic_writer.span[id];
-          const float next=float(sculpt_physics::update_compaction_v29(old,normal,plastic_dab->radius,plastic_dab->sign));
+          const int artistic_material=plastic_dab->artistic_compaction_material;
+          const float next=artistic_material>=0 && plastic_dab->sign>0?
+              float(sculpt_physics::artistic_v31d1110::compaction_after_write(
+                  static_cast<sculpt_physics::artistic_v31d1110::Material>(artistic_material),
+                  old,-normal,plastic_dab->radius,cache.xpbd_v16_clay_behavior==7?1.5:1.)):
+              float(sculpt_physics::update_compaction_v29(old,normal,plastic_dab->radius,plastic_dab->sign));
           if(next!=old){plastic_ids.append(id);plastic_before.append(old);plastic_after.append(next);}
         }
       }
@@ -963,7 +997,7 @@ inline bool try_apply(const Sculpt &sd,
   std::size_t moved_v30c=0,staged_v30c=0;
   for (PreparedNode &node : editor_writes) {
     if(profile && overlap_v30c_requested()){
-      const Span<int> ids=nodes[node.id].verts();
+      const Span<int> ids=write_vertices(node);
       for(const int i:ids.index_range()){
         const float3 p=current[ids[i]],q=p+node.translations[i];
         ++staged_v30c;
@@ -971,16 +1005,23 @@ inline bool try_apply(const Sculpt &sd,
       }
     }
     bke::pbvh::MeshNode &pbvh_node=nodes[node.id];
+    const Span<int> ids=write_vertices(node);
     Vector<float3> before_v31d5;
     if(diag_v31d5){
-      before_v31d5.resize(pbvh_node.verts().size());
-      for(const int i:pbvh_node.verts().index_range())before_v31d5[i]=current[pbvh_node.verts()[i]];
+      before_v31d5.resize(ids.size());
+      for(const int i:ids.index_range())before_v31d5[i]=current[ids[i]];
     }
-    position_data.deform(node.translations,pbvh_node.verts());
-    if(diag_v31d5)for(const int i:pbvh_node.verts().index_range())
-      written_v31d5+=double(math::length(position_data.eval[pbvh_node.verts()[i]]-before_v31d5[i]));
-    bke::pbvh::update_node_bounds_mesh(position_data.eval,pbvh_node);
+    position_data.deform(node.translations,ids);
+    if(diag_v31d5)for(const int i:ids.index_range())
+      written_v31d5+=double(math::length(position_data.eval[ids[i]]-before_v31d5[i]));
+    if(!sparse_nodes)bke::pbvh::update_node_bounds_mesh(position_data.eval,pbvh_node);
   }
+  // Shared boundary vertices may be owned by a different staged leaf.
+  // Refresh original Undo-region bounds after all sparse writes, even for
+  // leaves with no unique writes; keep the original PBVH invalidation mask.
+  if(sparse_nodes)node_mask.foreach_index([&](const int ni){
+    bke::pbvh::update_node_bounds_mesh(position_data.eval,nodes[ni]);
+  });
   if(plastic_writer){
     for(const int i:plastic_ids.index_range())plastic_writer.span[plastic_ids[i]]=plastic_after[i];
     plastic_writer.finish();
@@ -1134,6 +1175,15 @@ struct D11PreviewState {
   sculpt_physics::hybrid_v31d11::GeodesicCache distances;
   std::vector<std::size_t> global;
   std::size_t dabs=0;
+  int artistic_material=1;
+  bool artistic_gpu_attempted=false;
+  std::unique_ptr<sculpt_physics::artistic_v31d1110::PressureLocalBackend> artistic_gpu;
+  bool artistic_flux_attempted=false;
+  std::unique_ptr<sculpt_physics::PairedFluxBackend> artistic_flux;
+  bool artistic_plane_valid=false;
+  bool artistic_previous_valid=false;
+  sculpt_physics::Vec3 artistic_previous_center{};
+  sculpt_physics::artistic_v31d1110::PlaneState artistic_plane{};
 };
 inline sculpt_physics::hybrid_v31d11::MaterialKind d11_preview_material()
 {
@@ -1145,23 +1195,37 @@ inline sculpt_physics::hybrid_v31d11::MaterialKind d11_preview_material()
   if(v && std::strcmp(v,"stone")==0)return M::Stone;
   return M::Clay;
 }
-inline void d11_preview_target(
+inline bool d11_preview_target(
     const std::vector<sculpt_physics::ClaySurfaceVertex> &vertices,
     const std::vector<sculpt_physics::ClaySurfaceTriangle> &triangles,
     const std::vector<std::size_t> &global,
     const sculpt_physics::ClaySurfaceDab &dab,
     sculpt_physics::ClaySurfaceResult &result,D11PreviewState &state,
-    D11PreviewMode mode)
+    D11PreviewMode mode,bool direct=false)
 {
   namespace h=sculpt_physics::hybrid_v31d11;
   using sculpt_physics::ClaySurfaceAction;
   const auto start=std::chrono::steady_clock::now();
   const bool report=state.dabs++%32==0 || profile_v26b_requested();
-  const bool feature=d11_feature_requested();
+  const bool artistic_enabled=stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC");
+  const bool pressure_tool=dab.action==ClaySurfaceAction::Press ||
+      dab.action==ClaySurfaceAction::Compress || dab.action==ClaySurfaceAction::Compact;
+  const bool feature=direct || (d11_feature_requested() && (!artistic_enabled || pressure_tool));
+  const bool relief_tool=dab.action==ClaySurfaceAction::Push ||
+      dab.action==ClaySurfaceAction::Smear || dab.action==ClaySurfaceAction::Gather ||
+      dab.action==ClaySurfaceAction::Melt;
+  // Brush-scale proxy avoids the pressure tools' all-source geodesic graph.
+  // Larger budget is opt-in and still requires runtime timing validation.
+  const bool build_tool=artistic_enabled && (dab.action==ClaySurfaceAction::Buildup ||
+      dab.action==ClaySurfaceAction::FusionDeposit);
+  // Build is linear in patch size and retains the native writable set.
+  // Avoid silently reverting dense Clay Build to the same legacy profile.
+  const std::size_t active_budget=build_tool?16384:direct && relief_tool?4096:1024;
+  const std::size_t patch_budget=build_tool?32768:8192;
   if((!feature && result.coverage_weights_v31d9.size()!=vertices.size()) ||
      result.displacement.size()!=vertices.size()){
     if(report)std::fprintf(stderr,"[D11.6] legacy fallback: missing contact weights\n");
-    return;
+    return false;
   }
   std::vector<sculpt_physics::Vec3> p;
   std::vector<double> w,permission,falloff;
@@ -1184,15 +1248,16 @@ inline void d11_preview_target(
     w.push_back(std::clamp(weight,0.,1.));
     if(w.back()>0)++active;
   }
-  if(active==0 || active>1024 || vertices.size()>8192){
+  if(active==0 || (!feature && active>active_budget) || vertices.size()>patch_budget){
     if(report)std::fprintf(stderr,"[D11.6] legacy fallback: active=%zu patch=%zu (preview budget)\n",active,vertices.size());
-    return;
+    return false;
   }
   try{
     auto patch=h::make_patch(p,triangles,w);
     if(feature){
-      auto contact=h::feature_contact(patch,dab.center,dab.axis,
-          dab.swept_v29?dab.sweep_start:dab.center,dab.radius);
+      const auto sweep_start=direct && state.artistic_previous_valid?
+          state.artistic_previous_center:(dab.swept_v29?dab.sweep_start:dab.center);
+      auto contact=h::feature_contact(patch,dab.center,dab.axis,sweep_start,dab.radius);
       auto field=h::compose_brush_field(permission,contact.contact,falloff);
       patch.weight=std::move(field.weight);
       active=0;
@@ -1201,24 +1266,110 @@ inline void d11_preview_target(
         if(h::norm(result.displacement[i])<=1e-15)++recovered_contact;
         if(std::abs(h::dot(patch.normal[i],h::unit(dab.axis)))<.15)++vertical;
       }
-      if(active==0){
-        if(report)std::fprintf(stderr,"[D11.7] legacy fallback: no connected feature seed/contact\n");
-        return;
+      if(active==0 || active>active_budget){
+        if(report)std::fprintf(stderr,"[D11.7] legacy fallback: feature active=%zu outside preview budget\n",active);
+        return false;
       }
     }
     h::PlasticState plastic(p.size());
     // Reuse the existing V29 compaction attribute only if enabled; D11
     // deformation state is not persisted until an accepted-write adapter exists.
     for(std::size_t i=0;i<p.size();++i)
-      if(dab.plastic_v29)plastic[i].compaction=std::clamp(vertices[i].compaction_v29,0.,1.);
+      if(dab.plastic_v29 || dab.artistic_compaction_material>=0)plastic[i].compaction=std::clamp(vertices[i].compaction_v29,0.,1.);
     auto tool=dab.action==ClaySurfaceAction::Compact?h::Tool::Compact:
               dab.action==ClaySurfaceAction::Compress?h::Tool::Compress:h::Tool::Press;
-    if(state.global!=global){state.distances=h::GeodesicCache{};state.global=global;}
+    if(!build_tool && state.global!=global){state.distances=h::GeodesicCache{};state.global=global;}
     h::CachedFlux diagnostic;
+    bool local_recovery=false;
+    // Opt-in artistic pressure tools, using the existing native permission and writer.
+    // Other actions remain on their established native path.
+    if(artistic_enabled){
+      namespace a=sculpt_physics::artistic_v31d1110;
+      auto material=static_cast<a::Material>(std::clamp(state.artistic_material,0,8));
+      const char *name=std::getenv("BLENDER_SCULPT_D11_MATERIAL");
+      if(name){
+        if(std::strcmp(name,"soft_clay")==0)material=a::Material::SoftClay;
+        else if(std::strcmp(name,"mud")==0)material=a::Material::Mud;
+        else if(std::strcmp(name,"wax")==0)material=a::Material::Wax;
+        else if(std::strcmp(name,"flesh")==0)material=a::Material::Flesh;
+        else if(std::strcmp(name,"foam")==0)material=a::Material::Foam;
+        else if(std::strcmp(name,"stone")==0)material=a::Material::Stone;
+        else if(std::strcmp(name,"wood")==0)material=a::Material::Wood;
+        else if(std::strcmp(name,"putty")==0)material=a::Material::Putty;
+        else if(std::strcmp(name,"clay")==0 || std::strcmp(name,"firm_clay")==0)material=a::Material::FirmClay;
+      }
+      std::vector<double> deposit(p.size(),0.),compaction(p.size(),0.);
+      for(std::size_t i=0;i<p.size();++i)compaction[i]=plastic[i].compaction;
+      auto action=dab.action==ClaySurfaceAction::Compact?a::Action::Compact:
+                  dab.action==ClaySurfaceAction::Compress?a::Action::Compress:a::Action::Press;
+      if(!std::isfinite(dab.intensity)||!std::isfinite(dab.dose)||dab.dose<0)
+        throw std::invalid_argument("artistic dose");
+      // Above unit drive, increase exposure rather than saturating strength.
+      const double dose=dab.radius*dab.dose*std::max(1.,dab.intensity);
+      const double drive=std::clamp(dab.intensity,0.,1.);
+      std::vector<double> exposure(p.size());
+      for(std::size_t i=0;i<p.size();++i)exposure[i]=dose*patch.weight[i];
+      std::vector<sculpt_physics::Vec3> artistic;
+      const bool fast=stroke_option_v31d5("BLENDER_SCULPT_D11_FAST");
+      bool gpu_used=false,flux_gpu_used=false;
+      if(pressure_tool){
+#  ifdef WITH_SCULPT_WARP_CUDA
+        if(!state.artistic_gpu_attempted && stroke_option_v31d5("BLENDER_SCULPT_D11_WARP")){
+          state.artistic_gpu_attempted=true;
+          state.artistic_gpu=sculpt_physics::create_artistic_pressure_cuda();
+        }
+#  endif
+        const double plane_height=dab.has_tool_plane?dab.tool_plane_height:-dab.tool_depth*dab.radius;
+        artistic=a::pressure_target(patch,action,material,dab.center,dab.axis,
+            dab.radius,dose,drive,plane_height,compaction,
+            mode==D11PreviewMode::Adaptive?&state.distances:nullptr,fast,state.artistic_gpu.get(),&gpu_used);
+      }else if(dab.action==ClaySurfaceAction::Buildup || dab.action==ClaySurfaceAction::FusionDeposit){
+        // Shape the existing weighted native deposition with genuinely
+        // different cross sections instead of a weak geodesic spread.
+        artistic=a::build_profile_target(patch,result.displacement,material,
+            dab.center,dab.axis,dab.direction,dab.radius,compaction,fast);
+        if(report)std::fprintf(stderr,"[D11 Build profile] material=%d active=%zu patch=%zu\n",
+                               int(material),active,p.size());
+      }else if(dab.action==ClaySurfaceAction::Scrape){
+        if(!state.artistic_plane_valid){
+          state.artistic_plane=a::capture_plane(dab.center+h::unit(dab.axis)*
+              (dab.has_tool_plane?dab.tool_plane_height:-dab.tool_depth*dab.radius),dab.axis);
+          state.artistic_plane_valid=true;
+        }
+        artistic=a::scrape_plane(patch,state.artistic_plane,material,exposure,dab.radius,drive,&compaction,fast);
+      }else if(dab.action==ClaySurfaceAction::Melt || dab.action==ClaySurfaceAction::Push ||
+               dab.action==ClaySurfaceAction::Smear || dab.action==ClaySurfaceAction::Gather){
+        const auto relief_action=dab.action==ClaySurfaceAction::Push?a::Action::Push:
+            dab.action==ClaySurfaceAction::Smear?a::Action::Smear:
+            dab.action==ClaySurfaceAction::Gather?a::Action::Gather:a::Action::Melt;
+        // Reuse the V30 paired finite-volume relief proxy. Tangential CSR
+        // smoothing remains a separate reference, not a substitute for Melt.
+#  ifdef WITH_SCULPT_WARP_CUDA
+        if(!state.artistic_flux_attempted && stroke_option_v31d5("BLENDER_SCULPT_D11_WARP")){
+          state.artistic_flux_attempted=true;
+          state.artistic_flux=sculpt_physics::create_artistic_flux_cuda();
+        }
+#  endif
+        artistic=a::relief_target(patch,relief_action,material,dab.center,dab.direction,
+                                  h::unit(dab.axis),dab.radius,dose,drive,fast,&compaction,
+                                  state.artistic_flux.get(),&flux_gpu_used);
+      }else return false;
+      for(std::size_t i=0;i<artistic.size();++i)
+        if(!std::isfinite(h::norm(artistic[i])) ||
+           (patch.weight[i]<=0 && h::norm(artistic[i])>0))
+          throw std::runtime_error("invalid artistic motion");
+      result.displacement=std::move(artistic);
+      if(feature)result.coverage_weights_v31d9=patch.weight;
+      if(report)std::fprintf(stderr,"[D11 artistic %s] action=%d material=%d active=%zu fast=%d ms=%.3f\n",
+                            gpu_used?"Warp local + CPU transport":flux_gpu_used?"Warp flux exchange + CPU chart":"CPU",int(dab.action),int(material),active,int(fast),
+                            std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+      result.active=active;
+      result.artistic_material_used=int(material);
+      return true;
+    }
     auto target=h::material_target(patch,tool,d11_preview_material(),plastic,dab.axis,
         dab.radius,dab.dose*dab.intensity,
         mode==D11PreviewMode::Adaptive?&state.distances:nullptr,&diagnostic,feature);
-    bool local_recovery=false;
     auto motion=feature?h::optimize_feature(patch,target,&local_recovery):
                         h::optimize(patch,std::move(target),true);
     // Ensure no nonfinite or unauthorized motion before the native writer.
@@ -1245,7 +1396,9 @@ inline void d11_preview_target(
   }catch(const std::exception &ex){
     state.distances=h::GeodesicCache{};state.global.clear();
     std::fprintf(stderr,"[D11.6] legacy fallback: %s\n",ex.what());
+    return false;
   }
+  return true;
 }
 
 inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
@@ -1292,7 +1445,7 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
         (!attributes.mask.is_empty() && attributes.mask[vi]>=0.999f)) continue;
     const auto i=add_vertex(s.global_index);
     vertices[i].influence=s.envelope;
-    if(dab.plastic_v29 && plastic_attr)vertices[i].compaction_v29=(*plastic_attr)[vi];
+    if((dab.plastic_v29 || dab.artistic_compaction_material>=0) && plastic_attr)vertices[i].compaction_v29=(*plastic_attr)[vi];
     if(history && dab.dose>0 && dab.intensity>0){
       // Capture only the first eligible geometry, never requested or
       // unaccepted motion. Reference does not reset when a dab is clipped.
@@ -1313,7 +1466,7 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
                            add_vertex(std::size_t(corners[tri[2]]))});
     }
   }
-  if(d11_state && d11_feature_requested()){
+  if(d11_state && (d11_feature_requested() || stroke_option_v31d5("BLENDER_SCULPT_D11_DIRECT"))){
     // Stable global-ID order whenever the candidate set is unchanged.
     std::vector<std::size_t> order(global.size()),remap(global.size());
     for(std::size_t i=0;i<order.size();++i)order[i]=i;
@@ -1326,7 +1479,18 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
     vertices=std::move(sorted_vertices);global=std::move(sorted_global);
   }
   ClaySurfaceResult result;
-  if (dab.extended_material) {
+  // Direct path is a separate opt-in. Build keeps the native deposit reference.
+  const bool try_direct=d11_state && d11_mode!=D11PreviewMode::Legacy &&
+      stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC") &&
+      stroke_option_v31d5("BLENDER_SCULPT_D11_DIRECT") &&
+      dab.action!=ClaySurfaceAction::Buildup && dab.action!=ClaySurfaceAction::FusionDeposit;
+  bool direct_done=false;
+  if(try_direct && vertices.size()<=8192){
+    result.displacement.resize(vertices.size());
+    direct_done=d11_preview_target(vertices,triangles,global,dab,result,*d11_state,d11_mode,true);
+    if(!direct_done)result=ClaySurfaceResult{};
+  }
+  if (!direct_done && dab.extended_material) {
     const int substeps=int(material_override("BLENDER_SCULPT_V21_SUBSTEPS",4.0,1.0,16.0));
     // V26 avoids sorting diagnostic edges on unreported dabs.
     static thread_local unsigned int count=0;
@@ -1340,15 +1504,15 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
                    integrated.refinement_edges,result.active,result.transport_nodes);
     }
   }
-  else result=solve_clay_surface(vertices,triangles,dab);
-  if(dab.tangential_gain_v31d6>0){
+  else if(!direct_done)result=solve_clay_surface(vertices,triangles,dab);
+  if(!direct_done && dab.tangential_gain_v31d6>0){
     const auto tangent=add_tangential_transport_v31d6(vertices,triangles,dab,
         result.tangent_weights_v31d6,result.displacement);
     if(profile_v26b_requested() || stroke_option_v31d5("BLENDER_SCULPT_DIAG_V31D5"))
       std::fprintf(stderr,"[V31D6 tangent] action=%d moved=%zu scale=%.7g peak=%.7g first_order_volume=%.7g\n",
           int(dab.action),tangent.moved,tangent.scale,tangent.peak,tangent.signed_volume);
   }
-  if(d11_state && d11_mode!=D11PreviewMode::Legacy)
+  if(!try_direct && d11_state && d11_mode!=D11PreviewMode::Legacy)
     d11_preview_target(vertices,triangles,global,dab,result,*d11_state,d11_mode);
   if(coverage_v31d9 && result.coverage_weights_v31d9.size()==vertices.size()){
     coverage_v31d9->reserve(vertices.size());
@@ -1737,7 +1901,18 @@ inline bool try_apply_intent(
       clay.plastic_v29=clay.stable_v28 && plastic_v29_requested() &&
           (action==5 || action==7 || action==8) &&
           bool(mesh.attributes().lookup<float>(".bse_plastic_compaction",bke::AttrDomain::Point));
-      if(clay.plastic_v29)plastic_dab=clay;
+      // Reuse the pre-existing point attribute and native compaction Undo.
+      // No new attribute may be allocated inside a stroke.
+      const bool artistic_state=stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC") &&
+          stroke_option_v31d5("BLENDER_SCULPT_D11_PLASTIC") &&
+          bool(mesh.attributes().lookup<float>(".bse_plastic_compaction",bke::AttrDomain::Point));
+      if(artistic_state){
+        clay.artistic_compaction_material=std::clamp(int(brush.sculpt_physics_material),0,8);
+      }
+      if(clay.plastic_v29){
+        plastic_dab=clay;
+        plastic_dab.artistic_compaction_material=-1;
+      }
       const auto plan_start=std::chrono::steady_clock::now();
       std::shared_ptr<SurfaceContactHistoryV28> history;
       if(clay.stable_v28 && !clay.live_surface_v30 && clay.action!=ClaySurfaceAction::Buildup &&
@@ -1777,23 +1952,36 @@ inline bool try_apply_intent(
       const auto d11_mode=d11_preview_mode();
       std::shared_ptr<D11PreviewState> d11_state;
       // No inverted action, symmetry, Multires or unsupported topology.
+      const bool artistic_enabled=stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC");
+      const bool artistic_action=(action>=4 && action<=8) || (action>=11 && action<=14);
       if(d11_mode!=D11PreviewMode::Legacy && clay.live_surface_v30 &&
-         clay.gradient_v31c && drag_contact_requested() && sign>0 &&
+         (artistic_enabled || (clay.gradient_v31c && drag_contact_requested())) && sign>0 &&
          stroke_symmetry_xyz_get(object)==PAINT_SYMM_NONE &&
          !cache.reference_symmetry && !cache.reference_combined &&
          mesh.radial_symmetry[0]==1 && mesh.radial_symmetry[1]==1 && mesh.radial_symmetry[2]==1 &&
          (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))==0 &&
          cache.tile_pass==0 && cache.radial_symmetry_pass==0 && cache.mirror_symmetry_pass==0 &&
-         (action==5 || action==7 || action==8)){
+         ((artistic_enabled && artistic_action) || action==5 || action==7 || action==8)){
         d11_state=std::static_pointer_cast<D11PreviewState>(cache.xpbd_v31d11_preview);
         if(!d11_state){
           d11_state=std::make_shared<D11PreviewState>();
           cache.xpbd_v31d11_preview=d11_state;
         }
+        d11_state->artistic_material=brush.sculpt_physics_material;
+        const bool gap=v27 && stroke_step.gap;
+        if(gap)d11_state->artistic_plane_valid=false;
+        d11_state->artistic_previous_valid=cache.xpbd_v17_intent_started && !gap;
+        d11_state->artistic_previous_center=convert(cache.xpbd_v17_last_center);
         clay.coverage_v31d9=true;
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get(),
                                          capture_v31d9?&coverage_v31d9:nullptr,d11_state.get(),d11_mode);
+      if(artistic_state && planned.artistic_material_used>=0 &&
+         (action==5 || action==7 || action==8)){
+        plastic_dab=clay;
+        plastic_dab.plastic_v29=true;
+        plastic_dab.artistic_compaction_material=planned.artistic_material_used;
+      }
       if(clay.contact_reach_v31d4 && profile_v26b_requested())
         std::fprintf(stderr,"[V31D4 reach] action=%d extra_R=0.15 active=%zu goals=%zu component_rejected=%zu scale=%.7g\n",
                      action,planned.active,goals.size(),planned.component_rejected_v30b,planned.accepted_scale);

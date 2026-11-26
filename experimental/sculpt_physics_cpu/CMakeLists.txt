@@ -417,3 +417,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_brush_solver_backend PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_brush_solver_backend_tests COMMAND test_brush_solver_backend)
+
+add_executable(test_artistic_material_v31d1110 test_artistic_material_v31d1110.cc)
+target_compile_features(test_artistic_material_v31d1110 PRIVATE cxx_std_17)
+target_link_libraries(test_artistic_material_v31d1110 PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_artistic_material_v31d1110_tests COMMAND test_artistic_material_v31d1110)
