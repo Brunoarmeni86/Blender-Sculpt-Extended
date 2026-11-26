@@ -25,5 +25,26 @@ int main(){
  check(u[0].z<0&&h::norm(u[4])==0);
  auto v=h::flux(uniform,uniform.weight,1);
  for(double x:v)check(std::abs(x)<1e-12);
+ // Zero-net transport must remain conservative after optimization.
+ std::vector<Vec3> desired(p.size());
+ for(std::size_t i=0;i<p.size();++i)desired[i]=s.normal[i]*f[i];
+ auto balanced=h::optimize(s,desired,true);
+ double net=0, magnitude=0;
+ for(std::size_t i=0;i<p.size();++i){
+  double x=s.area[i]*h::dot(s.normal[i],balanced[i]);
+  net+=x;magnitude+=std::abs(x);
+ }
+ check(std::abs(net)<=1e-12+1e-9*magnitude);
+ check(gradient_motion_scale_v31c(p,t,balanced)>=1-1e-10);
+ // Nonfinite inputs must fail explicitly.
+ bool rejected=false;
+ try{h::flux(s,s.weight,std::numeric_limits<double>::infinity());}
+ catch(const std::invalid_argument&){rejected=true;}
+ check(rejected);
+ rejected=false;
+ desired[0].x=std::numeric_limits<double>::quiet_NaN();
+ try{h::optimize(s,desired);}
+ catch(const std::invalid_argument&){rejected=true;}
+ check(rejected);
  std::cout<<"hybrid foundation tests passed\n";
 }
