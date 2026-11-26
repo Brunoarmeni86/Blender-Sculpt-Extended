@@ -4,7 +4,7 @@
  * Surface gesture approximation, not volumetric flesh or actual cloth.
  */
 #pragma once
-#include "d12_clay_engine.hh"
+#include "d12_brush_common.hh"
 
 namespace sculpt_physics::dedicated_d12 {
 struct FleshParams {
