@@ -1159,6 +1159,8 @@ struct D11PreviewState {
   int artistic_material=1;
   bool artistic_gpu_attempted=false;
   std::unique_ptr<sculpt_physics::artistic_v31d1110::PressureLocalBackend> artistic_gpu;
+  bool artistic_flux_attempted=false;
+  std::unique_ptr<sculpt_physics::PairedFluxBackend> artistic_flux;
   bool artistic_plane_valid=false;
   bool artistic_previous_valid=false;
   sculpt_physics::Vec3 artistic_previous_center{};
@@ -1285,7 +1287,7 @@ inline bool d11_preview_target(
       for(std::size_t i=0;i<p.size();++i)exposure[i]=dose*patch.weight[i];
       std::vector<sculpt_physics::Vec3> artistic;
       const bool fast=stroke_option_v31d5("BLENDER_SCULPT_D11_FAST");
-      bool gpu_used=false;
+      bool gpu_used=false,flux_gpu_used=false;
       if(pressure_tool){
 #  ifdef WITH_SCULPT_WARP_CUDA
         if(!state.artistic_gpu_attempted && stroke_option_v31d5("BLENDER_SCULPT_D11_WARP")){
@@ -1320,8 +1322,15 @@ inline bool d11_preview_target(
             dab.action==ClaySurfaceAction::Gather?a::Action::Gather:a::Action::Melt;
         // Reuse the V30 paired finite-volume relief proxy. Tangential CSR
         // smoothing remains a separate reference, not a substitute for Melt.
+#  ifdef WITH_SCULPT_WARP_CUDA
+        if(!state.artistic_flux_attempted && stroke_option_v31d5("BLENDER_SCULPT_D11_WARP")){
+          state.artistic_flux_attempted=true;
+          state.artistic_flux=sculpt_physics::create_artistic_flux_cuda();
+        }
+#  endif
         artistic=a::relief_target(patch,relief_action,material,dab.center,dab.direction,
-                                  h::unit(dab.axis),dab.radius,dose,drive,fast,&compaction);
+                                  h::unit(dab.axis),dab.radius,dose,drive,fast,&compaction,
+                                  state.artistic_flux.get(),&flux_gpu_used);
       }else return false;
       for(std::size_t i=0;i<artistic.size();++i)
         if(!std::isfinite(h::norm(artistic[i])) ||
@@ -1330,7 +1339,7 @@ inline bool d11_preview_target(
       result.displacement=std::move(artistic);
       if(feature)result.coverage_weights_v31d9=patch.weight;
       if(report)std::fprintf(stderr,"[D11 artistic %s] action=%d material=%d active=%zu fast=%d ms=%.3f\n",
-                            gpu_used?"Warp local + CPU transport":"CPU",int(dab.action),int(material),active,int(fast),
+                            gpu_used?"Warp local + CPU transport":flux_gpu_used?"Warp flux exchange + CPU chart":"CPU",int(dab.action),int(material),active,int(fast),
                             std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
       result.active=active;
       result.artistic_material_used=int(material);
