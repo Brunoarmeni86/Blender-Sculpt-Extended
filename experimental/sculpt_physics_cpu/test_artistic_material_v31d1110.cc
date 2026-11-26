@@ -1,6 +1,6 @@
 #include "artistic_geometry_v31d1110.hh"
 #include "artistic_swept_v31d1111.hh"
-#include "artistic_plane_v31d1111.hh"
+#include "artistic_surface_v31d1111.hh"
 #include <cstdlib>
 #include <limits>
 using namespace sculpt_physics::artistic_v31d1110;
@@ -81,6 +81,15 @@ int main(){
  for(auto v:no_cut)check(h::norm(v)==0);
  check(sculptgl_falloff(0)==1 && sculptgl_falloff(1)==0);
  check(std::abs(sculptgl_falloff(.5)-.6875)<1e-12);
+ for(int a=0;a<6;++a)for(int m=0;m<9;++m){
+  auto v=surface_target(patch,static_cast<SurfaceAction>(a),static_cast<Material>(m),
+    capture_plane({0,0,0},{0,0,1}),{.3,.3,0},{1,0,0},{.1,.1,.1},1,1);
+  check(v.size()==3 && h::norm(v[2])==0);
+  for(auto x:v)check(std::isfinite(h::norm(x)));
+ }
+ auto clay=surface_target(patch,SurfaceAction::Clay,Material::FirmClay,
+    capture_plane({0,0,0},{0,0,1}),{0,0,0},{1,0,0},{.1,.1,0},1,1);
+ check(clay[0].z>0 && clay[0].z<=.1);
  bool rejected=false;
  try{evaluate(Material::Mud,std::numeric_limits<double>::quiet_NaN(),0,1);}
  catch(const std::invalid_argument&){rejected=true;}
