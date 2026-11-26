@@ -2,6 +2,8 @@ name: Artistic brush reference
 on:
   push:
     branches: ['experiment/physics-d11.10-13-artistic-engine']
+  pull_request:
+    branches: ['experiment/physics-d11.9-multibrush-integration']
   workflow_dispatch:
 jobs:
   reference:
