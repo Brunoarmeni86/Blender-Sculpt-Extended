@@ -349,7 +349,9 @@ def main():
             brush.auto_smooth_factor=0.0
             brush.use_accumulate=True
             brush.use_plane_trim=False
-            brush.direction="ADD"
+            # Direction is a tool-dependent RNA enum (some expose DEFAULT only).
+            # Keep the copied Essentials direction; the dedicated assets use
+            # its stock positive direction and the host handles stroke inversion.
             brush.strength=1.0
             brush.spacing=6
             brush.tip_roundness=.30 if action=="AUTONOMOUS_DEPOSIT" else 1.0
