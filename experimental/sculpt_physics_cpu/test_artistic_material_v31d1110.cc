@@ -52,6 +52,17 @@ int main(){
  auto u=geometry_target(patch,Action::Build,Material::FirmClay,
     {.01,.01,0},{0,0,0},{1,0,1},{.3,.3,0},.01,1);
  check(u[0].z>0);
+ auto flux=pair_transport(patch,{1,0,0},4,.1);
+ check(flux[0]<0 && flux[1]>0 && flux[2]==0);
+ double balance=0;
+ for(std::size_t k=0;k<flux.size();++k)balance+=flux[k]*patch.area[k];
+ check(std::abs(balance)<1e-12);
+ auto uniform=pair_transport(patch,{1,1,0},4,.1);
+ for(auto x:uniform)check(x==0);
+ auto transported=geometry_target(patch,Action::Press,Material::Mud,
+    {0,0,0},{0,.8,0},{0,0,1},{.3,.3,0},.01,1,4);
+ check(h::norm(transported[2])==0);
+ for(auto v:transported)check(std::isfinite(h::norm(v)));
  bool rejected=false;
  try{evaluate(Material::Mud,std::numeric_limits<double>::quiet_NaN(),0,1);}
  catch(const std::invalid_argument&){rejected=true;}
