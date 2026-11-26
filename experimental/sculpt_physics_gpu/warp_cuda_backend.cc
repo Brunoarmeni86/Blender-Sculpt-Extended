@@ -29,6 +29,8 @@ struct SharedWarpRuntime {
   void *smooth_module = nullptr;
   void *smooth_kernel = nullptr;
   void *smooth_scatter_kernel = nullptr;
+  void *artistic_module = nullptr;
+  void *artistic_kernel = nullptr;
 
   SharedWarpRuntime()
   {
@@ -54,6 +56,13 @@ struct SharedWarpRuntime {
         context, module, "jacobi_shape_step_2135c77f_cuda_kernel_forward");
     if (kernel == nullptr) {
       throw std::runtime_error("Warp Sculpt Jacobi kernel is missing from PTX module");
+    }
+    const char *artistic_path=std::getenv("BLENDER_SCULPT_D11_WARP_PTX");
+    const char *artistic_symbol=std::getenv("BLENDER_SCULPT_D11_WARP_KERNEL");
+    if(artistic_path && artistic_path[0] && artistic_symbol && artistic_symbol[0]){
+      artistic_module=wp_cuda_load_module(context,artistic_path);
+      if(artistic_module)
+        artistic_kernel=wp_cuda_get_kernel(context,artistic_module,artistic_symbol);
     }
     const char *smooth_ptx_path = std::getenv("BLENDER_SCULPT_WARP_SMOOTH_PTX");
     if (smooth_ptx_path != nullptr && smooth_ptx_path[0] != '\0') {
@@ -670,7 +679,111 @@ class WarpCudaBrushSolverBackend final : public BrushSolverBackend {
   void *d_smooth_normals_ = nullptr;
 };
 
+// Independent pressure proposals. Reuse device buffers throughout one stroke;
+// only the bounded local patch is uploaded and downloaded. No editor writes.
+class ArtisticPressureCuda final : public artistic_v31d1110::PressureLocalBackend {
+  using Float3=std::array<float,3>;
+  static_assert(sizeof(Float3)==sizeof(wp::vec3));
+  void *context_=nullptr,*kernel_=nullptr;
+  std::array<void*,6> device_{};
+  std::size_t capacity_=0;
+  bool failed_=false;
+  std::vector<Float3> p_,n_,motion_;
+  std::vector<float> weight_,compaction_,drive_;
+  void release(){
+    for(auto& d:device_)if(d){wp_free_device(context_,d);d=nullptr;}
+    capacity_=0;
+  }
+  bool reserve(std::size_t count){
+    if(capacity_>=count)return true;
+    release();
+    const auto capacity=std::min<std::size_t>(8192,std::max<std::size_t>(256,count*2));
+    const std::array<std::size_t,6> stride{sizeof(Float3),sizeof(Float3),sizeof(float),
+                                          sizeof(float),sizeof(Float3),sizeof(float)};
+    for(std::size_t i=0;i<device_.size();++i){
+      device_[i]=wp_alloc_device(context_,stride[i]*capacity);
+      if(!device_[i]){release();return false;}
+    }
+    capacity_=capacity;
+    return true;
+  }
+  template<class T> bool upload(std::size_t i,const std::vector<T>& v){
+    return wp_memcpy_h2d(context_,device_[i],v.data(),sizeof(T)*v.size());
+  }
+ public:
+  ArtisticPressureCuda(){
+    auto& runtime=shared_warp_runtime();
+    context_=runtime.context;kernel_=runtime.artistic_kernel;
+    if(!kernel_)throw std::runtime_error("D11 artistic Warp module unavailable");
+  }
+  ~ArtisticPressureCuda() override {release();}
+  bool evaluate_local(const artistic_v31d1110::h::Patch& patch,
+      artistic_v31d1110::Action action,artistic_v31d1110::Material material,
+      Vec3 center,Vec3 axis,double radius,double dose,double pressure,double plane_height,
+      const std::vector<double>& compaction,std::vector<Vec3>& motion,
+      std::vector<double>& drive) override {
+    namespace a=artistic_v31d1110;
+    const auto count=patch.p.size();
+    if(failed_||count==0||count>8192||compaction.size()!=count||
+       patch.normal.size()!=count||patch.weight.size()!=count)return false;
+    // Refuse small patches: dispatch + transfer costs dominate.
+    if(count<512)return false;
+    if(!reserve(count)){failed_=true;return false;}
+    p_.resize(count);n_.resize(count);weight_.resize(count);compaction_.resize(count);
+    motion_.resize(count);drive_.resize(count);
+    for(std::size_t i=0;i<count;++i){
+      const auto q=patch.p[i]-center,v=patch.normal[i];
+      p_[i]={float(q.x),float(q.y),float(q.z)};
+      n_[i]={float(v.x),float(v.y),float(v.z)};
+      weight_[i]=float(patch.weight[i]);compaction_[i]=float(compaction[i]);
+      for(float x:{p_[i][0],p_[i][1],p_[i][2],n_[i][0],n_[i][1],n_[i][2],
+                    weight_[i],compaction_[i]})if(!std::isfinite(x))return false;
+    }
+    if(!upload(0,p_)||!upload(1,n_)||!upload(2,weight_)||!upload(3,compaction_)){
+      failed_=true;return false;
+    }
+    const int size=int(count);
+    wp::array_t<wp::vec3> p(static_cast<wp::vec3*>(device_[0]),size);
+    wp::array_t<wp::vec3> n(static_cast<wp::vec3*>(device_[1]),size);
+    wp::array_t<float> w(static_cast<float*>(device_[2]),size);
+    wp::array_t<float> c(static_cast<float*>(device_[3]),size);
+    wp::array_t<wp::vec3> out(static_cast<wp::vec3*>(device_[4]),size);
+    wp::array_t<float> d(static_cast<float*>(device_[5]),size);
+    wp::launch_bounds_t<1> bounds;
+    bounds.shape[0]=uint32_t(count);bounds.size=count;bounds.coord_mult=1;
+    auto profile=a::profile(material);
+    int op=int(action);
+    Float3 axis_f{float(axis.x),float(axis.y),float(axis.z)};
+    float r=float(radius),e=float(dose),q=float(pressure),plane=float(plane_height);
+    float yield_value=float(profile.yield),flow=float(profile.flow);
+    float compression=float(profile.compression),recovery=float(profile.recovery);
+    float hardening=float(profile.hardening);
+    if(!std::isfinite(r)||r<=0||!std::isfinite(e)||!std::isfinite(q)||!std::isfinite(plane))
+      return false;
+    void *args[]={&bounds,&p,&n,&w,&c,&op,&axis_f,&r,&e,&q,&plane,
+                  &yield_value,&flow,&compression,&recovery,&hardening,&out,&d};
+    if(wp_cuda_launch_kernel(context_,kernel_,count,0,256,1,1,0,args,nullptr,nullptr)!=0 ||
+       !wp_cuda_context_synchronize(context_) ||
+       !wp_memcpy_d2h(context_,motion_.data(),device_[4],sizeof(Float3)*count) ||
+       !wp_memcpy_d2h(context_,drive_.data(),device_[5],sizeof(float)*count)){
+      failed_=true;return false;
+    }
+    motion.resize(count);drive.resize(count);
+    for(std::size_t i=0;i<count;++i){
+      motion[i]={motion_[i][0],motion_[i][1],motion_[i][2]};
+      drive[i]=drive_[i];
+    }
+    return true;
+  }
+};
+
 }  // namespace
+
+std::unique_ptr<artistic_v31d1110::PressureLocalBackend> create_artistic_pressure_cuda()
+{
+  try{return std::make_unique<ArtisticPressureCuda>();}
+  catch(const std::exception&){return nullptr;}
+}
 
 std::unique_ptr<BrushSolverBackend> create_warp_cuda_backend()
 {
