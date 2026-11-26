@@ -31,6 +31,8 @@ struct SharedWarpRuntime {
   void *smooth_scatter_kernel = nullptr;
   void *artistic_module = nullptr;
   void *artistic_kernel = nullptr;
+  void *flux_module = nullptr;
+  void *flux_kernel = nullptr;
 
   SharedWarpRuntime()
   {
@@ -63,6 +65,12 @@ struct SharedWarpRuntime {
       artistic_module=wp_cuda_load_module(context,artistic_path);
       if(artistic_module)
         artistic_kernel=wp_cuda_get_kernel(context,artistic_module,artistic_symbol);
+    }
+    const char *flux_path=std::getenv("BLENDER_SCULPT_D11_FLUX_PTX");
+    const char *flux_symbol=std::getenv("BLENDER_SCULPT_D11_FLUX_KERNEL");
+    if(flux_path && flux_path[0] && flux_symbol && flux_symbol[0]){
+      flux_module=wp_cuda_load_module(context,flux_path);
+      if(flux_module)flux_kernel=wp_cuda_get_kernel(context,flux_module,flux_symbol);
     }
     const char *smooth_ptx_path = std::getenv("BLENDER_SCULPT_WARP_SMOOTH_PTX");
     if (smooth_ptx_path != nullptr && smooth_ptx_path[0] != '\0') {
@@ -777,7 +785,99 @@ class ArtisticPressureCuda final : public artistic_v31d1110::PressureLocalBacken
   }
 };
 
+class ArtisticFluxCuda final : public PairedFluxBackend {
+  void *context_=nullptr,*kernel_=nullptr;
+  std::array<void*,4> device_{};
+  std::size_t node_capacity_=0,edge_capacity_=0;
+  bool failed_=false;
+  std::vector<int> endpoints_;
+  std::vector<float> amounts_,caps_,accum_;
+  void release(){
+    for(auto& d:device_)if(d){wp_free_device(context_,d);d=nullptr;}
+    node_capacity_=edge_capacity_=0;
+  }
+  bool reserve(std::size_t nodes,std::size_t edges){
+    if(node_capacity_>=nodes&&edge_capacity_>=edges)return true;
+    const auto nc=std::min<std::size_t>(8192,std::max({std::size_t(256),nodes*2,node_capacity_}));
+    const auto ec=std::min<std::size_t>(65536,std::max({std::size_t(512),edges*2,edge_capacity_}));
+    release();
+    const std::array<std::size_t,4> bytes{2*ec*sizeof(int),ec*sizeof(float),
+                                         2*nc*sizeof(float),(3*nc+1)*sizeof(float)};
+    for(std::size_t i=0;i<device_.size();++i){
+      device_[i]=wp_alloc_device(context_,bytes[i]);
+      if(!device_[i]){release();return false;}
+    }
+    node_capacity_=nc;edge_capacity_=ec;
+    return true;
+  }
+  template<class T> bool upload(std::size_t i,std::vector<T>& v){
+    return wp_memcpy_h2d(context_,device_[i],v.data(),sizeof(T)*v.size());
+  }
+ public:
+  ArtisticFluxCuda(){
+    auto& runtime=shared_warp_runtime();
+    context_=runtime.context;kernel_=runtime.flux_kernel;
+    if(!kernel_)throw std::runtime_error("D11 artistic flux module unavailable");
+  }
+  ~ArtisticFluxCuda() override {release();}
+  bool exchange(const std::vector<PairedFluxLink>& links,
+      const std::vector<double>& donor,const std::vector<double>& receiver,
+      std::vector<double>& change,double& transferred) override {
+    const auto n=donor.size(),m=links.size();
+    if(failed_||n==0||n>8192||m<256||m>65536||receiver.size()!=n)return false;
+    double unit=0.,total=0.;
+    for(auto f:links){
+      if(f.a>=n||f.b>=n||f.a==f.b||!std::isfinite(f.amount)||f.amount<0)return false;
+      unit=std::max(unit,f.amount);total+=f.amount;
+    }
+    if(unit<=0||!std::isfinite(total))return false;
+    if(!reserve(n,m)){failed_=true;return false;}
+    endpoints_.resize(2*m);amounts_.resize(m);caps_.resize(2*n);accum_.resize(3*n+1);
+    // Normalize volume to avoid object-scale underflow and large float values.
+    for(std::size_t k=0;k<m;++k){
+      endpoints_[2*k]=int(links[k].a);endpoints_[2*k+1]=int(links[k].b);
+      amounts_[k]=float(links[k].amount/unit);
+    }
+    for(std::size_t i=0;i<n;++i){
+      if(!std::isfinite(donor[i])||!std::isfinite(receiver[i])||donor[i]<0||receiver[i]<0)return false;
+      caps_[i]=float(std::min(donor[i],total)/unit);
+      caps_[n+i]=float(std::min(receiver[i],total)/unit);
+    }
+    if(!upload(0,endpoints_)||!upload(1,amounts_)||!upload(2,caps_)){
+      failed_=true;return false;
+    }
+    wp::array_t<int> endpoints(static_cast<int*>(device_[0]),int(2*m));
+    wp::array_t<float> amount(static_cast<float*>(device_[1]),int(m));
+    wp::array_t<float> caps(static_cast<float*>(device_[2]),int(2*n));
+    wp::array_t<float> accum(static_cast<float*>(device_[3]),int(3*n+1));
+    int count=int(n);
+    for(int phase=0;phase<3;++phase){
+      const auto size=phase==0?3*n+1:m;
+      wp::launch_bounds_t<1> bounds;
+      bounds.shape[0]=uint32_t(size);bounds.size=size;bounds.coord_mult=1;
+      void *args[]={&bounds,&endpoints,&amount,&caps,&accum,&count,&phase};
+      if(wp_cuda_launch_kernel(context_,kernel_,size,0,256,1,1,0,args,nullptr,nullptr)!=0){
+        failed_=true;return false;
+      }
+    }
+    if(!wp_cuda_context_synchronize(context_)||
+       !wp_memcpy_d2h(context_,accum_.data(),device_[3],sizeof(float)*accum_.size())){
+      failed_=true;return false;
+    }
+    change.resize(n);
+    for(std::size_t i=0;i<n;++i)change[i]=double(accum_[2*n+i])*unit;
+    transferred=double(accum_[3*n])*unit;
+    return true;
+  }
+};
+
 }  // namespace
+
+std::unique_ptr<PairedFluxBackend> create_artistic_flux_cuda()
+{
+  try{return std::make_unique<ArtisticFluxCuda>();}
+  catch(const std::exception&){return nullptr;}
+}
 
 std::unique_ptr<artistic_v31d1110::PressureLocalBackend> create_artistic_pressure_cuda()
 {
