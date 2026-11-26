@@ -131,5 +131,37 @@ int main(){
   metric("stress_global_far_z",shape,global[5].z);metric("stress_d10a_far_z",shape,local[5].z);metric("stress_d11_far_z",shape,hybrid[5].z);
   metric("stress_modified_vertex_fraction",shape,double(changed)/request.size());
  }
+ // D11.3: continuous swept contact, nearby disconnected sheet and barriers.
+ {
+  std::vector<Vec3> cp{{0,0,0},{1,0,0},{0,.25,0},{1,.25,0},{0,0,.01},{1,0,.01},{0,.25,.01}};
+  std::vector<h::Tri> ct{{0,1,2},{1,3,2},{4,5,6}};
+  auto patch=h::make_patch(cp,ct,std::vector<double>(cp.size(),1));
+  std::vector<double> visible(cp.size(),1),permit(cp.size(),1);
+  auto c=h::swept_contact(patch,{0,1},cp[0],cp[1],.5,2,visible,permit);
+  check(c.weight[0]==1&&c.weight[1]==1);
+  check(c.weight[2]>0&&c.weight[2]<1&&c.weight[3]>0);
+  check(c.weight[4]==0&&c.weight[5]==0&&c.weight[6]==0);
+  auto reverse=h::swept_contact(patch,{1,0},cp[1],cp[0],.5,2,visible,permit);
+  for(std::size_t i=0;i<cp.size();++i)check(std::abs(c.weight[i]-reverse.weight[i])<1e-12);
+  visible[1]=0;permit[2]=0;
+  auto blocked=h::swept_contact(patch,{0,1},cp[0],cp[1],.5,2,visible,permit);
+  check(blocked.weight[1]==0&&blocked.weight[2]==0&&blocked.weight[3]==0);
+  visible[1]=1;permit[2]=.25;
+  auto masked=h::swept_contact(patch,{0,1},cp[0],cp[1],.5,2,visible,permit);
+  check(std::abs(masked.weight[2]-.25*c.weight[2])<1e-12);
+  // Capsule boundary approaches zero continuously.
+  auto narrow=h::swept_contact(patch,{0,1},cp[0],cp[1],.250001,2,visible,permit);
+  auto edge=h::swept_contact(patch,{0,1},cp[0],cp[1],.25,2,visible,permit);
+  check(narrow.weight[3]>0&&narrow.weight[3]<1e-8&&edge.weight[3]==0);
+  metric("swept_connected_weight",0,c.weight[3]);
+  metric("swept_disconnected_leak",0,c.weight[4]+c.weight[5]+c.weight[6]);
+  metric("swept_masked_barrier_leak",0,blocked.weight[3]);
+  metric("swept_boundary_weight",0,narrow.weight[3]);
+  patch.weight=blocked.weight;
+  auto moves=h::optimize(patch,h::target(patch,h::Tool::Deposit,{},Vec3{0,0,1},.5,.05));
+  for(std::size_t i=1;i<cp.size();++i)check(h::norm(moves[i])==0);
+  bool bad=false;try{h::swept_contact(patch,{cp.size()},cp[0],cp[1],.5,2,visible,permit);}
+  catch(const std::invalid_argument&){bad=true;}check(bad);
+ }
  std::cout<<"hybrid foundation tests passed\n";
 }

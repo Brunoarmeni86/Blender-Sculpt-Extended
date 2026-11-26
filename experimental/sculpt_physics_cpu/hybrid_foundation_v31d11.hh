@@ -51,6 +51,60 @@ inline void contact(Patch& s,std::size_t seed,double reach){
  }
  for(std::size_t i=0;i<d.size();++i)if(!std::isfinite(d[i]))s.weight[i]=0;
 }
+// D11.3: swept capsule with host-confirmed surface seeds and explicit
+// visibility/write permission. Native weight is independent of traversal;
+// visibility and zero permission are barriers. No automatic raycast or CCD.
+struct SweptContact {
+ std::vector<double> distance,falloff,weight;
+};
+inline SweptContact swept_contact(const Patch& s,const std::vector<std::size_t>& seeds,
+ Vec3 start,Vec3 end,double radius,double reach,
+ const std::vector<double>& visibility,const std::vector<double>& permission){
+ const auto n=s.p.size();
+ if(visibility.size()!=n||permission.size()!=n||
+    !std::isfinite(radius)||radius<=0||!std::isfinite(reach)||reach<=0||
+    !std::isfinite(norm(start))||!std::isfinite(norm(end)))
+  throw std::invalid_argument("swept contact input");
+ SweptContact out;
+ out.distance.assign(n,std::numeric_limits<double>::infinity());
+ out.falloff.resize(n);out.weight.resize(n);
+ const Vec3 segment=end-start;
+ const double length=norm(segment);
+ if(!std::isfinite(length))throw std::invalid_argument("sweep length");
+ const Vec3 axis=length>0?segment/length:Vec3{};
+ std::vector<double> radial(n);
+ auto allowed=[&](std::size_t i){return visibility[i]>0&&permission[i]>0&&s.area[i]>0&&radial[i]<radius;};
+ for(std::size_t i=0;i<n;++i){
+  if(!std::isfinite(visibility[i])||!std::isfinite(permission[i]))
+   throw std::invalid_argument("contact visibility or permission");
+  const Vec3 delta=s.p[i]-start;
+  const double along=std::clamp(dot(delta,axis),0.0,length);
+  radial[i]=norm(delta-axis*along);
+  if(!std::isfinite(radial[i]))throw std::invalid_argument("contact radial distance");
+ }
+ using Q=std::pair<double,std::size_t>;
+ std::priority_queue<Q,std::vector<Q>,std::greater<Q>> q;
+ for(auto i:seeds){
+  if(i>=n)throw std::invalid_argument("contact seed index");
+  if(allowed(i)&&out.distance[i]!=0){out.distance[i]=0;q.push({0,i});}
+ }
+ while(!q.empty()){
+  auto [d,i]=q.top();q.pop();
+  if(d!=out.distance[i])continue;
+  for(auto j:s.adj[i])if(allowed(j)){
+   // Continuous bend penalty, no abrupt 90-degree normal gate.
+   double bend=1+.5*(1-std::clamp(dot(s.normal[i],s.normal[j]),-1.0,1.0));
+   double next=d+norm(s.p[j]-s.p[i])*bend;
+   if(next<reach&&next<out.distance[j]){out.distance[j]=next;q.push({next,j});}
+  }
+ }
+ auto smooth=[](double x){x=std::clamp(x,0.0,1.0);return x*x*(3-2*x);};
+ for(std::size_t i=0;i<n;++i)if(std::isfinite(out.distance[i])){
+  out.falloff[i]=smooth(1-radial[i]/radius)*smooth(1-out.distance[i]/reach);
+  out.weight[i]=s.weight[i]*out.falloff[i]*std::clamp(visibility[i],0.0,1.0)*std::clamp(permission[i],0.0,1.0);
+ }
+ return out;
+}
 // D10D: scalar swept-volume proxy, not actual mass. Pairwise conservative.
 inline std::vector<double> flux(const Patch& s,const std::vector<double>& pressure,double radius){
  if(pressure.size()!=s.p.size()||!std::isfinite(radius)||!(radius>0))throw std::invalid_argument("flux input");
