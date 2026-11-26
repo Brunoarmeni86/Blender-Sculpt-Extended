@@ -171,6 +171,34 @@ int main(){
  check(std::abs(compacted[mid].z-compress[mid].z)>1e-6);
  for(std::size_t k=0;k<flat.p.size();++k)if(flat.weight[k]==0)
   check(h::norm(press_deep[k])+h::norm(compress[k])+h::norm(compacted[k])==0.);
+ // D11.13: actual accepted inward dose accumulates independently of
+ // dab partition. Recovery fraction reduces permanent compaction.
+ const double clay_state=compaction_after_write(Material::FirmClay,0.,.1,1.);
+ const double foam_state=compaction_after_write(Material::Foam,0.,.1,1.);
+ check(clay_state>foam_state&&foam_state>0.);
+ double split_state=0.;
+ for(int k=0;k<10;++k)split_state=compaction_after_write(Material::FirmClay,split_state,.01,1.);
+ check(std::abs(split_state-clay_state)<1e-12);
+ check(compaction_after_write(Material::FirmClay,clay_state,0.,1.)==clay_state);
+ check(compaction_after_write(Material::FirmClay,clay_state,-.2,1.)==clay_state);
+ check(evaluate(Material::FirmClay,1.,clay_state,1.).plastic_sink<
+       evaluate(Material::FirmClay,1.,0.,1.).plastic_sink);
+ // A failed GPU call may corrupt output buffers. CPU fallback must replace
+ // them completely and yield the exact same reference result.
+ struct BadBackend final : PressureLocalBackend {
+  bool evaluate_local(const h::Patch&,Action,Material,sculpt_physics::Vec3,
+    sculpt_physics::Vec3,double,double,double,double,const std::vector<double>&,
+    std::vector<sculpt_physics::Vec3>& motion,std::vector<double>& drive) override {
+   motion.assign(1,{0,0,std::numeric_limits<double>::quiet_NaN()});
+   drive.assign(1,1.);
+   return true;
+  }
+ } bad;
+ bool used=true;
+ auto fallback=pressure_target(flat,Action::Compact,Material::FirmClay,
+    {0,0,0},{0,0,1},1.,.04,1.,-.08,state_flat,nullptr,true,&bad,&used);
+ check(!used&&fallback.size()==compacted.size());
+ for(std::size_t k=0;k<fallback.size();++k)check(h::norm(fallback[k]-compacted[k])==0.);
  auto transported=geometry_target(patch,Action::Press,Material::Mud,
     {0,0,0},{0,.8,0},{0,0,1},{.3,.3,0},.01,1,4);
  check(h::norm(transported[2])==0);
