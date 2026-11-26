@@ -1137,6 +1137,8 @@ struct D11PreviewState {
   std::size_t dabs=0;
   int artistic_material=1;
   bool artistic_plane_valid=false;
+  bool artistic_previous_valid=false;
+  sculpt_physics::Vec3 artistic_previous_center{};
   sculpt_physics::artistic_v31d1110::PlaneState artistic_plane{};
 };
 inline sculpt_physics::hybrid_v31d11::MaterialKind d11_preview_material()
@@ -1198,8 +1200,9 @@ inline bool d11_preview_target(
   try{
     auto patch=h::make_patch(p,triangles,w);
     if(feature){
-      auto contact=h::feature_contact(patch,dab.center,dab.axis,
-          dab.swept_v29?dab.sweep_start:dab.center,dab.radius);
+      const auto sweep_start=direct && state.artistic_previous_valid?
+          state.artistic_previous_center:(dab.swept_v29?dab.sweep_start:dab.center);
+      auto contact=h::feature_contact(patch,dab.center,dab.axis,sweep_start,dab.radius);
       auto field=h::compose_brush_field(permission,contact.contact,falloff);
       patch.weight=std::move(field.weight);
       active=0;
@@ -1244,7 +1247,10 @@ inline bool d11_preview_target(
       for(std::size_t i=0;i<p.size();++i)compaction[i]=plastic[i].compaction;
       auto action=dab.action==ClaySurfaceAction::Compact?a::Action::Compact:
                   dab.action==ClaySurfaceAction::Compress?a::Action::Compress:a::Action::Press;
-      const double dose=std::max(0.,dab.radius*dab.dose);
+      if(!std::isfinite(dab.intensity)||!std::isfinite(dab.dose)||dab.dose<0)
+        throw std::invalid_argument("artistic dose");
+      // Above unit drive, increase exposure rather than saturating strength.
+      const double dose=dab.radius*dab.dose*std::max(1.,dab.intensity);
       const double drive=std::clamp(dab.intensity,0.,1.);
       std::vector<double> exposure(p.size());
       for(std::size_t i=0;i<p.size();++i)exposure[i]=dose*patch.weight[i];
@@ -1880,7 +1886,10 @@ inline bool try_apply_intent(
           cache.xpbd_v31d11_preview=d11_state;
         }
         d11_state->artistic_material=brush.sculpt_physics_material;
-        if(v27 && stroke_step.gap)d11_state->artistic_plane_valid=false;
+        const bool gap=v27 && stroke_step.gap;
+        if(gap)d11_state->artistic_plane_valid=false;
+        d11_state->artistic_previous_valid=cache.xpbd_v17_intent_started && !gap;
+        d11_state->artistic_previous_center=convert(cache.xpbd_v17_last_center);
         clay.coverage_v31d9=true;
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get(),
