@@ -1,0 +1,37 @@
+name: Sculpt physics reference
+on:
+  push:
+    branches:
+      - experiment/physics-v31d11-hybrid-foundation
+    paths:
+      - 'experimental/sculpt_physics_cpu/**'
+      - '.github/workflows/sculpt-physics-reference.yml'
+  pull_request:
+    branches:
+      - experiment/physics-v31d10a-local-guard
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reference:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S experimental/sculpt_physics_cpu -B build-reference -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build-reference --config Debug --parallel 2
+      - name: Test
+        run: ctest --test-dir build-reference -C Debug --output-on-failure --no-tests=error
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sculpt-reference-${{ matrix.os }}
+          path: build-reference/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
