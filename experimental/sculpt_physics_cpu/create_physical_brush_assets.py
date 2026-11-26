@@ -46,10 +46,11 @@ SPECS = (
     ("Mud Melt (Surface)", "Clay", "MATERIAL", "AUTONOMOUS_MELT", "melt", 1., 1., "Physical Brushes/Thermal", "MUD"),
 )
 
-# Two experimental assets only. Preserve the existing D11 library and presets.
+# Dedicated experimental assets. Preserve the existing D11 library and presets.
 D12_SPECS = (
     ("D12 Clay Buildup", "Clay Strips", "MATERIAL", "AUTONOMOUS_DEPOSIT", "d12_clay", 1., .55, "Physical Brushes/Build", "FIRM_CLAY"),
     ("D12 Flesh Flow", "Clay", "MATERIAL", "AUTONOMOUS_SMEAR", "d12_flesh", 1., .55, "Physical Brushes/Transport", "FLESH"),
+    ("D12 Melt Surface", "Clay", "MATERIAL", "AUTONOMOUS_MELT", "melt", 1., .85, "Physical Brushes/Thermal", "MUD"),
 )
 
 def preview_height(kind, x, y):
@@ -266,9 +267,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output",required=True)
     parser.add_argument("--source")
-    parser.add_argument("--dedicated-d12",action="store_true")
+    group=parser.add_mutually_exclusive_group()
+    group.add_argument("--dedicated-d12",action="store_true")
+    group.add_argument("--dedicated-d12-melt",action="store_true",help="Generate only Melt in a new separate library")
     args = parser.parse_args(sys.argv[sys.argv.index("--")+1:] if "--" in sys.argv else [])
-    specs=D12_SPECS if args.dedicated_d12 else SPECS
+    dedicated=args.dedicated_d12 or args.dedicated_d12_melt
+    specs=(D12_SPECS[-1:] if args.dedicated_d12_melt else D12_SPECS) if dedicated else SPECS
     # Built-in RNA properties belong to instances; hasattr on bpy.types.Brush
     # does not reliably detect them. Inspect the registered RNA schema.
     required = ("sculpt_physics_mode", "sculpt_physics_clay_behavior",
@@ -344,7 +348,7 @@ def main():
                     brush.strength = 1.4
                 if "SMOOTH" in props["curve_distance_falloff_preset"].enum_items.keys():
                     brush.curve_distance_falloff_preset = "SMOOTH"
-        if args.dedicated_d12:
+        if dedicated:
             # One physical operation per dab; avoid inherited post-smoothing.
             brush.auto_smooth_factor=0.0
             brush.use_accumulate=True
@@ -353,10 +357,10 @@ def main():
             # Keep the copied Essentials direction; the dedicated assets use
             # its stock positive direction and the host handles stroke inversion.
             brush.strength=1.0
-            brush.spacing=6
+            brush.spacing=8 if action=="AUTONOMOUS_MELT" else 6
             brush.tip_roundness=.30 if action=="AUTONOMOUS_DEPOSIT" else 1.0
             brush.tip_scale_x=1.0
-            brush.hardness=.25 if action=="AUTONOMOUS_DEPOSIT" else .05
+            brush.hardness=.25 if action=="AUTONOMOUS_DEPOSIT" else .15 if action=="AUTONOMOUS_MELT" else .05
             brush.sculpt_physics_assist=1.0
             if "SMOOTH" in props["curve_distance_falloff_preset"].enum_items.keys():
                 brush.curve_distance_falloff_preset="SMOOTH"
