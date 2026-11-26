@@ -713,6 +713,25 @@ int main(){
   auto missing=h::feature_contact(full,{5,0,.2},{0,0,1},{5,0,.2},.5);
   for(auto x:missing.weight)check(x==0);
  }
+  // D11.9 field composition: write permission, geometric contact and host
+  // falloff remain independent. Their product preserves the D11.8 envelope.
+  {
+   auto f=h::compose_brush_field({1,1,0},{.8,.8,.8},{1,.25,1});
+   check(std::abs(f.weight[0]-.8)<1e-12);
+   check(std::abs(f.weight[1]-.2)<1e-12);
+   check(f.weight[2]==0);
+   auto patch=grid(8,false);
+   auto c=h::feature_contact(patch,{.5,.5,0},{0,0,1},{.5,.5,0},1.5);
+   std::vector<double> permit(patch.p.size()),falloff(patch.p.size());
+   for(std::size_t i=0;i<patch.p.size();++i){
+    permit[i]=patch.weight[i]>0?1.:0.;falloff[i]=patch.weight[i];
+   }
+   auto composed=h::compose_brush_field(permit,c.contact,falloff);
+   for(std::size_t i=0;i<patch.p.size();++i)
+    check(std::abs(composed.weight[i]-c.weight[i])<1e-12);
+   bool bad=false;try{h::compose_brush_field({1},{1,1},{1});}
+   catch(const std::invalid_argument&){bad=true;}check(bad);
+  }
  // Changing radius within the stored candidate margin can reuse the
  // same distances; the current radius controls kernel and capacity.
  {

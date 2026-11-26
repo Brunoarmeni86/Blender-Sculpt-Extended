@@ -111,15 +111,45 @@ inline SweptContact swept_contact(const Patch& s,const std::vector<std::size_t>&
 // Not an actual ray/face ID or a visibility solver. Admit vertical faces
 // with a continuous orientation factor, exclude negative-facing normals.
 struct FeatureContact {
+ // Geometry-only contact envelope. It excludes the host falloff but includes
+ // the continuous front/vertical orientation response.
+ std::vector<double> contact;
  std::vector<double> weight;
  std::size_t seed=std::numeric_limits<std::size_t>::max();
 };
+// D11.9: keep the four independent decisions visible. Permission is a hard
+// write/traversal barrier; contact is geometric; falloff is the host brush
+// envelope; response is reserved for material scaling. The composed weight is
+// the only value consumed by the material law. This helper intentionally
+// preserves D11.8's product when response is one.
+struct BrushField {
+ std::vector<double> permission,contact,falloff,response,weight;
+};
+inline BrushField compose_brush_field(const std::vector<double>& permission,
+ const std::vector<double>& contact,const std::vector<double>& falloff,
+ const std::vector<double>& response={}){
+ const std::size_t n=permission.size();
+ if(contact.size()!=n||falloff.size()!=n||(!response.empty()&&response.size()!=n))
+  throw std::invalid_argument("brush field size");
+ BrushField out{permission,contact,falloff,response,std::vector<double>(n)};
+ if(out.response.empty())out.response.assign(n,1.);
+ for(std::size_t i=0;i<n;++i){
+  for(double x:{out.permission[i],out.contact[i],out.falloff[i],out.response[i]})
+   if(!std::isfinite(x))throw std::invalid_argument("brush field value");
+  out.permission[i]=std::clamp(out.permission[i],0.,1.);
+  out.contact[i]=std::clamp(out.contact[i],0.,1.);
+  out.falloff[i]=std::clamp(out.falloff[i],0.,1.);
+  out.response[i]=std::clamp(out.response[i],0.,1.);
+  out.weight[i]=out.permission[i]*out.contact[i]*out.falloff[i]*out.response[i];
+ }
+ return out;
+}
 inline FeatureContact feature_contact(const Patch& s,Vec3 center,Vec3 axis,Vec3 start,double radius){
  if(!std::isfinite(radius)||radius<=0||!std::isfinite(norm(center))||
     !std::isfinite(norm(start))||!std::isfinite(norm(axis))||norm(axis)<=1e-20)
   throw std::invalid_argument("feature contact input");
  axis=unit(axis);
- FeatureContact out;out.weight.resize(s.p.size());
+ FeatureContact out;out.contact.resize(s.p.size());out.weight.resize(s.p.size());
  std::vector<double> visibility(s.p.size(),1.),permission(s.p.size());
  double nearest=std::numeric_limits<double>::infinity();
  for(std::size_t i=0;i<s.p.size();++i)if(s.weight[i]>0&&s.area[i]>0&&norm(s.normal[i])>.5){
@@ -139,6 +169,8 @@ inline FeatureContact feature_contact(const Patch& s,Vec3 center,Vec3 axis,Vec3 
  if(norm(center-start)>.75*radius)start=center;
  auto c=swept_contact(s,{out.seed},start,center,radius,1.5*radius+norm(center-start),visibility,permission);
  out.weight=std::move(c.weight);
+ for(std::size_t i=0;i<s.p.size();++i)
+  out.contact[i]=c.falloff[i]*std::clamp(permission[i],0.,1.);
  return out;
 }
 // D10D: scalar swept-volume proxy, not actual mass. Pairwise conservative.

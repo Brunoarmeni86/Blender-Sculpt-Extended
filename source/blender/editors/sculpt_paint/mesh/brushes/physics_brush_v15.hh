@@ -1164,8 +1164,9 @@ inline void d11_preview_target(
     return;
   }
   std::vector<sculpt_physics::Vec3> p;
-  std::vector<double> w;
+  std::vector<double> w,permission,falloff;
   p.reserve(vertices.size());w.reserve(vertices.size());
+  permission.reserve(vertices.size());falloff.reserve(vertices.size());
   std::size_t active=0,legacy_active=0,recovered_contact=0,vertical=0;
   for(std::size_t i=0;i<vertices.size();++i){
     p.push_back(vertices[i].position);
@@ -1173,7 +1174,12 @@ inline void d11_preview_target(
     // Do not turn diagnostic contact alone into permission to write.
     const bool legacy=h::norm(result.displacement[i])>1e-15;
     if(legacy)++legacy_active;
-    double weight=feature?vertices[i].influence:(legacy?
+    const double host_falloff=std::clamp(vertices[i].influence,0.,1.);
+    // A zero host influence remains a hard permission barrier. Fractional
+    // mask/brush falloff is kept separate from geometric feature contact.
+    permission.push_back(host_falloff>0?1.:0.);
+    falloff.push_back(host_falloff);
+    double weight=feature?permission.back():(legacy?
         std::min(vertices[i].influence,result.coverage_weights_v31d9[i]):0.);
     w.push_back(std::clamp(weight,0.,1.));
     if(w.back()>0)++active;
@@ -1187,7 +1193,8 @@ inline void d11_preview_target(
     if(feature){
       auto contact=h::feature_contact(patch,dab.center,dab.axis,
           dab.swept_v29?dab.sweep_start:dab.center,dab.radius);
-      patch.weight=std::move(contact.weight);
+      auto field=h::compose_brush_field(permission,contact.contact,falloff);
+      patch.weight=std::move(field.weight);
       active=0;
       for(std::size_t i=0;i<p.size();++i)if(patch.weight[i]>0){
         ++active;
