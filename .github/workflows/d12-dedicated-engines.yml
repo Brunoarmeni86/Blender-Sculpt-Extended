@@ -14,6 +14,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m py_compile scripts/startup/bl_ui/properties_paint_common.py experimental/sculpt_physics_cpu/create_physical_brush_assets.py
       - run: cmake -S experimental/sculpt_physics_cpu -B build-d12 -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build-d12 --config Release --target test_d12_dedicated_engines test_artistic_material_v31d1110
       - run: ctest --test-dir build-d12 -C Release -R "sculpt_(d12_dedicated_engines|artistic_material_v31d1110)_tests" --output-on-failure --no-tests=error -V
