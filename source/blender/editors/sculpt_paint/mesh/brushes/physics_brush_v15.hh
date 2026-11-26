@@ -23,7 +23,7 @@
 #  include "stroke_context_v27.hh"
 #  include "tangential_transport_v31d6.hh"
 #  include "hybrid_foundation_v31d11.hh"
-#  include "artistic_geometry_v31d1110.hh"
+#  include "artistic_csr_smooth_v31d1112.hh"
 #  include <cstring>
 
 #  include "BKE_mesh.hh"
@@ -1135,6 +1135,9 @@ struct D11PreviewState {
   sculpt_physics::hybrid_v31d11::GeodesicCache distances;
   std::vector<std::size_t> global;
   std::size_t dabs=0;
+  int artistic_material=1;
+  bool artistic_plane_valid=false;
+  sculpt_physics::artistic_v31d1110::PlaneState artistic_plane{};
 };
 inline sculpt_physics::hybrid_v31d11::MaterialKind d11_preview_material()
 {
@@ -1158,7 +1161,10 @@ inline void d11_preview_target(
   using sculpt_physics::ClaySurfaceAction;
   const auto start=std::chrono::steady_clock::now();
   const bool report=state.dabs++%32==0 || profile_v26b_requested();
-  const bool feature=d11_feature_requested();
+  const bool artistic_enabled=stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC");
+  const bool pressure_tool=dab.action==ClaySurfaceAction::Press ||
+      dab.action==ClaySurfaceAction::Compress || dab.action==ClaySurfaceAction::Compact;
+  const bool feature=d11_feature_requested() && (!artistic_enabled || pressure_tool);
   if((!feature && result.coverage_weights_v31d9.size()!=vertices.size()) ||
      result.displacement.size()!=vertices.size()){
     if(report)std::fprintf(stderr,"[D11.6] legacy fallback: missing contact weights\n");
@@ -1216,15 +1222,12 @@ inline void d11_preview_target(
               dab.action==ClaySurfaceAction::Compress?h::Tool::Compress:h::Tool::Press;
     if(state.global!=global){state.distances=h::GeodesicCache{};state.global=global;}
     h::CachedFlux diagnostic;
-    auto target=h::material_target(patch,tool,d11_preview_material(),plastic,dab.axis,
-        dab.radius,dab.dose*dab.intensity,
-        mode==D11PreviewMode::Adaptive?&state.distances:nullptr,&diagnostic,feature);
     bool local_recovery=false;
     // Opt-in artistic pressure tools, using the existing native permission and writer.
     // Other actions remain on their established native path.
-    if(stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC")){
+    if(artistic_enabled){
       namespace a=sculpt_physics::artistic_v31d1110;
-      auto material=a::Material::FirmClay;
+      auto material=static_cast<a::Material>(std::clamp(state.artistic_material,0,8));
       const char *name=std::getenv("BLENDER_SCULPT_D11_MATERIAL");
       if(name){
         if(std::strcmp(name,"soft_clay")==0)material=a::Material::SoftClay;
@@ -1235,23 +1238,59 @@ inline void d11_preview_target(
         else if(std::strcmp(name,"stone")==0)material=a::Material::Stone;
         else if(std::strcmp(name,"wood")==0)material=a::Material::Wood;
         else if(std::strcmp(name,"putty")==0)material=a::Material::Putty;
+        else if(std::strcmp(name,"clay")==0 || std::strcmp(name,"firm_clay")==0)material=a::Material::FirmClay;
       }
       std::vector<double> deposit(p.size(),0.),compaction(p.size(),0.);
       for(std::size_t i=0;i<p.size();++i)compaction[i]=plastic[i].compaction;
       auto action=dab.action==ClaySurfaceAction::Compact?a::Action::Compact:
                   dab.action==ClaySurfaceAction::Compress?a::Action::Compress:a::Action::Press;
-      auto artistic=a::geometry_target(patch,action,material,deposit,compaction,
-          dab.axis,dab.center,dab.radius*dab.dose,std::clamp(dab.intensity,0.,1.),dab.radius);
+      const double dose=std::max(0.,dab.radius*dab.dose);
+      const double drive=std::clamp(dab.intensity,0.,1.);
+      std::vector<double> exposure(p.size());
+      for(std::size_t i=0;i<p.size();++i)exposure[i]=dose*patch.weight[i];
+      std::vector<sculpt_physics::Vec3> artistic;
+      if(pressure_tool){
+        artistic=a::geometry_target(patch,action,material,deposit,compaction,
+            dab.axis,dab.center,dose,drive,dab.radius);
+      }else if(dab.action==ClaySurfaceAction::Buildup || dab.action==ClaySurfaceAction::FusionDeposit){
+        // Keep the already resolved native deposition vector and pressure.
+        artistic=result.displacement;
+        for(std::size_t i=0;i<p.size();++i){
+          const auto profile=a::profile(material);
+          artistic[i]=patch.weight[i]>0?artistic[i]*(profile.deposit/(1.+profile.hardening*compaction[i])):sculpt_physics::Vec3{};
+        }
+        artistic=h::optimize(patch,std::move(artistic));
+      }else if(dab.action==ClaySurfaceAction::Scrape){
+        if(!state.artistic_plane_valid){
+          state.artistic_plane=a::capture_plane(dab.center+h::unit(dab.axis)*
+              (dab.has_tool_plane?dab.tool_plane_height:-dab.tool_depth*dab.radius),dab.axis);
+          state.artistic_plane_valid=true;
+        }
+        artistic=a::scrape_plane(patch,state.artistic_plane,material,exposure,dab.radius,drive);
+      }else if(dab.action==ClaySurfaceAction::Melt){
+        // CPU CSR reference only; no native CUDA dispatch in this checkpoint.
+        auto work=a::pack_workset(patch,exposure);
+        artistic=h::optimize(patch,a::csr_smooth(work,material,dab.radius,drive,true));
+      }else if(dab.action==ClaySurfaceAction::Push || dab.action==ClaySurfaceAction::Smear ||
+               dab.action==ClaySurfaceAction::Gather){
+        const auto surface_action=dab.action==ClaySurfaceAction::Push?a::SurfaceAction::Push:
+            dab.action==ClaySurfaceAction::Smear?a::SurfaceAction::Smear:a::SurfaceAction::Gather;
+        artistic=a::surface_target(patch,surface_action,material,
+            a::capture_plane(dab.center,dab.axis),dab.center,dab.direction,exposure,dab.radius,drive);
+      }else return;
       for(std::size_t i=0;i<artistic.size();++i)
         if(!std::isfinite(h::norm(artistic[i])) ||
            (patch.weight[i]<=0 && h::norm(artistic[i])>0))
           throw std::runtime_error("invalid artistic motion");
       result.displacement=std::move(artistic);
       if(feature)result.coverage_weights_v31d9=patch.weight;
-      if(report)std::fprintf(stderr,"[D11 artistic CPU] action=%d material=%d active=%zu\\n",
+      if(report)std::fprintf(stderr,"[D11 artistic CPU] action=%d material=%d active=%zu\n",
                             int(dab.action),int(material),active);
       return;
     }
+    auto target=h::material_target(patch,tool,d11_preview_material(),plastic,dab.axis,
+        dab.radius,dab.dose*dab.intensity,
+        mode==D11PreviewMode::Adaptive?&state.distances:nullptr,&diagnostic,feature);
     auto motion=feature?h::optimize_feature(patch,target,&local_recovery):
                         h::optimize(patch,std::move(target),true);
     // Ensure no nonfinite or unauthorized motion before the native writer.
@@ -1810,19 +1849,22 @@ inline bool try_apply_intent(
       const auto d11_mode=d11_preview_mode();
       std::shared_ptr<D11PreviewState> d11_state;
       // No inverted action, symmetry, Multires or unsupported topology.
+      const bool artistic_enabled=stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC");
+      const bool artistic_action=(action>=4 && action<=8) || (action>=11 && action<=14);
       if(d11_mode!=D11PreviewMode::Legacy && clay.live_surface_v30 &&
-         clay.gradient_v31c && drag_contact_requested() && sign>0 &&
+         (artistic_enabled || (clay.gradient_v31c && drag_contact_requested())) && sign>0 &&
          stroke_symmetry_xyz_get(object)==PAINT_SYMM_NONE &&
          !cache.reference_symmetry && !cache.reference_combined &&
          mesh.radial_symmetry[0]==1 && mesh.radial_symmetry[1]==1 && mesh.radial_symmetry[2]==1 &&
          (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))==0 &&
          cache.tile_pass==0 && cache.radial_symmetry_pass==0 && cache.mirror_symmetry_pass==0 &&
-         (action==5 || action==7 || action==8)){
+         ((artistic_enabled && artistic_action) || action==5 || action==7 || action==8)){
         d11_state=std::static_pointer_cast<D11PreviewState>(cache.xpbd_v31d11_preview);
         if(!d11_state){
           d11_state=std::make_shared<D11PreviewState>();
           cache.xpbd_v31d11_preview=d11_state;
         }
+        d11_state->artistic_material=brush.sculpt_physics_material;
         clay.coverage_v31d9=true;
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get(),
