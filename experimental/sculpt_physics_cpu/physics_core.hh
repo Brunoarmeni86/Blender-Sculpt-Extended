@@ -99,6 +99,9 @@ class World {
     double compliance = 0.0;
   };
   bool set_brush_targets(const std::vector<BrushTargetInput> &targets);
+  /* Restrict local integration to an editor-owned Undo region. Crossing
+   * bonds remain fixed boundary constraints. Empty disables the restriction. */
+  bool set_active_region(const std::vector<std::size_t> &particle_ids);
   void step(double dt, int substeps = 4, int iterations = 5);
   /* Optional approximation for brush-local, quasistatic strokes. Only particles
    * within `bond_hops` from a Grab target are integrated. Crossing bonds act as
@@ -185,6 +188,9 @@ class World {
   std::vector<GrabTarget> targets_;
   std::vector<GrabTarget> pending_targets_; // Reused scratch for atomic Grab updates.
   std::vector<std::size_t> brush_candidate_scratch_; // Sort/deduplicate PBVH IDs.
+  std::vector<uint32_t> active_region_marks_;
+  uint32_t active_region_generation_ = 0;
+  bool active_region_enabled_ = false;
   std::vector<std::size_t> dirty_;
   // Stable indices: particle/bond topology cannot change during a stroke.
   std::unordered_map<std::size_t, Particle> undo_particles_;

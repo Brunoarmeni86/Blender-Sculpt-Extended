@@ -3171,6 +3171,75 @@ void sculpt_apply_texture(const SculptSession &ss,
       if (anchor_diag) {
         anchor_diag->samples[anchor_mode].fetch_add(1, std::memory_order_relaxed);
       }
+      /* Standard Roll Brush: map the texture across and along the recorded
+       * stroke path. This differs from merely advancing the Area texture at
+       * every dab: bends now rotate the alpha with the stroke and arc length
+       * supplies one continuous longitudinal coordinate. Virtual extensions
+       * at both ends cover the complete first/current dab. */
+      if (cache.roll_alpha && cache.radius > 1.0e-6f &&
+          cache.roll_alpha_points.size() >= 2)
+      {
+        const Span<float3> points = cache.roll_alpha_points;
+        const Span<float> lengths = cache.roll_alpha_lengths;
+        float best_distance_sq = FLT_MAX;
+        float best_lateral = x * cache.radius;
+        float best_longitudinal = lengths.last();
+
+        for (const int i : points.index_range().drop_back(1)) {
+          const float3 segment = points[i + 1] - points[i];
+          const float segment_length_sq = math::length_squared(segment);
+          if (segment_length_sq <= 1.0e-12f) {
+            continue;
+          }
+
+          const float segment_length = sqrtf(segment_length_sq);
+          float t_min = 0.0f;
+          float t_max = 1.0f;
+          if (i == 0) {
+            t_min = -3.0f * cache.radius / segment_length;
+          }
+          if (i == points.size() - 2) {
+            t_max = 3.0f * cache.radius / segment_length + 1.0f;
+          }
+          const float t = std::clamp(
+              math::dot(symm_point - points[i], segment) / segment_length_sq, t_min, t_max);
+          const float3 closest = points[i] + segment * t;
+          const float3 offset = symm_point - closest;
+          const float distance_sq = math::length_squared(offset);
+          if (distance_sq >= best_distance_sq) {
+            continue;
+          }
+
+          float3 tangent = segment / segment_length;
+          float3 normal = cache.sculpt_normal;
+          if (math::length_squared(normal) <= 1.0e-12f) {
+            normal = cache.view_normal;
+          }
+          normal = math::normalize(normal);
+          float3 across = math::cross(normal, tangent);
+          if (math::length_squared(across) <= 1.0e-12f) {
+            across = math::cross(cache.view_normal, tangent);
+          }
+          if (math::length_squared(across) <= 1.0e-12f) {
+            continue;
+          }
+          across = math::normalize(across);
+
+          best_distance_sq = distance_sq;
+          best_lateral = math::dot(offset, across);
+          best_longitudinal = lengths[i] + t * segment_length;
+        }
+
+        if (best_distance_sq != FLT_MAX) {
+          const float roll_x = best_lateral / cache.radius;
+          const float roll_y = (best_longitudinal / cache.radius) * cache.roll_alpha_repeat;
+          const float cosine = cosf(mtex->rot);
+          const float sine = sinf(mtex->rot);
+          x = cosine * roll_x - sine * roll_y;
+          y = sine * roll_x + cosine * roll_y;
+        }
+      }
+
       x *= mtex->size[0];
       y *= mtex->size[1];
 
@@ -3540,6 +3609,42 @@ static void update_brush_local_mat(const Sculpt &sd, Object &ob)
     const MTex *mask_tex = BKE_brush_mask_texture_get(brush, OB_MODE_SCULPT);
     calc_brush_local_mat(
         mask_tex->rot, ob, cache->brush_local_mat.ptr(), cache->brush_local_mat_inv.ptr());
+
+    const char *roll_enabled = std::getenv("BLENDER_SCULPT_ROLL_ALPHA");
+    cache->roll_alpha = roll_enabled && roll_enabled[0] == '1';
+    if (cache->roll_alpha) {
+      float repeat = 1.0f;
+      if (const char *value = std::getenv("BLENDER_SCULPT_ROLL_REPEAT")) {
+        char *end = nullptr;
+        const float parsed = std::strtof(value, &end);
+        if (end != value && std::isfinite(parsed)) {
+          repeat = std::clamp(parsed, 0.05f, 20.0f);
+        }
+      }
+      cache->roll_alpha_repeat = repeat;
+      if (!cache->roll_alpha_initialized) {
+        cache->roll_alpha_last_location = cache->location;
+        cache->roll_alpha_points.append(cache->location);
+        cache->roll_alpha_lengths.append(0.0f);
+        cache->roll_alpha_initialized = true;
+      }
+      else {
+        const float distance = math::distance(cache->location, cache->roll_alpha_last_location);
+        const float sample_distance = max_ff(cache->radius * 0.035f, 1.0e-6f);
+        if (distance >= sample_distance) {
+          cache->roll_alpha_points.append(cache->location);
+          cache->roll_alpha_lengths.append(cache->roll_alpha_lengths.last() + distance);
+          cache->roll_alpha_last_location = cache->location;
+
+          /* Only the path close to the current dab can be sampled. Keep a
+           * bounded history without resetting cumulative texture distance. */
+          while (cache->roll_alpha_points.size() > 96) {
+            cache->roll_alpha_points.remove(0);
+            cache->roll_alpha_lengths.remove(0);
+          }
+        }
+      }
+    }
   }
 }
 

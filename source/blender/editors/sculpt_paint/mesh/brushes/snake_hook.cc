@@ -27,6 +27,7 @@
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 
 #include "bmesh.hh"
+#include "physical_material_finish.hh"
 
 namespace blender::ed::sculpt_paint::brushes {
 
@@ -422,6 +423,7 @@ void do_snake_hook_brush(const Depsgraph &depsgraph,
       break;
     }
   }
+  apply_physical_material_finish(depsgraph, sd, brush, object, node_mask);
   pbvh.tag_positions_changed(node_mask);
   pbvh.flush_bounds_to_parents();
 }

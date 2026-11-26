@@ -24,6 +24,7 @@
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
 #  include "physics_brush_v15.hh"
 #endif
+#include "physical_material_finish.hh"
 
 namespace blender::ed::sculpt_paint::brushes {
 inline namespace clay_cc {
@@ -318,6 +319,7 @@ void do_clay_brush(const Depsgraph &depsgraph,
       break;
     }
   }
+  apply_physical_material_finish(depsgraph, sd, brush, object, node_mask);
   pbvh.tag_positions_changed(node_mask);
   pbvh.flush_bounds_to_parents();
 }

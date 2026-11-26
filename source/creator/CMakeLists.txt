@@ -2115,6 +2115,16 @@ endif()
 # -----------------------------------------------------------------------------
 # Windows shared library manifest
 if(WIN32)
+  # The experimental Sculpt Warp backend links warp.dll directly. Bundle it with
+  # the other side-by-side shared libraries so installed/portable builds start
+  # without requiring the Warp SDK directory on PATH.
+  if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL AND SCULPT_WARP_ROOT AND
+     EXISTS "${SCULPT_WARP_ROOT}/warp/bin/warp.dll")
+    windows_install_shared_manifest(
+      FILES "${SCULPT_WARP_ROOT}/warp/bin/warp.dll"
+      RELEASE
+    )
+  endif()
   windows_generate_shared_manifest()
 endif()
 

@@ -4,6 +4,12 @@
 
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
 
+#include <algorithm>
+#include <cstdlib>
+#include <memory>
+#include <stdexcept>
+#include <vector>
+
 #include "DNA_brush_types.h"
 #include "smooth_preserve_shape.hh"
 #include "DNA_mesh_types.h"
@@ -31,6 +37,10 @@
 #  include "physics_brush_v15.hh"
 #endif
 #include "editors/sculpt_paint/mesh/sculpt_layer_delta_smooth_v01.hh"
+
+#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#  include "brush_solver_backend.hh"
+#endif
 
 namespace blender::ed::sculpt_paint::brushes {
 
@@ -170,6 +180,259 @@ static bool try_smooth_physics_v15(const Depsgraph &depsgraph,
 }
 #endif
 
+#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+/* A1 hybrid validation path. Adjacency and positions stay resident in the
+ * selected Warp backend for the stroke; Blender still computes brush factors
+ * and the reference neighbor average. This deliberately validates lifetime,
+ * active-region, Undo and dirty-node integration before moving factor and CSR
+ * evaluation into a portable compute kernel. The normal Smooth path remains
+ * the default and is called unchanged on every rejection. */
+static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
+                              const Sculpt &sd,
+                              const Brush &brush,
+                              Object &object,
+                              const IndexMask &node_mask,
+                              const float brush_strength)
+{
+  const char *enabled = std::getenv("BLENDER_SCULPT_GPU_SMOOTH_A1");
+  if (!enabled || enabled[0] != '1' || enabled[1] != '\0') {
+    return false;
+  }
+  SculptSession &ss = *object.runtime->sculpt_session;
+  StrokeCache &cache = *ss.cache;
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  if (pbvh.type() != bke::pbvh::Type::Mesh || ss.deform_modifiers_active ||
+      ss.shapekey_active || cache.tile_pass != 0 || cache.radial_symmetry_pass != 0)
+  {
+    return false;
+  }
+
+  Mesh &mesh = *id_cast<Mesh *>(object.data);
+  const PositionDeformData position_data(depsgraph, object);
+  if (position_data.eval.size() != mesh.verts_num || mesh.verts_num == 0) {
+    return false;
+  }
+  MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
+  const MeshAttributeData attributes(mesh);
+  const Span<float3> normals = bke::pbvh::vert_normals_eval(depsgraph, object);
+  const OffsetIndices faces = mesh.faces();
+  const Span<int> corner_verts = mesh.corner_verts();
+  const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+
+  try {
+    auto session = std::static_pointer_cast<sculpt_physics::StrokeSolverSession>(
+        cache.physical_solver_session);
+    if (!session || session->purpose != sculpt_physics::StrokeSolverPurpose::Smooth ||
+        session->vertex_count != std::size_t(mesh.verts_num))
+    {
+      session = sculpt_physics::create_stroke_solver_session(
+          sculpt_physics::StrokeSolverPurpose::Smooth,
+          sculpt_physics::BackendKind::WarpCuda,
+          std::size_t(mesh.verts_num));
+      if (session->selected_backend != sculpt_physics::BackendKind::WarpCuda) {
+        cache.physical_solver_session.reset();
+        return false;
+      }
+      sculpt_physics::BrushSolverBackend &solver = *session->solver;
+      for (const int vertex : position_data.eval.index_range()) {
+        const bool hidden = !attributes.hide_vert.is_empty() && attributes.hide_vert[vertex];
+        const float mask = attributes.mask.is_empty() ? 0.0f : attributes.mask[vertex];
+        const float3 p = position_data.eval[vertex];
+        solver.add_particle({double(p.x), double(p.y), double(p.z)},
+                            hidden || mask >= 0.999f ? 0.0 : 1.0 - double(mask));
+      }
+      for (const int2 edge : mesh.edges()) {
+        if (edge[0] != edge[1]) {
+          solver.add_bond(std::size_t(edge[0]), std::size_t(edge[1]), 0.0);
+        }
+      }
+      /* Smooth must evolve from the previous dab, not preserve the rest shape
+       * captured at stroke start. Grab and Clay keep the default material
+       * stiffness because they depend on that shape retention. */
+      solver.set_shape_stiffness_override(0.0);
+      solver.begin_stroke();
+      cache.physical_solver_session = session;
+    }
+
+    sculpt_physics::BrushSolverBackend &solver = *session->solver;
+    struct Target {
+      int vertex;
+      float factor;
+      float3 position;
+    };
+    std::vector<Target> gathered;
+    threading::EnumerableThreadSpecific<LocalData> all_tls;
+    node_mask.foreach_index([&](const int node_i) {
+      LocalData &tls = all_tls.local();
+      const bke::pbvh::MeshNode &node = nodes[node_i];
+      const Span<int> verts = node.verts();
+      tls.factors.resize(verts.size());
+      tls.distances.resize(verts.size());
+      calc_factors_common_mesh_indexed(depsgraph,
+                                       brush,
+                                       object,
+                                       attributes,
+                                       position_data.eval,
+                                       normals,
+                                       node,
+                                       tls.factors,
+                                       tls.distances);
+      scale_factors(tls.factors, std::clamp(brush_strength, 0.0f, 1.0f));
+      const GroupedSpan<int> neighbors = calc_vert_neighbors_interior(faces,
+                                                                      corner_verts,
+                                                                      vert_to_face_map,
+                                                                      ss.boundary_info_cache->verts,
+                                                                      ss.boundary_info_cache->edges,
+                                                                      attributes.hide_poly,
+                                                                      verts,
+                                                                      tls.factors,
+                                                                      tls.neighbor_offsets,
+                                                                      tls.neighbor_data);
+      tls.new_positions.resize(verts.size());
+      smooth::neighbor_data_average_mesh_check_loose(
+          position_data.eval, verts, neighbors, tls.new_positions.as_mutable_span());
+      for (const int i : verts.index_range()) {
+        if (tls.factors[i] > 0.0f && std::isfinite(tls.factors[i])) {
+          gathered.push_back({verts[i], tls.factors[i], tls.new_positions[i]});
+        }
+      }
+    });
+    if (gathered.empty()) {
+      return true;
+    }
+    std::sort(gathered.begin(), gathered.end(), [](const Target &a, const Target &b) {
+      return a.vertex < b.vertex;
+    });
+    std::vector<sculpt_physics::World::BrushTargetInput> targets;
+    std::vector<std::size_t> active_region;
+    std::vector<float> compact_weights;
+    std::vector<sculpt_physics::Vec3> compact_normals;
+    for (std::size_t i = 0; i < gathered.size();) {
+      Target target = gathered[i++];
+      while (i < gathered.size() && gathered[i].vertex == target.vertex) {
+        if (gathered[i].factor > target.factor) {
+          target = gathered[i];
+        }
+        i++;
+      }
+      const double weight = std::clamp(double(target.factor), 1.0e-4, 1.0);
+      const double compliance = (1.0 / weight - 1.0) / 250000.0;
+      targets.push_back({std::size_t(target.vertex),
+                         {double(target.position.x),
+                          double(target.position.y),
+                          double(target.position.z)},
+                         compliance});
+      active_region.push_back(std::size_t(target.vertex));
+      compact_weights.push_back(float(weight));
+      const float3 normal = normals[target.vertex];
+      compact_normals.push_back({double(normal.x), double(normal.y), double(normal.z)});
+    }
+    /* A2 uses a dedicated Laplacian kernel. The full resident CSR gives every
+     * active vertex access to one-ring neighbours while only active vertices
+     * are written: the surrounding collar is therefore read-only. Per-dab
+     * traffic and readback are compact. Keep A1 as an atomic compatibility
+     * fallback for an older PTX package. */
+    sculpt_physics::SmoothSolverMode smooth_mode = sculpt_physics::SmoothSolverMode::Laplacian;
+    bool physical_relax = false;
+    if (const char *mode = std::getenv("BLENDER_SCULPT_GPU_SMOOTH_MODE")) {
+      if (STREQ(mode, "taubin")) {
+        smooth_mode = sculpt_physics::SmoothSolverMode::Taubin;
+      }
+      else if (STREQ(mode, "volume")) {
+        smooth_mode = sculpt_physics::SmoothSolverMode::VolumePreserve;
+      }
+      else if (STREQ(mode, "relax")) {
+        smooth_mode = sculpt_physics::SmoothSolverMode::Relax;
+      }
+      else if (STREQ(mode, "dense")) {
+        smooth_mode = sculpt_physics::SmoothSolverMode::DenseStrong;
+      }
+      else if (STREQ(mode, "strong")) {
+        smooth_mode = sculpt_physics::SmoothSolverMode::DenseStrong;
+      }
+      else if (STREQ(mode, "physical")) {
+        physical_relax = true;
+      }
+    }
+    /* Physical Relax deliberately uses the lightweight XPBD target path and
+     * a small amount of rest-shape retention. All dedicated geometric modes
+     * keep rest-shape disabled so continuous smoothing can evolve per dab. */
+    solver.set_shape_stiffness_override(physical_relax ? 0.08 : 0.0);
+    if (smooth_mode == sculpt_physics::SmoothSolverMode::DenseStrong) {
+      for (float &weight : compact_weights) {
+        weight = std::min(1.0f, weight * 1.75f);
+      }
+    }
+    if (physical_relax ||
+        !solver.smooth_compact(
+            active_region, compact_weights, compact_normals, smooth_mode, double(cache.radius)))
+    {
+      if (!solver.set_active_region(active_region) || !solver.set_targets(targets)) {
+        throw std::runtime_error("GPU Smooth rejected its active region");
+      }
+      solver.step_local(1.0 / 60.0, 1, physical_relax ? 2 : 1, 0);
+    }
+
+    double expected_motion = 0.0;
+    double solved_motion = 0.0;
+    for (const sculpt_physics::World::BrushTargetInput &target : targets) {
+      const float3 current = position_data.eval[int(target.particle_index)];
+      expected_motion += math::distance(
+          current,
+          float3(float(target.goal.x), float(target.goal.y), float(target.goal.z)));
+      const sculpt_physics::Vec3 solved = solver.particles()[target.particle_index].position;
+      solved_motion += math::distance(
+          current, float3(float(solved.x), float(solved.y), float(solved.z)));
+    }
+    if (!std::isfinite(solved_motion) ||
+        (expected_motion > 1.0e-12 && solved_motion <= 1.0e-15))
+    {
+      /* No Blender positions have been written yet: abandoning the GPU result
+       * here is atomic and lets the unchanged standard Smooth execute. */
+      throw std::runtime_error("GPU Smooth produced no valid deformation");
+    }
+
+    Vector<float3> translations;
+    node_mask.foreach_index([&](const int node_i) {
+      const Span<int> verts = nodes[node_i].verts();
+      translations.resize(verts.size());
+      for (const int i : verts.index_range()) {
+        const auto target = std::lower_bound(
+            targets.begin(),
+            targets.end(),
+            std::size_t(verts[i]),
+            [](const sculpt_physics::World::BrushTargetInput &candidate,
+               const std::size_t vertex) { return candidate.particle_index < vertex; });
+        if (target == targets.end() || target->particle_index != std::size_t(verts[i])) {
+          /* Never publish solver halo/material motion outside the actual brush
+           * influence. Doing so exposes rectangular PBVH node boundaries. */
+          translations[i] = float3(0.0f);
+          continue;
+        }
+        const sculpt_physics::Vec3 p = solver.particles()[verts[i]].position;
+        translations[i] = float3(float(p.x) - position_data.eval[verts[i]].x,
+                                 float(p.y) - position_data.eval[verts[i]].y,
+                                 float(p.z) - position_data.eval[verts[i]].z);
+        if (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE) {
+          smooth_preserve_shape_translation(translations[i], normals[verts[i]]);
+        }
+      }
+      clip_and_lock_translations(sd, ss, position_data.eval, verts, translations);
+      position_data.deform(translations, verts);
+      bke::pbvh::update_node_bounds_mesh(position_data.eval, nodes[node_i]);
+    });
+    pbvh.tag_positions_changed(node_mask);
+    pbvh.flush_bounds_to_parents();
+    return true;
+  }
+  catch (const std::exception &error) {
+    std::fprintf(stderr, "[GPU Smooth A1] fallback to standard Smooth: %s\n", error.what());
+    cache.physical_solver_session.reset();
+    return false;
+  }
+}
+#endif
+
 BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
                                               const Sculpt &sd,
                                               const Brush &brush,
@@ -177,6 +440,11 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
                                               const IndexMask &node_mask,
                                               const float brush_strength)
 {
+#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+  if (try_gpu_smooth_a1(depsgraph, sd, brush, object, node_mask, brush_strength)) {
+    return;
+  }
+#endif
   const SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();

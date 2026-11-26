@@ -37,8 +37,18 @@ SPECS = (
     ("Physical Compact", "Clay", "MATERIAL", "AUTONOMOUS_COMPACT", "compact", .75, .45, "Physical Brushes/Compression"),
     ("Physical Press", "Clay Strips", "MATERIAL", "AUTONOMOUS_PRESS", "press", .75, .45, "Physical Brushes/Compression"),
     ("Physical Scrape", "Clay Strips", "MATERIAL", "AUTONOMOUS_SCRAPE", "scrape", 1., .85, "Physical Brushes/Carving"),
+    ("Stone Chisel", "Clay Strips", "MATERIAL", "AUTONOMOUS_SCRAPE", "scrape", 1., .65, "Physical Brushes/Carving"),
+    ("Wax Knife", "Clay Strips", "MATERIAL", "AUTONOMOUS_SCRAPE", "scrape", 1., .65, "Physical Brushes/Carving"),
+    ("Wood Chisel", "Clay Strips", "MATERIAL", "AUTONOMOUS_SCRAPE", "scrape", 1., .65, "Physical Brushes/Carving"),
     ("Physical Melt (Surface)", "Clay", "MATERIAL", "AUTONOMOUS_MELT", "melt", 1., 1., "Physical Brushes/Thermal"),
 )
+
+# Match the V27 migration presets for the single-plane carving tools.
+CARVING_PRESETS = {
+    "Stone Chisel": (1.35, .45),
+    "Wax Knife": (1.30, .85),
+    "Wood Chisel": (1.25, .60),
+}
 
 def preview_height(kind, x, y):
     # Broad exaggerated sculpt forms read at 32-48 px. These depict
@@ -324,6 +334,8 @@ def main():
                     brush.strength = 1.4
                 if "SMOOTH" in props["curve_distance_falloff_preset"].enum_items.keys():
                     brush.curve_distance_falloff_preset = "SMOOTH"
+        if name in CARVING_PRESETS:
+            brush.strength, brush.sculpt_physics_plasticity = CARVING_PRESETS[name]
         brush.asset_mark()
         brush.asset_data.catalog_id = CATALOGS[category]
         brush.asset_data.description = (

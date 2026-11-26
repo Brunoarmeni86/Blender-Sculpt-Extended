@@ -24,6 +24,7 @@
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 
 #include "bmesh.hh"
+#include "physical_material_finish.hh"
 
 namespace blender::ed::sculpt_paint::brushes {
 
@@ -188,6 +189,8 @@ static void offset_positions(const Depsgraph &depsgraph,
       break;
     }
   }
+  apply_physical_lesion_preview(depsgraph, sd, brush, object, node_mask);
+  apply_physical_material_finish(depsgraph, sd, brush, object, node_mask);
   pbvh.tag_positions_changed(node_mask);
   pbvh.flush_bounds_to_parents();
 }

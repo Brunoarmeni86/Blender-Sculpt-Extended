@@ -411,6 +411,10 @@ struct PersistentMultiresData {
 };
 
 struct SculptSession : NonCopyable, NonMovable {
+  /* Experimental GPU brush topology/session cache. Never serialized. The
+   * concrete solver type stays outside BKE and is validated by purpose and
+   * vertex count before reuse. */
+  std::shared_ptr<void> physical_solver_session_cache;
   /* The current active shapekey for the mesh. Only non-null for Type::Mesh */
   KeyBlock *shapekey_active = nullptr;
 

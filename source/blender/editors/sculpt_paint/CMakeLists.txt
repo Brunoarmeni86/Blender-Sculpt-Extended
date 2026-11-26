@@ -166,6 +166,8 @@ set(SRC
   mesh/brushes/multires_displacement_eraser.cc
   mesh/brushes/multires_displacement_smear.cc
   mesh/brushes/pinch.cc
+  mesh/brushes/physical_material_finish.cc
+  mesh/brushes/physical_material_finish.hh
   mesh/brushes/plane.cc
   mesh/brushes/relax.cc
   mesh/brushes/rotate.cc
@@ -232,11 +234,13 @@ endif()
 # Blender fork. Runtime is separately disabled unless the environment flag
 # BLENDER_SCULPT_XPBD_GRAB_V12=1 is set. Never built into release by default.
 option(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
-       "Build opt-in XPBD Grab research integration (normal mesh only)" OFF)
+       "Build opt-in shared physical Sculpt brush engine (Grab/Clay research)" OFF)
 if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
   list(APPEND SRC
     "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/physics_core.cc"
     "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/physics_core.hh"
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/brush_solver_backend.cc"
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu/brush_solver_backend.hh"
   )
   list(APPEND INC
     "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_cpu"
@@ -277,6 +281,26 @@ if(WITH_SCULPT_XPBD_OTHER_BRUSHES_V15)
   )
 endif()
 
+set(SCULPT_WARP_ROOT "" CACHE PATH "Path to a pinned NVIDIA Warp source/binary tree")
+if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL AND SCULPT_WARP_ROOT AND
+   EXISTS "${SCULPT_WARP_ROOT}/warp/native/warp.h" AND
+   EXISTS "${SCULPT_WARP_ROOT}/warp/bin/warp.lib")
+  list(APPEND SRC
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_gpu/warp_cuda_backend.cc"
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_gpu/warp_cuda_backend.hh"
+  )
+  list(APPEND INC
+    "${CMAKE_SOURCE_DIR}/experimental/sculpt_physics_gpu"
+  )
+  list(APPEND INC_SYS
+    "${SCULPT_WARP_ROOT}/warp/native"
+  )
+  list(APPEND LIB
+    "${SCULPT_WARP_ROOT}/warp/bin/warp.lib"
+  )
+  set(WITH_SCULPT_WARP_CUDA TRUE)
+endif()
+
 blender_add_lib(bf_editor_sculpt_paint "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
 if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
   target_compile_definitions(bf_editor_sculpt_paint PRIVATE WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
@@ -286,6 +310,10 @@ if(WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
 endif()
 if(WITH_SCULPT_XPBD_OTHER_BRUSHES_V15)
   target_compile_definitions(bf_editor_sculpt_paint PRIVATE WITH_SCULPT_XPBD_OTHER_BRUSHES_V15)
+endif()
+
+if(WITH_SCULPT_WARP_CUDA)
+  target_compile_definitions(bf_editor_sculpt_paint PRIVATE WITH_SCULPT_WARP_CUDA)
 endif()
 # RNA_prototypes.hh
 add_dependencies(bf_editor_sculpt_paint bf_rna)

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(sculpt_physics_cpu_reference LANGUAGES CXX)
 
-add_library(sculpt_physics_reference STATIC physics_core.cc adaptive_solver.cc mask_extract_core.cc sculpt_surface_bridge.cc)
+add_library(sculpt_physics_reference STATIC physics_core.cc brush_solver_backend.cc adaptive_solver.cc mask_extract_core.cc sculpt_surface_bridge.cc)
 target_include_directories(sculpt_physics_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(sculpt_physics_reference PUBLIC cxx_std_17)
 
@@ -27,6 +27,7 @@ add_test(NAME sculpt_physics_reference_tests COMMAND test_physics_core)
 add_test(NAME sculpt_surface_local_tests COMMAND test_surface_local)
 
 option(SCULPT_PHYSICS_BUILD_BENCHMARKS "Build standalone CPU benchmark" OFF)
+set(SCULPT_WARP_ROOT "" CACHE PATH "Path to a pinned NVIDIA Warp source/binary tree")
 if(SCULPT_PHYSICS_BUILD_BENCHMARKS)
   add_executable(bench_physics_core bench_physics_core.cc)
   add_executable(bench_local_physics bench_local_physics.cc)
@@ -44,6 +45,27 @@ if(SCULPT_PHYSICS_BUILD_BENCHMARKS)
     target_compile_options(bench_substeps PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_compile_options(bench_adaptive_physics PRIVATE -Wall -Wextra -Wpedantic -Werror)
   endif()
+endif()
+
+if(SCULPT_WARP_ROOT AND EXISTS "${SCULPT_WARP_ROOT}/warp/native/warp.h" AND
+   EXISTS "${SCULPT_WARP_ROOT}/warp/bin/warp.lib")
+  add_executable(test_warp_cuda_backend
+    ../sculpt_physics_gpu/test_warp_cuda_backend.cc
+    ../sculpt_physics_gpu/warp_cuda_backend.cc
+    brush_solver_backend.cc
+    physics_core.cc
+  )
+  target_compile_features(test_warp_cuda_backend PRIVATE cxx_std_17)
+  target_compile_definitions(test_warp_cuda_backend PRIVATE WITH_SCULPT_WARP_CUDA)
+  target_include_directories(test_warp_cuda_backend PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../sculpt_physics_gpu
+    ${SCULPT_WARP_ROOT}/warp/native
+  )
+  target_link_libraries(test_warp_cuda_backend PRIVATE
+    ${SCULPT_WARP_ROOT}/warp/bin/warp.lib
+  )
+  add_test(NAME warp_cuda_backend COMMAND test_warp_cuda_backend)
 endif()
 
 add_executable(test_adaptive test_adaptive.cc)
@@ -389,3 +411,9 @@ add_test(NAME sculpt_local_gradient_v31d10a_tests COMMAND test_local_gradient_v3
 add_executable(test_hybrid_foundation_v31d11 test_hybrid_foundation_v31d11.cc)
 target_link_libraries(test_hybrid_foundation_v31d11 PRIVATE sculpt_physics_reference)
 add_test(NAME sculpt_hybrid_foundation_v31d11_tests COMMAND test_hybrid_foundation_v31d11)
+add_executable(test_brush_solver_backend test_brush_solver_backend.cc)
+target_link_libraries(test_brush_solver_backend PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_brush_solver_backend PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_brush_solver_backend_tests COMMAND test_brush_solver_backend)

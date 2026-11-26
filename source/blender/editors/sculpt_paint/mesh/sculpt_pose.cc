@@ -39,6 +39,7 @@
 #include "sculpt_smooth.hh"
 
 #include "bmesh.hh"
+#include "brushes/physical_material_finish.hh"
 
 #include <cmath>
 #include <cstdio>
@@ -2575,6 +2576,7 @@ void do_pose_brush(const Depsgraph &depsgraph,
       break;
     }
   }
+  brushes::apply_physical_material_finish(depsgraph, sd, brush, ob, node_mask);
   pbvh.tag_positions_changed(node_mask);
   pbvh.flush_bounds_to_parents();
 }

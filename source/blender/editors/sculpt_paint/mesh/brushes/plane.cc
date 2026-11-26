@@ -41,6 +41,7 @@
 #include "editors/sculpt_paint/mesh/sculpt_intern.hh"
 
 #include "bmesh.hh"
+#include "physical_material_finish.hh"
 #include "editors/sculpt_paint/mesh/sculpt_layer_detail_v01.hh"
 
 
@@ -477,6 +478,7 @@ void do_plane_brush(const Depsgraph &depsgraph,
       break;
     }
   }
+  apply_physical_material_finish(depsgraph, sd, brush, object, node_mask);
   pbvh.tag_positions_changed(node_mask);
   pbvh.flush_bounds_to_parents();
 }

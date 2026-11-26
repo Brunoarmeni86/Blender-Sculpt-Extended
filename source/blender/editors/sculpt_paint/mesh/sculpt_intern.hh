@@ -237,9 +237,10 @@ struct StrokeCache {
   // Experimental preview state is always present in this C++ runtime struct,
   // independent of build flags, to preserve a consistent layout across TUs.
   // Neither field is serialized in .blend DNA.
-  std::shared_ptr<void> xpbd_v12_world;
-  int xpbd_v12_world_verts = 0;
-  float3 xpbd_v12_previous_delta = float3(0.0f);
+  /* Shared A0 owner for experimental CPU/GPU brush buffers. The concrete
+   * StrokeSolverSession stays outside the public Sculpt header. Standard
+   * brushes never allocate or inspect this field. */
+  std::shared_ptr<void> physical_solver_session;
   bool xpbd_v12_failed = false;
   bool xpbd_v12_active_logged = false;
   // V14 opt-in native IPhysicsExecutor Grab bridge: independent from V12.
@@ -275,6 +276,11 @@ struct StrokeCache {
   double xpbd_v16_clay_plasticity = 0.65;
   double xpbd_v16_clay_spread = 0.55;
 
+  bool xpbd_v12_rejection_logged = false;
+  /* Physical Clay V01: isolated opt-in CPU reference proxy. */
+  bool physical_clay_v01_failed = false;
+  bool physical_clay_v01_active_logged = false;
+  bool physical_clay_v01_rejection_logged = false;
   /* Invariants */
   float initial_radius = 0.0f;
   float3 scale = float3(0);
@@ -410,6 +416,16 @@ struct StrokeCache {
    * displacement in area plane mode.
    */
   float4x4 brush_local_mat_inv = float4x4::identity();
+  /* Optional standard Roll alpha path. Runtime-only and reset with every
+   * StrokeCache; physical brush backends never inspect these fields. The
+   * cumulative lengths stay absolute when old points are discarded so the
+   * texture phase remains continuous for arbitrarily long strokes. */
+  bool roll_alpha = false;
+  bool roll_alpha_initialized = false;
+  float roll_alpha_repeat = 1.0f;
+  float3 roll_alpha_last_location = float3(0.0f);
+  Vector<float3> roll_alpha_points;
+  Vector<float> roll_alpha_lengths;
 
   /* used to shift the plane around when doing tiled strokes */
   float3 plane_offset = float3(0);

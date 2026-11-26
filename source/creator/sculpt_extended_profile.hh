@@ -72,6 +72,11 @@ inline void initialize_defaults()
   BLI_setenv_if_new("BLENDER_SCULPT_WEIGHT_HOT_DELTA_CACHE", "1");
   BLI_setenv_if_new("BLENDER_SCULPT_WEIGHT_HOT_SKIP_STITCH", "0");
   BLI_setenv_if_new("BLENDER_SCULPT_WEIGHT_MULTI_CACHE", "0");
+  /* XPBD Grab is compiled into the experimental Sculpt Extended build. Keep an
+   * explicit environment override for A/B testing, but make the normal
+   * executable exercise the validated CPU backend without a launcher. */
+  BLI_setenv_if_new("BLENDER_SCULPT_XPBD_GRAB_V12", "1");
+  BLI_setenv_if_new("BLENDER_SCULPT_XPBD_BACKEND", "auto");
   BLI_setenv_if_new("BLENDER_SCULPT_EXTENDED_NATIVE", "1");
 }
 }  // namespace blender::sculpt_extended_release

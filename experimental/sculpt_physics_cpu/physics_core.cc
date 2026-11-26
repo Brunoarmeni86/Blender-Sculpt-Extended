@@ -161,6 +161,7 @@ void World::begin_stroke()
   targets_.clear();
   pending_targets_.clear();
   dirty_.clear();
+  active_region_enabled_ = false;
   adaptive_cached_hops_ = -1;
   active_stroke_ = true;
 }
@@ -214,6 +215,27 @@ bool World::set_brush_targets(const std::vector<BrushTargetInput> &inputs)
   }
   targets_.swap(pending_targets_);
   return !targets_.empty();
+}
+
+bool World::set_active_region(const std::vector<std::size_t> &particle_ids)
+{
+  if (!active_stroke_) throw std::logic_error("begin_stroke required");
+  if (active_region_marks_.size() != particles_.size()) {
+    active_region_marks_.assign(particles_.size(), 0);
+  }
+  if (++active_region_generation_ == 0) {
+    std::fill(active_region_marks_.begin(), active_region_marks_.end(), 0);
+    active_region_generation_ = 1;
+  }
+  for (const std::size_t particle : particle_ids) {
+    if (particle >= particles_.size()) {
+      active_region_enabled_ = false;
+      return false;
+    }
+    active_region_marks_[particle] = active_region_generation_;
+  }
+  active_region_enabled_ = !particle_ids.empty();
+  return true;
 }
 
 bool World::apply_grab_impl(Vec3 center, double radius, Vec3 displacement,
@@ -468,9 +490,15 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   const auto include = [&](std::size_t i) {
     included_generation_marks_[i] = included_generation_;
   };
+  const auto allowed = [&](const std::size_t i) {
+    return !active_region_enabled_ || active_region_marks_[i] == active_region_generation_;
+  };
   std::vector<std::size_t> &active = local_active_scratch_;
   active.clear();
   for (const GrabTarget &target : targets_) {
+    if (!allowed(target.index)) {
+      throw std::invalid_argument("Brush target lies outside active Undo region");
+    }
     if (!included(target.index)) {
       include(target.index);
       active.push_back(target.index);
@@ -484,7 +512,7 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
     for (const std::size_t pi : moving_particle_ids_) {
       if (pi >= particles_.size()) throw std::logic_error("Stale moving-particle index");
       const Particle &p = particles_[pi];
-      if (p.inverse_mass <= 0.0 || included(pi)) continue;
+      if (p.inverse_mass <= 0.0 || included(pi) || !allowed(pi)) continue;
       const Vec3 v = p.velocity;
       const double component_speed = std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)});
       if (!std::isfinite(component_speed)) {
@@ -507,7 +535,7 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
         const Bond &b = bonds_[bi];
         if (b.broken) continue;
         const std::size_t other = b.a == pi ? b.b : b.a;
-        if (!included(other)) {
+        if (!included(other) && allowed(other)) {
           include(other);
           active.push_back(other);
         }
@@ -523,7 +551,7 @@ void World::step_local_impl(double dt, int substeps, int iterations, int bond_ho
   // make it sublinear later.
   const double minimum_speed = 1.0e-10 / dt;
   bool exterior_motion = false;
-  if (!include_moving_islands) {
+  if (!include_moving_islands && !active_region_enabled_) {
     for (const std::size_t i : moving_particle_ids_) {
       if (included(i) || particles_[i].inverse_mass <= 0.0) continue;
     const Vec3 v = particles_[i].velocity;
