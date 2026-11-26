@@ -54,6 +54,19 @@ int main(){
   std::printf("D12 Multiscale CPU points=%zu apex_R=%.6f ms=%.3f\n",samples.size(),a,
       std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
  }
+ // Above fixtures deliberately reach the safety cap. Also verify the
+ // unsaturated response so equality at the cap cannot hide density bias.
+ double uncapped=0.;
+ for(int density:{31,61,121,241}){
+  auto samples=fixture(density);
+  for(auto& q:samples){q.p.z*=.25;q.normal=unit({q.normal.x*.25,q.normal.y*.25,q.normal.z});}
+  check(ms::prepare(samples,{0,0,0},1.,chart),"shallow bump chart");
+  const auto a=apex(samples,ms::cpu(chart));
+  check(a<-.006&&a>-.054,"unsaturated strong response");
+  if(uncapped==0.)uncapped=a;
+  check(std::abs(a-uncapped)<.003,"unsaturated density invariance");
+  std::printf("D12 Multiscale shallow points=%zu apex_R=%.6f\n",samples.size(),a);
+ }
  auto small=fixture(61,false,.001);
  check(ms::prepare(small,{0,0,0},.001,chart),"small object scale");
  check(std::abs(apex(small,ms::cpu(chart))-baseline)<.006,"object scale invariance");
