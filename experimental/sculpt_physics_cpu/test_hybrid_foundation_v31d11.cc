@@ -648,7 +648,10 @@ int main(){
   check(!h::cached_geodesic_flux(cache,distorted,pressure,1).reused);
   std::reverse(distorted.tris.begin(),distorted.tris.end());
   check(!h::cached_geodesic_flux(cache,distorted,pressure,1).reused);
-  check(!h::cached_geodesic_flux(cache,distorted,pressure,.8).reused);
+  auto smaller=h::cached_geodesic_flux(cache,distorted,pressure,.8);
+  check(smaller.reused);
+  auto smaller_exact=h::transport_flux(h::transport_stencil(distorted,.8),pressure);
+  for(std::size_t i=0;i<pressure.size();++i)check(std::abs(smaller.flux[i]-smaller_exact[i])<=smaller.error_bound[i]+1e-12);
   std::vector<Vec3> q{{0,0,0},{.05,0,0},{0,.05,0},{0,0,.001},{.05,0,.001},{0,.05,.001}};
   auto sheets=h::make_patch(q,{{0,1,2},{3,4,5}},std::vector<double>(6,1));
   auto isolated=h::cached_geodesic_flux(cache,sheets,{1,1,1,0,0,0},1);
@@ -673,6 +676,55 @@ int main(){
   auto b=h::material_target(patch,h::Tool::Push,h::MaterialKind::Clay,plastic,{1,0,0},1,.05,&cache,&d);
   for(std::size_t i=0;i<a.size();++i)check(h::norm(a[i]-b[i])==0);
   check(d.flux.empty());
+ }
+ // D11.7 narrow ridge with vertical sidewalls, plus a nearby disconnected
+ // reverse-wound sheet. Compare old local normal law and feature law.
+ {
+  std::vector<Vec3> p;std::vector<h::Tri> tris;
+  for(auto xz:std::vector<std::pair<double,double>>{{-.2,0},{-.02,0},{-.02,.1},{-.02,.2},{.02,.2},{.02,.1},{.02,0},{.2,0}}){
+   p.push_back({xz.first,-.025,xz.second});p.push_back({xz.first,.025,xz.second});
+  }
+  for(std::size_t i=0;i+2<p.size();i+=2){
+   tris.push_back({i,i+2,i+1});tris.push_back({i+2,i+3,i+1});
+  }
+  auto n=p.size();p.push_back({-.02,-.025,.199});p.push_back({.02,-.025,.199});p.push_back({-.02,.025,.199});
+  tris.push_back({n,n+2,n+1});
+  auto patch=h::make_patch(p,tris,std::vector<double>(p.size(),1.));
+  auto c=h::feature_contact(patch,{0,0,.2},{0,0,1},{0,0,.2},.5);
+  check(c.seed<n);
+  for(std::size_t i=n;i<p.size();++i)check(c.weight[i]==0);
+  check(c.weight[4]>0&&c.weight[10]>0);
+  metric("feature_vertical_weight",0,c.weight[4]);
+  auto full=patch;for(std::size_t i=n;i<p.size();++i)full.weight[i]=0;
+  h::PlasticState plastic(p.size());
+  auto old=h::material_target(full,h::Tool::Compress,h::MaterialKind::Clay,plastic,{0,0,1},.5,.05);
+  auto target=h::material_target(full,h::Tool::Compress,h::MaterialKind::Clay,plastic,{0,0,1},.5,.05,nullptr,nullptr,true);
+  check(h::norm(old[4])<1e-12&&h::norm(target[4])>1e-5);
+  metric("feature_vertical_motion",0,h::norm(target[4]));
+  patch.weight=c.weight;
+  auto desired=h::material_target(patch,h::Tool::Compress,h::MaterialKind::Clay,plastic,{0,0,1},.5,.08,nullptr,nullptr,true);
+  bool recovery=false;auto motion=h::optimize_feature(patch,desired,&recovery);
+  check(gradient_motion_scale_v31c(patch.p,patch.tris,motion)>=1-1e-10);
+  for(std::size_t i=0;i<p.size();++i)if(patch.weight[i]==0)check(h::norm(motion[i])==0);
+  metric("feature_vertical_accepted",0,h::norm(motion[4]));
+  auto blocked=full;blocked.weight[6]=blocked.weight[7]=0;
+  auto masked=h::feature_contact(blocked,{.02,0,.2},{0,0,1},{.02,0,.2},.5);
+  check(masked.weight[6]==0&&masked.weight[7]==0&&masked.weight[4]==0);
+  auto missing=h::feature_contact(full,{5,0,.2},{0,0,1},{5,0,.2},.5);
+  for(auto x:missing.weight)check(x==0);
+ }
+ // Changing radius within the stored candidate margin can reuse the
+ // same distances; the current radius controls kernel and capacity.
+ {
+  auto patch=grid(8,false);h::GeodesicCache cache;
+  std::vector<double> p;for(auto v:patch.p)p.push_back(1-v.x);
+  h::cached_geodesic_flux(cache,patch,p,1.);
+  auto f=h::cached_geodesic_flux(cache,patch,p,1.005);
+  check(f.reused);
+  auto exact=h::transport_flux(h::transport_stencil(patch,1.005),p);
+  for(std::size_t i=0;i<p.size();++i)check(std::abs(f.flux[i]-exact[i])<=f.error_bound[i]+1e-12);
+  check(!h::cached_geodesic_flux(cache,patch,p,1.1).reused);
+  metric("cache_small_radius_reused",0,f.reused?1:0);
  }
  std::cout<<"hybrid foundation tests passed\n";
 }

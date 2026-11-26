@@ -106,6 +106,41 @@ inline SweptContact swept_contact(const Patch& s,const std::vector<std::size_t>&
  }
  return out;
 }
+// D11.7 feature contact: native eligibility is a hard barrier; seed is
+// the nearest eligible front-facing vertex to the current host hit point.
+// Not an actual ray/face ID or a visibility solver. Admit vertical faces
+// with a continuous orientation factor, exclude negative-facing normals.
+struct FeatureContact {
+ std::vector<double> weight;
+ std::size_t seed=std::numeric_limits<std::size_t>::max();
+};
+inline FeatureContact feature_contact(const Patch& s,Vec3 center,Vec3 axis,Vec3 start,double radius){
+ if(!std::isfinite(radius)||radius<=0||!std::isfinite(norm(center))||
+    !std::isfinite(norm(start))||!std::isfinite(norm(axis))||norm(axis)<=1e-20)
+  throw std::invalid_argument("feature contact input");
+ axis=unit(axis);
+ FeatureContact out;out.weight.resize(s.p.size());
+ std::vector<double> visibility(s.p.size(),1.),permission(s.p.size());
+ double nearest=std::numeric_limits<double>::infinity();
+ for(std::size_t i=0;i<s.p.size();++i)if(s.weight[i]>0&&s.area[i]>0&&norm(s.normal[i])>.5){
+  double alignment=dot(s.normal[i],axis);
+  if(alignment<-.025)continue;
+  // A vertical wall receives 60% of its native envelope before spatial
+  // falloff. Feather the small negative alignment tolerance to zero.
+  double x=std::clamp((alignment+.025)/.025,0.,1.);
+  permission[i]=x*x*(3-2*x)*(.6+.4*std::clamp(alignment/.3,0.,1.));
+  double d=norm(s.p[i]-center);
+  if(alignment>.15&&d<nearest){nearest=d;out.seed=i;}
+ }
+ if(out.seed==std::numeric_limits<std::size_t>::max()||nearest>=.65*radius){
+  out.seed=std::numeric_limits<std::size_t>::max();return out;
+ }
+ // Limit continuity to a local stroke segment; never bridge a long jump.
+ if(norm(center-start)>.75*radius)start=center;
+ auto c=swept_contact(s,{out.seed},start,center,radius,1.5*radius+norm(center-start),visibility,permission);
+ out.weight=std::move(c.weight);
+ return out;
+}
 // D10D: scalar swept-volume proxy, not actual mass. Pairwise conservative.
 inline std::vector<double> flux(const Patch& s,const std::vector<double>& pressure,double radius){
  if(pressure.size()!=s.p.size()||!std::isfinite(radius)||!(radius>0))throw std::invalid_argument("flux input");
@@ -265,7 +300,7 @@ inline GeodesicCache build_geodesic_cache(const Patch& s,double radius){
 }
 inline bool geodesic_cache_ratios(const GeodesicCache& c,const Patch& s,double radius,
  double& lo,double& hi){
- if(c.radius!=radius||c.allowed.size()!=s.p.size()||c.tris!=s.tris||c.adj!=s.adj)return false;
+ if(!(c.radius>0)||c.allowed.size()!=s.p.size()||c.tris!=s.tris||c.adj!=s.adj)return false;
  for(std::size_t i=0;i<s.p.size();++i)
   if(bool(c.allowed[i])!=(s.weight[i]>0&&s.area[i]>0))return false;
  lo=std::numeric_limits<double>::infinity();hi=0;
@@ -276,11 +311,12 @@ inline bool geodesic_cache_ratios(const GeodesicCache& c,const Patch& s,double r
   if(!std::isfinite(q)||q<GeodesicCache::min_ratio||q>GeodesicCache::max_ratio)return false;
   lo=std::min(lo,q);hi=std::max(hi,q);
  }
- if(hi==0){lo=hi=1;return true;}
+ if(hi==0){lo=hi=1;return radius<=c.radius/GeodesicCache::min_ratio;}
  // Pad the interval for floating point path accumulation. The analytical
  // bound is in real arithmetic, not a directed-rounding interval library.
  lo*=1-1e-12;hi*=1+1e-12;
- return lo>=GeodesicCache::min_ratio&&hi<=GeodesicCache::max_ratio;
+ return lo>=GeodesicCache::min_ratio&&hi<=GeodesicCache::max_ratio&&
+        radius<=c.radius*lo/GeodesicCache::min_ratio;
 }
 struct CachedFlux {
  std::vector<double> flux,error_bound;
@@ -288,8 +324,8 @@ struct CachedFlux {
  bool reused=false;
 };
 inline CachedFlux evaluate_geodesic_cache(const GeodesicCache& c,const Patch& s,
- const std::vector<double>& pressure,double lo,double hi){
- const auto n=s.p.size();const double reach=c.radius*.5,mid=lo+(hi-lo)*.5;
+ const std::vector<double>& pressure,double lo,double hi,double radius){
+ const auto n=s.p.size();const double reach=radius*.5,mid=lo+(hi-lo)*.5;
  CachedFlux out;out.flux.resize(n);out.error_bound.resize(n);
  std::vector<double> low(n),high(n),est(n);
  for(std::size_t i=0;i<n;++i)if(c.allowed[i])low[i]=high[i]=est[i]=s.area[i];
@@ -304,7 +340,7 @@ inline CachedFlux evaluate_geodesic_cache(const GeodesicCache& c,const Patch& s,
   auto i=e.i,j=e.j;
   // Recompute current areas, fractional mask and normalization, not stale
   // coefficients. All three coefficient estimates are symmetric.
-  double common=c.radius*.02*std::min(s.weight[i],s.weight[j])*s.area[i];
+  double common=radius*.02*std::min(s.weight[i],s.weight[j])*s.area[i];
   auto coeff=[&](const std::vector<double>& support,double k){
    return common*(s.area[j]/std::max(support[i],support[j]))*k;
   };
@@ -333,13 +369,13 @@ inline CachedFlux cached_geodesic_flux(GeodesicCache& c,const Patch& s,
  for(double x:pressure)if(!std::isfinite(x))throw std::invalid_argument("cache pressure");
  double lo=1,hi=1;
  if(geodesic_cache_ratios(c,s,radius,lo,hi)){
-  auto result=evaluate_geodesic_cache(c,s,pressure,lo,hi);
+  auto result=evaluate_geodesic_cache(c,s,pressure,lo,hi,radius);
   if(result.relative_bound<=tolerance){result.reused=true;return result;}
  }
  // No uncertain result escapes. Build from the current geometry.
  // When evaluated with lo=hi=1, this is the reference distance kernel.
  auto next=build_geodesic_cache(s,radius);
- auto result=evaluate_geodesic_cache(next,s,pressure,1,1);
+ auto result=evaluate_geodesic_cache(next,s,pressure,1,1,radius);
  c=std::move(next);
  return result;
 }
@@ -612,7 +648,7 @@ inline bool plastic_tool(Tool t){
 // per-endpoint post-scaling (which would break the signed proxy).
 inline std::vector<Vec3> material_target(const Patch& s,Tool tool,MaterialKind kind,
  const PlasticState& state,Vec3 direction,double radius,double dose,
- GeodesicCache* cache=nullptr,CachedFlux* diagnostics=nullptr){
+ GeodesicCache* cache=nullptr,CachedFlux* diagnostics=nullptr,bool feature=false){
  validate_plastic(s,state,radius);
  if(!std::isfinite(dose)||!std::isfinite(norm(direction)))throw std::invalid_argument("material dab");
  auto m=material_law(kind);
@@ -647,6 +683,19 @@ inline std::vector<Vec3> material_target(const Patch& s,Tool tool,MaterialKind k
   if(s.weight[i]<=0)continue;
   const auto n=s.normal[i];const auto tangent=dir-n*dot(dir,n);
   const double a=radius*dt*m.mobility*drive[i],b=flow[i]*dt*m.mobility;
+  if(feature&&compression_tool(tool)){
+   // Transport remains along surface normal (same antisymmetric proxy).
+   // Compression blends the inward local normal with the coherent tool
+   // axis. Preserve the original flat response; avoid zero compression
+   // at 90 degrees, without forcing opposite-facing motion.
+   double alignment=std::clamp(dot(n,dir),0.,1.);
+   Vec3 inward_axis=unit(n*.75+dir*.25);
+   double sink=a*m.compressibility;
+   if(tool==Tool::Compact)sink*=1.5;
+   if(tool==Tool::Compress)sink*=.35+.65*alignment;
+   result[i]=n*(tool==Tool::Compact?.35*b:b)-inward_axis*sink;
+   continue;
+  }
   switch(tool){
    case Tool::Deposit:result[i]=n*a;break;
    case Tool::Scrape:result[i]=n*(-a);break;
@@ -782,6 +831,24 @@ inline std::vector<Vec3> optimize(const Patch& s,std::vector<Vec3> desired,bool 
   double x=error(candidate);
   if(x<e){e=x;best=std::move(candidate);}
  }return best;
+}
+// D11.7: compression has a physical sink, not a universal zero-volume
+// constraint. Try local recovery only on a stalled target, and keep it
+// only if both target error and signed-proxy error do not worsen versus
+// strict reference. This does not establish actual volume or global CCD.
+inline std::vector<Vec3> optimize_feature(const Patch& s,const std::vector<Vec3>& desired,bool* recovered=nullptr){
+ if(recovered)*recovered=false;
+ auto strict=optimize(s,desired,true);
+ if(gradient_motion_scale_v31c(s.p,s.tris,desired)>=.95)return strict;
+ auto local=optimize(s,desired,false);
+ auto objective=[&](const std::vector<Vec3>& u){double v=0;for(std::size_t i=0;i<u.size();++i)v+=s.area[i]*dot(u[i]-desired[i],u[i]-desired[i]);return v;};
+ auto proxy=[&](const std::vector<Vec3>& u){double v=0;for(std::size_t i=0;i<u.size();++i)v+=s.area[i]*dot(s.normal[i],u[i]);return v;};
+ double target=proxy(desired),base=proxy(strict),candidate=proxy(local);
+ if(objective(local)<objective(strict)&&std::abs(candidate-target)<=std::abs(base-target)+1e-14*std::max(1.,std::abs(target))){
+  if(recovered)*recovered=true;
+  return local;
+ }
+ return strict;
 }
 } // namespace hybrid_v31d11
 } // namespace sculpt_physics
