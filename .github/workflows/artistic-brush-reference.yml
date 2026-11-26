@@ -30,3 +30,4 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install warp-lang==1.9.1 numpy
       - run: python experimental/sculpt_physics_cpu/test_artistic_warp_v31d1112.py -v
+      - run: python experimental/sculpt_physics_gpu/prototype_warp_artistic_pressure.py
