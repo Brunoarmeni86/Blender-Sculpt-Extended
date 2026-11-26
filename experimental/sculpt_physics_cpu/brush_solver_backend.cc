@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include "brush_solver_backend.hh"
+#include "d12_smooth_multiscale.hh"
 
 #include <algorithm>
 #include <cctype>
@@ -143,5 +144,16 @@ std::shared_ptr<StrokeSolverSession> create_stroke_solver_session(
   session->compact_stamp.assign(vertex_count, 0);
   return session;
 }
+
+namespace dedicated_d12::smooth_multiscale {
+std::unique_ptr<Backend> create_cuda()
+{
+#ifdef WITH_SCULPT_WARP_CUDA
+  return create_multiscale_cuda_backend();
+#else
+  return nullptr;
+#endif
+}
+}  // namespace dedicated_d12::smooth_multiscale
 
 }  // namespace sculpt_physics
