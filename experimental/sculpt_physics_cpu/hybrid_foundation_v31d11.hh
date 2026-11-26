@@ -222,6 +222,117 @@ inline std::vector<Vec3> target(const Patch& s,Tool tool,Material m,Vec3 directi
   }
  }return u;
 }
+// D11.5: opt-in phenomenological material response. These are dimensionless
+// reference parameters, not measured constitutive laws or bulk densities.
+enum class MaterialKind {SoftClay,Clay,Wax,Wood,Stone};
+struct MaterialLaw {
+ double mobility,yield,compressibility,adhesion,hardening,compaction_rate;
+};
+inline MaterialLaw material_law(MaterialKind k){
+ switch(k){
+  case MaterialKind::SoftClay:return {.95,.05,.40,.65,.65,12};
+  case MaterialKind::Clay:return {.65,.12,.25,.55,1.1,9};
+  case MaterialKind::Wax:return {.48,.20,.08,.85,.45,4};
+  case MaterialKind::Wood:return {.16,.45,.025,.24,1.4,2};
+  case MaterialKind::Stone:return {.055,.70,.005,.12,2,1};
+ }
+ throw std::invalid_argument("material kind");
+}
+struct PlasticPoint {
+ double deformation=0; // saturating local relative-motion proxy
+ double compaction=0;  // saturating accepted inward-travel proxy
+};
+using PlasticState=std::vector<PlasticPoint>;
+inline void validate_plastic(const Patch& s,const PlasticState& state,double radius){
+ if(state.size()!=s.p.size()||!std::isfinite(radius)||radius<=0)
+  throw std::invalid_argument("plastic state or radius");
+ for(auto x:state)if(!std::isfinite(x.deformation)||!std::isfinite(x.compaction)||
+    x.deformation<0||x.deformation>1||x.compaction<0||x.compaction>1)
+  throw std::invalid_argument("plastic range");
+}
+inline bool compression_tool(Tool t){
+ return t==Tool::Press||t==Tool::Compact||t==Tool::Compress;
+}
+inline bool plastic_tool(Tool t){
+ return compression_tool(t)||t==Tool::Push||t==Tool::Smear||t==Tool::Melt;
+}
+// Pure proposal: state is read-only. Pressure includes yield and hardening.
+// Transport is evaluated simultaneously with shared material mobility, not
+// per-endpoint post-scaling (which would break the signed proxy).
+inline std::vector<Vec3> material_target(const Patch& s,Tool tool,MaterialKind kind,
+ const PlasticState& state,Vec3 direction,double radius,double dose){
+ validate_plastic(s,state,radius);
+ if(!std::isfinite(dose)||!std::isfinite(norm(direction)))throw std::invalid_argument("material dab");
+ auto m=material_law(kind);
+ double dt=std::clamp(dose,0.0,.08);
+ Vec3 dir=unit(direction);
+ std::vector<double> drive(s.p.size());
+ for(std::size_t i=0;i<drive.size();++i){
+  double threshold=std::min(.99,m.yield*(1+m.hardening*(state[i].deformation+state[i].compaction)));
+  drive[i]=std::clamp((s.weight[i]-threshold)/(1-threshold),0.0,1.0)/
+           (1+m.hardening*(state[i].deformation+state[i].compaction));
+ }
+ std::vector<double> flow(s.p.size());
+ if(compression_tool(tool)&&dt>0)flow=transport_flux(transport_stencil(s,radius),drive);
+ std::vector<Vec3> result(s.p.size());
+ for(std::size_t i=0;i<result.size();++i){
+  if(s.weight[i]<=0)continue;
+  const auto n=s.normal[i];const auto tangent=dir-n*dot(dir,n);
+  const double a=radius*dt*m.mobility*drive[i],b=flow[i]*dt*m.mobility;
+  switch(tool){
+   case Tool::Deposit:result[i]=n*a;break;
+   case Tool::Scrape:result[i]=n*(-a);break;
+   case Tool::Press:result[i]=n*(b-a*m.compressibility);break;
+   case Tool::Compact:result[i]=n*(.35*b-1.5*a*m.compressibility);break;
+   case Tool::Compress:result[i]=n*(b-a*m.compressibility*std::abs(dot(n,dir)));break;
+   case Tool::Push:result[i]=unit(tangent)*a;break;
+   case Tool::Smear:result[i]=tangent*(a*m.adhesion);break;
+   case Tool::Melt:{
+    Vec3 avg{};double count=0;
+    for(auto j:s.adj[i])if(s.weight[j]>0){avg+=s.p[j]-s.p[i];++count;}
+    if(count>0)result[i]=n*std::clamp(dot(avg/count,n),-a,a);
+    break;
+   }
+   case Tool::Grab:result[i]=dir*a;break;
+  }
+ }
+ return result;
+}
+// Transactional state proposal from actual positions after write. The caller
+// commits this returned state only together with the matching geometry.
+// Same topology and vertex correspondence are required; no remap yet.
+// Rejected/no-op vertices never gain plastic state. Rigid translation has
+// zero relative deformation; compression is explicitly an inward-travel proxy.
+inline PlasticState plastic_after_write(const Patch& before,const PlasticState& state,
+ Tool tool,MaterialKind kind,double radius,const std::vector<Vec3>& after){
+ validate_plastic(before,state,radius);
+ if(after.size()!=before.p.size())throw std::invalid_argument("written position size");
+ const auto m=material_law(kind);
+ std::vector<Vec3> applied(after.size());
+ for(std::size_t i=0;i<after.size();++i){
+  applied[i]=after[i]-before.p[i];
+  if(!std::isfinite(norm(after[i]))||!std::isfinite(norm(applied[i]))||
+     (before.weight[i]<=0&&norm(applied[i])>0))throw std::invalid_argument("invalid or pinned write");
+ }
+ auto next=state;
+ if(!plastic_tool(tool))return next;
+ for(std::size_t i=0;i<after.size();++i){
+  if(norm(applied[i])==0)continue;
+  double strain=0;
+  for(auto j:before.adj[i]){
+   double length=norm(before.p[j]-before.p[i]);
+   if(length>1e-20)strain=std::max(strain,norm(applied[i]-applied[j])/length);
+  }
+  next[i].deformation=std::clamp(state[i].deformation+(1-state[i].deformation)*
+      (-std::expm1(-std::min(strain,1.0)*m.mobility)),0.0,1.0);
+  if(compression_tool(tool)){
+   double inward=std::max(0.0,-dot(before.normal[i],applied[i]))/radius;
+   next[i].compaction=std::clamp(state[i].compaction+(1-state[i].compaction)*
+       (-std::expm1(-std::min(inward,1.0)*m.compaction_rate)),0.0,1.0);
+  }
+ }
+ return next;
+}
 // D10B: displacement-field Jacobi, pinned halo, existing global safety.
 // Choose only a lower target-error feasible candidate; no geometry smoothing.
 inline std::vector<Vec3> optimize(const Patch& s,std::vector<Vec3> desired,bool preserve_flux=false){

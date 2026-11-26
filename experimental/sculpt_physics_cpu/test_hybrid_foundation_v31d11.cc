@@ -248,5 +248,71 @@ int main(){
    }
   }
  }
+ // D11.5 material profiles and transactional accepted-write state.
+ {
+  auto patch=grid(4,false);
+  h::PlasticState fresh(patch.p.size());
+  double prev=std::numeric_limits<double>::infinity();
+  for(auto kind:{h::MaterialKind::SoftClay,h::MaterialKind::Clay,h::MaterialKind::Wax,h::MaterialKind::Wood,h::MaterialKind::Stone}){
+   auto press=h::material_target(patch,h::Tool::Press,kind,fresh,Vec3{0,0,1},1,.05);
+   auto compact=h::material_target(patch,h::Tool::Compact,kind,fresh,Vec3{0,0,1},1,.05);
+   auto compress=h::material_target(patch,h::Tool::Compress,kind,fresh,Vec3{1,0,0},1,.05);
+   auto push=h::material_target(patch,h::Tool::Push,kind,fresh,Vec3{1,0,0},1,.05);
+   auto smear=h::material_target(patch,h::Tool::Smear,kind,fresh,Vec3{1,0,0},1,.05);
+   check(press[12].z<0&&-press[12].z<prev);
+   check(compact[12].z<press[12].z&&h::norm(compress[12])<1e-12);
+   check(push[12].x>smear[12].x&&smear[12].x>0);
+   prev=-press[12].z;
+   metric("material_press_depth",static_cast<int>(kind),prev);
+   metric("material_smear_distance",static_cast<int>(kind),smear[12].x);
+  }
+  const auto kind=h::MaterialKind::Clay;
+  const auto requested=h::material_target(patch,h::Tool::Press,kind,fresh,Vec3{0,0,1},1,.05);
+  auto accepted=h::optimize(patch,requested,true);
+  auto pos=patch.p,partial=patch.p;
+  for(std::size_t i=0;i<pos.size();++i){pos[i]+=accepted[i];partial[i]+=accepted[i]*.25;}
+  auto no=h::plastic_after_write(patch,fresh,h::Tool::Press,kind,1,patch.p);
+  auto full=h::plastic_after_write(patch,fresh,h::Tool::Press,kind,1,pos);
+  auto part=h::plastic_after_write(patch,fresh,h::Tool::Press,kind,1,partial);
+  for(std::size_t i=0;i<pos.size();++i){
+   check(fresh[i].compaction==0&&no[i].compaction==0&&no[i].deformation==0);
+   check(full[i].compaction>part[i].compaction&&part[i].compaction>0);
+   check(full[i].deformation<1e-12); // uniform translation
+  }
+  metric("plastic_full_compaction",0,full[12].compaction);
+  metric("plastic_partial_compaction",0,part[12].compaction);
+  auto hardened=h::material_target(patch,h::Tool::Press,kind,full,Vec3{0,0,1},1,.05);
+  check(h::norm(hardened[12])<h::norm(requested[12]));
+  metric("plastic_hardened_press_ratio",0,h::norm(hardened[12])/h::norm(requested[12]));
+  // Carry state across many independent accepted dabs and geometry rebuilds.
+  auto state=fresh;
+  for(int step=0;step<100;++step){
+   auto req=h::material_target(patch,h::Tool::Press,kind,state,Vec3{0,0,1},1,.05);
+   auto applied=h::optimize(patch,req,true);
+   auto next=patch.p;for(std::size_t i=0;i<next.size();++i)next[i]+=applied[i];
+   auto updated=h::plastic_after_write(patch,state,h::Tool::Press,kind,1,next);
+   check(updated[12].compaction>=state[12].compaction&&updated[12].compaction<=1);
+   state=std::move(updated);patch=h::make_patch(next,patch.tris,patch.weight);
+  }
+  metric("plastic_compaction_100",0,state[12].compaction);
+  check(state[12].compaction>full[12].compaction);
+  // Pinned and no-write vertices: reject an invalid transaction atomically.
+  auto pinned=grid(4,true);
+  h::PlasticState initial(pinned.p.size());
+  auto write=pinned.p;write[12].x+=.01;
+  auto local=h::plastic_after_write(pinned,initial,h::Tool::Smear,kind,1,write);
+  check(local[12].deformation>0&&local[12].compaction==0);
+  for(std::size_t i=0;i<write.size();++i)if(i!=12)check(local[i].deformation==0&&local[i].compaction==0);
+  write[0].x+=.01;
+  bool rejected=false;
+  try{h::plastic_after_write(pinned,initial,h::Tool::Smear,kind,1,write);}
+  catch(const std::invalid_argument&){rejected=true;}
+  check(rejected&&initial[12].deformation==0);
+  // Reflection of a planar push, no sign preference.
+  auto right=h::material_target(pinned,h::Tool::Push,kind,initial,Vec3{1,0,0},1,.05);
+  auto left=h::material_target(pinned,h::Tool::Push,kind,initial,Vec3{-1,0,0},1,.05);
+  for(std::size_t i=0;i<right.size();++i)check(h::norm(right[i]+left[i])<1e-12);
+  metric("plastic_masked_write_rejected",0,rejected?1:0);
+ }
  std::cout<<"hybrid foundation tests passed\n";
 }
