@@ -79,5 +79,43 @@ int main(){
   int id=static_cast<int>(tool);metric("permutation_displacement_max",id,maxerr);metric("target_error_rms",id,std::sqrt(err2/area));metric("modified_vertex_fraction",id,double(changed)/q.size());if(requested>0)metric("applied_requested_norm_ratio",id,applied/requested);
   std::vector<double> times;for(int k=0;k<100;++k){auto start=std::chrono::steady_clock::now();auto result=h::optimize(original,target);auto end=std::chrono::steady_clock::now();check(result.size()==q.size());times.push_back(std::chrono::duration<double,std::micro>(end-start).count());}std::sort(times.begin(),times.end());metric("latency_us_p50",id,times[49]);metric("latency_us_p95",id,times[94]);metric("latency_us_p99",id,times[98]);
  }
+ // D11.2 stress regression: connected sliver, flat/crest/cavity continuation.
+ // Explicit synthetic displacement, not a brush calibration or collision test.
+ for(int shape=0;shape<3;++shape){
+  double z=shape==0?0.0:(shape==1?.2:-.2);
+  std::vector<Vec3> sp{{0,0,0},{1,0,0},{0,.001,0},{1,1,z},{2,0,0},{2,1,0}};
+  std::vector<h::Tri> st{{0,1,2},{1,3,2},{1,4,3},{4,5,3}};
+  auto patch=h::make_patch(sp,st,{0,1,1,1,1,1});
+  std::vector<Vec3> request(sp.size(),Vec3{0,0,.1});
+  request[0]={};
+  double initial=gradient_motion_scale_v31c(sp,st,request);
+  check(initial<.01);
+  auto global=request;
+  for(auto& v:global)v=v*initial;
+  limit_local_contact(sp,st,global,true);
+  auto local=request;
+  limit_local_gradient_v31d10a(sp,st,local);
+  auto hybrid=h::optimize(patch,request);
+  auto error=[&](const std::vector<Vec3>& moves){
+   double e=0;for(std::size_t i=0;i<moves.size();++i){auto d=moves[i]-request[i];e+=patch.area[i]*h::dot(d,d);}return e;
+  };
+  auto ratio=[&](const std::vector<Vec3>& moves){
+   double requested=0,applied=0;for(std::size_t i=0;i<moves.size();++i){requested+=patch.area[i]*h::norm(request[i]);applied+=patch.area[i]*h::norm(moves[i]);}return applied/requested;
+  };
+  for(const auto* moves:{&global,&local,&hybrid}){
+   check(h::norm((*moves)[0])==0);
+   check(gradient_motion_scale_v31c(sp,st,*moves)>=1-1e-10);
+   for(auto tri:st){ContactTriangle ct{};for(int j=0;j<3;++j){ct.position[j]=sp[tri[j]];ct.motion[j]=(*moves)[tri[j]];}check(contact_triangle_scale(ct)>=1-1e-10);}
+  }
+  check(error(hybrid)<=error(local)+1e-12);
+  check(error(hybrid)<error(global));
+  std::size_t changed=0;for(std::size_t i=0;i<request.size();++i)if(h::norm(hybrid[i]-request[i])>1e-12)++changed;
+  check(changed>0);
+  metric("stress_initial_gradient_scale",shape,initial);
+  metric("stress_global_error",shape,error(global));metric("stress_d10a_error",shape,error(local));metric("stress_d11_error",shape,error(hybrid));
+  metric("stress_global_ratio",shape,ratio(global));metric("stress_d10a_ratio",shape,ratio(local));metric("stress_d11_ratio",shape,ratio(hybrid));
+  metric("stress_global_far_z",shape,global[5].z);metric("stress_d10a_far_z",shape,local[5].z);metric("stress_d11_far_z",shape,hybrid[5].z);
+  metric("stress_modified_vertex_fraction",shape,double(changed)/request.size());
+ }
  std::cout<<"hybrid foundation tests passed\n";
 }
