@@ -21,3 +21,12 @@ jobs:
       - run: cmake -S experimental/sculpt_physics_cpu -B build-d12 -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build-d12 --config Release --target test_d12_dedicated_engines test_d12_smooth_multiscale test_artistic_material_v31d1110
       - run: ctest --test-dir build-d12 -C Release -R "sculpt_(d12_dedicated_engines|d12_smooth_multiscale|artistic_material_v31d1110)_tests" --output-on-failure --no-tests=error -V
+  warp-multiscale-reference:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install warp-lang==1.9.1 numpy
+      - run: python experimental/sculpt_physics_gpu/prototype_warp_smooth_multiscale.py
