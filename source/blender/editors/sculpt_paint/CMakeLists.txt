@@ -299,6 +299,18 @@ if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL AND SCULPT_WARP_ROOT AND
     "${SCULPT_WARP_ROOT}/warp/bin/warp.lib"
   )
   set(WITH_SCULPT_WARP_CUDA TRUE)
+  if(WIN32)
+    install(FILES "${SCULPT_WARP_ROOT}/warp/bin/warp.dll" DESTINATION "." OPTIONAL)
+    set(SCULPT_WARP_PTX_DIR "" CACHE PATH "Directory of locally validated native Sculpt Warp PTX package")
+    if(SCULPT_WARP_PTX_DIR)
+      install(FILES
+        "${SCULPT_WARP_PTX_DIR}/blender_xpbd_jacobi.sm75.ptx"
+        "${SCULPT_WARP_PTX_DIR}/blender_smooth_a3.sm75.ptx"
+        "${SCULPT_WARP_PTX_DIR}/blender_smooth_multiscale.sm75.ptx"
+        "${SCULPT_WARP_PTX_DIR}/blender_smooth_multiscale.sm75.symbols"
+        DESTINATION "." OPTIONAL)
+    endif()
+  endif()
 endif()
 
 blender_add_lib(bf_editor_sculpt_paint "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
