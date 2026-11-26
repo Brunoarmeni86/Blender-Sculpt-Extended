@@ -1208,8 +1208,8 @@ inline void d11_preview_target(
         if(h::norm(result.displacement[i])<=1e-15)++recovered_contact;
         if(std::abs(h::dot(patch.normal[i],h::unit(dab.axis)))<.15)++vertical;
       }
-      if(active==0){
-        if(report)std::fprintf(stderr,"[D11.7] legacy fallback: no connected feature seed/contact\n");
+      if(active==0 || active>1024){
+        if(report)std::fprintf(stderr,"[D11.7] legacy fallback: feature active=%zu outside preview budget\n",active);
         return;
       }
     }
