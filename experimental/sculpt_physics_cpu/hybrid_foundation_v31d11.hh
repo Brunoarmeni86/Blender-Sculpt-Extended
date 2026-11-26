@@ -87,7 +87,7 @@ inline std::vector<Vec3> target(const Patch& s,Tool tool,Material m,Vec3 directi
    case Tool::Deposit:u[i]=n*(a*w);break;
    case Tool::Scrape:u[i]=n*(-a*w);break;
    case Tool::Press:u[i]=n*(h[i]*dose-a*w*std::clamp(m.compressibility,0.0,1.0));break;
-   case Tool::Compact:u[i]=n*(h[i]*dose-a*w*std::clamp(m.compressibility,0.0,1.0));break;
+   case Tool::Compact:u[i]=n*(h[i]*dose*.35-a*w*std::clamp(m.compressibility,0.0,1.0)*1.5);break;
    case Tool::Compress:u[i]=n*(h[i]*dose-a*w*std::clamp(m.compressibility,0.0,1.0)*std::abs(dot(n,unit(direction))));break;
    case Tool::Push:u[i]=unit(t)*(a*w);break;
    case Tool::Smear:u[i]=t*(a*w*std::clamp(m.viscosity,0.0,1.0));break;
@@ -108,6 +108,10 @@ inline std::vector<Vec3> optimize(const Patch& s,std::vector<Vec3> desired,bool 
  auto volume=[&](const std::vector<Vec3>& u){double v=0;for(std::size_t i=0;i<u.size();++i)v+=s.area[i]*dot(s.normal[i],u[i]);return v;};
  auto best=safe(desired),u=desired;double e=error(best);
  const double reference=volume(best);
+ // Compare D10A local attenuation before searching redistributed fields.
+ auto local=desired;
+ limit_local_gradient_v31d10a(s.p,s.tris,local);
+ if((!preserve_flux||std::abs(volume(local)-reference)<=1e-10*std::max(1e-20,std::abs(reference)+std::abs(volume(desired))))&&error(local)<e){e=error(local);best=std::move(local);}
  // Preserve the feasible baseline signed normal-area proxy, not exact volume.
  auto balance=[&](std::vector<Vec3>& v){
   double a=0;for(std::size_t i=0;i<v.size();++i)if(s.weight[i]>0)a+=s.area[i]*s.weight[i]*dot(s.normal[i],s.normal[i]);
