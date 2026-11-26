@@ -93,7 +93,7 @@ def _register_xpbd_runtime_settings():
             ('NORMAL', "Normal", "Fast density-normalized smoothing"),
             ('RELAX', "Relax", "Shape-aware tangential and normal relaxation"),
             ('VOLUME', "Preserve Volume", "Smooth while strongly attenuating surface shrinkage"),
-            ('STRONG', "Very Strong", "Scale-aware curvature smoothing for dense meshes"),
+            ('STRONG', "Very Strong", "D12 local multiscale smoothing; CUDA when available, CPU chart otherwise"),
         ),
         default='NORMAL',
         update=_xpbd_sync_environment)
@@ -193,6 +193,12 @@ def register():
     os.environ.setdefault(
         'BLENDER_SCULPT_WARP_SMOOTH_PTX',
         str(Path(bpy.app.binary_path).with_name('blender_smooth_a3.sm75.ptx')))
+    os.environ.setdefault(
+        'BLENDER_SCULPT_WARP_MULTISCALE_PTX',
+        str(Path(bpy.app.binary_path).with_name('blender_smooth_multiscale.sm75.ptx')))
+    os.environ.setdefault(
+        'BLENDER_SCULPT_WARP_MULTISCALE_SYMBOLS',
+        str(Path(bpy.app.binary_path).with_name('blender_smooth_multiscale.sm75.symbols')))
     _register_xpbd_runtime_settings()
     spec = importlib.util.spec_from_file_location(
         'sculpt_extended_integrated_tools',
