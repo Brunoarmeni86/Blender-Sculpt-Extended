@@ -1630,10 +1630,13 @@ inline bool try_apply_intent(
           clay.stiffness=material_override("BLENDER_SCULPT_V21_STIFFNESS",0.25,0.0,1.0);
           clay.volume_preservation=material_override("BLENDER_SCULPT_V21_VOLUME",0.75,0.0,1.0);
           clay.fusion=material_override("BLENDER_SCULPT_V21_FUSION",0.6,0.0,1.0);
-          if (clay.tool_v25) {
-            const char *material=std::getenv("BLENDER_SCULPT_V25_MATERIAL");
-            if (material && material[0]) {
-              const auto p=surface_profile_v25(material);
+          if (clay.tool_v25 || brush.sculpt_physics_mode==3) {
+            const char *material_override_name=std::getenv("BLENDER_SCULPT_V25_MATERIAL");
+            const auto material_name = material_override_name && material_override_name[0] ?
+                                           std::string_view(material_override_name) :
+                                           surface_profile_name_v25(brush.sculpt_physics_material);
+            {
+              const auto p=surface_profile_v25(material_name);
               clay.friction=material_override("BLENDER_SCULPT_V21_FRICTION",p.friction,0.0,1.0);
               clay.viscosity=material_override("BLENDER_SCULPT_V21_VISCOSITY",p.viscosity,0.0,1.0);
               clay.cohesion=material_override("BLENDER_SCULPT_V21_COHESION",p.cohesion,0.0,1.0);

@@ -3505,6 +3505,25 @@ static void rna_def_brush(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Physical Mode", "Experimental coordinate-only sculpt physics; requires an enabled research build");
   RNA_def_property_update(prop, 0, "rna_Brush_update");
 
+  static const EnumPropertyItem physics_materials[] = {
+      {0, "SOFT_CLAY", 0, "Soft Clay", "Smooth cohesive clay with broad plastic flow"},
+      {1, "FIRM_CLAY", 0, "Firm Clay", "Stiffer clay that holds planes and detail"},
+      {2, "MUD", 0, "Mud", "Very soft material with strong flow and weak recovery"},
+      {3, "WAX", 0, "Wax", "Dense plastic material with controlled edges and modest recovery"},
+      {4, "FLESH", 0, "Flesh", "Compliant material with volume retention and elastic recovery"},
+      {5, "FOAM", 0, "Foam", "Light compressible material with strong elastic recovery"},
+      {6, "STONE", 0, "Stone", "Rigid, low-flow surface response for broad shaping"},
+      {7, "WOOD", 0, "Wood", "Firm response with moderate directional drag"},
+      {8, "PUTTY", 0, "Putty", "Highly plastic, cohesive modeling material"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  prop = RNA_def_property(srna, "sculpt_physics_material", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "sculpt_physics_material");
+  RNA_def_property_enum_items(prop, physics_materials);
+  RNA_def_property_enum_default(prop, 0);
+  RNA_def_property_ui_text(prop, "Material", "Physical response stored in this brush asset");
+  RNA_def_property_update(prop, 0, "rna_Brush_update");
+
   static const EnumPropertyItem clay_behaviors[] = {
       {0, "V2", 0, "V2 Reference", "Previous one-ring material approximation"},
       {1, "DEPOSIT", 0, "Deposit", "Redistribute deposited clay over the brush footprint"},

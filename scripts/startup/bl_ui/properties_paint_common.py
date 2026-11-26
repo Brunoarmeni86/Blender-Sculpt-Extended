@@ -1457,7 +1457,7 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
                 runtime = context.window_manager
                 physical_panel.prop(runtime, "sculpt_physical_clay_v01", text="Material Response")
                 if runtime.sculpt_physical_clay_v01:
-                    physical_panel.prop(runtime, "sculpt_physical_clay_material", text="Material")
+                    physical_panel.prop(brush, "sculpt_physics_material", text="Material")
                     physical_panel.prop(runtime, "sculpt_xpbd_backend", text="Compute")
                     if runtime.sculpt_xpbd_backend == 'CUDA':
                         physical_panel.label(text="NVIDIA Warp CUDA preview", icon='EXPERIMENTAL')

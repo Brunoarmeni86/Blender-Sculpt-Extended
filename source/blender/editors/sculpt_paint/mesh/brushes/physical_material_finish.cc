@@ -115,15 +115,22 @@ bool apply_physical_material_finish(const Depsgraph &depsgraph,
   return false;
 #else
   const char *enabled = std::getenv("BLENDER_SCULPT_PHYSICAL_CLAY_V01");
-  const char *material = std::getenv("BLENDER_SCULPT_PHYSICAL_CLAY_MATERIAL");
-  if (!enabled || enabled[0] != '1' || !material || STREQ(material, "clay")) {
+  const bool brush_material = brush.sculpt_physics_mode == 3;
+  if (!brush_material && (!enabled || enabled[0] != '1')) {
     return false;
   }
-  const bool is_mud = STREQ(material, "mud");
-  const float material_weight = is_mud ? 0.55f : 0.32f;
+  int material_id = std::clamp(brush.sculpt_physics_material, 0, 8);
+  if (!brush_material) {
+    if (const char *material = std::getenv("BLENDER_SCULPT_PHYSICAL_CLAY_MATERIAL")) {
+      material_id = STREQ(material, "mud") ? 2 : STREQ(material, "wax") ? 3 : 0;
+    }
+  }
+  static constexpr float weights[] = {.38f, .22f, .62f, .26f, .32f, .48f, .08f, .14f, .44f};
+  const float material_weight = weights[material_id];
   const sculpt_physics::SmoothSolverMode mode =
-      is_mud ? sculpt_physics::SmoothSolverMode::DenseStrong :
-               sculpt_physics::SmoothSolverMode::VolumePreserve;
+      material_id == 2 || material_id == 8 ? sculpt_physics::SmoothSolverMode::DenseStrong :
+      material_id == 5 ? sculpt_physics::SmoothSolverMode::Relax :
+                         sculpt_physics::SmoothSolverMode::VolumePreserve;
   SculptSession &ss = *object.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);

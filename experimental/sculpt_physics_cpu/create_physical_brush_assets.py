@@ -23,32 +23,28 @@ CATALOGS = {
     "Physical Brushes/Carving": "ca085ce2-6d67-49da-afeb-614f27af470a",
     "Physical Brushes/Thermal": "383a78b3-64ad-4ed4-8fbe-a395b12b618f",
 }
-# Name, Essentials base, mode, action, preview, assist, spread, catalog.
+# Name, Essentials base, mode, action, preview, assist, spread, catalog, material.
 # Legacy Directional/Pressure/Hybrid Flow remain in RNA for older assets.
 # No placeholder assets for unimplemented volumetric fluid or fracture.
 SPECS = (
-    ("Clay XPBD", "Clay", "ASSISTED", None, "clay", .65, .55, "XPBD Sculpt"),
-    ("Clay Strips XPBD", "Clay Strips", "ASSISTED", None, "strips", .65, .55, "XPBD Sculpt"),
-    ("Physical Deposit", "Clay", "MATERIAL", "AUTONOMOUS_DEPOSIT", "deposit", .8, .55, "Physical Brushes/Build"),
-    ("Physical Push", "Clay Strips", "MATERIAL", "FLOW", "flow", 1., 1., "Physical Brushes/Transport"),
-    ("Physical Gather", "Clay", "MATERIAL", "AUTONOMOUS_GATHER", "gather", .85, .75, "Physical Brushes/Transport"),
-    ("Physical Smear", "Clay Strips", "MATERIAL", "AUTONOMOUS_SMEAR", "smear", .85, .85, "Physical Brushes/Transport"),
-    ("Physical Compress", "Clay Strips", "MATERIAL", "AUTONOMOUS_COMPRESS", "compress", .75, .55, "Physical Brushes/Compression"),
-    ("Physical Compact", "Clay", "MATERIAL", "AUTONOMOUS_COMPACT", "compact", .75, .45, "Physical Brushes/Compression"),
-    ("Physical Press", "Clay Strips", "MATERIAL", "AUTONOMOUS_PRESS", "press", .75, .45, "Physical Brushes/Compression"),
-    ("Physical Scrape", "Clay Strips", "MATERIAL", "AUTONOMOUS_SCRAPE", "scrape", 1., .85, "Physical Brushes/Carving"),
-    ("Stone Chisel", "Clay Strips", "MATERIAL", "AUTONOMOUS_SCRAPE", "scrape", 1., .65, "Physical Brushes/Carving"),
-    ("Wax Knife", "Clay Strips", "MATERIAL", "AUTONOMOUS_SCRAPE", "scrape", 1., .65, "Physical Brushes/Carving"),
-    ("Wood Chisel", "Clay Strips", "MATERIAL", "AUTONOMOUS_SCRAPE", "scrape", 1., .65, "Physical Brushes/Carving"),
-    ("Physical Melt (Surface)", "Clay", "MATERIAL", "AUTONOMOUS_MELT", "melt", 1., 1., "Physical Brushes/Thermal"),
+    ("Clay XPBD", "Clay", "ASSISTED", None, "clay", .65, .55, "XPBD Sculpt", "SOFT_CLAY"),
+    ("Clay Strips XPBD", "Clay Strips", "ASSISTED", None, "strips", .65, .55, "XPBD Sculpt", "FIRM_CLAY"),
+    ("Soft Clay Build", "Clay", "MATERIAL", "AUTONOMOUS_DEPOSIT", "deposit", .82, .62, "Physical Brushes/Build", "SOFT_CLAY"),
+    ("Firm Clay Build", "Clay", "MATERIAL", "AUTONOMOUS_DEPOSIT", "deposit", .72, .42, "Physical Brushes/Build", "FIRM_CLAY"),
+    ("Mud Build", "Clay", "MATERIAL", "AUTONOMOUS_DEPOSIT", "deposit", .88, .92, "Physical Brushes/Build", "MUD"),
+    ("Wax Build", "Clay", "MATERIAL", "AUTONOMOUS_DEPOSIT", "deposit", .70, .35, "Physical Brushes/Build", "WAX"),
+    ("Putty Build", "Clay", "MATERIAL", "AUTONOMOUS_DEPOSIT", "deposit", .86, .72, "Physical Brushes/Build", "PUTTY"),
+    ("Soft Clay Push", "Clay Strips", "MATERIAL", "FLOW", "flow", 1., .75, "Physical Brushes/Transport", "SOFT_CLAY"),
+    ("Mud Smear", "Clay Strips", "MATERIAL", "AUTONOMOUS_SMEAR", "smear", .9, 1., "Physical Brushes/Transport", "MUD"),
+    ("Putty Gather", "Clay", "MATERIAL", "AUTONOMOUS_GATHER", "gather", .88, .82, "Physical Brushes/Transport", "PUTTY"),
+    ("Firm Clay Compress", "Clay Strips", "MATERIAL", "AUTONOMOUS_COMPRESS", "compress", .78, .42, "Physical Brushes/Compression", "FIRM_CLAY"),
+    ("Wax Press", "Clay Strips", "MATERIAL", "AUTONOMOUS_PRESS", "press", .78, .32, "Physical Brushes/Compression", "WAX"),
+    ("Flesh Press", "Clay Strips", "MATERIAL", "AUTONOMOUS_PRESS", "press", .68, .55, "Physical Brushes/Compression", "FLESH"),
+    ("Foam Compact", "Clay", "MATERIAL", "AUTONOMOUS_COMPACT", "compact", .72, .62, "Physical Brushes/Compression", "FOAM"),
+    ("Stone Form", "Clay Strips", "MATERIAL", "AUTONOMOUS_PRESS", "press", .62, .18, "Physical Brushes/Compression", "STONE"),
+    ("Wood Form", "Clay Strips", "MATERIAL", "AUTONOMOUS_PRESS", "press", .68, .28, "Physical Brushes/Compression", "WOOD"),
+    ("Mud Melt (Surface)", "Clay", "MATERIAL", "AUTONOMOUS_MELT", "melt", 1., 1., "Physical Brushes/Thermal", "MUD"),
 )
-
-# Match the V27 migration presets for the single-plane carving tools.
-CARVING_PRESETS = {
-    "Stone Chisel": (1.35, .45),
-    "Wax Knife": (1.30, .85),
-    "Wood Chisel": (1.25, .60),
-}
 
 def preview_height(kind, x, y):
     # Broad exaggerated sculpt forms read at 32-48 px. These depict
@@ -265,7 +261,8 @@ def main():
     # does not reliably detect them. Inspect the registered RNA schema.
     required = ("sculpt_physics_mode", "sculpt_physics_clay_behavior",
                 "sculpt_physics_assist", "sculpt_physics_spread",
-                "sculpt_physics_yield", "sculpt_physics_plasticity")
+                "sculpt_physics_yield", "sculpt_physics_plasticity",
+                "sculpt_physics_material")
     props = bpy.types.Brush.bl_rna.properties
     missing = [name for name in required if props.get(name) is None]
     if missing:
@@ -298,7 +295,7 @@ def main():
             raise RuntimeError(f"Failed to load Essentials brush: {name}")
     print("[BSE Physical Brushes] Loaded base brushes: "+", ".join(names), flush=True)
     assets = set()
-    for name, base, mode, action, icon, assist, spread, category in SPECS:
+    for name, base, mode, action, icon, assist, spread, category, material in SPECS:
         brush = bases[base].copy()
         if brush.asset_data:
             brush.asset_clear()
@@ -308,6 +305,7 @@ def main():
         brush.sculpt_physics_mode = mode
         brush.sculpt_physics_assist = assist
         brush.sculpt_physics_spread = spread
+        brush.sculpt_physics_material = material
         if action:
             brush.sculpt_physics_clay_behavior = action
         if action == "FLOW":
@@ -334,8 +332,6 @@ def main():
                     brush.strength = 1.4
                 if "SMOOTH" in props["curve_distance_falloff_preset"].enum_items.keys():
                     brush.curve_distance_falloff_preset = "SMOOTH"
-        if name in CARVING_PRESETS:
-            brush.strength, brush.sculpt_physics_plasticity = CARVING_PRESETS[name]
         brush.asset_mark()
         brush.asset_data.catalog_id = CATALOGS[category]
         brush.asset_data.description = (

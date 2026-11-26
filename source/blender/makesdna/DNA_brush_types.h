@@ -329,6 +329,10 @@ struct Brush {
   float sculpt_physics_yield = 0.035f;
   float sculpt_physics_plasticity = 0.65f;
   float sculpt_physics_spread = 0.55f;
+  /** Artistic surface material preset. Stored per brush so asset libraries do
+   * not depend on process-wide environment state. See eBrushSculptPhysicsMaterial. */
+  int sculpt_physics_material = 0;
+  int _pad_sculpt_physics = 0;
   /** 0=V2, 1-3=V3, 4-6=V17, 7-10=V18-B Compact/Press/Pressure Flow/Hybrid Flow, 11-13=V23 Melt/Gather/Smear. */
   int sculpt_physics_clay_behavior = 1;
 

@@ -391,25 +391,45 @@ static bool try_physical_clay_v01(const Depsgraph &depsgraph,
   float drag = unit_setting("BLENDER_SCULPT_PHYSICAL_CLAY_DRAG", 0.35f);
   float volume = unit_setting("BLENDER_SCULPT_PHYSICAL_CLAY_VOLUME", 0.50f);
   float recovery = unit_setting("BLENDER_SCULPT_PHYSICAL_CLAY_RECOVERY", 0.20f);
-  enum class MaterialModel { Clay, Wax, Mud };
-  MaterialModel material_model = MaterialModel::Clay;
-  if (const char *material = std::getenv("BLENDER_SCULPT_PHYSICAL_CLAY_MATERIAL")) {
-    if (STREQ(material, "wax")) {
+  enum class MaterialModel { SoftClay, FirmClay, Mud, Wax, Flesh, Foam, Stone, Wood, Putty };
+  MaterialModel material_model = MaterialModel(
+      std::clamp(brush.sculpt_physics_material, 0, int(MaterialModel::Putty)));
+  if (brush.sculpt_physics_mode != 3) {
+    if (const char *material = std::getenv("BLENDER_SCULPT_PHYSICAL_CLAY_MATERIAL")) {
+      if (STREQ(material, "wax")) material_model = MaterialModel::Wax;
+      else if (STREQ(material, "mud")) material_model = MaterialModel::Mud;
+    }
+  }
+  switch (material_model) {
+    case MaterialModel::FirmClay:
+      compression = std::max(compression, 0.82f); plasticity = std::min(plasticity, 0.55f);
+      drag = std::min(drag, 0.30f); volume = std::max(volume, 0.82f); recovery = std::max(recovery, 0.24f); break;
+    case MaterialModel::Wax:
       material_model = MaterialModel::Wax;
       compression = std::max(compression, 0.95f);
       plasticity = std::min(plasticity, 0.18f);
       drag = std::min(drag, 0.12f);
       volume = std::max(volume, 0.85f);
       recovery = std::max(recovery, 0.55f);
-    }
-    else if (STREQ(material, "mud")) {
-      material_model = MaterialModel::Mud;
+      break;
+    case MaterialModel::Mud:
       compression = std::min(compression, 0.22f);
       plasticity = std::max(plasticity, 0.95f);
       drag = std::max(drag, 0.90f);
       volume = std::min(volume, 0.28f);
       recovery = std::min(recovery, 0.05f);
-    }
+      break;
+    case MaterialModel::Flesh:
+      compression = .58f; plasticity = .42f; drag = .48f; volume = .92f; recovery = .62f; break;
+    case MaterialModel::Foam:
+      compression = .20f; plasticity = .16f; drag = .22f; volume = .78f; recovery = .92f; break;
+    case MaterialModel::Stone:
+      compression = .98f; plasticity = .08f; drag = .08f; volume = .98f; recovery = .12f; break;
+    case MaterialModel::Wood:
+      compression = .90f; plasticity = .28f; drag = .20f; volume = .94f; recovery = .20f; break;
+    case MaterialModel::Putty:
+      compression = .46f; plasticity = .98f; drag = .66f; volume = .82f; recovery = .03f; break;
+    case MaterialModel::SoftClay: break;
   }
 
   sculpt_physics::BackendKind requested_backend = sculpt_physics::BackendKind::Auto;
@@ -795,7 +815,7 @@ static bool try_physical_clay_v01(const Depsgraph &depsgraph,
      * topology-aware and density-normalized, unlike merely changing the same
      * five scalar parameters for every preset. */
     if (world.kind() == sculpt_physics::BackendKind::WarpCuda &&
-        material_model != MaterialModel::Clay)
+        material_model != MaterialModel::SoftClay)
     {
       const sculpt_physics::SmoothSolverMode relaxation =
           material_model == MaterialModel::Wax ?
