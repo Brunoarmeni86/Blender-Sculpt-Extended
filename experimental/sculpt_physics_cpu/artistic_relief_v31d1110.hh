@@ -9,7 +9,7 @@ namespace sculpt_physics::artistic_v31d1110 {
 // reject folded charts rather than project opposite sheets onto one grid.
 inline std::vector<Vec3> relief_target(const h::Patch& patch, Action action,
  Material material,Vec3 center,Vec3 direction,Vec3 tool_axis,
- double radius,double dose,double pressure){
+ double radius,double dose,double pressure,bool fast=false){
  if(action!=Action::Push&&action!=Action::Smear&&action!=Action::Gather&&action!=Action::Melt)
   throw std::invalid_argument("relief action");
  if(!std::isfinite(radius)||radius<=0||!std::isfinite(dose)||dose<0||
@@ -19,7 +19,7 @@ inline std::vector<Vec3> relief_target(const h::Patch& patch, Action action,
  const auto profile_data=profile(material);
  const auto n=patch.p.size();
  std::vector<Vec3> out(n);
- if(dose==0||response.transport==0)return out;
+ if(dose==0||(action==Action::Smear?response.drag:response.transport)==0)return out;
  std::vector<unsigned char> seen(n);
  std::size_t components=0;
  for(std::size_t seed=0;seed<n;++seed){
@@ -62,25 +62,29 @@ inline std::vector<Vec3> relief_target(const h::Patch& patch, Action action,
   dab.tool_v26=false; // no implicit gravity
   ClaySurfaceResult diagnostics;
   // Flow is a material response; adhesion separately modulates smear.
-  const double drag=action==Action::Smear?response.drag:1.;
+  // Smear is adhesion-led, Push is flow-led. Gather uses the radial
+  // field; Melt has diffusion only. Avoid multiplying Smear's yield twice.
+  const double mobility=action==Action::Smear?response.drag:response.transport;
+  const double drag=action==Action::Smear?2.0:1.;
+  const double travel=dose*(action==Action::Gather?1.4:action==Action::Melt?1.8:1.);
   coarse_clay_transport(xy,height,weight,patch.area,dab,axis,floor-.12*radius,
-      dose,response.transport,profile_data.yield,drag,1.,delta,diagnostics,&edges);
+      travel,mobility,profile_data.yield,drag,1.,delta,diagnostics,&edges);
   for(auto i:ids)out[i]=patch.normal[i]*delta[i];
  }
  // Area-weighted normal-height proxy; the existing optimizer retains
  // the feasible signed proxy, not exact enclosed volume.
- return h::optimize(patch,std::move(out),true);
+ return fast?accept_fast(patch,std::move(out)):h::optimize(patch,std::move(out),true);
 }
 
 // Preserve the native deposition vector; redistribute only its positive
 // normal relief, with stronger lateral spreading for softer profiles.
 inline std::vector<Vec3> spread_deposit(const h::Patch& patch,
  std::vector<Vec3> motion,Material material,double radius,double dose,
- double pressure,h::GeodesicCache* cache=nullptr){
+ double pressure,h::GeodesicCache* cache=nullptr,bool fast=false){
  if(motion.size()!=patch.p.size()||!std::isfinite(radius)||radius<=0||
     !std::isfinite(dose)||dose<0)throw std::invalid_argument("deposit spread");
  auto response=evaluate(material,pressure,0,1);
- if(dose==0||response.transport==0)return h::optimize(patch,std::move(motion),true);
+ if(dose==0||response.transport==0)return fast?accept_fast(patch,std::move(motion)):h::optimize(patch,std::move(motion),true);
  std::vector<double> drive(motion.size());
  for(std::size_t i=0;i<drive.size();++i)if(patch.weight[i]>0)
   drive[i]=std::clamp(h::dot(patch.normal[i],motion[i])/dose,0.,1.)*response.transport;
@@ -90,6 +94,6 @@ inline std::vector<Vec3> spread_deposit(const h::Patch& patch,
  for(std::size_t i=0;i<flux.size();++i)if(flux[i]<0)
   scale=std::min(scale,std::max(0.,h::dot(motion[i],patch.normal[i]))/-flux[i]);
  for(std::size_t i=0;i<flux.size();++i)motion[i]+=patch.normal[i]*(scale*flux[i]);
- return h::optimize(patch,std::move(motion),true);
+ return fast?accept_fast(patch,std::move(motion)):h::optimize(patch,std::move(motion),true);
 }
 }
