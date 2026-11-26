@@ -206,6 +206,40 @@ int main(){
     {0,0,0},{0,0,1},1.,.04,1.,-.08,state_flat,nullptr,true,&bad,&used);
  check(!used&&fallback.size()==compacted.size());
  for(std::size_t k=0;k<fallback.size();++k)check(h::norm(fallback[k]-compacted[k])==0.);
+ // Exchange dispatch must preserve the original V30 coarse and fine
+ // proposals for every relief action; this mock runs CPU, not CUDA.
+ struct ReferenceExchange final : sculpt_physics::PairedFluxBackend {
+  int calls=0;
+  bool exchange(const std::vector<sculpt_physics::PairedFluxLink>& links,
+      const std::vector<double>& donor,const std::vector<double>& receiver,
+      std::vector<double>& change,double& moved) override {
+   ++calls;sculpt_physics::paired_flux_reference(links,donor,receiver,change,moved);
+   return true;
+  }
+ } exchange;
+ for(auto action:{Action::Push,Action::Smear,Action::Gather,Action::Melt}){
+  bool dispatched=false;
+  auto cpu=relief_target(bump,action,Material::Mud,{0,0,0},{1,0,0},{0,0,1},
+      1.,.04,1.,true);
+  auto other=relief_target(bump,action,Material::Mud,{0,0,0},{1,0,0},{0,0,1},
+      1.,.04,1.,true,nullptr,&exchange,&dispatched);
+  check(dispatched&&cpu.size()==other.size());
+  for(std::size_t k=0;k<cpu.size();++k)check(h::norm(cpu[k]-other[k])<1e-10);
+ }
+ check(exchange.calls>=4);
+ struct BrokenExchange final : sculpt_physics::PairedFluxBackend {
+  bool exchange(const std::vector<sculpt_physics::PairedFluxLink>&,
+      const std::vector<double>& donor,const std::vector<double>&,
+      std::vector<double>& change,double& moved) override {
+   change.assign(donor.size(),1.);moved=0.;return true;
+  }
+ } broken_exchange;
+ std::vector<double> change;
+ double moved=0.;
+ bool used_exchange=sculpt_physics::paired_flux_dispatch(&broken_exchange,
+    {{0,1,.6},{0,2,.4}}, {.5,.3,.2,0.},{.3,.3,.3,0.},change,moved);
+ check(!used_exchange&&std::abs(change[0]+.5)<1e-12&&change[3]==0.);
+ check(std::abs(change[0]+change[1]+change[2])<1e-12);
  auto transported=geometry_target(patch,Action::Press,Material::Mud,
     {0,0,0},{0,.8,0},{0,0,1},{.3,.3,0},.01,1,4);
  check(h::norm(transported[2])==0);
