@@ -6,6 +6,9 @@ on:
     paths:
       - 'experimental/sculpt_physics_cpu/**'
       - '.github/workflows/sculpt-physics-reference.yml'
+  pull_request:
+    branches:
+      - experiment/physics-v31d10a-local-guard
   workflow_dispatch:
 permissions:
   contents: read
