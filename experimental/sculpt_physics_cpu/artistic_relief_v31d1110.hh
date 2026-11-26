@@ -9,7 +9,8 @@ namespace sculpt_physics::artistic_v31d1110 {
 // reject folded charts rather than project opposite sheets onto one grid.
 inline std::vector<Vec3> relief_target(const h::Patch& patch, Action action,
  Material material,Vec3 center,Vec3 direction,Vec3 tool_axis,
- double radius,double dose,double pressure,bool fast=false){
+ double radius,double dose,double pressure,bool fast=false,
+ const std::vector<double>* compaction=nullptr){
  if(action!=Action::Push&&action!=Action::Smear&&action!=Action::Gather&&action!=Action::Melt)
   throw std::invalid_argument("relief action");
  if(!std::isfinite(radius)||radius<=0||!std::isfinite(dose)||dose<0||
@@ -18,6 +19,7 @@ inline std::vector<Vec3> relief_target(const h::Patch& patch, Action action,
  const auto response=evaluate(material,pressure,0,1);
  const auto profile_data=profile(material);
  const auto n=patch.p.size();
+ if(compaction&&compaction->size()!=n)throw std::invalid_argument("relief compaction shape");
  std::vector<Vec3> out(n);
  if(dose==0||(action==Action::Smear?response.drag:response.transport)==0)return out;
  std::vector<unsigned char> seen(n);
@@ -45,7 +47,12 @@ inline std::vector<Vec3> relief_target(const h::Patch& patch, Action action,
   for(auto i:ids){
    const auto q=patch.p[i]-center;
    height[i]=h::dot(q,axis);xy[i]=q-axis*height[i];
-   floor=std::min(floor,height[i]);weight[i]=patch.weight[i];
+   floor=std::min(floor,height[i]);
+   // Keep the host permission unchanged; hardened clay participates
+   // less in the conservative proxy transport, never across pinned regions.
+   const double c=compaction?(*compaction)[i]:0.;
+   if(!std::isfinite(c)||c<0||c>1)throw std::invalid_argument("relief compaction");
+   weight[i]=patch.weight[i]/(1.+profile_data.hardening*c);
    for(auto j:patch.adj[i])if(i<j&&patch.weight[j]>0&&patch.area[j]>0)
     edges.push_back({i,j});
   }
