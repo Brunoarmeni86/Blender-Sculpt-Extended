@@ -43,19 +43,20 @@ inline double sculptgl_falloff(double x){
 // Fixed plane for the entire stroke. Only remove protrusions.
 // Exponential response is additive in dose on a fixed plane before safety.
 inline std::vector<Vec3> scrape_plane(const h::Patch& patch,PlaneState plane,
- Material material,const std::vector<double>& exposure,double radius,double pressure){
+ Material material,const std::vector<double>& exposure,double radius,double pressure,
+ const std::vector<double>* compaction=nullptr,bool fast=false){
  plane=capture_plane(plane.origin,plane.normal);
- if(exposure.size()!=patch.p.size()||!std::isfinite(radius)||radius<=0)
+ if(exposure.size()!=patch.p.size()||(compaction&&compaction->size()!=patch.p.size())||!std::isfinite(radius)||radius<=0)
   throw std::invalid_argument("scrape inputs");
- auto response=evaluate(material,pressure,0,1);
  std::vector<Vec3> desired(patch.p.size());
  for(std::size_t i=0;i<desired.size();++i){
   if(!std::isfinite(exposure[i])||exposure[i]<0)throw std::invalid_argument("scrape exposure");
   if(patch.weight[i]<=0)continue;
+  auto response=evaluate(material,pressure,compaction?(*compaction)[i]:0.,1.);
   double height=std::max(0.,h::dot(patch.p[i]-plane.origin,plane.normal));
   double fraction=-std::expm1(-exposure[i]/radius*response.transport);
   desired[i]=plane.normal*(-std::min(height*fraction,radius*.1));
  }
- return h::optimize(patch,std::move(desired));
+ return fast?accept_fast(patch,std::move(desired)):h::optimize(patch,std::move(desired));
 }
 }
