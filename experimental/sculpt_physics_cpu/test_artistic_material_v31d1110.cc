@@ -1,4 +1,5 @@
 #include "artistic_tool_v31d1110.hh"
+#include "artistic_stroke_v31d1111.hh"
 #include <cstdlib>
 #include <limits>
 using namespace sculpt_physics::artistic_v31d1110;
@@ -31,6 +32,16 @@ int main(){
  check(compact.axial_sink>press.axial_sink && compact.transport<press.transport);
  check(target(Action::Gather,Material::Putty,i).radial_gather>0);
  check(target(Action::Melt,Material::Mud,i).relaxation>0);
+ for(int n: {1,2,8,64,256}){
+  double moving=0,time=0;
+  for(int j=0;j<n;++j){
+   auto d=integrate({1./n,2./n,.2+.6*j/n,.2+.6*(j+1)/n,.1});
+   moving+=d.moving;time+=d.stationary;
+  }
+  check(std::abs(moving-.5)<1e-12 && std::abs(time-1.)<1e-12);
+ }
+ auto stationary=integrate({0,1,.5,.5,.1});
+ check(stationary.moving==0 && stationary.stationary==.5);
  bool rejected=false;
  try{evaluate(Material::Mud,std::numeric_limits<double>::quiet_NaN(),0,1);}
  catch(const std::invalid_argument&){rejected=true;}
