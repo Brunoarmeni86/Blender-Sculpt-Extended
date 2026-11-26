@@ -95,3 +95,7 @@ D11.9 work is isolated on `experiment/physics-v31d11.9-architecture-review`; the
 - The host path explicitly rejects object/radial/tile symmetry, Multires, deform modifiers and shape keys. Mask/hidden eligibility and PBVH/Undo writes use the existing Mesh writer. Undo transaction rollback, Multires detail transfer and symmetric state mapping are therefore not validated by this preview.
 
 Automated evidence for this increment must be recorded separately from Blender runtime evidence. Standalone tests exercise field separation and exact D11.8 envelope preservation; full reference CTest and a VS2022 Blender build are required before handoff. Interactive Blender checks for thin vertical surfaces, long strokes, masks, high density and Undo remain manual and pending until explicitly performed.
+
+## D11.9 Windows build handoff
+
+Commit `34315fecac54e65b159375cc02c6b6da659e8525` was compiled with Visual Studio 2022, installed and started successfully in background mode on 2026-11-26. The standalone reference suite previously passed 43/43. Interactive D11.9 brush validation remains pending and must not be inferred from the successful startup. Exact directories, the `/Z7` build-tree workaround for MSVC/PDB error C1902, GPU configuration, commands and remaining validation gaps are recorded in `doc/sculpt_extended/D11_9_WINDOWS_VS2022_HANDOFF_20261126.md`.
