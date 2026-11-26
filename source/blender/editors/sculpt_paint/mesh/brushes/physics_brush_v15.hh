@@ -132,6 +132,8 @@ inline int explicit_engine(const Brush &brush)
 inline int effective_action(const Brush &brush)
 {
   switch(explicit_engine(brush)){
+    case 1:return brush.sculpt_physics_clay_behavior>=1 && brush.sculpt_physics_clay_behavior<=3?
+        brush.sculpt_physics_clay_behavior+3:brush.sculpt_physics_clay_behavior;
     case 2:return 4;
     case 3:return 13;
     case 4:return 11;
@@ -1638,8 +1640,10 @@ inline bool try_apply_intent(
     const float3 &normal)
 {
   StrokeCache &cache=*object.runtime->sculpt_session->cache;
+  const Brush &selected_brush=*BKE_paint_brush_for_read(&sd.paint);
+  const bool explicit_selected=explicit_engine(selected_brush)>0;
   const bool v23=smooth_v23_requested() || new_material_action_v23(cache.xpbd_v16_clay_behavior);
-  const bool surface_v20=(surface_contact_v20_requested() || v23) && cache.xpbd_v16_compact &&
+  const bool surface_v20=(explicit_selected || surface_contact_v20_requested() || v23) && cache.xpbd_v16_compact &&
       cache.xpbd_v16_clay_material && cache.xpbd_v16_clay_behavior>=1 &&
       cache.xpbd_v16_clay_behavior<=14;
   const bool conservative=surface_v20 || (conservative_clay_requested() &&
@@ -1672,7 +1676,7 @@ inline bool try_apply_intent(
     // Native bstrength includes brush-specific multipliers and overlap
     // attenuation. Do NOT use its magnitude on top of arc-length dose.
     // Reuse the actual tablet strength curve once, with linear artist gain.
-    const Brush &brush=*BKE_paint_brush_for_read(&sd.paint);
+    const Brush &brush=selected_brush;
     const double strength=double(BKE_brush_alpha_get(&sd.paint,&brush));
     const double pressure=BKE_brush_use_alpha_pressure(&brush) ?
         double(BKE_curvemapping_evaluateF(brush.curve_strength,0,cache.pressure)) : 1.0;
@@ -1934,7 +1938,7 @@ inline bool try_apply_intent(
             const char *material_override_name=std::getenv("BLENDER_SCULPT_V25_MATERIAL");
             const auto material_name = material_override_name && material_override_name[0] ?
                                            std::string_view(material_override_name) :
-                                           surface_profile_name_v25(brush.sculpt_physics_material);
+                                           surface_profile_name_v25(effective_material(brush));
             {
               const auto p=surface_profile_v25(material_name);
               clay.friction=material_override("BLENDER_SCULPT_V21_FRICTION",p.friction,0.0,1.0);
