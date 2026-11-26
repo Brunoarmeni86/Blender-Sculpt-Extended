@@ -25,6 +25,7 @@
 #  include "hybrid_foundation_v31d11.hh"
 #  include "artistic_csr_smooth_v31d1112.hh"
 #  include "artistic_relief_v31d1110.hh"
+#  include "artistic_build_v31d1114.hh"
 #  ifdef WITH_SCULPT_WARP_CUDA
 #    include "warp_cuda_backend.hh"
 #  endif
@@ -1215,7 +1216,12 @@ inline bool d11_preview_target(
       dab.action==ClaySurfaceAction::Melt;
   // Brush-scale proxy avoids the pressure tools' all-source geodesic graph.
   // Larger budget is opt-in and still requires runtime timing validation.
-  const std::size_t active_budget=direct && relief_tool?4096:1024;
+  const bool build_tool=artistic_enabled && (dab.action==ClaySurfaceAction::Buildup ||
+      dab.action==ClaySurfaceAction::FusionDeposit);
+  // Build is linear in patch size and retains the native writable set.
+  // Avoid silently reverting dense Clay Build to the same legacy profile.
+  const std::size_t active_budget=build_tool?16384:direct && relief_tool?4096:1024;
+  const std::size_t patch_budget=build_tool?32768:8192;
   if((!feature && result.coverage_weights_v31d9.size()!=vertices.size()) ||
      result.displacement.size()!=vertices.size()){
     if(report)std::fprintf(stderr,"[D11.6] legacy fallback: missing contact weights\n");
@@ -1242,7 +1248,7 @@ inline bool d11_preview_target(
     w.push_back(std::clamp(weight,0.,1.));
     if(w.back()>0)++active;
   }
-  if(active==0 || (!feature && active>active_budget) || vertices.size()>8192){
+  if(active==0 || (!feature && active>active_budget) || vertices.size()>patch_budget){
     if(report)std::fprintf(stderr,"[D11.6] legacy fallback: active=%zu patch=%zu (preview budget)\n",active,vertices.size());
     return false;
   }
@@ -1272,7 +1278,7 @@ inline bool d11_preview_target(
       if(dab.plastic_v29 || dab.artistic_compaction_material>=0)plastic[i].compaction=std::clamp(vertices[i].compaction_v29,0.,1.);
     auto tool=dab.action==ClaySurfaceAction::Compact?h::Tool::Compact:
               dab.action==ClaySurfaceAction::Compress?h::Tool::Compress:h::Tool::Press;
-    if(state.global!=global){state.distances=h::GeodesicCache{};state.global=global;}
+    if(!build_tool && state.global!=global){state.distances=h::GeodesicCache{};state.global=global;}
     h::CachedFlux diagnostic;
     bool local_recovery=false;
     // Opt-in artistic pressure tools, using the existing native permission and writer.
@@ -1318,14 +1324,12 @@ inline bool d11_preview_target(
             dab.radius,dose,drive,plane_height,compaction,
             mode==D11PreviewMode::Adaptive?&state.distances:nullptr,fast,state.artistic_gpu.get(),&gpu_used);
       }else if(dab.action==ClaySurfaceAction::Buildup || dab.action==ClaySurfaceAction::FusionDeposit){
-        // Keep the already resolved native deposition vector and pressure.
-        artistic=result.displacement;
-        for(std::size_t i=0;i<p.size();++i){
-          const auto profile=a::profile(material);
-          artistic[i]=patch.weight[i]>0?artistic[i]*(profile.deposit/(1.+profile.hardening*compaction[i])):sculpt_physics::Vec3{};
-        }
-        artistic=a::spread_deposit(patch,std::move(artistic),material,dab.radius,dose,drive,
-            mode==D11PreviewMode::Adaptive?&state.distances:nullptr,fast);
+        // Shape the existing weighted native deposition with genuinely
+        // different cross sections instead of a weak geodesic spread.
+        artistic=a::build_profile_target(patch,result.displacement,material,
+            dab.center,dab.axis,dab.direction,dab.radius,compaction,fast);
+        if(report)std::fprintf(stderr,"[D11 Build profile] material=%d active=%zu patch=%zu\n",
+                               int(material),active,p.size());
       }else if(dab.action==ClaySurfaceAction::Scrape){
         if(!state.artistic_plane_valid){
           state.artistic_plane=a::capture_plane(dab.center+h::unit(dab.axis)*
