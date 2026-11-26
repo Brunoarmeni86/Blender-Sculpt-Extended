@@ -23,6 +23,7 @@
 #  include "stroke_context_v27.hh"
 #  include "tangential_transport_v31d6.hh"
 #  include "hybrid_foundation_v31d11.hh"
+#  include "artistic_geometry_v31d1110.hh"
 #  include <cstring>
 
 #  include "BKE_mesh.hh"
@@ -1219,6 +1220,38 @@ inline void d11_preview_target(
         dab.radius,dab.dose*dab.intensity,
         mode==D11PreviewMode::Adaptive?&state.distances:nullptr,&diagnostic,feature);
     bool local_recovery=false;
+    // Opt-in artistic pressure tools, using the existing native permission and writer.
+    // Other actions remain on their established native path.
+    if(stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC")){
+      namespace a=sculpt_physics::artistic_v31d1110;
+      auto material=a::Material::FirmClay;
+      const char *name=std::getenv("BLENDER_SCULPT_D11_MATERIAL");
+      if(name){
+        if(std::strcmp(name,"soft_clay")==0)material=a::Material::SoftClay;
+        else if(std::strcmp(name,"mud")==0)material=a::Material::Mud;
+        else if(std::strcmp(name,"wax")==0)material=a::Material::Wax;
+        else if(std::strcmp(name,"flesh")==0)material=a::Material::Flesh;
+        else if(std::strcmp(name,"foam")==0)material=a::Material::Foam;
+        else if(std::strcmp(name,"stone")==0)material=a::Material::Stone;
+        else if(std::strcmp(name,"wood")==0)material=a::Material::Wood;
+        else if(std::strcmp(name,"putty")==0)material=a::Material::Putty;
+      }
+      std::vector<double> deposit(p.size(),0.),compaction(p.size(),0.);
+      for(std::size_t i=0;i<p.size();++i)compaction[i]=plastic[i].compaction;
+      auto action=dab.action==ClaySurfaceAction::Compact?a::Action::Compact:
+                  dab.action==ClaySurfaceAction::Compress?a::Action::Compress:a::Action::Press;
+      auto artistic=a::geometry_target(patch,action,material,deposit,compaction,
+          dab.axis,dab.center,dab.radius*dab.dose,std::clamp(dab.intensity,0.,1.),dab.radius);
+      for(std::size_t i=0;i<artistic.size();++i)
+        if(!std::isfinite(h::norm(artistic[i])) ||
+           (patch.weight[i]<=0 && h::norm(artistic[i])>0))
+          throw std::runtime_error("invalid artistic motion");
+      result.displacement=std::move(artistic);
+      if(feature)result.coverage_weights_v31d9=patch.weight;
+      if(report)std::fprintf(stderr,"[D11 artistic CPU] action=%d material=%d active=%zu\\n",
+                            int(dab.action),int(material),active);
+      return;
+    }
     auto motion=feature?h::optimize_feature(patch,target,&local_recovery):
                         h::optimize(patch,std::move(target),true);
     // Ensure no nonfinite or unauthorized motion before the native writer.
