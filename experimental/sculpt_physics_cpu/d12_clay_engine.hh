@@ -31,9 +31,9 @@ inline Frame clay_frame(const std::vector<PhysicalBrushIntentSample>& samples,
  for(const auto& v:samples)if(valid_sample(v)){
   const Vec3 q=v.position-center;
   const double r=norm(q)/reach;
-  if(r>=1.||dot(unit(v.surface_normal),n)<.2)continue;
+  if(r>=1.||dot(unit_normal(v.surface_normal),n)<.2)continue;
   const double w=(1.-r*r)*(1.-r*r);
-  sum+=unit(v.surface_normal)*w;
+  sum+=unit_normal(v.surface_normal)*w;
   height+=dot(q,n)*w;weight+=w;
  }
  Vec3 axis=norm(sum)>1e-12?unit(sum):n;
@@ -73,7 +73,7 @@ inline ClayKernel prepare_clay(Frame frame,double radius,double dose,double stre
 inline Vec3 clay_vertex(const ClayKernel& k,const PhysicalBrushIntentSample& s){
  if(!valid_sample(s)||k.exposure==0)return {};
  // Strict support: no back-facing or deep target, and no footprint expansion.
- if(dot(unit(s.surface_normal),k.frame.axis)<.05)return {};
+ if(dot(unit_normal(s.surface_normal),k.frame.axis)<.05)return {};
  const Vec3 q=(s.position-k.frame.center)/k.radius;
  const double h=dot(q,k.frame.axis)*k.sign;
  if(h < -k.max_depth || h > k.offset)return {};
