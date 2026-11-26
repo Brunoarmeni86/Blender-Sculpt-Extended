@@ -49,16 +49,16 @@ def sculpt_smooth_multiscale(
                 wp.atomic_add(grid_mass, idx, w)
                 wp.atomic_add(grid_height, idx, w*p[2])
     elif phase == 2:
-        x = k % 33
-        y = k // 33
+        cell_x = k % 33
+        cell_y = k // 33
         m1 = float(0.0)
         h1 = float(0.0)
         m2 = float(0.0)
         h2 = float(0.0)
         for j in range(-5, 6):
             for i in range(-5, 6):
-                a = x + i
-                b = y + j
+                a = cell_x + i
+                b = cell_y + j
                 if a >= 0 and a < 33 and b >= 0 and b < 33:
                     idx = b*33+a
                     w2 = float(6-wp.abs(i))*float(6-wp.abs(j))
