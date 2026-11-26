@@ -512,6 +512,8 @@ inline bool try_apply(const Sculpt &sd,
 
   MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
   const Span<float3> current=position_data.eval;
+  const bool sparse_nodes=conservative_clay && autonomous &&
+      stroke_option_v31d5("BLENDER_SCULPT_D11_FAST");
   struct PreparedNode {
     int id;
     Vector<float3> translations;
@@ -874,6 +876,16 @@ inline bool try_apply(const Sculpt &sd,
       PreparedNode node;
       node.id=ni;
       const Span<int> verts=nodes[ni].verts();
+      // Do not stage a leaf with no requested changes. Keep the existing
+      // full-leaf clipping and write contract for all touched leaves.
+      if(sparse_nodes){
+        bool has_changes=false;
+        for(int vi:verts)if(changes.find(std::size_t(vi))!=changes.end() &&
+                            covered.find(std::size_t(vi))==covered.end()){
+          has_changes=true;break;
+        }
+        if(!has_changes)return;
+      }
       node.translations.resize(verts.size());
       for (const int i : verts.index_range()) {
         const std::size_t vi=std::size_t(verts[i]);
@@ -1262,10 +1274,12 @@ inline bool d11_preview_target(
       std::vector<double> exposure(p.size());
       for(std::size_t i=0;i<p.size();++i)exposure[i]=dose*patch.weight[i];
       std::vector<sculpt_physics::Vec3> artistic;
+      const bool fast=stroke_option_v31d5("BLENDER_SCULPT_D11_FAST");
       if(pressure_tool){
-        artistic=a::geometry_target(patch,action,material,deposit,compaction,
-            dab.axis,dab.center,dose,drive,dab.radius,nullptr,
-            mode==D11PreviewMode::Adaptive?&state.distances:nullptr);
+        const double plane_height=dab.has_tool_plane?dab.tool_plane_height:-dab.tool_depth*dab.radius;
+        artistic=a::pressure_target(patch,action,material,dab.center,dab.axis,
+            dab.radius,dose,drive,plane_height,compaction,
+            mode==D11PreviewMode::Adaptive?&state.distances:nullptr,fast);
       }else if(dab.action==ClaySurfaceAction::Buildup || dab.action==ClaySurfaceAction::FusionDeposit){
         // Keep the already resolved native deposition vector and pressure.
         artistic=result.displacement;
@@ -1274,7 +1288,7 @@ inline bool d11_preview_target(
           artistic[i]=patch.weight[i]>0?artistic[i]*(profile.deposit/(1.+profile.hardening*compaction[i])):sculpt_physics::Vec3{};
         }
         artistic=a::spread_deposit(patch,std::move(artistic),material,dab.radius,dose,drive,
-            mode==D11PreviewMode::Adaptive?&state.distances:nullptr);
+            mode==D11PreviewMode::Adaptive?&state.distances:nullptr,fast);
       }else if(dab.action==ClaySurfaceAction::Scrape){
         if(!state.artistic_plane_valid){
           state.artistic_plane=a::capture_plane(dab.center+h::unit(dab.axis)*
@@ -1290,7 +1304,7 @@ inline bool d11_preview_target(
         // Reuse the V30 paired finite-volume relief proxy. Tangential CSR
         // smoothing remains a separate reference, not a substitute for Melt.
         artistic=a::relief_target(patch,relief_action,material,dab.center,dab.direction,
-                                  h::unit(dab.axis),dab.radius,dose,drive);
+                                  h::unit(dab.axis),dab.radius,dose,drive,fast);
       }else return false;
       for(std::size_t i=0;i<artistic.size();++i)
         if(!std::isfinite(h::norm(artistic[i])) ||
@@ -1298,8 +1312,9 @@ inline bool d11_preview_target(
           throw std::runtime_error("invalid artistic motion");
       result.displacement=std::move(artistic);
       if(feature)result.coverage_weights_v31d9=patch.weight;
-      if(report)std::fprintf(stderr,"[D11 artistic CPU] action=%d material=%d active=%zu\n",
-                            int(dab.action),int(material),active);
+      if(report)std::fprintf(stderr,"[D11 artistic CPU] action=%d material=%d active=%zu fast=%d ms=%.3f\n",
+                            int(dab.action),int(material),active,int(fast),
+                            std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
       result.active=active;
       return true;
     }
