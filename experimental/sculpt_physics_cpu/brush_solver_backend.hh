@@ -122,6 +122,7 @@ struct StrokeSolverSession {
   double topology_mean_edge_length = 0.0;
   std::unique_ptr<BrushSolverBackend> solver;
   bool multiscale_attempted=false;
+  std::size_t multiscale_dabs=0;
   std::unique_ptr<dedicated_d12::smooth_multiscale::Backend> multiscale;
   /* Brush-adapter scratch survives for one stroke. Generation stamps avoid
    * clearing an array the size of the complete mesh on every dab. */
