@@ -208,6 +208,122 @@ inline std::vector<double> transport_flux(const TransportStencil& s,
  for(std::size_t i=0;i<h.size();++i)if(s.area[i]>0)h[i]/=s.area[i];
  return h;
 }
+// D11.5 experimental aggregated quadrature; exact transport remains default.
+// Each aggregate is connected within a spatial cell, and representative
+// distances use the ORIGINAL allowed graph (no coarse-graph shortcuts).
+// Pressure in [0,1] permits separable conservative fine reconstruction.
+struct AggregateTransport {
+ struct Group {std::vector<std::size_t> members;std::size_t representative=0;double mass=0;};
+ struct Pair {std::size_t i,j;double kernel;};
+ std::vector<Group> groups;
+ std::vector<Pair> pairs;
+ std::vector<double> support,area,weight;
+ double radius=0;
+};
+inline AggregateTransport aggregate_transport(const Patch& s,double radius,double cell_fraction=.125){
+ if(!std::isfinite(radius)||radius<=0||!std::isfinite(cell_fraction)||
+    cell_fraction<=0||cell_fraction>.25||!(radius*cell_fraction>0)||!(radius*.5>0))
+  throw std::invalid_argument("aggregate transport scale");
+ AggregateTransport out;out.radius=radius;out.area=s.area;out.weight=s.weight;
+ const auto n=s.p.size();const auto invalid=std::numeric_limits<std::size_t>::max();
+ const double cell=radius*cell_fraction,reach=radius*.5;
+ std::vector<std::size_t> group(n,invalid),rep(n,invalid),order;
+ std::vector<std::array<double,3>> key(n);
+ auto allowed=[&](std::size_t i){return s.weight[i]>0&&s.area[i]>0;};
+ auto less=[&](std::size_t i,std::size_t j){
+  const auto a=s.p[i],b=s.p[j];
+  return std::array<double,3>{a.x,a.y,a.z}<std::array<double,3>{b.x,b.y,b.z};
+ };
+ // Use a geometry-derived origin; sorting makes distinct-position fixtures
+ // insensitive to vertex numbering. Coincident vertex tie cases are unresolved.
+ Vec3 origin{};bool have=false;
+ for(std::size_t i=0;i<n;++i)if(allowed(i)){
+  if(!have){origin=s.p[i];have=true;}
+  origin.x=std::min(origin.x,s.p[i].x);origin.y=std::min(origin.y,s.p[i].y);origin.z=std::min(origin.z,s.p[i].z);
+  order.push_back(i);
+ }
+ std::sort(order.begin(),order.end(),less);
+ for(auto i:order){
+  auto d=(s.p[i]-origin)/cell;
+  if(!std::isfinite(norm(d)))throw std::overflow_error("aggregate cell coordinate");
+  key[i]={std::floor(d.x),std::floor(d.y),std::floor(d.z)};
+ }
+ for(auto seed:order)if(group[seed]==invalid){
+  auto id=out.groups.size();out.groups.emplace_back();
+  auto& g=out.groups.back();g.members.push_back(seed);group[seed]=id;
+  for(std::size_t k=0;k<g.members.size();++k)for(auto j:s.adj[g.members[k]])
+   if(allowed(j)&&group[j]==invalid&&key[j]==key[seed]){group[j]=id;g.members.push_back(j);}
+  std::sort(g.members.begin(),g.members.end(),less);
+  Vec3 center{};
+  for(auto i:g.members){double a=s.area[i]*s.weight[i];g.mass+=a;center+=(s.p[i]-origin)*a;}
+  if(!(g.mass>0)||!std::isfinite(g.mass))throw std::overflow_error("aggregate mass");
+  center=center/g.mass;
+  g.representative=g.members.front();
+  double best=norm(s.p[g.representative]-origin-center);
+  for(auto i:g.members){double d=norm(s.p[i]-origin-center);if(d<best){best=d;g.representative=i;}}
+  rep[g.representative]=id;
+ }
+ out.support.resize(out.groups.size());
+ for(std::size_t i=0;i<out.groups.size();++i)out.support[i]=out.groups[i].mass;
+ struct Edge {std::size_t j;double length;};
+ std::vector<std::vector<Edge>> edges(n);
+ for(auto i:order)for(auto j:s.adj[i])if(allowed(j))edges[i].push_back({j,norm(s.p[i]-s.p[j])});
+ using Q=std::pair<double,std::size_t>;
+ std::vector<Q> heap;
+ std::vector<double> dist(n,std::numeric_limits<double>::infinity());
+ std::vector<std::size_t> touched;
+ heap.reserve(n);touched.reserve(n);
+ auto push=[&](Q x){heap.push_back(x);std::push_heap(heap.begin(),heap.end(),std::greater<Q>{});};
+ for(std::size_t a=0;a<out.groups.size();++a){
+  auto i=out.groups[a].representative;
+  dist[i]=0;touched.push_back(i);push({0,i});
+  while(!heap.empty()){
+   std::pop_heap(heap.begin(),heap.end(),std::greater<Q>{});
+   auto [d,j]=heap.back();heap.pop_back();if(d!=dist[j])continue;
+   auto b=rep[j];
+   if(b!=invalid&&b>a){
+    double x=1-d/reach,k=x*x*(3-2*x);
+    out.pairs.push_back({a,b,k});
+    out.support[a]+=out.groups[b].mass*k;
+    out.support[b]+=out.groups[a].mass*k;
+   }
+   for(auto e:edges[j]){
+    double next=d+e.length;
+    if(next<reach&&next<dist[e.j]){
+     if(!std::isfinite(dist[e.j]))touched.push_back(e.j);
+     dist[e.j]=next;push({next,e.j});
+    }
+   }
+  }
+  for(auto j:touched)dist[j]=std::numeric_limits<double>::infinity();
+  touched.clear();
+ }
+ return out;
+}
+// With effective area a_i=A_i*w_i, approximate pair coefficient
+// a_i*a_j*K_ab/max(S_a,S_b). Sum over j <= a_i, so the per-vertex
+// absolute exchange bound is .02*radius*w_i after division by A_i.
+// Group mean + fine residual reconstruction avoids piecewise constant flow.
+inline std::vector<double> aggregate_flux(const AggregateTransport& s,const std::vector<double>& pressure){
+ if(pressure.size()!=s.area.size())throw std::invalid_argument("aggregate pressure size");
+ for(double x:pressure)if(!std::isfinite(x)||x<0||x>1)throw std::invalid_argument("aggregate pressure range");
+ const auto m=s.groups.size();
+ std::vector<double> mean(m),row(m),moment(m),out(pressure.size());
+ for(std::size_t a=0;a<m;++a){
+  const auto& g=s.groups[a];
+  for(auto i:g.members)mean[a]+=s.area[i]*s.weight[i]*pressure[i]/g.mass;
+  row[a]=g.mass/s.support[a];moment[a]=row[a]*mean[a];
+ }
+ for(auto e:s.pairs){
+  double c=e.kernel/std::max(s.support[e.i],s.support[e.j]);
+  double ab=c*s.groups[e.j].mass,ba=c*s.groups[e.i].mass;
+  row[e.i]+=ab;moment[e.i]+=ab*mean[e.j];
+  row[e.j]+=ba;moment[e.j]+=ba*mean[e.i];
+ }
+ for(std::size_t a=0;a<m;++a)for(auto i:s.groups[a].members)
+  out[i]=s.radius*.02*s.weight[i]*(moment[a]-row[a]*pressure[i]);
+ return out;
+}
 enum class Tool {Deposit,Press,Compact,Compress,Scrape,Push,Smear,Melt,Grab};
 struct Material {double mobility=.55,compressibility=.2,viscosity=.4;};
 // D11: stateless reference laws, no persistent plastic state yet.

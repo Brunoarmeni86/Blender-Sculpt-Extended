@@ -393,5 +393,76 @@ int main(){
   for(std::size_t i=0;i<req.size();++i)check(std::abs(req[i].z+(flat.weight[i]>0?.008125:0))<1e-12);
   metric("uniform_material_target_us",0,std::chrono::duration<double,std::micro>(finish-start).count());
  }
+ // D11.5 optional aggregate transport: quality and cost relative to exact.
+ for(int density:{1,2,4,8}){
+  auto patch=grid(4*density,false);
+  std::vector<double> pressure;for(auto v:patch.p)pressure.push_back(.5+.5*std::cos(3.141592653589793*v.x));
+  auto start=std::chrono::steady_clock::now();
+  auto agg=h::aggregate_transport(patch,1);
+  auto built=std::chrono::steady_clock::now();
+  auto approx=h::aggregate_flux(agg,pressure);
+  auto finished=std::chrono::steady_clock::now();
+  auto exact_stencil=h::transport_stencil(patch,1);
+  auto exact=h::transport_flux(exact_stencil,pressure);
+  auto exact_end=std::chrono::steady_clock::now();
+  double net=0,err=0,ref=0,abs_a=0,abs_e=0,mom_a=0,mom_e=0;
+  for(std::size_t i=0;i<approx.size();++i){
+   double a=patch.area[i],d=approx[i]-exact[i];
+   check(std::isfinite(approx[i])&&std::abs(approx[i])<=.02+1e-12);
+   net+=a*approx[i];err+=a*d*d;ref+=a*exact[i]*exact[i];
+   abs_a+=a*std::abs(approx[i]);abs_e+=a*std::abs(exact[i]);
+   mom_a+=a*patch.p[i].x*approx[i];mom_e+=a*patch.p[i].x*exact[i];
+  }
+  check(std::abs(net)<1e-12&&ref>0&&abs_e>0&&mom_e>0);
+  double relative=std::sqrt(err/ref);
+  metric("aggregate_groups",density,double(agg.groups.size()));
+  metric("aggregate_pairs",density,double(agg.pairs.size()));
+  metric("aggregate_exact_pairs",density,double(exact_stencil.pairs.size()));
+  metric("aggregate_relative_rms",density,relative);
+  metric("aggregate_absolute_ratio",density,abs_a/abs_e);
+  metric("aggregate_moment_ratio",density,mom_a/mom_e);
+  metric("aggregate_net",density,net);
+  metric("aggregate_build_us",density,std::chrono::duration<double,std::micro>(built-start).count());
+  metric("aggregate_apply_us",density,std::chrono::duration<double,std::micro>(finished-built).count());
+  metric("aggregate_exact_total_us",density,std::chrono::duration<double,std::micro>(exact_end-finished).count());
+  // Quality is a separate eligibility gate, not a claim that all cases pass.
+  // An experimental candidate can be rejected without weakening exact mode.
+  bool eligible=relative<=.35&&std::abs(abs_a/abs_e-1)<=.20&&std::abs(mom_a/mom_e-1)<=.20;
+  metric("aggregate_quality_gate",density,eligible?1:0);
+  if(density==1)check(relative<1e-10);
+  if(density==8)check(agg.groups.size()<patch.p.size()&&agg.pairs.size()<exact_stencil.pairs.size());
+  auto rev=patch.p;auto rt=patch.tris;auto rw=patch.weight;auto rp=pressure;
+  std::reverse(rev.begin(),rev.end());std::reverse(rw.begin(),rw.end());std::reverse(rp.begin(),rp.end());
+  for(auto& tri:rt)for(auto& i:tri)i=rev.size()-1-i;
+  std::reverse(rt.begin(),rt.end());
+  auto back=h::aggregate_flux(h::aggregate_transport(h::make_patch(rev,rt,rw),1),rp);
+  double perm=0;for(std::size_t i=0;i<approx.size();++i)perm=std::max(perm,std::abs(approx[i]-back[approx.size()-1-i]));
+  check(perm<1e-10);metric("aggregate_permutation_max",density,perm);
+ }
+ // Two nearby sheets and a fully masked bridge must not exchange material.
+ {
+  std::vector<Vec3> p{{0,0,0},{.05,0,0},{0,.05,0},{0,0,.001},{.05,0,.001},{0,.05,.001}};
+  auto patch=h::make_patch(p,{{0,1,2},{3,4,5}},{1,.25,1,1,1,1});
+  auto a=h::aggregate_transport(patch,1);
+  auto f=h::aggregate_flux(a,{1,1,1,0,0,0});
+  check(a.groups.size()==2&&a.pairs.empty());
+  for(auto x:f)check(std::abs(x)<1e-12);
+  auto bridge=grid(8,false);
+  std::vector<double> pressure;
+  for(std::size_t i=0;i<bridge.p.size();++i){
+   if(bridge.p[i].x==.5)bridge.weight[i]=0;
+   pressure.push_back(bridge.p[i].x<.5?1:0);
+  }
+  auto blocked=h::aggregate_flux(h::aggregate_transport(bridge,1),pressure);
+  double leak=0;for(double x:blocked)leak=std::max(leak,std::abs(x));
+  check(leak<1e-12);metric("aggregate_barrier_leak",0,leak);
+  auto varied=h::aggregate_flux(a,{1,0,.5,0,0,0});
+  double net=0;for(std::size_t i=0;i<varied.size();++i){
+   net+=patch.area[i]*varied[i];check(std::abs(varied[i])<=.02*patch.weight[i]+1e-12);
+   if(i>=3)check(std::abs(varied[i])<1e-12);
+  }
+  check(std::abs(net)<1e-12&&std::abs(varied[0])>0);
+  bool bad=false;try{h::aggregate_flux(a,{2,0,0,0,0,0});}catch(const std::invalid_argument&){bad=true;}check(bad);
+ }
  std::cout<<"hybrid foundation tests passed\n";
 }
