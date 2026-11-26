@@ -53,7 +53,7 @@ inline void contact(Patch& s,std::size_t seed,double reach){
 }
 // D10D: scalar swept-volume proxy, not actual mass. Pairwise conservative.
 inline std::vector<double> flux(const Patch& s,const std::vector<double>& pressure,double radius){
- if(pressure.size()!=s.p.size()||!(radius>0))throw std::invalid_argument("flux input");
+ if(pressure.size()!=s.p.size()||!std::isfinite(radius)||!(radius>0))throw std::invalid_argument("flux input");
  std::vector<double> h(s.p.size()),budget(s.p.size());
  for(double x:pressure)if(!std::isfinite(x))throw std::invalid_argument("pressure");
  for(std::size_t i=0;i<h.size();++i)budget[i]=s.area[i]*s.weight[i]*radius*.02;
@@ -100,7 +100,10 @@ inline std::vector<Vec3> target(const Patch& s,Tool tool,Material m,Vec3 directi
 // Choose only a lower target-error feasible candidate; no geometry smoothing.
 inline std::vector<Vec3> optimize(const Patch& s,std::vector<Vec3> desired,bool preserve_flux=false){
  if(desired.size()!=s.p.size())throw std::invalid_argument("target size");
- for(std::size_t i=0;i<desired.size();++i)if(s.weight[i]<=0)desired[i]={};
+ for(std::size_t i=0;i<desired.size();++i){
+  if(!std::isfinite(norm(desired[i])))throw std::invalid_argument("nonfinite target");
+  if(s.weight[i]<=0)desired[i]={};
+ }
  auto safe=[&](std::vector<Vec3> u){double g=gradient_motion_scale_v31c(s.p,s.tris,u);
   for(auto& v:u)v=v*g;
   limit_local_contact(s.p,s.tris,u,true);return u;};
@@ -108,10 +111,15 @@ inline std::vector<Vec3> optimize(const Patch& s,std::vector<Vec3> desired,bool 
  auto volume=[&](const std::vector<Vec3>& u){double v=0;for(std::size_t i=0;i<u.size();++i)v+=s.area[i]*dot(s.normal[i],u[i]);return v;};
  auto best=safe(desired),u=desired;double e=error(best);
  const double reference=volume(best);
+ double proxy_scale=0;
+ for(std::size_t i=0;i<desired.size();++i){
+  proxy_scale+=s.area[i]*(std::abs(dot(s.normal[i],desired[i]))+std::abs(dot(s.normal[i],best[i])));
+ }
+ const double proxy_tol=1e-10*std::max(1e-20,proxy_scale);
  // Compare D10A local attenuation before searching redistributed fields.
  auto local=desired;
  limit_local_gradient_v31d10a(s.p,s.tris,local);
- if((!preserve_flux||std::abs(volume(local)-reference)<=1e-10*std::max(1e-20,std::abs(reference)+std::abs(volume(desired))))&&error(local)<e){e=error(local);best=std::move(local);}
+ if((!preserve_flux||std::abs(volume(local)-reference)<=proxy_tol)&&error(local)<e){e=error(local);best=std::move(local);}
  // Preserve the feasible baseline signed normal-area proxy, not exact volume.
  auto balance=[&](std::vector<Vec3>& v){
   double a=0;for(std::size_t i=0;i<v.size();++i)if(s.weight[i]>0)a+=s.area[i]*s.weight[i]*dot(s.normal[i],s.normal[i]);
@@ -123,7 +131,7 @@ inline std::vector<Vec3> optimize(const Patch& s,std::vector<Vec3> desired,bool 
    Vec3 avg{};for(auto j:s.adj[i])avg+=u[j];
    next[i]=desired[i]*.35+avg*(.65/double(s.adj[i].size()));
   }u=std::move(next);auto trial=u;if(preserve_flux)balance(trial);auto candidate=safe(trial);
-  if(preserve_flux&&std::abs(volume(candidate)-reference)>1e-10*std::max(1e-20,std::abs(reference)+std::abs(volume(desired))))continue;
+  if(preserve_flux&&std::abs(volume(candidate)-reference)>proxy_tol)continue;
   double x=error(candidate);
   if(x<e){e=x;best=std::move(candidate);}
  }return best;
