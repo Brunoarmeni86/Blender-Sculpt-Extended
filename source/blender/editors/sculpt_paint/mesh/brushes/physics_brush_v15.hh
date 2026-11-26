@@ -1333,6 +1333,7 @@ inline bool d11_preview_target(
                             gpu_used?"Warp local + CPU transport":"CPU",int(dab.action),int(material),active,int(fast),
                             std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
       result.active=active;
+      result.artistic_material_used=int(material);
       return true;
     }
     auto target=h::material_target(patch,tool,d11_preview_material(),plastic,dab.axis,
@@ -1876,9 +1877,11 @@ inline bool try_apply_intent(
           bool(mesh.attributes().lookup<float>(".bse_plastic_compaction",bke::AttrDomain::Point));
       if(artistic_state){
         clay.artistic_compaction_material=std::clamp(int(brush.sculpt_physics_material),0,8);
-        if(action==5 || action==7 || action==8)clay.plastic_v29=true;
       }
-      if(clay.plastic_v29)plastic_dab=clay;
+      if(clay.plastic_v29){
+        plastic_dab=clay;
+        plastic_dab.artistic_compaction_material=-1;
+      }
       const auto plan_start=std::chrono::steady_clock::now();
       std::shared_ptr<SurfaceContactHistoryV28> history;
       if(clay.stable_v28 && !clay.live_surface_v30 && clay.action!=ClaySurfaceAction::Buildup &&
@@ -1942,6 +1945,12 @@ inline bool try_apply_intent(
       }
       auto planned=plan_conservative_clay(mesh,position_data.eval,samples,clay,goals,history.get(),
                                          capture_v31d9?&coverage_v31d9:nullptr,d11_state.get(),d11_mode);
+      if(artistic_state && planned.artistic_material_used>=0 &&
+         (action==5 || action==7 || action==8)){
+        plastic_dab=clay;
+        plastic_dab.plastic_v29=true;
+        plastic_dab.artistic_compaction_material=planned.artistic_material_used;
+      }
       if(clay.contact_reach_v31d4 && profile_v26b_requested())
         std::fprintf(stderr,"[V31D4 reach] action=%d extra_R=0.15 active=%zu goals=%zu component_rejected=%zu scale=%.7g\n",
                      action,planned.active,goals.size(),planned.component_rejected_v30b,planned.accepted_scale);
