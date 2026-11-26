@@ -1,5 +1,6 @@
 #include "artistic_geometry_v31d1110.hh"
 #include "artistic_swept_v31d1111.hh"
+#include "artistic_plane_v31d1111.hh"
 #include <cstdlib>
 #include <limits>
 using namespace sculpt_physics::artistic_v31d1110;
@@ -72,6 +73,14 @@ int main(){
  auto blocked=swept_exposure(patch,{0,1},{0,0,0},{1,0,0},.2,2,1,1,1,
     {1,0,1},{1,1,0});
  check(blocked.moving[1]==0);
+ auto plane=capture_plane({0,0,-.1},{0,0,1});
+ auto scrape=scrape_plane(patch,plane,Material::Mud,{.1,.1,.1},1,1);
+ check(scrape[0].z<0 && h::norm(scrape[2])==0);
+ auto above=capture_plane({0,0,.1},{0,0,1});
+ auto no_cut=scrape_plane(patch,above,Material::Mud,{.1,.1,.1},1,1);
+ for(auto v:no_cut)check(h::norm(v)==0);
+ check(sculptgl_falloff(0)==1 && sculptgl_falloff(1)==0);
+ check(std::abs(sculptgl_falloff(.5)-.6875)<1e-12);
  bool rejected=false;
  try{evaluate(Material::Mud,std::numeric_limits<double>::quiet_NaN(),0,1);}
  catch(const std::invalid_argument&){rejected=true;}
