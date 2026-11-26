@@ -60,6 +60,40 @@ int main(){
  check(std::abs(balance)<1e-12);
  auto uniform=pair_transport(patch,{1,1,0},4,.1);
  for(auto x:uniform)check(x==0);
+ // Dense planar grid: exercise cached transport across a connected patch,
+ // partial falloff and a fully pinned boundary. Compare to exact stencil.
+ std::vector<sculpt_physics::Vec3> grid_p;
+ std::vector<h::Tri> grid_t;
+ std::vector<double> grid_w,grid_drive;
+ constexpr std::size_t side=24;
+ for(std::size_t y=0;y<side;++y)for(std::size_t x=0;x<side;++x){
+  grid_p.push_back({double(x)/double(side-1),double(y)/double(side-1),0});
+  grid_w.push_back(x==0?0.:.25+.75*double(y)/double(side-1));
+  grid_drive.push_back(double(x)/double(side-1));
+  if(x+1<side&&y+1<side){
+   auto k=y*side+x;
+   grid_t.push_back({k,k+1,k+side});
+   grid_t.push_back({k+1,k+side+1,k+side});
+  }
+ }
+ auto grid=h::make_patch(grid_p,grid_t,grid_w);
+ h::GeodesicCache cache;
+ auto expected=pair_transport(grid,grid_drive,.25,.1);
+ auto cached=pair_transport(grid,grid_drive,.25,.1,&cache);
+ check(!cache.pairs.empty());
+ auto replay=pair_transport(grid,grid_drive,.25,.1,&cache);
+ double net=0.;
+ for(std::size_t k=0;k<cached.size();++k){
+  check(std::abs(cached[k]-expected[k])<1e-10);
+  check(std::abs(replay[k]-cached[k])<1e-10);
+  if(grid_w[k]==0)check(cached[k]==0.);
+  net+=cached[k]*grid.area[k];
+ }
+ check(std::abs(net)<1e-12);
+ h::GeodesicCache empty_cache;
+ auto uniform_grid=pair_transport(grid,std::vector<double>(grid_p.size(),.5),.25,.1,&empty_cache);
+ check(empty_cache.pairs.empty());
+ for(auto x:uniform_grid)check(x==0.);
  auto transported=geometry_target(patch,Action::Press,Material::Mud,
     {0,0,0},{0,.8,0},{0,0,1},{.3,.3,0},.01,1,4);
  check(h::norm(transported[2])==0);
