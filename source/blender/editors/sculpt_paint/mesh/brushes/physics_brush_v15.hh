@@ -1668,14 +1668,15 @@ inline bool try_apply_intent(
         if(clay_tool){
           d::ClayParams params;
           // Two modes are tool geometry, not separate material solvers.
-          params.roundness=kind==NativeSculptBrushKind::ClayStrips?.25:.95;
+          params.roundness=kind==NativeSculptBrushKind::ClayStrips?
+              std::clamp(double(brush.tip_roundness),0.,1.):.95;
           params.offset=kind==NativeSculptBrushKind::ClayStrips?.18:.12;
           next_frame=d::clay_frame(samples,intent.center,convert(normal),convert(delta),
                                    radius,next_frame,params);
           const auto kernel=d::prepare_clay(next_frame,radius,dose,intensity,sign,params);
           for(const auto& sample:samples){
             const auto displacement=d::clay_vertex(kernel,sample);
-            if(d::norm(displacement)>1e-15)goals.push_back({sample.global_index,displacement});
+            if(d::norm2(displacement)>1e-30)goals.push_back({sample.global_index,displacement});
           }
         }else{
           d::FleshParams params;
@@ -1684,7 +1685,7 @@ inline bool try_apply_intent(
           next_flesh=kernel.next;
           for(const auto& sample:samples){
             const auto displacement=d::flesh_vertex(kernel,sample);
-            if(d::norm(displacement)>1e-15)goals.push_back({sample.global_index,displacement});
+            if(d::norm2(displacement)>1e-30)goals.push_back({sample.global_index,displacement});
           }
         }
         const double plan_ms=std::chrono::duration<double,std::milli>(
