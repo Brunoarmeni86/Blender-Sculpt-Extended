@@ -183,6 +183,13 @@ int main(){
  check(compaction_after_write(Material::FirmClay,clay_state,-.2,1.)==clay_state);
  check(evaluate(Material::FirmClay,1.,clay_state,1.).plastic_sink<
        evaluate(Material::FirmClay,1.,0.,1.).plastic_sink);
+ // Previously compacted surface is harder to scrape and transport.
+ std::vector<double> hardened(flat.p.size(),.9);
+ auto fresh_scrape=scrape_plane(flat,capture_plane({0,0,-.08},{0,0,1}),
+    Material::FirmClay,std::vector<double>(flat.p.size(),.02),1.,1.,nullptr,true);
+ auto hard_scrape=scrape_plane(flat,capture_plane({0,0,-.08},{0,0,1}),
+    Material::FirmClay,std::vector<double>(flat.p.size(),.02),1.,1.,&hardened,true);
+ check(h::norm(hard_scrape[mid])<h::norm(fresh_scrape[mid]));
  // A failed GPU call may corrupt output buffers. CPU fallback must replace
  // them completely and yield the exact same reference result.
  struct BadBackend final : PressureLocalBackend {
