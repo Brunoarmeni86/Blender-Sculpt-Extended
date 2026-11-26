@@ -1,0 +1,19 @@
+name: D12 dedicated brush reference
+on:
+  push:
+    branches: ['experiment/physics-d12-dedicated-engines']
+  pull_request:
+    branches: ['experiment/physics-d11.10-13-artistic-engine']
+  workflow_dispatch:
+jobs:
+  reference:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S experimental/sculpt_physics_cpu -B build-d12 -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build-d12 --config Release --target test_d12_dedicated_engines test_artistic_material_v31d1110
+      - run: ctest --test-dir build-d12 -C Release -R "sculpt_(d12_dedicated_engines|artistic_material_v31d1110)_tests" --output-on-failure --no-tests=error -V
