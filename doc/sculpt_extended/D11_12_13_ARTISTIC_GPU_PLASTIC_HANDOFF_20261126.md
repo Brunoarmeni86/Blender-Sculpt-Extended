@@ -39,3 +39,23 @@ Save a separate test copy. Without the attribute, artistic compaction stays disa
 5. Next major performance milestone: GPU brush-scale relief transport, sparse per-vertex writeback, and a measured end-to-end budget. Do not enable by default or merge main.
 
 CI does not build the full Blender host or native Warp bridge. Do not label the checkpoint runtime-validated based on CI alone.
+
+
+## D11.12b — paired exchange and sparse native writer
+
+Added the optional `PairedFluxBackend` contract and Warp exchange kernel. CPU still prepares the contact chart, residual fits, interpolation stencils and signed edge proposals; Warp calculates simultaneous donor/receiver demand, applies capacity limits and accumulates equal/opposite volume exchanges on coarse chart and fine residual edges. Small edge sets (<256), unavailable modules, invalid output and device failures use the reference CPU implementation. The fallback is checked for finite results, zero pinned output, signed balance and per-node net capacity. These checks do not prove exact float parity, collision prevention, or physical mass conservation. Atomic accumulation can differ slightly by scheduling.
+
+Generate both new PTX modules in the pinned native Warp 1.19.0 environment:
+```powershell
+python experimental/sculpt_physics_gpu/prototype_warp_artistic_pressure.py --ptx-dir C:\BlenderDev\ptx-artistic-d1112
+python experimental/sculpt_physics_gpu/prototype_warp_artistic_flux.py --ptx-dir C:\BlenderDev\ptx-artistic-d1112
+```
+Apply the actual four environment assignments printed by the two scripts. The old Jacobi PTX and matching Warp DLL are still required by the shared runtime. Confirm actual logs:
+- `[D11 artistic Warp local + CPU transport]`: pressure local stage dispatched.
+- `[D11 artistic Warp flux exchange + CPU chart]`: paired volume exchange dispatched.
+- `[D11 artistic CPU]`: no successful GPU stage.
+The exchange is partial GPU offload, not a fully resident GPU solver. GPU timings may be slower because chart construction and transfers remain; compare warm end-to-end times and disable Warp if it loses.
+
+Sparse writer: under BLENDER_SCULPT_D11_FAST=1, on supported autonomous ordinary meshes without mirror clipping, the existing native PositionDeformData writer receives only unique changed indices and corresponding translations. Native Undo coverage remains mandatory; PBVH bounds are refreshed over the original region after all writes and position invalidation is unchanged. No writes to untouched vertices; with mirror clipping the dense path is retained. The candidate scan, local geometry guards and native PBVH updates remain CPU. Validate mask/axis lock/Undo and shared-boundary bounds in actual Blender. Do not equate this with a sparse GPU viewport update.
+
+Before enabling compaction, test CPU Fast path then GPU on identical meshes; keep profiling off for subjective latency tests and enable it for short matched diagnostic strokes. Compare V26 plan/write times, V30C staged/moved counts, D11 actual backend and displayed shape. Full native compile, PTX generation, CUDA execution and Undo/Redo need Windows runtime validation. Standalone CI cannot certify the native writer or C++ CUDA ABI.
