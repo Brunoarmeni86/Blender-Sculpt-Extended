@@ -17,3 +17,16 @@ jobs:
       - run: cmake -S experimental/sculpt_physics_cpu -B build-artistic -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build-artistic --config Release --target test_artistic_material_v31d1110
       - run: ctest --test-dir build-artistic -C Release -R sculpt_artistic_material_v31d1110_tests --output-on-failure --no-tests=error
+  warp-reference:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install warp-lang==1.9.1 numpy
+      - run: python experimental/sculpt_physics_cpu/test_artistic_warp_v31d1112.py -v
