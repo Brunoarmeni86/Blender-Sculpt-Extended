@@ -98,7 +98,7 @@ BackendKind backend_kind_from_name(const std::string_view name)
   throw std::invalid_argument("unknown sculpt physics backend");
 }
 
-std::unique_ptr<BrushSolverBackend> create_brush_solver_backend(const BackendKind requested,
+std::unique_ptr<BrushSolverBackend> create_brush_solver_backend([[maybe_unused]] const BackendKind requested,
                                                                  BackendKind *selected)
 {
 #ifdef WITH_SCULPT_WARP_CUDA
