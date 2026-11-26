@@ -55,6 +55,34 @@ int main(){
   for(auto& s:live)s.position+=clay_vertex(k,s);
  }
  check(live[live.size()/2].position.z>v.z,"live buildup");
+ // Reproduce the problematic positive feedback: the hit point follows
+ // the current ridge upward on every dab. Bound cumulative motion even
+ // when the moving plane itself never reaches equilibrium.
+ auto rising=center;
+ const ClayReference anchor{rising.position,rising.surface_normal,1.};
+ for(int j=0;j<200;++j){
+  const Frame live_frame{true,rising.position,{0,0,1},{1,0,0}};
+  const auto k=prepare_clay(live_frame,1.,.12,2.,1.,p);
+  rising.position+=clay_vertex(k,rising,&anchor);
+  check(norm(rising.position-anchor.position)<=p.stroke_height+1e-12,"live cursor runaway");
+ }
+ check(rising.position.z>.15,"useful buildup retained");
+ const ClayReference new_stroke{rising.position,rising.surface_normal,1.};
+ const auto next_stroke=prepare_clay({true,rising.position,{0,0,1},{1,0,0}},1.,.10,1.,1.,p);
+ check(clay_vertex(next_stroke,rising,&new_stroke).z>0,"new stroke can build further");
+ // The target may be below the plane even at the edge: geometry support
+ // must still fade continuously rather than move to a hard cutoff.
+ const auto edge_near=clay_vertex(kernel,sample({.999,0,-.08}));
+ check(norm(edge_near)<1e-5,"smooth outer rim");
+ const auto deep_near=clay_vertex(kernel,sample({0,0,-p.max_depth+1e-5}));
+ check(norm(deep_near)<1e-6,"smooth depth cutoff");
+ const auto n=Vec3{std::sqrt(1.-.051*.051),0,.051};
+ check(norm(clay_vertex(kernel,sample({0,0,0},1.,n)))<1e-5,"smooth facing cutoff");
+ // Tilt of the live frame must not turn a previously deposited patch
+ // into a tall tangential extrusion.
+ auto tilted=prepare_clay({true,{0,0,0},unit({.7,0,1}),{0,1,0}},1.,.12,1.,1.,p);
+ auto tilt_motion=clay_vertex(tilted,center,&anchor);
+ check(tilt_motion.z>0&&std::abs(tilt_motion.x)<.4*tilt_motion.z,"original normal bias");
  FleshParams flesh;
  auto fk=prepare_flesh({0,0,0},{0,0,1},{.08,0,0},1.,1.,{},flesh);
  auto drag=flesh_vertex(fk,center);
