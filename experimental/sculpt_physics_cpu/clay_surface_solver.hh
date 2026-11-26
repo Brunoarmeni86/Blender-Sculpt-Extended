@@ -93,6 +93,7 @@ inline double progressive_press_depth_v26(double base,double cumulative_dose)
   return std::min(.25,base+.08*(1-std::exp(-3*std::max(0.0,cumulative_dose))));
 }
 struct ClaySurfaceResult {
+  int artistic_material_used=-1; // set only after a successful artistic target
   std::vector<Vec3> displacement;
   std::vector<double> projected_area;
   std::vector<double> tangent_weights_v31d6; // selected contact; zero for all fixed/removed candidates
