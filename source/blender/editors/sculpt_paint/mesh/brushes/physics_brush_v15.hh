@@ -952,7 +952,12 @@ inline bool try_apply(const Sculpt &sd,
           const double normal=(ax.x*v.x+ax.y*v.y+ax.z*v.z)/len;
           const int id=verts[i];
           const float old=plastic_writer.span[id];
-          const float next=float(sculpt_physics::update_compaction_v29(old,normal,plastic_dab->radius,plastic_dab->sign));
+          const int artistic_material=plastic_dab->artistic_compaction_material;
+          const float next=artistic_material>=0 && plastic_dab->sign>0?
+              float(sculpt_physics::artistic_v31d1110::compaction_after_write(
+                  static_cast<sculpt_physics::artistic_v31d1110::Material>(artistic_material),
+                  old,-normal,plastic_dab->radius,cache.xpbd_v16_clay_behavior==7?1.5:1.)):
+              float(sculpt_physics::update_compaction_v29(old,normal,plastic_dab->radius,plastic_dab->sign));
           if(next!=old){plastic_ids.append(id);plastic_before.append(old);plastic_after.append(next);}
         }
       }
@@ -1239,7 +1244,7 @@ inline bool d11_preview_target(
     // Reuse the existing V29 compaction attribute only if enabled; D11
     // deformation state is not persisted until an accepted-write adapter exists.
     for(std::size_t i=0;i<p.size();++i)
-      if(dab.plastic_v29)plastic[i].compaction=std::clamp(vertices[i].compaction_v29,0.,1.);
+      if(dab.plastic_v29 || dab.artistic_compaction_material>=0)plastic[i].compaction=std::clamp(vertices[i].compaction_v29,0.,1.);
     auto tool=dab.action==ClaySurfaceAction::Compact?h::Tool::Compact:
               dab.action==ClaySurfaceAction::Compress?h::Tool::Compress:h::Tool::Press;
     if(state.global!=global){state.distances=h::GeodesicCache{};state.global=global;}
@@ -1396,7 +1401,7 @@ inline sculpt_physics::ClaySurfaceResult plan_conservative_clay(
         (!attributes.mask.is_empty() && attributes.mask[vi]>=0.999f)) continue;
     const auto i=add_vertex(s.global_index);
     vertices[i].influence=s.envelope;
-    if(dab.plastic_v29 && plastic_attr)vertices[i].compaction_v29=(*plastic_attr)[vi];
+    if((dab.plastic_v29 || dab.artistic_compaction_material>=0) && plastic_attr)vertices[i].compaction_v29=(*plastic_attr)[vi];
     if(history && dab.dose>0 && dab.intensity>0){
       // Capture only the first eligible geometry, never requested or
       // unaccepted motion. Reference does not reset when a dab is clipped.
@@ -1852,6 +1857,15 @@ inline bool try_apply_intent(
       clay.plastic_v29=clay.stable_v28 && plastic_v29_requested() &&
           (action==5 || action==7 || action==8) &&
           bool(mesh.attributes().lookup<float>(".bse_plastic_compaction",bke::AttrDomain::Point));
+      // Reuse the pre-existing point attribute and native compaction Undo.
+      // No new attribute may be allocated inside a stroke.
+      const bool artistic_state=stroke_option_v31d5("BLENDER_SCULPT_D11_ARTISTIC") &&
+          stroke_option_v31d5("BLENDER_SCULPT_D11_PLASTIC") &&
+          bool(mesh.attributes().lookup<float>(".bse_plastic_compaction",bke::AttrDomain::Point));
+      if(artistic_state){
+        clay.artistic_compaction_material=std::clamp(int(brush.sculpt_physics_material),0,8);
+        if(action==5 || action==7 || action==8)clay.plastic_v29=true;
+      }
       if(clay.plastic_v29)plastic_dab=clay;
       const auto plan_start=std::chrono::steady_clock::now();
       std::shared_ptr<SurfaceContactHistoryV28> history;
