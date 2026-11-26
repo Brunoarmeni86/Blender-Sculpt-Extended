@@ -72,6 +72,7 @@ struct ClaySurfaceDab {
   bool refine_v28b=false; // gradual capacities and curvature-aware Melt
   bool swept_v29=false;
   bool plastic_v29=false;
+  int artistic_compaction_material=-1; // D11.13 read-only material state unless native writer opts in
   Vec3 sweep_start{};
   double melt_local_gravity_v27b=0.0; // opt-in object-local downhill
   bool has_tool_plane=false;
