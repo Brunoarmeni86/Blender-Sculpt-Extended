@@ -1,4 +1,4 @@
-#include "artistic_tool_v31d1110.hh"
+#include "artistic_geometry_v31d1110.hh"
 #include "artistic_stroke_v31d1111.hh"
 #include <cstdlib>
 #include <limits>
@@ -42,6 +42,16 @@ int main(){
  }
  auto stationary=integrate({0,1,.5,.5,.1});
  check(stationary.moving==0 && stationary.stationary==.5);
+ auto patch=h::make_patch({{0,0,0},{1,0,0},{0,1,0}},{{0,1,2}},{1,1,0});
+ for(int a=0;a<8;++a)for(int m=0;m<9;++m){
+  auto u=geometry_target(patch,static_cast<Action>(a),static_cast<Material>(m),
+    {.01,.01,0},{0,0,0},{1,0,1},{.3,.3,0},.01,1);
+  check(u.size()==3 && h::norm(u[2])==0);
+  for(auto v:u)check(std::isfinite(h::norm(v)));
+ }
+ auto u=geometry_target(patch,Action::Build,Material::FirmClay,
+    {.01,.01,0},{0,0,0},{1,0,1},{.3,.3,0},.01,1);
+ check(u[0].z>0);
  bool rejected=false;
  try{evaluate(Material::Mud,std::numeric_limits<double>::quiet_NaN(),0,1);}
  catch(const std::invalid_argument&){rejected=true;}
