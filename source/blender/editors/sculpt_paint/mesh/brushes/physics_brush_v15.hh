@@ -24,6 +24,7 @@
 #  include "tangential_transport_v31d6.hh"
 #  include "hybrid_foundation_v31d11.hh"
 #  include "artistic_csr_smooth_v31d1112.hh"
+#  include "artistic_relief_v31d1110.hh"
 #  include <cstring>
 
 #  include "BKE_mesh.hh"
@@ -1266,7 +1267,8 @@ inline bool d11_preview_target(
           const auto profile=a::profile(material);
           artistic[i]=patch.weight[i]>0?artistic[i]*(profile.deposit/(1.+profile.hardening*compaction[i])):sculpt_physics::Vec3{};
         }
-        artistic=h::optimize(patch,std::move(artistic));
+        artistic=a::spread_deposit(patch,std::move(artistic),material,dab.radius,dose,drive,
+            mode==D11PreviewMode::Adaptive?&state.distances:nullptr);
       }else if(dab.action==ClaySurfaceAction::Scrape){
         if(!state.artistic_plane_valid){
           state.artistic_plane=a::capture_plane(dab.center+h::unit(dab.axis)*
@@ -1274,16 +1276,15 @@ inline bool d11_preview_target(
           state.artistic_plane_valid=true;
         }
         artistic=a::scrape_plane(patch,state.artistic_plane,material,exposure,dab.radius,drive);
-      }else if(dab.action==ClaySurfaceAction::Melt){
-        // CPU CSR reference only; no native CUDA dispatch in this checkpoint.
-        auto work=a::pack_workset(patch,exposure);
-        artistic=h::optimize(patch,a::csr_smooth(work,material,dab.radius,drive,true));
-      }else if(dab.action==ClaySurfaceAction::Push || dab.action==ClaySurfaceAction::Smear ||
-               dab.action==ClaySurfaceAction::Gather){
-        const auto surface_action=dab.action==ClaySurfaceAction::Push?a::SurfaceAction::Push:
-            dab.action==ClaySurfaceAction::Smear?a::SurfaceAction::Smear:a::SurfaceAction::Gather;
-        artistic=a::surface_target(patch,surface_action,material,
-            a::capture_plane(dab.center,dab.axis),dab.center,dab.direction,exposure,dab.radius,drive);
+      }else if(dab.action==ClaySurfaceAction::Melt || dab.action==ClaySurfaceAction::Push ||
+               dab.action==ClaySurfaceAction::Smear || dab.action==ClaySurfaceAction::Gather){
+        const auto relief_action=dab.action==ClaySurfaceAction::Push?a::Action::Push:
+            dab.action==ClaySurfaceAction::Smear?a::Action::Smear:
+            dab.action==ClaySurfaceAction::Gather?a::Action::Gather:a::Action::Melt;
+        // Reuse the V30 paired finite-volume relief proxy. Tangential CSR
+        // smoothing remains a separate reference, not a substitute for Melt.
+        artistic=a::relief_target(patch,relief_action,material,dab.center,dab.direction,
+                                  h::unit(dab.axis),dab.radius,dose,drive);
       }else return false;
       for(std::size_t i=0;i<artistic.size();++i)
         if(!std::isfinite(h::norm(artistic[i])) ||
