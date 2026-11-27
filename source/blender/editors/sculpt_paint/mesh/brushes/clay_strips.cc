@@ -995,7 +995,10 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
         ss.cache->xpbd_v16_clay_behavior!=1 && ss.cache->xpbd_v16_clay_behavior!=4;
     const bool bulb=autonomous && physics_v15::clay_bulb_d14_requested(brush) &&
         physics_v15::live_surface_v30_brush(object,brush);
-    const bool bulb_swept=bulb && physics_v15::bulb_sweep_d14_active(*ss.cache,brush);
+    const bool continuous=autonomous && physics_v15::continuous_clay_d14_requested(brush) &&
+        physics_v15::live_surface_v30_brush(object,brush);
+    const bool continuous_swept=continuous && physics_v15::continuous_clay_sweep_d14_active(*ss.cache,brush);
+    const bool bulb_swept=bulb && (physics_v15::bulb_sweep_d14_active(*ss.cache,brush)||continuous_swept);
     const float3 bulb_axis=bulb?math::normalize(plane_normal):float3(0.f);
     const bool footprint=autonomous && physics_v15::footprint_v30e_brush(object,brush);
     const bool audit=footprint && physics_v15::profile_v26b_requested();
@@ -1026,7 +1029,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
         }
       }
       else {
-        if(autonomous && physics_v15::clay_sweep_d13_active(*ss.cache,brush)){
+        if(autonomous && (continuous_swept || physics_v15::clay_sweep_d13_active(*ss.cache,brush))){
           const float2 a=math::transform_point(mat,ss.cache->xpbd_v17_last_center).xy()-
                          math::transform_point(mat,ss.cache->location_symm).xy();
           const float den=math::dot(a,a);

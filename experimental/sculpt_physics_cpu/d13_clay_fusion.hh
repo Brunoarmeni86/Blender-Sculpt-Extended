@@ -12,9 +12,11 @@ using Edge=std::array<std::size_t,2>;
 // Contact topology and actual lumped triangle areas supplied by native host.
 // Retain one connected, oriented eligible component seeded at the live hit.
 inline std::vector<unsigned char> contact(const std::vector<PhysicalBrushIntentSample>& s,
- const std::vector<Edge>& edges,Vec3 center,Vec3 axis,double radius,double travel)
+ const std::vector<Edge>& edges,Vec3 center,Vec3 axis,double radius,double travel,
+ std::vector<double>* soft_weights=nullptr)
 {
  const auto n=s.size();std::vector<unsigned char> ok(n),selected(n);
+ if(soft_weights)soft_weights->assign(n,0.);
  std::vector<std::vector<std::size_t>> adj(n);
  if(!d::finite(center)||!d::finite(axis)||!std::isfinite(radius)||radius<=0||
     !std::isfinite(travel)||travel<0)return selected;
@@ -49,6 +51,15 @@ inline std::vector<unsigned char> contact(const std::vector<PhysicalBrushIntentS
   const auto [length,i]=queue.top();queue.pop();
   if(length!=distance[i])continue;
   selected[i]=1;
+  if(soft_weights){
+   const auto q=s[i].position-center;
+   const auto taper=[](double t){
+    t=std::clamp(t,0.,1.);return t*t*t*(10.+t*(-15.+6.*t));
+   };
+   (*soft_weights)[i]=taper((reach-length)/(.25*radius))*
+      taper((.55*radius-std::abs(d::dot(q,axis)))/(.15*radius))*
+      taper((d::dot(d::unit_normal(s[i].surface_normal),axis)-.05)/.35);
+  }
   for(auto j:adj[i]){
    const double candidate=length+d::norm(s[i].position-s[j].position);
    if(candidate<=reach&&candidate<distance[j]){

@@ -30,6 +30,7 @@
 #  include "d13_clay_fusion.hh"
 #  include "d14_clay_bulb.hh"
 #  include "d14_adaptive_median_fusion.hh"
+#  include "d14_continuous_fusion.hh"
 #  include "d12_flesh_engine.hh"
 #  ifdef WITH_SCULPT_WARP_CUDA
 #    include "warp_cuda_backend.hh"
@@ -290,6 +291,24 @@ inline bool bulb_sweep_d14_active(const StrokeCache &cache,const Brush &brush)
   if(!clay_bulb_d14_requested(brush)||!cache.xpbd_v17_intent_started||cache.xpbd_v15_failed||
      cache.reference_symmetry||cache.reference_combined||cache.tile_pass!=0||
      cache.radial_symmetry_pass!=0||cache.mirror_symmetry_pass!=0)return false;
+  const double distance=math::length(cache.location_symm-cache.xpbd_v17_last_center);
+  return std::isfinite(distance)&&cache.radius>0&&distance>1e-12&&distance<=1.5*cache.radius;
+}
+inline bool continuous_clay_d14_requested(const Brush &brush)
+{
+  return stroke_option_v31d5("BLENDER_SCULPT_D14_CONTINUOUS_FUSION") &&
+      dedicated_engine_requested(brush) && brush.sculpt_physics_mode==3 &&
+      brush.sculpt_physics_assist>0 && brush.stroke_method==BRUSH_STROKE_SPACE &&
+      (brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY ||
+       brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY_STRIPS) &&
+      (effective_action(brush)==1 || effective_action(brush)==4) &&
+      (effective_material(brush)==0 || effective_material(brush)==1);
+}
+inline bool continuous_clay_sweep_d14_active(const StrokeCache &cache,const Brush &brush)
+{
+  if(!continuous_clay_d14_requested(brush)||!cache.xpbd_v17_intent_started||
+     cache.xpbd_v15_failed||cache.reference_symmetry||cache.reference_combined||
+     cache.tile_pass!=0||cache.radial_symmetry_pass!=0||cache.mirror_symmetry_pass!=0)return false;
   const double distance=math::length(cache.location_symm-cache.xpbd_v17_last_center);
   return std::isfinite(distance)&&cache.radius>0&&distance>1e-12&&distance<=1.5*cache.radius;
 }
@@ -1787,12 +1806,18 @@ inline bool try_apply_intent(
         d::Frame next_frame=state->d12_clay_frame;
         d::FleshState next_flesh=state->d12_flesh_state;
         const bool bulb=clay_tool && clay_bulb_d14_requested(brush);
+        const bool continuous_enabled=clay_tool && sign>0 && continuous_clay_d14_requested(brush);
+        std::vector<double> diagnostic_area;
+        double proposed_axial=0.;
+        bool report_continuous=false;
         if(clay_tool){
           namespace fusion=sculpt_physics::dedicated_d13::clay_fusion;
           namespace bulb_engine=sculpt_physics::dedicated_d14::bulb;
           namespace median_engine=sculpt_physics::dedicated_d14::median_fusion;
+          namespace continuous_engine=sculpt_physics::dedicated_d14::continuous_fusion;
+          namespace additive=sculpt_physics::dedicated_d14::continuous_clay;
           const bool median_enabled=sign>0 && stroke_option_v31d5("BLENDER_SCULPT_D14_MEDIAN_FUSION");
-          const bool fusion_enabled=sign>0 && (median_enabled || bulb || stroke_option_v31d5("BLENDER_SCULPT_D13_CLAY_FUSION"));
+          const bool fusion_enabled=sign>0 && (continuous_enabled || median_enabled || bulb || stroke_option_v31d5("BLENDER_SCULPT_D13_CLAY_FUSION"));
           const bool thin_enabled=stroke_option_v31d5("BLENDER_SCULPT_D13_THIN_CONTACT");
           std::vector<fusion::Edge> local_edges;
           std::vector<double> local_area;
@@ -1831,9 +1856,13 @@ inline bool try_apply_intent(
             std::sort(local_edges.begin(),local_edges.end());
             local_edges.erase(std::unique(local_edges.begin(),local_edges.end()),local_edges.end());
             if(thin_enabled){
+              std::vector<double> soft;
               const auto keep=fusion::contact(samples,local_edges,intent.center,convert(normal),radius,
-                                               std::min(travel,1.5)*radius);
-              for(std::size_t i=0;i<samples.size();++i)if(!keep[i])samples[i].envelope=0.;
+                                               std::min(travel,1.5)*radius,continuous_enabled?&soft:nullptr);
+              for(std::size_t i=0;i<samples.size();++i){
+                if(!keep[i])samples[i].envelope=0.;
+                else if(continuous_enabled)samples[i].envelope*=soft[i];
+              }
             }
           }
           d::ClayParams params;
@@ -1849,13 +1878,21 @@ inline bool try_apply_intent(
           const auto tangent=motion-next_frame.axis*d::dot(motion,next_frame.axis);
           const bool swept=clay_sweep_d13_active(cache,brush);
           const bool bulb_swept=bulb && bulb_sweep_d14_active(cache,brush);
+          const bool continuous_swept=continuous_enabled && continuous_clay_sweep_d14_active(cache,brush);
           dose=cache.xpbd_v17_intent_started?(travel<=1.5?
-              std::min((swept||bulb_swept)?1.5:.25,d::norm(tangent)/radius):0.):.06;
+              std::min((swept||bulb_swept||continuous_swept)?1.5:.25,d::norm(tangent)/radius):0.):
+              (continuous_enabled?.03:.06);
           const auto kernel=d::prepare_clay(next_frame,radius,dose,intensity,sign,params);
           bulb_engine::Kernel bulb_kernel{
               bulb_swept?convert(cache.xpbd_v17_last_center):intent.center,
               intent.center,next_frame.axis,radius,dose,intensity,sign};
           if(bulb && cache.xpbd_v17_intent_started && !bulb_swept)bulb_kernel.dose=0.;
+          additive::Kernel additive_kernel{
+              continuous_swept?convert(cache.xpbd_v17_last_center):intent.center,
+              intent.center,next_frame.axis,next_frame.tangent,radius,dose,intensity,
+              (bulb||kind==NativeSculptBrushKind::Clay)?1.:params.roundness,bulb?.27:.22};
+          if(continuous_enabled && cache.xpbd_v17_intent_started && !continuous_swept)
+            additive_kernel.dose=0.;
           std::vector<Vec3> fusion_motion;
           std::vector<double> headroom;
           if(fusion_enabled){fusion_motion.resize(samples.size());headroom.resize(samples.size());}
@@ -1864,13 +1901,17 @@ inline bool try_apply_intent(
             if(!d::valid_sample(sample))continue;
             const auto ref=state->d12_clay_reference.try_emplace(sample.global_index,
                 d::ClayReference{sample.position,sample.surface_normal,radius}).first;
-            const auto displacement=bulb?bulb_engine::deposit(bulb_kernel,sample,ref->second):
+            const auto displacement=continuous_enabled?additive::deposit(additive_kernel,sample):
+                bulb?bulb_engine::deposit(bulb_kernel,sample,ref->second):
                 swept?d::swept_clay_vertex(kernel,sample,tangent,&ref->second):
                       d::clay_vertex(kernel,sample,&ref->second);
             if(fusion_enabled){
               fusion_motion[i]=displacement;
               const double cap=(bulb?bulb_kernel.stroke_height:kernel.stroke_height)*std::min(radius,ref->second.radius);
-              headroom[i]=std::max(0.,cap-d::norm(sample.position-ref->second.position)-d::norm(displacement));
+              // V2 has a per-dab correction budget, not a uniform stroke
+              // ceiling. Geometry guards remain authoritative after planning.
+              headroom[i]=continuous_enabled?.06*radius*sample.envelope:
+                  std::max(0.,cap-d::norm(sample.position-ref->second.position)-d::norm(displacement));
             }else if(d::norm2(displacement)>1e-30)goals.push_back({sample.global_index,displacement});
           }
           if(fusion_enabled){
@@ -1885,7 +1926,14 @@ inline bool try_apply_intent(
             median_engine::Statistics median_stats;
             median_engine::Settings median_settings;
             median_settings.radius=radius;median_settings.axis=next_frame.axis;
-            const bool fused=median_enabled?
+            continuous_engine::Stats continuous_stats;
+            if(continuous_enabled){
+              median_settings.mobility=.85;median_settings.old_limit=.035;median_settings.relaxation=.75;
+            }
+            const bool fused=continuous_enabled?
+                continuous_engine::apply(median_settings,samples,local_edges,local_area,headroom,
+                                     fusion_motion,state->artistic_flux.get(),&continuous_stats):
+                median_enabled?
                 median_engine::apply(median_settings,samples,local_edges,local_area,headroom,
                                      fusion_motion,state->artistic_flux.get(),&median_stats):
                 bulb?bulb_engine::fuse(bulb_kernel,samples,local_edges,local_area,headroom,
@@ -1895,7 +1943,19 @@ inline bool try_apply_intent(
             if(!fused)throw std::runtime_error("Clay fusion invalid patch");
             for(std::size_t i=0;i<samples.size();++i)if(d::norm2(fusion_motion[i])>1e-30)
               goals.push_back({samples[i].global_index,fusion_motion[i]});
-            if(state->d12_dabs%32==0 || profile_v26b_requested()){
+            if(continuous_enabled){
+              report_continuous=state->d12_dabs%32==0 || profile_v26b_requested() ||
+                  stroke_option_v31d5("BLENDER_SCULPT_D14_FUSION_DIAG");
+              if(report_continuous){
+                for(std::size_t i=0;i<samples.size();++i)
+                  proposed_axial+=local_area[i]*d::dot(fusion_motion[i],next_frame.axis);
+                diagnostic_area=std::move(local_area);
+                std::fprintf(stderr,"[D14 Continuous Fusion] asset=%s gpu_any=%d links=%zu collar=%zu old_donors=%zu old_mobilized=%.9g balance=%.9g dose=%.6g\n",
+                  brush.id.name+2,int(continuous_stats.gpu),continuous_stats.links,
+                  continuous_stats.collar_writes,continuous_stats.old_donors,
+                  continuous_stats.old_mobilized,continuous_stats.balance,additive_kernel.dose);
+              }
+            }else if(state->d12_dabs%32==0 || profile_v26b_requested()){
               if(median_enabled)std::fprintf(stderr,"[D14 Median Fusion] asset=%s backend=%s links=%zu goals=%zu transferred=%.9g old_donors=%zu old_mobilized=%.9g balance=%.9g\n",
                   brush.id.name+2,median_stats.gpu?"CUDA":"CPU",median_stats.links,goals.size(),
                   median_stats.transferred,median_stats.old_donors,median_stats.old_mobilized,median_stats.axial_balance);
@@ -1919,6 +1979,14 @@ inline bool try_apply_intent(
             std::chrono::steady_clock::now()-started).count();
         const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,true,nullptr,true);
         if(handled&&!cache.xpbd_v15_failed){
+          if(report_continuous){
+            double accepted=0.;
+            for(std::size_t i=0;i<samples.size();++i)if(diagnostic_area[i]>0.)
+              accepted+=diagnostic_area[i]*d::dot(convert(position_data.eval[int(samples[i].global_index)])-
+                  samples[i].position,next_frame.axis);
+            std::fprintf(stderr,"[D14 Continuous write] proposed_axial=%.9g accepted_axial=%.9g\n",
+                         proposed_axial,accepted);
+          }
           state->d12_clay_frame=next_frame;
           state->d12_flesh_state=next_flesh;
           cache.xpbd_v31d11_preview=state;
