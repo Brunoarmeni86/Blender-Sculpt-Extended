@@ -107,4 +107,4 @@ if ($LASTEXITCODE -ne 0) { throw "Blender version smoke failed." }
 if ($LASTEXITCODE -ne 0) { throw "D12 asset generation failed." }
 Write-Host "[D12] Install: $InstallDirectory"
 Write-Host "[D12] Assets:  $AssetDirectory"
-Write-Host "Select NVIDIA Warp Smooth > Very Strong in Sculpt settings. First test ordinary Mesh, symmetry off, Preserve Shape off."
+Write-Host "Compare NVIDIA Warp Smooth > Very Strong (original A3) and Very Strong Multiscale (D12). First test ordinary Mesh, symmetry off, Preserve Shape off."
