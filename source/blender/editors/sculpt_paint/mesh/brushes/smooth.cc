@@ -1263,6 +1263,9 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
   const OffsetIndices faces = mesh.faces();
   const Span<int> corner_verts = mesh.corner_verts();
   const GroupedSpan<int> vert_to_face_map = mesh.vert_to_face_map();
+  const char *c9_flag=std::getenv("BLENDER_SCULPT_D15_GPU_PRESERVE");
+  const bool c9_requested=c9_flag&&STREQ(c9_flag,"1");
+  bool c9_publish_started=false;
 
   try {
     auto session = std::static_pointer_cast<sculpt_physics::StrokeSolverSession>(
@@ -1452,6 +1455,15 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
     }
 
     Vector<float3> translations;
+    // C9: collect the exact legacy GPU displacements (including native
+    // Preserve Shape and clipping) before any publication. Attribute
+    // preservation may change corner UVs, never the accepted displacement.
+    const bool c9=c9_requested&&dedicated_gpu&&
+        smooth_mode==sculpt_physics::SmoothSolverMode::DenseStrong;
+    struct C9Batch {int node;Vector<float3> motion;};
+    std::vector<C9Batch> c9_batches;
+    std::unordered_map<std::size_t,float3> c9_changes;
+    if(c9)c9_changes.reserve(active_region.size());
     std::vector<unsigned char> written(active_region.size(),0);
     std::vector<std::size_t> correction_ids;
     std::vector<sculpt_physics::Vec3> correction_positions;
@@ -1488,9 +1500,112 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
       clip_and_lock_translations(sd, ss, position_data.eval, verts, translations);
       for(const int i:verts.index_range())if(math::is_zero(before_clip[i]))
         translations[i]=float3(0.f);
-      position_data.deform(translations, verts);
-      bke::pbvh::update_node_bounds_mesh(position_data.eval, nodes[node_i]);
+      if(c9){
+        for(const int i:verts.index_range()){
+          const auto v=translations[i];
+          if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))
+            throw std::runtime_error("C9 nonfinite GPU displacement");
+          if(!math::is_zero(v))c9_changes.emplace(std::size_t(verts[i]),v);
+        }
+        c9_batches.push_back({node_i,translations});
+      }else{
+        position_data.deform(translations, verts);
+        bke::pbvh::update_node_bounds_mesh(position_data.eval, nodes[node_i]);
+      }
     });
+    if(c9){
+      Vector<undo::UVCornerProposalD15> proposals;
+      std::unique_ptr<FeatureUVPublishD15> uv_writer;
+      IndexMaskMemory uv_memory;
+      IndexMask uv_nodes;
+      std::size_t material_vertices=0;
+      const char *material_reason=nullptr;
+      // Do not extend the C5 corner Undo scope by assumption. Outside it,
+      // keep original UVs and run the already supported GPU geometry path.
+      const bool scope=!cache.reference_symmetry&&!cache.reference_combined&&
+          cache.mirror_symmetry_pass==0&&stroke_symmetry_xyz_get(object)==PAINT_SYMM_NONE&&
+          mesh.radial_symmetry[0]==1&&mesh.radial_symmetry[1]==1&&mesh.radial_symmetry[2]==1&&
+          (sd.paint.symmetry_flags&(PAINT_TILE_X|PAINT_TILE_Y|PAINT_TILE_Z))==0;
+      if(!scope)material_reason="unsupported_uv_scope";
+      else if(c9_changes.empty())material_reason="no_motion";
+      else if(mesh.uv_map_names().is_empty())material_reason="no_uv_maps";
+      else{
+        // A failed attribute correspondence must never carve a stationary
+        // island into the smoothing result. Drop only the UV proposals of
+        // that vertex (all maps/wedges), not its geometric displacement.
+        // This is explicit material transport, not successful reprojection.
+        std::vector<std::size_t> rejected;
+        if(!feature_uv_probe_d15(mesh,position_data.eval,normals,c9_changes,
+                                 &proposals,&rejected,true,true)){
+          material_reason="projection_preflight";
+        }else{
+          const auto cv=mesh.corner_verts();
+          constexpr int max_uv_rounds=6;
+          bool ready=false;
+          std::sort(rejected.begin(),rejected.end());
+          rejected.erase(std::unique(rejected.begin(),rejected.end()),rejected.end());
+          material_vertices=rejected.size();
+          for(int round=0;round<max_uv_rounds;++round){
+            Vector<undo::UVCornerProposalD15> filtered;
+            for(const auto &q:proposals){
+              if(q.corner<0||q.corner>=cv.size())
+                throw std::runtime_error("C9 invalid proposed corner");
+              if(!std::binary_search(rejected.begin(),rejected.end(),std::size_t(cv[q.corner])))
+                filtered.append(q);
+            }
+            proposals=std::move(filtered);
+            if(proposals.is_empty()){ready=true;break;}
+            std::vector<std::size_t> bad;
+            auto writer=std::make_unique<FeatureUVPublishD15>();
+            if(!writer->prepare(mesh,proposals.as_span(),c9_changes,bad)){
+              material_reason="writer_preflight";break;
+            }
+            if(bad.empty()){
+              uv_writer=std::move(writer);ready=true;break;
+            }
+            // Revalidate all remaining UV triangles after removing these
+            // corners. Geometry is identical in every iteration.
+            rejected.insert(rejected.end(),bad.begin(),bad.end());
+            std::sort(rejected.begin(),rejected.end());
+            rejected.erase(std::unique(rejected.begin(),rejected.end()),rejected.end());
+            material_vertices=rejected.size();
+          }
+          if(!ready&&!material_reason)material_reason="uv_guard_budget";
+        }
+      }
+      if(uv_writer&&!material_reason){
+        for(const auto &batch:c9_batches){
+          if(!orig_position_data_lookup_mesh(object,nodes[batch.node])){
+            material_reason="position_undo_node";break;
+          }
+        }
+        if(!material_reason){
+          uv_nodes=bke::pbvh::all_leaf_nodes(pbvh,uv_memory);
+          if(!undo::capture_uv_corners_d15(object,proposals.as_span()))
+            material_reason="uv_undo_capture";
+        }
+      }
+      if(material_reason){
+        uv_writer.reset();
+        proposals.clear();
+        material_vertices=c9_changes.size();
+      }
+      // The exact same displacements as legacy A3 are authoritative.
+      // No allocation-dependent staging or fallback after journal capture.
+      c9_publish_started=true;
+      for(auto &batch:c9_batches){
+        position_data.deform(batch.motion,nodes[batch.node].verts());
+      }
+      if(uv_writer)uv_writer->write_values();
+      for(const auto &batch:c9_batches)
+        bke::pbvh::update_node_bounds_mesh(position_data.eval,nodes[batch.node]);
+      if(uv_writer)uv_writer->finish(pbvh,uv_nodes);
+      std::fprintf(stderr,"[D15 C9 GPU Preserve] active=%zu moved=%zu uv_corners=%lld material_vertices=%zu reason=%s\n",
+                   active_region.size(),c9_changes.size(),static_cast<long long>(proposals.size()),
+                   material_vertices,material_reason?material_reason:"local_transport");
+    }else if(c9_requested){
+      std::fprintf(stderr,"[D15 C9 GPU Preserve] inactive: requires dedicated DenseStrong GPU\n");
+    }
     pbvh.tag_positions_changed(node_mask);
     pbvh.flush_bounds_to_parents();
     // Published geometry is authoritative. Never run fallback after write.
@@ -1520,6 +1635,14 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
     return true;
   }
   catch (const std::exception &error) {
+    if(c9_publish_started){
+      // A failure after publication cannot authorize a second Smooth.
+      std::fprintf(stderr,"[D15 C9] publication error; no second deformation: %s\n",error.what());
+      cache.physical_solver_session.reset();
+      pbvh.tag_positions_changed(node_mask);
+      pbvh.flush_bounds_to_parents();
+      return true;
+    }
     std::fprintf(stderr, "[GPU Smooth A1] fallback to standard Smooth: %s\n", error.what());
     cache.physical_solver_session.reset();
     return false;
