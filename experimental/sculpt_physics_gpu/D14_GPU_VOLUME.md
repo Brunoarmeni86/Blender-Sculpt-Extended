@@ -8,3 +8,5 @@ Review of preceding D13: fixed intrinsically unbounded connected-contact propaga
 
 ## Numerical review follow-up
 V21 and Warp G2P now extrapolate the particle PIC velocity into zero-mass grid nodes for gradient evaluation. Constant translation should induce zero strain even on a grid-aligned free boundary. This changes the reference numerics deliberately, not APIC. Warp PBF checks the hash-coordinate range before building the grid; invalid tentative positions retain the prior valid value and set the error flag. Added float32 domain validation and explicit CPU-vs-CUDA comparisons in the smoke script. CPU-vs-CUDA Warp comparison is distinct from C++ oracle parity. Still unexecuted here.
+
+Added independent C++ V21 free-boundary regression in test_volume_v25. A failed dedicated Smooth CUDA trial now discards the GPU session and invokes native fallback rather than running Jacobi on possibly partially modified buffers. Intentional behavior change: old A3-missing-package Jacobi compatibility path no longer runs; explicit Physical Relax keeps its Jacobi path. No execution claimed.

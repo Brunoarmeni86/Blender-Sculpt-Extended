@@ -71,6 +71,16 @@ int main(){
   MaterialPointSettingsV21 material;material.floor_enabled=true;material.floor_z=0;
   const auto solid=step_material_points_v21({particle},material);
   assert(solid.particles[0].position.z>=0);
+  // A particle exactly on a grid node has zero-mass neighboring nodes.
+  // Uniform translation must not create artificial stress or volume change.
+  MaterialPointV21 aligned;aligned.position={0,0,0};aligned.velocity={.2,.3,.4};
+  MaterialPointSettingsV21 free_boundary;free_boundary.dt=.001;
+  const auto translated=step_material_points_v21({aligned},free_boundary);
+  const auto &moved=translated.particles.front();
+  assert(std::abs(moved.volume-aligned.volume)<1e-12);
+  for(const auto &row:moved.deviator)for(double value:row)assert(std::abs(value)<1e-12);
+  assert(std::abs(translated.mass-translated.grid_mass)<1e-12);
+  assert(std::abs(moved.position.z-.0004)<1e-12);
   mesh.triangles.pop_back();
   bool rejected=false;
   try{seed_volume_v25(mesh,.25);}catch(const std::invalid_argument&){rejected=true;}
