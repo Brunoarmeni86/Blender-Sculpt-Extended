@@ -445,3 +445,7 @@ add_test(NAME sculpt_d13_reference_primitives_tests COMMAND test_d13_reference_p
 add_executable(test_d13_smooth_recovery test_d13_smooth_recovery.cc)
 target_compile_features(test_d13_smooth_recovery PRIVATE cxx_std_17)
 add_test(NAME sculpt_d13_smooth_recovery_tests COMMAND test_d13_smooth_recovery)
+
+add_executable(test_d13_multiscale_flatten test_d13_multiscale_flatten.cc)
+target_compile_features(test_d13_multiscale_flatten PRIVATE cxx_std_17)
+add_test(NAME sculpt_d13_multiscale_flatten_tests COMMAND test_d13_multiscale_flatten)

@@ -45,6 +45,7 @@
 #ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
 #  include "brush_solver_backend.hh"
 #  include "d12_smooth_multiscale.hh"
+#  include "d13_multiscale_flatten.hh"
 #  include "BKE_multires_sculpt_layers.hh"
 #endif
 
@@ -192,6 +193,13 @@ static bool gpu_smooth_requested()
   const char *enabled=std::getenv("BLENDER_SCULPT_GPU_SMOOTH_A1");
   return enabled && enabled[0]=='1' && enabled[1]=='\0';
 }
+static bool flatten_d13_requested()
+{
+  const char *mode=std::getenv("BLENDER_SCULPT_GPU_SMOOTH_MODE");
+  return gpu_smooth_requested() && mode &&
+         (STREQ(mode,"flatten") ||
+          (STREQ(mode,"multiscale") && std::getenv("BLENDER_SCULPT_D13_FLATTEN")));
+}
 static bool multiscale_smooth_requested()
 {
   const char *mode=std::getenv("BLENDER_SCULPT_GPU_SMOOTH_MODE");
@@ -206,8 +214,18 @@ static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
     const Sculpt &sd,const Brush &brush,Object &object,const IndexMask &node_mask,
     const float brush_strength)
 {
-  if(!multiscale_smooth_requested())return false;
+  const bool flatten=flatten_d13_requested();
+  if(!multiscale_smooth_requested()&&!flatten)return false;
   namespace ms=sculpt_physics::dedicated_d12::smooth_multiscale;
+  namespace flat=sculpt_physics::dedicated_d13::flatten;
+  flat::Params flatten_params;
+  if(flatten){
+    flatten_params.mode=flat::parse(std::getenv("BLENDER_SCULPT_D13_FLATTEN"));
+    if(flatten_params.mode==flat::Mode::Invalid ||
+       !flat::number(std::getenv("BLENDER_SCULPT_D13_FLATTEN_MIX"),flatten_params.plane_mix,0.,1.) ||
+       !flat::number(std::getenv("BLENDER_SCULPT_D13_FLATTEN_OFFSET"),flatten_params.offset,-.25,.25))
+      return false;
+  }
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
   bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
@@ -314,6 +332,11 @@ static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
         ms::validate(chart,displacement);
     if(!gpu)displacement=ms::cpu(chart);
     if(!ms::validate(chart,displacement))return false;
+    if(flatten){
+      std::vector<double> result;
+      if(!flat::evaluate(chart,displacement,flatten_params,result))return false;
+      displacement=std::move(result);
+    }
     // Stage exact native clipped motion before checking local triangles.
     std::unordered_map<std::size_t,float3> changes;
     changes.reserve(active);
@@ -368,6 +391,9 @@ static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
       gpu?"Warp CUDA":"CPU multiscale",active,guard_scale,
       std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),
       brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE?" preserve-shape":"");
+  if(flatten && std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
+    std::fprintf(stderr,"[D13 Flatten] mode=%s base=%s guard=%.4f\n",
+                 flat::name(flatten_params.mode),gpu?"CUDA":"CPU",guard_scale);
   return true;
 }
 
@@ -979,6 +1005,13 @@ void do_smooth_brush(const Depsgraph &depsgraph,
   if(gpu_selected){
     if(try_smooth_multiscale_d12(depsgraph,sd,brush,object,node_mask,brush_strength)){
       pbvh.update_bounds(depsgraph,object);return;
+    }
+    if(flatten_d13_requested()){
+      // A flatten rejection is not permission to run a different tool.
+      static thread_local unsigned int flatten_rejects=0;
+      if(flatten_rejects++%32==0 || std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
+        std::fprintf(stderr,"[D13 Flatten] unsupported chart or configuration; no write\n");
+      return;
     }
     if(multiscale_smooth_requested()){
       static thread_local unsigned int rejects=0;
