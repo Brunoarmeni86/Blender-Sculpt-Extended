@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later */
 
 #include <queue>
-#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#if defined(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL) && !defined(BSE_VOLUMETRIC_ONLY)
 #  include <algorithm>
 #  include <cmath>
 #  include <cstdio>
@@ -29,7 +29,7 @@
 
 #include "BKE_attribute.hh"
 #include "BKE_mesh.hh"
-#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#if defined(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL) && !defined(BSE_VOLUMETRIC_ONLY)
 #  include "BKE_multires_sculpt_layers.hh"
 #endif
 #include "BKE_object_types.hh"
@@ -182,7 +182,7 @@ static void calc_bmesh(const Depsgraph &depsgraph,
   apply_translations(translations, verts);
 }
 
-#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#if defined(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL) && !defined(BSE_VOLUMETRIC_ONLY)
 /* V13: deliberately conservative persistent native-scene integration.
  * Runtime OFF by default, normal PBVH Mesh only. The physics proxy is
  * constructed once per Blender stroke and released with StrokeCache.
@@ -787,7 +787,7 @@ void do_grab_brush(const Depsgraph &depsgraph,
 
   const float3 grab_delta = grab_delta_get(brush, *ss.cache) * ss.cache->bstrength;
 
-#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#if defined(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL) && !defined(BSE_VOLUMETRIC_ONLY)
 #  ifdef WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14
   const char *v14 = std::getenv("BLENDER_SCULPT_XPBD_GRAB_EXECUTOR_V14");
   if (v14 && v14[0] == '1' && v14[1] == '\0') {

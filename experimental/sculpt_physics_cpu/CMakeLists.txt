@@ -438,9 +438,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 add_test(NAME sculpt_d12_smooth_multiscale_tests COMMAND test_d12_smooth_multiscale)
 
-add_executable(test_d13_reference_primitives test_d13_reference_primitives.cc)
-target_compile_features(test_d13_reference_primitives PRIVATE cxx_std_17)
-add_test(NAME sculpt_d13_reference_primitives_tests COMMAND test_d13_reference_primitives)
 
 add_executable(test_d13_smooth_recovery test_d13_smooth_recovery.cc)
 target_compile_features(test_d13_smooth_recovery PRIVATE cxx_std_17)
@@ -450,19 +447,6 @@ add_executable(test_d13_multiscale_flatten test_d13_multiscale_flatten.cc)
 target_compile_features(test_d13_multiscale_flatten PRIVATE cxx_std_17)
 add_test(NAME sculpt_d13_multiscale_flatten_tests COMMAND test_d13_multiscale_flatten)
 
-add_executable(test_d13_combined test_d13_combined.cc)
-target_compile_features(test_d13_combined PRIVATE cxx_std_17)
-target_link_libraries(test_d13_combined PRIVATE sculpt_physics_reference)
-add_test(NAME sculpt_d13_combined_tests COMMAND test_d13_combined)
 
-add_executable(test_d14_clay_bulb test_d14_clay_bulb.cc)
-target_link_libraries(test_d14_clay_bulb PRIVATE sculpt_physics_reference)
-add_test(NAME sculpt_d14_clay_bulb_tests COMMAND test_d14_clay_bulb)
 
-add_executable(test_d14_adaptive_median_fusion test_d14_adaptive_median_fusion.cc)
-target_link_libraries(test_d14_adaptive_median_fusion PRIVATE sculpt_physics_reference)
-add_test(NAME sculpt_d14_adaptive_median_fusion_tests COMMAND test_d14_adaptive_median_fusion)
 
-add_executable(test_d14_continuous_fusion test_d14_continuous_fusion.cc)
-target_link_libraries(test_d14_continuous_fusion PRIVATE sculpt_physics_reference)
-add_test(NAME sculpt_d14_continuous_fusion_tests COMMAND test_d14_continuous_fusion)

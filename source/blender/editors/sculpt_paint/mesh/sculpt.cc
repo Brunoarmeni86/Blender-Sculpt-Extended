@@ -5574,21 +5574,7 @@ static void do_brush_action(const Depsgraph &depsgraph,
   // plus the tangent length of the preceding short swept segment.
   // sqrt(1 + .65^2) < 1.20: triangle inequality gives a conservative
   // bound regardless of the normal used for the later exact footprint.
-  if((brushes::physics_v15::clay_bulb_d14_requested(brush) ||
-      brushes::physics_v15::continuous_clay_d14_requested(brush)) &&
-     brushes::physics_v15::live_surface_v30_brush(ob,brush)){
-    const float3 b=ss.cache->location_symm;
-    const float3 a=(brushes::physics_v15::bulb_sweep_d14_active(*ss.cache,brush) ||
-        brushes::physics_v15::continuous_clay_sweep_d14_active(*ss.cache,brush))?
-        ss.cache->xpbd_v17_last_center:b;
-    // Conservative envelope of the projected disk and .55R depth, plus
-    // half the swept segment. Native mask/Undo covers every candidate.
-    const float bound=brushes::physics_v15::continuous_clay_d14_requested(brush)?1.65f:1.25f;
-    const float r=bound*ss.cache->radius+math::length(b-a)*.5f;
-    const auto extra=gather_nodes(*bke::object::pbvh_get(ob),PAINT_FALLOFF_SHAPE_SPHERE,
-                                  false,(a+b)*.5f,r*r,std::nullopt,memory);
-    cursor_sample_result.node_mask=IndexMask::from_union(cursor_sample_result.node_mask,extra,memory);
-  }else if(brushes::physics_v15::footprint_v30e_brush(ob,brush)){
+  if(brushes::physics_v15::footprint_v30e_brush(ob,brush)){
     const float segment=brushes::physics_v15::swept_v29_active(*ss.cache,brush)?
         math::length(ss.cache->location_symm-ss.cache->xpbd_v17_last_center):0.0f;
     const bool adaptive=brushes::physics_v15::adaptive_v31_requested() &&
@@ -5609,10 +5595,9 @@ static void do_brush_action(const Depsgraph &depsgraph,
       bke::object::pbvh_get(ob)->type()==bke::pbvh::Type::Mesh &&
       !ss.deform_modifiers_active && !ss.shapekey_active &&
       bke::multires_layers::base_modifier(ob)==nullptr &&
-      (brushes::physics_v15::swept_v29_active(*ss.cache,brush) ||
-       brushes::physics_v15::clay_sweep_d13_active(*ss.cache,brush))){
+      brushes::physics_v15::swept_v29_active(*ss.cache,brush)){
     const float3 a=ss.cache->xpbd_v17_last_center,b=ss.cache->location_symm;
-    const float r=ss.cache->radius*(brushes::physics_v15::clay_sweep_d13_active(*ss.cache,brush)?1.6f:1.f)+math::length(b-a)*.5f;
+    const float r=ss.cache->radius+math::length(b-a)*.5f;
     const IndexMask swept=gather_nodes(*bke::object::pbvh_get(ob),PAINT_FALLOFF_SHAPE_SPHERE,
                                       false,(a+b)*.5f,r*r,std::nullopt,memory);
     cursor_sample_result.node_mask=IndexMask::from_union(cursor_sample_result.node_mask,swept,memory);

@@ -27,10 +27,6 @@
 #  include "artistic_relief_v31d1110.hh"
 #  include "artistic_build_v31d1114.hh"
 #  include "d12_clay_engine.hh"
-#  include "d13_clay_fusion.hh"
-#  include "d14_clay_bulb.hh"
-#  include "d14_adaptive_median_fusion.hh"
-#  include "d14_continuous_fusion.hh"
 #  include "d12_flesh_engine.hh"
 #  ifdef WITH_SCULPT_WARP_CUDA
 #    include "warp_cuda_backend.hh"
@@ -253,65 +249,6 @@ inline bool direct_material_action_v31(int action)
 {
   return action==2 || action==5 || action==7 || action==8 || action==14;
 }
-inline bool clay_sweep_d13_active(const StrokeCache &cache,const Brush &brush)
-{
-  const char *flag=std::getenv("BLENDER_SCULPT_D13_CLAY_SWEEP");
-  if(!flag || !STREQ(flag,"1") || !dedicated_engine_requested(brush) ||
-     brush.sculpt_brush_type!=SCULPT_BRUSH_TYPE_CLAY_STRIPS ||
-     brush.sculpt_physics_mode!=3 || brush.sculpt_physics_assist<=0 ||
-     brush.stroke_method!=BRUSH_STROKE_SPACE ||
-     (effective_action(brush)!=1 && effective_action(brush)!=4) ||
-     (effective_material(brush)!=0 && effective_material(brush)!=1) ||
-     !cache.xpbd_v17_intent_started || cache.xpbd_v15_failed ||
-     cache.reference_symmetry || cache.reference_combined ||
-     cache.tile_pass!=0 || cache.radial_symmetry_pass!=0 || cache.mirror_symmetry_pass!=0)
-    return false;
-  const double distance=math::length(cache.location_symm-cache.xpbd_v17_last_center);
-  return std::isfinite(distance)&&cache.radius>0&&distance>1e-12&&distance<=1.5*cache.radius;
-}
-// Prototype routing is explicit and asset-specific; no change to other Clay
-// tools. Name override supports a renamed/duplicated local asset.
-inline bool clay_bulb_d14_requested(const Brush &brush)
-{
-  const char *flag=std::getenv("BLENDER_SCULPT_D14_CLAYBULB");
-  if(!flag || std::strcmp(flag,"1")!=0 || !dedicated_engine_requested(brush) ||
-     brush.sculpt_physics_mode!=3 || brush.sculpt_physics_assist<=0 ||
-     brush.stroke_method!=BRUSH_STROKE_SPACE ||
-     (brush.sculpt_brush_type!=SCULPT_BRUSH_TYPE_CLAY &&
-      brush.sculpt_brush_type!=SCULPT_BRUSH_TYPE_CLAY_STRIPS) ||
-     (effective_action(brush)!=1 && effective_action(brush)!=4) ||
-     (effective_material(brush)!=0 && effective_material(brush)!=1))return false;
-  const char *name=brush.id.name+2;
-  const char *override_name=std::getenv("BLENDER_SCULPT_D14_CLAYBULB_NAME");
-  return override_name && override_name[0] ? std::strcmp(name,override_name)==0 :
-      sculpt_physics::dedicated_d14::bulb::asset_name(name);
-}
-inline bool bulb_sweep_d14_active(const StrokeCache &cache,const Brush &brush)
-{
-  if(!clay_bulb_d14_requested(brush)||!cache.xpbd_v17_intent_started||cache.xpbd_v15_failed||
-     cache.reference_symmetry||cache.reference_combined||cache.tile_pass!=0||
-     cache.radial_symmetry_pass!=0||cache.mirror_symmetry_pass!=0)return false;
-  const double distance=math::length(cache.location_symm-cache.xpbd_v17_last_center);
-  return std::isfinite(distance)&&cache.radius>0&&distance>1e-12&&distance<=1.5*cache.radius;
-}
-inline bool continuous_clay_d14_requested(const Brush &brush)
-{
-  return stroke_option_v31d5("BLENDER_SCULPT_D14_CONTINUOUS_FUSION") &&
-      dedicated_engine_requested(brush) && brush.sculpt_physics_mode==3 &&
-      brush.sculpt_physics_assist>0 && brush.stroke_method==BRUSH_STROKE_SPACE &&
-      (brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY ||
-       brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY_STRIPS) &&
-      (effective_action(brush)==1 || effective_action(brush)==4) &&
-      (effective_material(brush)==0 || effective_material(brush)==1);
-}
-inline bool continuous_clay_sweep_d14_active(const StrokeCache &cache,const Brush &brush)
-{
-  if(!continuous_clay_d14_requested(brush)||!cache.xpbd_v17_intent_started||
-     cache.xpbd_v15_failed||cache.reference_symmetry||cache.reference_combined||
-     cache.tile_pass!=0||cache.radial_symmetry_pass!=0||cache.mirror_symmetry_pass!=0)return false;
-  const double distance=math::length(cache.location_symm-cache.xpbd_v17_last_center);
-  return std::isfinite(distance)&&cache.radius>0&&distance>1e-12&&distance<=1.5*cache.radius;
-}
 inline bool swept_v29_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_SWEEP_V29");return v && v[0]=='1' && v[1]=='\0';}();
@@ -341,13 +278,6 @@ inline float swept_distance_v29(const StrokeCache &cache,float3 p,const float3 *
   const float den=math::dot(a,a);
   const float t=den>1e-20f?std::clamp(math::dot(p,a)/den,0.0f,1.0f):0.0f;
   return math::length(p-a*t);
-}
-inline float bulb_distance_d14(const StrokeCache &cache,const bool swept,
-                              float3 p,const float3 &axis)
-{
-  if(swept)return swept_distance_v29(cache,p,&axis);
-  p-=cache.location_symm;
-  return math::length(p-axis*math::dot(p,axis));
 }
 inline bool footprint_v30e_requested()
 {
@@ -944,8 +874,7 @@ inline bool try_apply(const Sculpt &sd,
       }
     }
 
-    const bool strict_collision=stroke_option_v31d5("BLENDER_SCULPT_D13_COLLISION");
-    if(global_collision_v29_requested() || strict_collision){
+    if(global_collision_v29_requested()){
       const auto tris=mesh.corner_tris();
       const auto corners=mesh.corner_verts();
       const auto tri_at=[&](std::size_t i){
@@ -959,7 +888,7 @@ inline bool try_apply(const Sculpt &sd,
       };
       const auto guarded=sculpt_physics::guard_global_collision_v29(
           std::size_t(tris.size()),tri_at,current_position,motion_at,
-          std::max(1e-12,double(cache.radius)*1e-6),200000,strict_collision);
+          std::max(1e-12,double(cache.radius)*1e-6));
       if(profile || guarded.scale<1)
         std::fprintf(stderr,"[V29 collision] scale=%.7g pairs=%zu limited=%zu unresolved=%zu budget=%d\n",
             guarded.scale,guarded.tested_pairs,guarded.limited_pairs,guarded.unresolved_pairs,int(guarded.budget_exhausted));
@@ -1805,66 +1734,7 @@ inline bool try_apply_intent(
         goals.reserve(samples.size());
         d::Frame next_frame=state->d12_clay_frame;
         d::FleshState next_flesh=state->d12_flesh_state;
-        const bool bulb=clay_tool && clay_bulb_d14_requested(brush);
-        const bool continuous_enabled=clay_tool && sign>0 && continuous_clay_d14_requested(brush);
-        std::vector<double> diagnostic_area;
-        double proposed_axial=0.;
-        bool report_continuous=false;
         if(clay_tool){
-          namespace fusion=sculpt_physics::dedicated_d13::clay_fusion;
-          namespace bulb_engine=sculpt_physics::dedicated_d14::bulb;
-          namespace median_engine=sculpt_physics::dedicated_d14::median_fusion;
-          namespace continuous_engine=sculpt_physics::dedicated_d14::continuous_fusion;
-          namespace additive=sculpt_physics::dedicated_d14::continuous_clay;
-          const bool median_enabled=sign>0 && stroke_option_v31d5("BLENDER_SCULPT_D14_MEDIAN_FUSION");
-          const bool fusion_enabled=sign>0 && (continuous_enabled || median_enabled || bulb || stroke_option_v31d5("BLENDER_SCULPT_D13_CLAY_FUSION"));
-          const bool thin_enabled=stroke_option_v31d5("BLENDER_SCULPT_D13_THIN_CONTACT");
-          std::vector<fusion::Edge> local_edges;
-          std::vector<double> local_area;
-          if(fusion_enabled||thin_enabled){
-            // Reuse the native incident-face triangulation. No global
-            // proximity links between disconnected sheets.
-            const auto v2f=mesh.vert_to_face_map();
-            const auto faces=mesh.faces();
-            const auto corners=mesh.corner_verts();
-            const auto tris=mesh.corner_tris();
-            std::vector<int> incident;
-            std::unordered_map<std::size_t,std::size_t> slots;
-            slots.reserve(samples.size());local_area.assign(samples.size(),0.);
-            for(std::size_t i=0;i<samples.size();++i)if(d::valid_sample(samples[i])){
-              const auto id=samples[i].global_index;
-              slots.emplace(id,i);
-              for(int face:v2f[int(id)])incident.push_back(face);
-            }
-            std::sort(incident.begin(),incident.end());
-            incident.erase(std::unique(incident.begin(),incident.end()),incident.end());
-            for(int face:incident)for(int ti:bke::mesh::face_triangles_range(faces,face)){
-              const int3 c=tris[ti];
-              std::array<std::size_t,3> ids{std::size_t(corners[c[0]]),std::size_t(corners[c[1]]),std::size_t(corners[c[2]])};
-              const auto a=convert(position_data.eval[int(ids[0])]);
-              const auto b=convert(position_data.eval[int(ids[1])]);
-              const auto cc=convert(position_data.eval[int(ids[2])]);
-              const double share=d::norm(d::cross(b-a,cc-a))/6.;
-              if(!std::isfinite(share)||share<=1e-24)continue;
-              for(int j=0;j<3;++j){
-                const auto x=slots.find(ids[j]),y=slots.find(ids[(j+1)%3]);
-                if(x!=slots.end())local_area[x->second]+=share;
-                if(x!=slots.end()&&y!=slots.end()&&x->second!=y->second)
-                  local_edges.push_back({std::min(x->second,y->second),std::max(x->second,y->second)});
-              }
-            }
-            std::sort(local_edges.begin(),local_edges.end());
-            local_edges.erase(std::unique(local_edges.begin(),local_edges.end()),local_edges.end());
-            if(thin_enabled){
-              std::vector<double> soft;
-              const auto keep=fusion::contact(samples,local_edges,intent.center,convert(normal),radius,
-                                               std::min(travel,1.5)*radius,continuous_enabled?&soft:nullptr);
-              for(std::size_t i=0;i<samples.size();++i){
-                if(!keep[i])samples[i].envelope=0.;
-                else if(continuous_enabled)samples[i].envelope*=soft[i];
-              }
-            }
-          }
           d::ClayParams params;
           // Two modes are tool geometry, not separate material solvers.
           params.roundness=kind==NativeSculptBrushKind::ClayStrips?
@@ -1876,94 +1746,17 @@ inline bool try_apply_intent(
           // Count tangential motion only, and bound a single accepted dab.
           const auto motion=convert(delta);
           const auto tangent=motion-next_frame.axis*d::dot(motion,next_frame.axis);
-          const bool swept=clay_sweep_d13_active(cache,brush);
-          const bool bulb_swept=bulb && bulb_sweep_d14_active(cache,brush);
-          const bool continuous_swept=continuous_enabled && continuous_clay_sweep_d14_active(cache,brush);
           dose=cache.xpbd_v17_intent_started?(travel<=1.5?
-              std::min((swept||bulb_swept||continuous_swept)?1.5:.25,d::norm(tangent)/radius):0.):
-              (continuous_enabled?.03:.06);
+              std::min(.25,d::norm(tangent)/radius):0.):.06;
           const auto kernel=d::prepare_clay(next_frame,radius,dose,intensity,sign,params);
-          bulb_engine::Kernel bulb_kernel{
-              bulb_swept?convert(cache.xpbd_v17_last_center):intent.center,
-              intent.center,next_frame.axis,radius,dose,intensity,sign};
-          if(bulb && cache.xpbd_v17_intent_started && !bulb_swept)bulb_kernel.dose=0.;
-          additive::Kernel additive_kernel{
-              continuous_swept?convert(cache.xpbd_v17_last_center):intent.center,
-              intent.center,next_frame.axis,next_frame.tangent,radius,dose,intensity,
-              (bulb||kind==NativeSculptBrushKind::Clay)?1.:params.roundness,bulb?.27:.22};
-          if(continuous_enabled && cache.xpbd_v17_intent_started && !continuous_swept)
-            additive_kernel.dose=0.;
-          std::vector<Vec3> fusion_motion;
-          std::vector<double> headroom;
-          if(fusion_enabled){fusion_motion.resize(samples.size());headroom.resize(samples.size());}
-          for(std::size_t i=0;i<samples.size();++i){
-            const auto& sample=samples[i];
+          for(const auto& sample:samples){
             if(!d::valid_sample(sample))continue;
+            // Captured before any writer changes on first contact. The
+            // existing stroke-owned cache is reset with the StrokeCache.
             const auto ref=state->d12_clay_reference.try_emplace(sample.global_index,
                 d::ClayReference{sample.position,sample.surface_normal,radius}).first;
-            const auto displacement=continuous_enabled?additive::deposit(additive_kernel,sample):
-                bulb?bulb_engine::deposit(bulb_kernel,sample,ref->second):
-                swept?d::swept_clay_vertex(kernel,sample,tangent,&ref->second):
-                      d::clay_vertex(kernel,sample,&ref->second);
-            if(fusion_enabled){
-              fusion_motion[i]=displacement;
-              const double cap=(bulb?bulb_kernel.stroke_height:kernel.stroke_height)*std::min(radius,ref->second.radius);
-              // V2 has a per-dab correction budget, not a uniform stroke
-              // ceiling. Geometry guards remain authoritative after planning.
-              headroom[i]=continuous_enabled?.06*radius*sample.envelope:
-                  std::max(0.,cap-d::norm(sample.position-ref->second.position)-d::norm(displacement));
-            }else if(d::norm2(displacement)>1e-30)goals.push_back({sample.global_index,displacement});
-          }
-          if(fusion_enabled){
-#  ifdef WITH_SCULPT_WARP_CUDA
-            if(!state->artistic_flux_attempted && stroke_option_v31d5("BLENDER_SCULPT_D11_WARP")){
-              state->artistic_flux_attempted=true;
-              state->artistic_flux=sculpt_physics::create_artistic_flux_cuda();
-            }
-#  endif
-            bool gpu_used=false;
-            double transferred=0.;
-            median_engine::Statistics median_stats;
-            median_engine::Settings median_settings;
-            median_settings.radius=radius;median_settings.axis=next_frame.axis;
-            continuous_engine::Stats continuous_stats;
-            if(continuous_enabled){
-              median_settings.mobility=.85;median_settings.old_limit=.035;median_settings.relaxation=.75;
-            }
-            const bool fused=continuous_enabled?
-                continuous_engine::apply(median_settings,samples,local_edges,local_area,headroom,
-                                     fusion_motion,state->artistic_flux.get(),&continuous_stats):
-                median_enabled?
-                median_engine::apply(median_settings,samples,local_edges,local_area,headroom,
-                                     fusion_motion,state->artistic_flux.get(),&median_stats):
-                bulb?bulb_engine::fuse(bulb_kernel,samples,local_edges,local_area,headroom,
-                                  fusion_motion,state->artistic_flux.get(),&gpu_used,&transferred):
-                fusion::redistribute(samples,local_edges,local_area,headroom,next_frame.axis,radius,
-                                     fusion_motion,state->artistic_flux.get(),&gpu_used);
-            if(!fused)throw std::runtime_error("Clay fusion invalid patch");
-            for(std::size_t i=0;i<samples.size();++i)if(d::norm2(fusion_motion[i])>1e-30)
-              goals.push_back({samples[i].global_index,fusion_motion[i]});
-            if(continuous_enabled){
-              report_continuous=state->d12_dabs%32==0 || profile_v26b_requested() ||
-                  stroke_option_v31d5("BLENDER_SCULPT_D14_FUSION_DIAG");
-              if(report_continuous){
-                for(std::size_t i=0;i<samples.size();++i)
-                  proposed_axial+=local_area[i]*d::dot(fusion_motion[i],next_frame.axis);
-                diagnostic_area=std::move(local_area);
-                std::fprintf(stderr,"[D14 Continuous Fusion] asset=%s gpu_any=%d links=%zu collar=%zu old_donors=%zu old_mobilized=%.9g balance=%.9g dose=%.6g\n",
-                  brush.id.name+2,int(continuous_stats.gpu),continuous_stats.links,
-                  continuous_stats.collar_writes,continuous_stats.old_donors,
-                  continuous_stats.old_mobilized,continuous_stats.balance,additive_kernel.dose);
-              }
-            }else if(state->d12_dabs%32==0 || profile_v26b_requested()){
-              if(median_enabled)std::fprintf(stderr,"[D14 Median Fusion] asset=%s backend=%s links=%zu goals=%zu transferred=%.9g old_donors=%zu old_mobilized=%.9g balance=%.9g\n",
-                  brush.id.name+2,median_stats.gpu?"CUDA":"CPU",median_stats.links,goals.size(),
-                  median_stats.transferred,median_stats.old_donors,median_stats.old_mobilized,median_stats.axial_balance);
-              else if(bulb)std::fprintf(stderr,"[D14 ClayBulb fusion] backend=%s edges=%zu goals=%zu transferred=%.9g\n",
-                           gpu_used?"CUDA":"CPU",local_edges.size(),goals.size(),transferred);
-              else std::fprintf(stderr,"[D13 Clay fusion] backend=%s edges=%zu goals=%zu\n",
-                           gpu_used?"CUDA":"CPU",local_edges.size(),goals.size());
-            }
+            const auto displacement=d::clay_vertex(kernel,sample,&ref->second);
+            if(d::norm2(displacement)>1e-30)goals.push_back({sample.global_index,displacement});
           }
         }else{
           d::FleshParams params;
@@ -1979,25 +1772,14 @@ inline bool try_apply_intent(
             std::chrono::steady_clock::now()-started).count();
         const bool handled=try_apply(sd,object,node_mask,position_data,kind,goals,true,true,nullptr,true);
         if(handled&&!cache.xpbd_v15_failed){
-          if(report_continuous){
-            double accepted=0.;
-            for(std::size_t i=0;i<samples.size();++i)if(diagnostic_area[i]>0.)
-              accepted+=diagnostic_area[i]*d::dot(convert(position_data.eval[int(samples[i].global_index)])-
-                  samples[i].position,next_frame.axis);
-            std::fprintf(stderr,"[D14 Continuous write] proposed_axial=%.9g accepted_axial=%.9g\n",
-                         proposed_axial,accepted);
-          }
           state->d12_clay_frame=next_frame;
           state->d12_flesh_state=next_flesh;
           cache.xpbd_v31d11_preview=state;
           cache.xpbd_v17_intent_started=true;
           cache.xpbd_v17_last_center=center;
-          if(state->d12_dabs++%32==0 || profile_v26b_requested()){
-            if(bulb)std::fprintf(stderr,"[D14 ClayBulb CPU] asset=%s samples=%zu goals=%zu plan_ms=%.3f dose=%.5f\n",
-                         brush.id.name+2,samples.size(),goals.size(),plan_ms,dose);
-            else std::fprintf(stderr,"[D12 %s CPU] asset=%s samples=%zu goals=%zu plan_ms=%.3f dose=%.5f\n",
-                         clay_tool?"Clay":"Flesh",brush.id.name+2,samples.size(),goals.size(),plan_ms,dose);
-          }
+          if(state->d12_dabs++%32==0 || profile_v26b_requested())
+            std::fprintf(stderr,"[D12 %s CPU] samples=%zu goals=%zu plan_ms=%.3f dose=%.5f\n",
+                         clay_tool?"Clay":"Flesh",samples.size(),goals.size(),plan_ms,dose);
         }
         return handled;
       }
@@ -2275,8 +2057,7 @@ inline bool try_apply_intent(
       }
       const Mesh &mesh=*id_cast<Mesh *>(object.data);
       if (position_data.eval.size()!=mesh.verts_num) return false;
-      clay.plastic_v29=clay.stable_v28 && (plastic_v29_requested() ||
-           stroke_option_v31d5("BLENDER_SCULPT_D13_PERSISTENT_MATERIAL")) &&
+      clay.plastic_v29=clay.stable_v28 && plastic_v29_requested() &&
           (action==5 || action==7 || action==8) &&
           bool(mesh.attributes().lookup<float>(".bse_plastic_compaction",bke::AttrDomain::Point));
       // Reuse the pre-existing point attribute and native compaction Undo.

@@ -247,12 +247,19 @@ if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
   )
 endif()
 
+# D15 builds keep shared Warp/Smooth infrastructure without compiling
+# abandoned surface physics dispatch. Old .blend DNA/RNA remains readable.
+option(WITH_BSE_VOLUMETRIC_ONLY "D15: keep Smooth, native Clay Strips and volumetric research" ON)
+
 # V14 native CPU physics-executor Grab research (requires legacy V12 build
 # scaffolding, but uses a separate runtime flag and separate StrokeCache).
 # No CUDA, Warp Python, PBVH grids, Dyntopo or Multires support claimed.
 option(WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14
        "Build opt-in native IPhysicsExecutor Grab preview (ordinary Mesh only)" OFF)
 if(WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
+  if(WITH_BSE_VOLUMETRIC_ONLY)
+    message(FATAL_ERROR "D15 build requires WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14=OFF")
+  endif()
   if(NOT WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
     message(FATAL_ERROR "V14 Grab executor requires WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL=ON")
   endif()
@@ -273,6 +280,9 @@ endif()
 option(WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
        "Build opt-in XPBD Clay/Draw/other sculpt brush preview (Mesh only)" OFF)
 if(WITH_SCULPT_XPBD_OTHER_BRUSHES_V15)
+  if(WITH_BSE_VOLUMETRIC_ONLY)
+    message(FATAL_ERROR "D15 build requires WITH_SCULPT_XPBD_OTHER_BRUSHES_V15=OFF")
+  endif()
   if(NOT WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14)
     message(FATAL_ERROR "V15 other brushes require WITH_SCULPT_XPBD_GRAB_EXECUTOR_V14=ON")
   endif()
@@ -314,6 +324,9 @@ if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL AND SCULPT_WARP_ROOT AND
 endif()
 
 blender_add_lib(bf_editor_sculpt_paint "${SRC}" "${INC}" "${INC_SYS}" "${LIB}")
+if(WITH_BSE_VOLUMETRIC_ONLY)
+  target_compile_definitions(bf_editor_sculpt_paint PRIVATE BSE_VOLUMETRIC_ONLY)
+endif()
 if(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
   target_compile_definitions(bf_editor_sculpt_paint PRIVATE WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
 endif()

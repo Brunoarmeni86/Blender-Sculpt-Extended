@@ -55,7 +55,7 @@
 #endif
 #include "editors/sculpt_paint/mesh/sculpt_layer_detail_v01.hh"
 
-#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#if defined(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL) && !defined(BSE_VOLUMETRIC_ONLY)
 #  include "brush_solver_backend.hh"
 #endif
 
@@ -322,7 +322,7 @@ static void calc_bmesh(const Depsgraph &depsgraph,
   apply_translations(tls.translations, verts);
 }
 
-#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#if defined(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL) && !defined(BSE_VOLUMETRIC_ONLY)
 /* Physical Clay V01 is intentionally isolated and runtime opt-in. It uses the
  * standard Clay Strips displacement as an artistic collider/goal, then lets a
  * local elastoplastic surface proxy resist compression and retain material
@@ -993,13 +993,6 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
     const bool autonomous=physics_v15::autonomous_requested(*ss.cache);
     const bool round_contact=autonomous && (physics_v15::shape_v24_requested() || ss.cache->xpbd_v16_clay_behavior==14) &&
         ss.cache->xpbd_v16_clay_behavior!=1 && ss.cache->xpbd_v16_clay_behavior!=4;
-    const bool bulb=autonomous && physics_v15::clay_bulb_d14_requested(brush) &&
-        physics_v15::live_surface_v30_brush(object,brush);
-    const bool continuous=autonomous && physics_v15::continuous_clay_d14_requested(brush) &&
-        physics_v15::live_surface_v30_brush(object,brush);
-    const bool continuous_swept=continuous && physics_v15::continuous_clay_sweep_d14_active(*ss.cache,brush);
-    const bool bulb_swept=bulb && (physics_v15::bulb_sweep_d14_active(*ss.cache,brush)||continuous_swept);
-    const float3 bulb_axis=bulb?math::normalize(plane_normal):float3(0.f);
     const bool footprint=autonomous && physics_v15::footprint_v30e_brush(object,brush);
     const bool audit=footprint && physics_v15::profile_v26b_requested();
     physics_v15::FootprintAuditV30E coverage;
@@ -1014,9 +1007,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       calc_local_positions(pos.eval,verts,mat,tls.xy_positions,tls.z_positions);
       tls.distances.resize(verts.size());
       MutableSpan<float> distances=tls.distances;
-      if(bulb){
-        for(const int j:verts.index_range())distances[j]=physics_v15::bulb_distance_d14(*ss.cache,bulb_swept,pos.eval[verts[j]],bulb_axis)/std::max(ss.cache->radius,1e-12f);
-      }else if(footprint){
+      if(footprint){
         for(const int j:verts.index_range())distances[j]=physics_v15::footprint_distance_v30e(*ss.cache,brush,pos.eval[verts[j]],plane_normal)/std::max(ss.cache->radius,1e-12f);
       }else if (round_contact) {
         const float3 axis=math::normalize(plane_normal);
@@ -1028,16 +1019,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
           distances[j]=dist/std::max(ss.cache->radius,1e-12f);
         }
       }
-      else {
-        if(autonomous && (continuous_swept || physics_v15::clay_sweep_d13_active(*ss.cache,brush))){
-          const float2 a=math::transform_point(mat,ss.cache->xpbd_v17_last_center).xy()-
-                         math::transform_point(mat,ss.cache->location_symm).xy();
-          const float den=math::dot(a,a);
-          if(den>1e-20f)for(auto &p:tls.xy_positions)
-            p-=a*std::clamp(math::dot(p,a)/den,0.f,1.f);
-        }
-        calc_brush_cube_distances<float2>(brush,tls.xy_positions,distances);
-      }
+      else calc_brush_cube_distances<float2>(brush,tls.xy_positions,distances);
       if(audit)for(const float dist:distances)if(dist<1.0f)++coverage.geometric;
       fill_factor_from_hide_and_mask(attributes.hide_vert,attributes.mask,verts,factors);
       filter_region_clip_factors(ss,pos.eval,verts,factors);
@@ -1088,7 +1070,7 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
 #endif
 
   if (stationary) return; // no degenerate native fallback after stationary trial
-#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#if defined(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL) && !defined(BSE_VOLUMETRIC_ONLY)
   if (try_physical_clay_v01(
           depsgraph, sd, object, node_mask, brush, mat, offset, plane_normal, pbvh))
   {

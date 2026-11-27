@@ -46,6 +46,7 @@
 #  include "brush_solver_backend.hh"
 #  include "d12_smooth_multiscale.hh"
 #  include "d13_multiscale_flatten.hh"
+#  include "brush_contact.hh"
 #  include "BKE_multires_sculpt_layers.hh"
 #endif
 
@@ -188,6 +189,53 @@ static bool try_smooth_physics_v15(const Depsgraph &depsgraph,
 #endif
 
 #ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+static double smooth_local_contact_guard(const Mesh &mesh,const Span<float3> positions,
+                                        std::unordered_map<std::size_t,float3> &changes)
+{
+  const auto map=mesh.vert_to_face_map();
+  const auto faces=mesh.faces();
+  const auto corners=mesh.corner_verts();
+  const auto tris=mesh.corner_tris();
+  std::vector<int> ids;
+  for (const auto &entry:changes) {
+    for (const int f:map[int(entry.first)]) ids.push_back(f);
+  }
+  std::sort(ids.begin(),ids.end());
+  ids.erase(std::unique(ids.begin(),ids.end()),ids.end());
+  const auto cv=[](const float3 &v)->sculpt_physics::Vec3 {
+    return {double(v.x),double(v.y),double(v.z)};
+  };
+  std::unordered_map<std::size_t,std::size_t> local;
+  std::vector<std::size_t> global;
+  std::vector<sculpt_physics::Vec3> p, motion;
+  std::vector<std::array<std::size_t,3>> triangles;
+  const auto add_vertex=[&](std::size_t v) {
+    const auto found=local.find(v);
+    if(found!=local.end()) return found->second;
+    const auto i=p.size();
+    local.emplace(v,i);
+    global.push_back(v);
+    p.push_back(cv(positions[int(v)]));
+    const auto it=changes.find(v);
+    motion.push_back(it==changes.end()?sculpt_physics::Vec3{}:cv(it->second));
+    return i;
+  };
+  for (const int f:ids) {
+    for (const int t:bke::mesh::face_triangles_range(faces,f)) {
+      const int3 c=tris[t];
+      triangles.push_back({add_vertex(std::size_t(corners[c[0]])),
+                           add_vertex(std::size_t(corners[c[1]])),
+                           add_vertex(std::size_t(corners[c[2]]))});
+    }
+  }
+  const auto result=sculpt_physics::limit_local_contact(p,triangles,motion,true);
+  for(std::size_t i=0;i<global.size();++i){
+    auto it=changes.find(global[i]);
+    if(it!=changes.end())it->second=float3(float(motion[i].x),float(motion[i].y),float(motion[i].z));
+  }
+  return result.final_scale;
+}
+
 static bool gpu_smooth_requested()
 {
   const char *enabled=std::getenv("BLENDER_SCULPT_GPU_SMOOTH_A1");
@@ -382,13 +430,7 @@ static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
       if(flatten_v2)session->flatten_plane=pending_plane;
       return true;
     }
-#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
-    const auto guard=physics_v15::limit_drag_contact(mesh,pos.eval,changes,true);
-    guard_scale=guard.final_scale;
-#else
-    // Require the native local contact guard for this experimental strong mode.
-    return false;
-#endif
+    guard_scale=smooth_local_contact_guard(mesh,pos.eval,changes);
     for(auto& batch:batches)for(const int i:batch.ids.index_range()){
       batch.motion[i]=changes.at(std::size_t(batch.ids[i]));
       const auto v=batch.motion[i];
