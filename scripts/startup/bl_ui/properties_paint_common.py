@@ -1494,8 +1494,10 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
                 gpu_smooth_panel.prop(runtime, "sculpt_gpu_smooth_a1", text="NVIDIA Warp Smooth")
                 if runtime.sculpt_gpu_smooth_a1:
                     gpu_smooth_panel.prop(runtime, "sculpt_gpu_smooth_mode", text="Mode")
-                    if runtime.sculpt_gpu_smooth_mode == 'STRONG':
-                        gpu_smooth_panel.label(text="D12 multiscale · CPU fallback available")
+                    if runtime.sculpt_gpu_smooth_mode in {'STRONG', 'MULTISCALE'}:
+                        gpu_smooth_panel.label(text="Original A3 two-ring CUDA" if
+                            runtime.sculpt_gpu_smooth_mode == 'STRONG' else
+                            "D12 multiscale · CPU fallback available")
                         if brush.use_smooth_shape_preserve:
                             gpu_smooth_panel.label(text="Preserve Shape reduces normal motion by 80%", icon='INFO')
                     gpu_smooth_panel.label(text="Experimental · ordinary mesh only", icon='EXPERIMENTAL')
