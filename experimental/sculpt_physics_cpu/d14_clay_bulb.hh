@@ -3,19 +3,22 @@
 #include "d12_clay_engine.hh"
 #include "artistic_paired_flux.hh"
 #include <array>
-#include <string>
 #include <string_view>
 
 namespace sculpt_physics::dedicated_d14::bulb {
 namespace d=dedicated_d12;
 using Edge=std::array<std::size_t,2>;
 inline bool asset_name(std::string_view name){
- std::string letters;
+ constexpr std::string_view needle="claybulb";
+ std::size_t matched=0;
  for(char c:name){
   if(c>='A'&&c<='Z')c=char(c-'A'+'a');
-  if(c>='a'&&c<='z')letters+=c;
+  if(c<'a'||c>'z')continue;
+  if(c==needle[matched]){
+   if(++matched==needle.size())return true;
+  }else matched=c==needle[0]?1:0;
  }
- return letters.find("claybulb")!=std::string::npos;
+ return false;
 }
 struct Kernel {
  Vec3 start{},end{},axis{};

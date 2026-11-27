@@ -322,11 +322,10 @@ inline float swept_distance_v29(const StrokeCache &cache,float3 p,const float3 *
   const float t=den>1e-20f?std::clamp(math::dot(p,a)/den,0.0f,1.0f):0.0f;
   return math::length(p-a*t);
 }
-inline float bulb_distance_d14(const StrokeCache &cache,const Brush &brush,
-                              float3 p,const float3 &normal)
+inline float bulb_distance_d14(const StrokeCache &cache,const bool swept,
+                              float3 p,const float3 &axis)
 {
-  const float3 axis=math::normalize(normal);
-  if(bulb_sweep_d14_active(cache,brush))return swept_distance_v29(cache,p,&axis);
+  if(swept)return swept_distance_v29(cache,p,&axis);
   p-=cache.location_symm;
   return math::length(p-axis*math::dot(p,axis));
 }

@@ -209,6 +209,8 @@ void do_clay_brush(const Depsgraph &depsgraph,
     Vector<float3> translations;
     const bool bulb=autonomous && physics_v15::clay_bulb_d14_requested(brush) &&
         physics_v15::live_surface_v30_brush(object,brush);
+    const bool bulb_swept=bulb && physics_v15::bulb_sweep_d14_active(*ss.cache,brush);
+    const float3 bulb_axis=bulb?math::normalize(area_no):float3(0.f);
     const bool footprint=autonomous && physics_v15::footprint_v30e_brush(object,brush);
     const bool audit=footprint && physics_v15::profile_v26b_requested();
     physics_v15::FootprintAuditV30E coverage;
@@ -218,7 +220,7 @@ void do_clay_brush(const Depsgraph &depsgraph,
       if(footprint||bulb){
         factors.resize(verts.size());distances.resize(verts.size());
         for(const int i:verts.index_range()){
-          distances[i]=bulb?physics_v15::bulb_distance_d14(*ss.cache,brush,pos.eval[verts[i]],area_no):
+          distances[i]=bulb?physics_v15::bulb_distance_d14(*ss.cache,bulb_swept,pos.eval[verts[i]],bulb_axis):
                             physics_v15::footprint_distance_v30e(*ss.cache,brush,pos.eval[verts[i]],area_no);
           if(audit && distances[i]<ss.cache->radius)++coverage.geometric;
         }
