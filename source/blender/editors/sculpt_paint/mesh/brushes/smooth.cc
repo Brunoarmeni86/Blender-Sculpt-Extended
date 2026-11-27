@@ -728,11 +728,12 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       if(uv_probe||uv_preserve)std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=no_eligible_motion active=%zu feature_edges=%zu\n",active,feature_count);
       return true;
     }
-    guard_scale=smooth_local_contact_guard(mesh,pos.eval,changes);
-    if(!std::isfinite(guard_scale)||guard_scale<0.||guard_scale>1.)return false;
-    // Do not partially scale a clipping snap/lock correction. Refuse before
-    // publishing when native clipping and geometry safety disagree.
-    if(adjusted_by_clip && guard_scale<1.)return false;
+    if(!uv_preserve){
+      guard_scale=smooth_local_contact_guard(mesh,pos.eval,changes);
+      if(!std::isfinite(guard_scale)||guard_scale<0.||guard_scale>1.)return false;
+      // Do not partially scale a clipping snap/lock correction.
+      if(adjusted_by_clip && guard_scale<1.)return false;
+    }
     if(uv_probe)return feature_uv_probe_d15(mesh,pos.eval,normals,changes,nullptr);
     if(uv_preserve){
       // A single unsafe vertex must not freeze an otherwise safe dab.
@@ -746,13 +747,20 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         changes=remaining;
         if(changes.empty())break;
         const double pass_scale=smooth_local_contact_guard(mesh,pos.eval,changes);
-        if(!std::isfinite(pass_scale)||pass_scale<0.||pass_scale>1.)return false;
+        if(!std::isfinite(pass_scale)||pass_scale<0.||pass_scale>1.){
+          std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=invalid_geometry_guard\n");
+          return false;
+        }
+        if(adjusted_by_clip&&pass_scale<1.)return false;
         for(auto it=changes.begin();it!=changes.end();){
           const auto v=it->second;
           if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))return false;
           if(math::length_squared(v)==0.f)it=changes.erase(it);else ++it;
         }
-        if(changes.empty())break;
+        if(changes.empty()){
+          std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=zero_guarded_motion scale=%.9g\n",pass_scale);
+          break;
+        }
         std::vector<std::size_t> bad;
         uv_proposals.clear();
         if(!feature_uv_probe_d15(mesh,pos.eval,normals,changes,&uv_proposals,&bad)){
@@ -768,7 +776,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
           }
           if(bad.empty()){
             uv_publish=std::move(writer);
-            guard_scale*=pass_scale;
+            guard_scale=pass_scale;
             ready=true;break;
           }
           // Writer destructs before next read/guard pass; no UV was written.
