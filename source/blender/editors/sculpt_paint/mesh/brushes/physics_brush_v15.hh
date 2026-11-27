@@ -28,6 +28,7 @@
 #  include "artistic_build_v31d1114.hh"
 #  include "d12_clay_engine.hh"
 #  include "d13_clay_fusion.hh"
+#  include "d14_clay_bulb.hh"
 #  include "d12_flesh_engine.hh"
 #  ifdef WITH_SCULPT_WARP_CUDA
 #    include "warp_cuda_backend.hh"
@@ -266,6 +267,31 @@ inline bool clay_sweep_d13_active(const StrokeCache &cache,const Brush &brush)
   const double distance=math::length(cache.location_symm-cache.xpbd_v17_last_center);
   return std::isfinite(distance)&&cache.radius>0&&distance>1e-12&&distance<=1.5*cache.radius;
 }
+// Prototype routing is explicit and asset-specific; no change to other Clay
+// tools. Name override supports a renamed/duplicated local asset.
+inline bool clay_bulb_d14_requested(const Brush &brush)
+{
+  const char *flag=std::getenv("BLENDER_SCULPT_D14_CLAYBULB");
+  if(!flag || std::strcmp(flag,"1")!=0 || !dedicated_engine_requested(brush) ||
+     brush.sculpt_physics_mode!=3 || brush.sculpt_physics_assist<=0 ||
+     brush.stroke_method!=BRUSH_STROKE_SPACE ||
+     (brush.sculpt_brush_type!=SCULPT_BRUSH_TYPE_CLAY &&
+      brush.sculpt_brush_type!=SCULPT_BRUSH_TYPE_CLAY_STRIPS) ||
+     (effective_action(brush)!=1 && effective_action(brush)!=4) ||
+     (effective_material(brush)!=0 && effective_material(brush)!=1))return false;
+  const char *name=brush.id.name+2;
+  const char *override_name=std::getenv("BLENDER_SCULPT_D14_CLAYBULB_NAME");
+  return override_name && override_name[0] ? std::strcmp(name,override_name)==0 :
+      sculpt_physics::dedicated_d14::bulb::asset_name(name);
+}
+inline bool bulb_sweep_d14_active(const StrokeCache &cache,const Brush &brush)
+{
+  if(!clay_bulb_d14_requested(brush)||!cache.xpbd_v17_intent_started||cache.xpbd_v15_failed||
+     cache.reference_symmetry||cache.reference_combined||cache.tile_pass!=0||
+     cache.radial_symmetry_pass!=0||cache.mirror_symmetry_pass!=0)return false;
+  const double distance=math::length(cache.location_symm-cache.xpbd_v17_last_center);
+  return std::isfinite(distance)&&cache.radius>0&&distance>1e-12&&distance<=1.5*cache.radius;
+}
 inline bool swept_v29_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_SWEEP_V29");return v && v[0]=='1' && v[1]=='\0';}();
@@ -295,6 +321,14 @@ inline float swept_distance_v29(const StrokeCache &cache,float3 p,const float3 *
   const float den=math::dot(a,a);
   const float t=den>1e-20f?std::clamp(math::dot(p,a)/den,0.0f,1.0f):0.0f;
   return math::length(p-a*t);
+}
+inline float bulb_distance_d14(const StrokeCache &cache,const Brush &brush,
+                              float3 p,const float3 &normal)
+{
+  const float3 axis=math::normalize(normal);
+  if(bulb_sweep_d14_active(cache,brush))return swept_distance_v29(cache,p,&axis);
+  p-=cache.location_symm;
+  return math::length(p-axis*math::dot(p,axis));
 }
 inline bool footprint_v30e_requested()
 {
@@ -1752,9 +1786,11 @@ inline bool try_apply_intent(
         goals.reserve(samples.size());
         d::Frame next_frame=state->d12_clay_frame;
         d::FleshState next_flesh=state->d12_flesh_state;
+        const bool bulb=clay_tool && clay_bulb_d14_requested(brush);
         if(clay_tool){
           namespace fusion=sculpt_physics::dedicated_d13::clay_fusion;
-          const bool fusion_enabled=sign>0 && stroke_option_v31d5("BLENDER_SCULPT_D13_CLAY_FUSION");
+          namespace bulb_engine=sculpt_physics::dedicated_d14::bulb;
+          const bool fusion_enabled=sign>0 && (bulb || stroke_option_v31d5("BLENDER_SCULPT_D13_CLAY_FUSION"));
           const bool thin_enabled=stroke_option_v31d5("BLENDER_SCULPT_D13_THIN_CONTACT");
           std::vector<fusion::Edge> local_edges;
           std::vector<double> local_area;
@@ -1810,9 +1846,14 @@ inline bool try_apply_intent(
           const auto motion=convert(delta);
           const auto tangent=motion-next_frame.axis*d::dot(motion,next_frame.axis);
           const bool swept=clay_sweep_d13_active(cache,brush);
+          const bool bulb_swept=bulb && bulb_sweep_d14_active(cache,brush);
           dose=cache.xpbd_v17_intent_started?(travel<=1.5?
-              std::min(swept?1.5:.25,d::norm(tangent)/radius):0.):.06;
+              std::min((swept||bulb_swept)?1.5:.25,d::norm(tangent)/radius):0.):.06;
           const auto kernel=d::prepare_clay(next_frame,radius,dose,intensity,sign,params);
+          bulb_engine::Kernel bulb_kernel{
+              bulb_swept?convert(cache.xpbd_v17_last_center):intent.center,
+              intent.center,next_frame.axis,radius,dose,intensity,sign};
+          if(bulb && cache.xpbd_v17_intent_started && !bulb_swept)bulb_kernel.dose=0.;
           std::vector<Vec3> fusion_motion;
           std::vector<double> headroom;
           if(fusion_enabled){fusion_motion.resize(samples.size());headroom.resize(samples.size());}
@@ -1821,11 +1862,12 @@ inline bool try_apply_intent(
             if(!d::valid_sample(sample))continue;
             const auto ref=state->d12_clay_reference.try_emplace(sample.global_index,
                 d::ClayReference{sample.position,sample.surface_normal,radius}).first;
-            const auto displacement=swept?d::swept_clay_vertex(kernel,sample,tangent,&ref->second):
-                                          d::clay_vertex(kernel,sample,&ref->second);
+            const auto displacement=bulb?bulb_engine::deposit(bulb_kernel,sample,ref->second):
+                swept?d::swept_clay_vertex(kernel,sample,tangent,&ref->second):
+                      d::clay_vertex(kernel,sample,&ref->second);
             if(fusion_enabled){
               fusion_motion[i]=displacement;
-              const double cap=kernel.stroke_height*std::min(radius,ref->second.radius);
+              const double cap=(bulb?bulb_kernel.stroke_height:kernel.stroke_height)*std::min(radius,ref->second.radius);
               headroom[i]=std::max(0.,cap-d::norm(sample.position-ref->second.position)-d::norm(displacement));
             }else if(d::norm2(displacement)>1e-30)goals.push_back({sample.global_index,displacement});
           }
@@ -1837,14 +1879,21 @@ inline bool try_apply_intent(
             }
 #  endif
             bool gpu_used=false;
-            if(!fusion::redistribute(samples,local_edges,local_area,headroom,next_frame.axis,radius,
-                                     fusion_motion,state->artistic_flux.get(),&gpu_used))
-              throw std::runtime_error("D13 Clay fusion invalid patch");
+            double transferred=0.;
+            const bool fused=bulb?
+                bulb_engine::fuse(bulb_kernel,samples,local_edges,local_area,headroom,
+                                  fusion_motion,state->artistic_flux.get(),&gpu_used,&transferred):
+                fusion::redistribute(samples,local_edges,local_area,headroom,next_frame.axis,radius,
+                                     fusion_motion,state->artistic_flux.get(),&gpu_used);
+            if(!fused)throw std::runtime_error("Clay fusion invalid patch");
             for(std::size_t i=0;i<samples.size();++i)if(d::norm2(fusion_motion[i])>1e-30)
               goals.push_back({samples[i].global_index,fusion_motion[i]});
-            if(state->d12_dabs%32==0 || profile_v26b_requested())
-              std::fprintf(stderr,"[D13 Clay fusion] backend=%s edges=%zu goals=%zu\n",
+            if(state->d12_dabs%32==0 || profile_v26b_requested()){
+              if(bulb)std::fprintf(stderr,"[D14 ClayBulb fusion] backend=%s edges=%zu goals=%zu transferred=%.9g\n",
+                           gpu_used?"CUDA":"CPU",local_edges.size(),goals.size(),transferred);
+              else std::fprintf(stderr,"[D13 Clay fusion] backend=%s edges=%zu goals=%zu\n",
                            gpu_used?"CUDA":"CPU",local_edges.size(),goals.size());
+            }
           }
         }else{
           d::FleshParams params;
@@ -1865,9 +1914,12 @@ inline bool try_apply_intent(
           cache.xpbd_v31d11_preview=state;
           cache.xpbd_v17_intent_started=true;
           cache.xpbd_v17_last_center=center;
-          if(state->d12_dabs++%32==0 || profile_v26b_requested())
-            std::fprintf(stderr,"[D12 %s CPU] samples=%zu goals=%zu plan_ms=%.3f dose=%.5f\n",
-                         clay_tool?"Clay":"Flesh",samples.size(),goals.size(),plan_ms,dose);
+          if(state->d12_dabs++%32==0 || profile_v26b_requested()){
+            if(bulb)std::fprintf(stderr,"[D14 ClayBulb CPU] asset=%s samples=%zu goals=%zu plan_ms=%.3f dose=%.5f\n",
+                         brush.id.name+2,samples.size(),goals.size(),plan_ms,dose);
+            else std::fprintf(stderr,"[D12 %s CPU] asset=%s samples=%zu goals=%zu plan_ms=%.3f dose=%.5f\n",
+                         clay_tool?"Clay":"Flesh",brush.id.name+2,samples.size(),goals.size(),plan_ms,dose);
+          }
         }
         return handled;
       }

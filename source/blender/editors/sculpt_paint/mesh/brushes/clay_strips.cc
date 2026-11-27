@@ -993,6 +993,8 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
     const bool autonomous=physics_v15::autonomous_requested(*ss.cache);
     const bool round_contact=autonomous && (physics_v15::shape_v24_requested() || ss.cache->xpbd_v16_clay_behavior==14) &&
         ss.cache->xpbd_v16_clay_behavior!=1 && ss.cache->xpbd_v16_clay_behavior!=4;
+    const bool bulb=autonomous && physics_v15::clay_bulb_d14_requested(brush) &&
+        physics_v15::live_surface_v30_brush(object,brush);
     const bool footprint=autonomous && physics_v15::footprint_v30e_brush(object,brush);
     const bool audit=footprint && physics_v15::profile_v26b_requested();
     physics_v15::FootprintAuditV30E coverage;
@@ -1007,7 +1009,9 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
       calc_local_positions(pos.eval,verts,mat,tls.xy_positions,tls.z_positions);
       tls.distances.resize(verts.size());
       MutableSpan<float> distances=tls.distances;
-      if(footprint){
+      if(bulb){
+        for(const int j:verts.index_range())distances[j]=physics_v15::bulb_distance_d14(*ss.cache,brush,pos.eval[verts[j]],plane_normal)/std::max(ss.cache->radius,1e-12f);
+      }else if(footprint){
         for(const int j:verts.index_range())distances[j]=physics_v15::footprint_distance_v30e(*ss.cache,brush,pos.eval[verts[j]],plane_normal)/std::max(ss.cache->radius,1e-12f);
       }else if (round_contact) {
         const float3 axis=math::normalize(plane_normal);

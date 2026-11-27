@@ -207,16 +207,19 @@ void do_clay_brush(const Depsgraph &depsgraph,
     Vector<float> factors;
     Vector<float> distances;
     Vector<float3> translations;
+    const bool bulb=autonomous && physics_v15::clay_bulb_d14_requested(brush) &&
+        physics_v15::live_surface_v30_brush(object,brush);
     const bool footprint=autonomous && physics_v15::footprint_v30e_brush(object,brush);
     const bool audit=footprint && physics_v15::profile_v26b_requested();
     physics_v15::FootprintAuditV30E coverage;
     node_mask.foreach_index([&](const int ni) {
       const bke::pbvh::MeshNode &node=nodes[ni];
       const Span<int> verts=node.verts();
-      if(footprint){
+      if(footprint||bulb){
         factors.resize(verts.size());distances.resize(verts.size());
         for(const int i:verts.index_range()){
-          distances[i]=physics_v15::footprint_distance_v30e(*ss.cache,brush,pos.eval[verts[i]],area_no);
+          distances[i]=bulb?physics_v15::bulb_distance_d14(*ss.cache,brush,pos.eval[verts[i]],area_no):
+                            physics_v15::footprint_distance_v30e(*ss.cache,brush,pos.eval[verts[i]],area_no);
           if(audit && distances[i]<ss.cache->radius)++coverage.geometric;
         }
         fill_factor_from_hide_and_mask(attributes.hide_vert,attributes.mask,verts,factors);

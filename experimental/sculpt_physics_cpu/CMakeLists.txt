@@ -454,3 +454,7 @@ add_executable(test_d13_combined test_d13_combined.cc)
 target_compile_features(test_d13_combined PRIVATE cxx_std_17)
 target_link_libraries(test_d13_combined PRIVATE sculpt_physics_reference)
 add_test(NAME sculpt_d13_combined_tests COMMAND test_d13_combined)
+
+add_executable(test_d14_clay_bulb test_d14_clay_bulb.cc)
+target_link_libraries(test_d14_clay_bulb PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_d14_clay_bulb_tests COMMAND test_d14_clay_bulb)
