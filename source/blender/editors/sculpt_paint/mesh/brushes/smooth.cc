@@ -263,7 +263,8 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
                                 const Span<float3> normals,
                                 const std::unordered_map<std::size_t,float3> &changes,
                                 Vector<undo::UVCornerProposalD15> *proposals,
-                                std::vector<std::size_t> *rejected_vertices=nullptr)
+                                std::vector<std::size_t> *rejected_vertices=nullptr,
+                                const bool sculpt_normal_transport=false)
 {
   namespace a=sculpt_physics::surface_anchor_d15;
   const auto names=mesh.uv_map_names();
@@ -287,8 +288,8 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
     layer_names.emplace_back(name.data(),name.size());
   }
   std::size_t projected=0,refused=0,corner_values=0;
-  std::size_t normal_reject=0,fan_reject=0,residual_reject=0,uv_reject=0;
-  double max_uv_delta=0.;
+  std::size_t normal_reject=0,fan_reject=0,residual_reject=0,uv_reject=0,normal_only=0;
+  double max_uv_delta=0.,max_normal_motion=0.,max_tangent_motion=0.;
   for(const auto &entry:changes){
     const auto reject=[&](std::size_t &reason){
       ++refused;++reason;
@@ -296,17 +297,29 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
     };
     const int v=int(entry.first);
     const auto motion=as_v(entry.second);
-    const double travel=a::norm(motion);
-    if(!(travel>0.))continue;
+    const double full_travel=a::norm(motion);
+    if(!std::isfinite(full_travel)){reject(normal_reject);continue;}
+    if(!(full_travel>0.))continue;
     const auto old=as_v(positions[v]);
-    const auto target=a::add(old,motion);
     const auto normal=as_v(normals[v]);
     const double nl=a::norm(normal);
-    if(!(nl>0.) || !std::isfinite(travel) || !std::isfinite(nl)){reject(normal_reject);continue;}
+    if(!(nl>0.) || !std::isfinite(nl)){reject(normal_reject);continue;}
     const auto n=a::mul(normal,1./nl);
-    // Diagnostic only: a tangent proposal should have negligible normal
-    // motion. Reject native clip corrections that violate this assumption.
-    if(std::abs(a::dot(motion,n))>travel*1e-4){reject(normal_reject);continue;}
+    const double normal_motion=a::dot(motion,n);
+    // C7 separates surface redistribution from material deformation.
+    // The full guarded position is published; only its tangential component
+    // samples the old surface. Pure normal motion keeps the original UVs.
+    if(!sculpt_normal_transport && std::abs(normal_motion)>full_travel*1e-4){
+      reject(normal_reject);continue;
+    }
+    const auto tangent=sculpt_normal_transport?
+        a::add(motion,a::mul(n,-normal_motion)):motion;
+    const double travel=a::norm(tangent);
+    if(!std::isfinite(travel)){reject(normal_reject);continue;}
+    max_normal_motion=std::max(max_normal_motion,std::abs(normal_motion));
+    max_tangent_motion=std::max(max_tangent_motion,travel);
+    if(sculpt_normal_transport && travel<=full_travel*1e-8){++normal_only;continue;}
+    const auto target=a::add(old,tangent);
     struct Candidate {int tri;int3 corners;a::V bary;double distance;};
     std::vector<Candidate> hits;
     std::vector<int> dest;
@@ -392,6 +405,9 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
   }
   std::fprintf(stderr,"[D15 UV %s] layers=%zu projected=%zu refused=%zu corner_values=%zu max_uv_delta=%.9g\n",
                proposals?"STAGE":"Probe READ ONLY",layers.size(),projected,refused,corner_values,max_uv_delta);
+  if(sculpt_normal_transport)
+    std::fprintf(stderr,"[D15 UV Sculpt Transport] normal_only=%zu max_normal=%.9g max_tangent=%.9g\n",
+                 normal_only,max_normal_motion,max_tangent_motion);
   if(refused)
     std::fprintf(stderr,"[D15 UV Reject] normal=%zu fan=%zu residual=%zu uv=%zu\n",
                  normal_reject,fan_reject,residual_reject,uv_reject);
@@ -497,7 +513,11 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
   const char *preserve_flag=std::getenv("BLENDER_SCULPT_D15_UV_PRESERVE");
   const bool uv_preserve=!uv_probe && preserve_flag && STREQ(preserve_flag,"1");
   const char *tangent_flag=std::getenv("BLENDER_SCULPT_D15_TANGENT_ONLY");
-  const bool tangent_only=uv_probe || uv_preserve || (tangent_flag && STREQ(tangent_flag,"1"));
+  const char *sculpt_flag=std::getenv("BLENDER_SCULPT_D15_UV_SCULPT");
+  const bool uv_sculpt=!uv_probe && sculpt_flag && STREQ(sculpt_flag,"1");
+  const bool tangent_only=!uv_sculpt &&
+      (uv_probe || uv_preserve || (tangent_flag && STREQ(tangent_flag,"1")));
+  const bool constrained_features=tangent_only||uv_sculpt;
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
   bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
@@ -538,8 +558,8 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
   const MeshAttributeData attrs(mesh);
   const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
   if(normals.size()!=pos.eval.size())return reject("normal_count_mismatch");
-  if(diag)std::fprintf(stderr,"[D15 C6.2 ENTER] preserve=%d probe=%d tangent=%d verts=%d strength=%.6g\n",
-                       int(uv_preserve),int(uv_probe),int(tangent_only),mesh.verts_num,double(brush_strength));
+  if(diag)std::fprintf(stderr,"[D15 C7 ENTER] preserve=%d probe=%d tangent=%d sculpt=%d verts=%d strength=%.6g\n",
+                       int(uv_preserve),int(uv_probe),int(tangent_only),int(uv_sculpt),mesh.verts_num,double(brush_strength));
   const auto faces=mesh.faces();
   const auto v2f=mesh.vert_to_face_map();
   const auto native_edges=mesh.edges();
@@ -589,7 +609,8 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         const float factor=tls.factors[j];
         if(!std::isfinite(factor)){rejected=true;return;}
         if(factor<=0.f || !visible(verts[j]))continue;
-        add(verts[j],std::clamp(double(factor),0.,1.));
+        // C7 boosts only the selected Smooth pilot, not native brush modes.
+        add(verts[j],std::clamp(double(factor)*(uv_sculpt?1.75:1.),0.,1.));
         if(samples.size()>500000){rejected=true;return;}
       }
     });
@@ -708,8 +729,9 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       if(blocked[i]||uv_pinned[i])samples[i].weight=0.;
     }
     fs::Settings settings;
-    if(tangent_only){
-      settings.normal_keep=0.;
+    if(tangent_only)settings.normal_keep=0.;
+    if(uv_sculpt){settings.normal_keep=1.;settings.max_step=.35;}
+    if(constrained_features){
       for(std::size_t i=0;i<samples.size();++i)if(feature[i])samples[i].weight=0.;
     }
     if(!fs::evaluate(samples,std::move(edges),settings,result))return reject("feature_evaluate");
@@ -738,7 +760,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         auto &v=batch.motion[j];
         const bool changed=v.x!=before[j].x||v.y!=before[j].y||v.z!=before[j].z;
         const auto i=slot.at(batch.ids[j]);
-        if(changed && (feature[i]||tangent_only))v=float3(0.f); // do not rotate a tangent proposal off its constraint
+        if(changed && (feature[i]||constrained_features))v=float3(0.f); // do not rotate a tangent proposal off its constraint
         else if(changed)adjusted_by_clip=true;
         if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z)){rejected=true;return;}
         if(math::length_squared(v)>0.f)changes.emplace(std::size_t(batch.ids[j]),v);
@@ -785,7 +807,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         }
         std::vector<std::size_t> bad;
         uv_proposals.clear();
-        if(!feature_uv_probe_d15(mesh,pos.eval,normals,changes,&uv_proposals,&bad)){
+        if(!feature_uv_probe_d15(mesh,pos.eval,normals,changes,&uv_proposals,&bad,uv_sculpt)){
           std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=projection_preflight\n");
           return false;
         }
