@@ -29,7 +29,7 @@ inline bool normal_component(V motion,V normal,V &out){
 enum Feature : unsigned { Sharp=1, Seam=2, FaceSet=4, Open=8, UVChart=16, Guide=32 };
 struct Vertex { V co{},normal{}; double weight=0.; bool visible=true; };
 struct Edge { std::size_t a,b; unsigned flags=0; bool readable=true; };
-struct Settings { double normal_keep=.20, max_step=.25, bend_cos=-.5; };
+struct Settings { double normal_keep=.20, max_step=.25, bend_cos=-.5; bool adaptive_boundaries=false; };
 struct Result {
  std::vector<V> motion;
  std::size_t interior=0,sliding=0,pinned=0;
@@ -53,7 +53,7 @@ inline bool evaluate(const std::vector<Vertex>& v,std::vector<Edge> edges,
  });
  struct Row {
   V sum{}; std::array<V,2> feature{}; std::array<unsigned,2> flags{};
-  std::size_t count=0,degree=0; bool blocked=false;
+  std::size_t count=0,degree=0; bool blocked=false,hard=false;
   double shortest=std::numeric_limits<double>::infinity();
  };
  std::vector<Row> rows(v.size());
@@ -67,6 +67,7 @@ inline bool evaluate(const std::vector<Vertex>& v,std::vector<Edge> edges,
   const auto visit=[&](std::size_t i,V offset){
    auto& r=rows[i];
    if(e.flags){
+    r.hard=r.hard||bool(e.flags&(Sharp|Open|Guide));
     if(r.degree<2){r.feature[r.degree]=offset;r.flags[r.degree]=e.flags;}
     ++r.degree;
     if(!readable)r.blocked=true;
@@ -81,7 +82,28 @@ inline bool evaluate(const std::vector<Vertex>& v,std::vector<Edge> edges,
   if(!finite(r.sum))return false;
   if(!x.visible||x.weight==0.)continue;
   V d{};
-  if(r.degree){
+  if(r.degree && k.adaptive_boundaries && !r.hard){
+   // Soft boundaries follow the surface normally, including endpoints
+   // and junctions. Only a coherent two-edge chain can slide tangentially.
+   const double n=length(x.normal);
+   if(r.blocked||!r.count||!std::isfinite(n)||n==0.){++trial.pinned;continue;}
+   const V unit=mul(x.normal,1./n);
+   const V mean=mul(r.sum,1./double(r.count));
+   d=mul(unit,k.normal_keep*dot(mean,unit));
+   if(r.degree==2&&r.flags[0]==r.flags[1]){
+    const double a=length(r.feature[0]),b=length(r.feature[1]);
+    if(a>0.&&b>0.&&dot(mul(r.feature[0],1./a),mul(r.feature[1],1./b))<=k.bend_cos){
+     V chord=sub(r.feature[1],r.feature[0]);
+     chord=sub(chord,mul(unit,dot(chord,unit)));
+     const double c=length(chord);
+     if(std::isfinite(c)&&c>0.){
+      const V tangent=mul(chord,1./c);
+      d=add(d,mul(tangent,dot(mul(add(r.feature[0],r.feature[1]),.5),tangent)));
+      ++trial.sliding;
+     }
+    }
+   }
+  }else if(r.degree){
    // Conservative V1 policy: pin ends, mixed features, junctions and sharp
    // bends. Only slide along the chord of the actual two feature edges.
    if(r.blocked||r.degree!=2||r.flags[0]!=r.flags[1]){++trial.pinned;continue;}

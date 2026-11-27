@@ -36,5 +36,13 @@ int main(){
  check(relocate({a,b},{{0,8}},7,seed,q,out)==Status::Invalid,"bad link");
  check(relocate({a,b},l,8,seed,q,out)==Status::Invalid,"stale anchor");
  q.position[0]=std::numeric_limits<double>::quiet_NaN();check(relocate({a,b},l,7,seed,q,out)==Status::Invalid,"NaN query");
+ std::vector<std::vector<std::size_t>> wedges;
+ check(partition_wedges({a,b},1e-6,wedges)&&wedges.size()==1,"continuous wedge");
+ Triangle split=b;split.uv[0][0]+=1.;
+ check(partition_wedges({a,split},1e-6,wedges)&&wedges.size()==2,"split at one endpoint");
+ Triangle separate=a;separate.id=99;separate.vertices={0,6,7};
+ check(partition_wedges({a,separate},1e-6,wedges)&&wedges.size()==2,"coincident UV not connected by an edge");
+ auto saved=wedges;
+ check(!partition_wedges({a,a},1e-6,wedges)&&wedges==saved,"duplicate ID no partial partition");
  std::puts("D15_SURFACE_ANCHOR_REFERENCE_OK");
 }

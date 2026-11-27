@@ -264,7 +264,8 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
                                 const std::unordered_map<std::size_t,float3> &changes,
                                 Vector<undo::UVCornerProposalD15> *proposals,
                                 std::vector<std::size_t> *rejected_vertices=nullptr,
-                                const bool sculpt_normal_transport=false)
+                                const bool sculpt_normal_transport=false,
+                                const bool adaptive_wedges=false)
 {
   namespace a=sculpt_physics::surface_anchor_d15;
   const auto names=mesh.uv_map_names();
@@ -290,6 +291,7 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
   std::size_t projected=0,refused=0,corner_values=0;
   std::size_t normal_reject=0,fan_reject=0,residual_reject=0,uv_reject=0,normal_only=0;
   double max_uv_delta=0.,max_normal_motion=0.,max_tangent_motion=0.;
+  std::size_t wedge_count=0,multi_wedge_count=0;
   for(const auto &entry:changes){
     const auto reject=[&](std::size_t &reason){
       ++refused;++reason;
@@ -360,7 +362,7 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
       return x.distance!=y.distance?x.distance<y.distance:x.tri<y.tri;
     });
     const auto &best=hits.front();
-    if(best.distance>travel*.25){reject(residual_reject);continue;}
+    if(!adaptive_wedges && best.distance>travel*.25){reject(residual_reject);continue;}
     // All maps use the same geometric correspondence. Inspect every
     // destination corner and reject incompatible equidistant UV samples.
     double local_delta=0.;
@@ -368,34 +370,78 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
     for(std::size_t li=0;li<layers.size();++li){
       const auto &layer=layers[li];
       const auto read=[&](int c)->a::UV{const float2 uv=layer[c];return {double(uv.x),double(uv.y)};};
-      const auto original=read(dest.front());
-      if(!a::finite(original)){bad=true;break;}
-      for(const int c:dest){const auto uv=read(c);if(!a::finite(uv)||!a::same_uv(uv,original,1e-6)){bad=true;break;}}
-      if(bad)break;
+      std::vector<std::vector<std::size_t>> groups;
+      if(adaptive_wedges){
+        std::vector<a::Triangle> fan;
+        fan.reserve(hits.size());
+        for(const auto &hit:hits){
+          a::Triangle tri;tri.id=std::uint64_t(hit.tri);
+          for(int k=0;k<3;++k){
+            const int c=hit.corners[k];tri.vertices[k]=std::uint64_t(cv[c]);
+            tri.co[k]=as_v(positions[cv[c]]);tri.uv[k]=read(c);
+          }
+          fan.push_back(tri);
+        }
+        if(!a::partition_wedges(fan,1e-6,groups)){bad=true;break;}
+      }else{
+        groups.emplace_back();
+        for(std::size_t k=0;k<hits.size();++k)groups.back().push_back(k);
+      }
+      std::vector<int> assigned(dest.size(),-1);
       const auto sample=[&](const Candidate &h,a::UV &out){
         out={};
         for(int j=0;j<3;++j){const auto uv=read(h.corners[j]);if(!a::finite(uv))return false;
           for(int u=0;u<2;++u)out[u]+=h.bary[j]*uv[u];}
         return a::finite(out);
       };
-      a::UV proposed;
-      if(!sample(best,proposed)){bad=true;break;}
-      for(const auto &hit:hits){
-        if(hit.distance-best.distance>std::max(1e-12,travel*1e-6))break;
-        a::UV other;
-        if(!sample(hit,other)||!a::same_uv(other,proposed,1e-6)){bad=true;break;}
-      }
-      if(bad)break;
-      local_delta=std::max(local_delta,std::hypot(proposed[0]-original[0],proposed[1]-original[1]));
-      if(proposals){
-        const std::array<float,2> after{float(proposed[0]),float(proposed[1])};
-        if(!std::isfinite(after[0])||!std::isfinite(after[1])){bad=true;break;}
-        for(const int c:dest){
-          const float2 before=layer[c];
-          if(before.x!=after[0]||before.y!=after[1])
-            local.append({layer_names[li],c,after});
+      for(std::size_t gi=0;gi<groups.size();++gi){
+        const auto &group=groups[gi];
+        if(group.empty()){bad=true;break;}
+        const auto &winner=hits[group.front()];
+        if(winner.distance>travel*.25){bad=true;break;}
+        std::vector<int> corners;
+        if(!adaptive_wedges)corners=dest;
+        else{
+          for(const auto k:group)for(int z=0;z<3;++z){
+            const int c=hits[k].corners[z];if(cv[c]==v)corners.push_back(c);
+          }
+          std::sort(corners.begin(),corners.end());
+          corners.erase(std::unique(corners.begin(),corners.end()),corners.end());
+        }
+        if(corners.empty()){bad=true;break;}
+        const auto original=read(corners.front());
+        if(!a::finite(original)){bad=true;break;}
+        for(const int c:corners){
+          const auto it=std::find(dest.begin(),dest.end(),c);
+          if(it==dest.end()){bad=true;break;}
+          const auto k=std::size_t(it-dest.begin());
+          if(assigned[k]!=-1 || !a::finite(read(c)) || !a::same_uv(read(c),original,1e-6)){
+            bad=true;break;
+          }
+          assigned[k]=int(gi);
+        }
+        if(bad)break;
+        a::UV proposed;
+        if(!sample(winner,proposed)){bad=true;break;}
+        for(const auto k:group){
+          const auto &hit=hits[k];
+          if(hit.distance-winner.distance>std::max(1e-12,travel*1e-6))break;
+          a::UV other;
+          if(!sample(hit,other)||!a::same_uv(other,proposed,1e-6)){bad=true;break;}
+        }
+        if(bad)break;
+        local_delta=std::max(local_delta,std::hypot(proposed[0]-original[0],proposed[1]-original[1]));
+        if(proposals){
+          const std::array<float,2> after{float(proposed[0]),float(proposed[1])};
+          if(!std::isfinite(after[0])||!std::isfinite(after[1])){bad=true;break;}
+          for(const int c:corners){
+            const float2 before=layer[c];
+            if(before.x!=after[0]||before.y!=after[1])local.append({layer_names[li],c,after});
+          }
         }
       }
+      if(bad||std::find(assigned.begin(),assigned.end(),-1)!=assigned.end()){bad=true;break;}
+      if(adaptive_wedges){wedge_count+=groups.size();if(groups.size()>1)++multi_wedge_count;}
     }
     if(bad){reject(uv_reject);continue;}
     if(proposals){
@@ -410,6 +456,8 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
   if(sculpt_normal_transport)
     std::fprintf(stderr,"[D15 UV Sculpt Transport] normal_only=%zu max_normal=%.9g max_tangent=%.9g\n",
                  normal_only,max_normal_motion,max_tangent_motion);
+  if(adaptive_wedges)
+    std::fprintf(stderr,"[D15 C8 Wedges] sampled_groups=%zu multi_wedge_layer_vertices=%zu\n",wedge_count,multi_wedge_count);
   if(refused)
     std::fprintf(stderr,"[D15 UV Reject] normal=%zu fan=%zu residual=%zu uv=%zu\n",
                  normal_reject,fan_reject,residual_reject,uv_reject);
@@ -520,6 +568,10 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
   const bool tangent_only=!uv_sculpt &&
       (uv_probe || uv_preserve || (tangent_flag && STREQ(tangent_flag,"1")));
   const bool constrained_features=tangent_only||uv_sculpt;
+  const char *adaptive_flag=std::getenv("BLENDER_SCULPT_D15_ADAPTIVE");
+  const bool adaptive=uv_sculpt&&adaptive_flag&&STREQ(adaptive_flag,"1");
+  const char *faceset_flag=std::getenv("BLENDER_SCULPT_D15_PROTECT_FACE_SETS");
+  const bool protect_facesets=!adaptive||!faceset_flag||!STREQ(faceset_flag,"0");
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
   bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
@@ -582,7 +634,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
     std::unordered_map<int,std::size_t> slot;
     std::vector<int> global;
     std::vector<fs::Vertex> samples;
-    std::vector<unsigned char> feature,blocked,uv_pinned,uv_normal;
+    std::vector<unsigned char> feature,blocked,uv_pinned,uv_normal,hard_feature;
     const auto cv=[](const float3 &v)->fs::V{return {double(v.x),double(v.y),double(v.z)};};
     const auto visible=[&](int id){return attrs.hide_vert.is_empty() || !attrs.hide_vert[id];};
     const auto add=[&](int id,double weight){
@@ -595,7 +647,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       const auto i=samples.size();
       slot.emplace(id,i);global.push_back(id);
       samples.push_back({cv(pos.eval[id]),cv(normals[id]),weight,visible(id)});
-      feature.push_back(0);blocked.push_back(0);uv_pinned.push_back(0);uv_normal.push_back(0);
+      feature.push_back(0);blocked.push_back(0);uv_pinned.push_back(0);uv_normal.push_back(0);hard_feature.push_back(0);
       return i;
     };
     LocalData tls;
@@ -709,7 +761,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       unsigned flags=0;
       if(sharp[e])flags|=fs::Sharp;
       if(seams[e])flags|=fs::Seam;
-      if(q.mixed)flags|=fs::FaceSet;
+      if(q.mixed&&protect_facesets)flags|=fs::FaceSet;
       if(q.count==1)flags|=fs::Open;
       if(q.uv==uvb::Status::Split){
         flags|=fs::UVChart;
@@ -724,10 +776,11 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       // A UV chart boundary is not necessarily a geometric feature.
       // C7 normal material transport may smooth a UV-only seam without
       // changing either wedge; real sharp/open/Face Set features remain pinned.
-      if(uv_sculpt && (flags&(fs::Seam|fs::UVChart))){
+      if(uv_sculpt && !adaptive && (flags&(fs::Seam|fs::UVChart))){
         uv_normal[a]=uv_normal[b]=1;
         flags&=~unsigned(fs::Seam|fs::UVChart);
       }
+      if(flags&(fs::Sharp|fs::Open|fs::Guide))hard_feature[a]=hard_feature[b]=1;
       if(flags){feature[a]=feature[b]=1;++feature_count;}
       edges.push_back({a,b,flags,!unsafe});
     }
@@ -741,7 +794,8 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
     fs::Settings settings;
     if(tangent_only)settings.normal_keep=0.;
     if(uv_sculpt){settings.normal_keep=1.;settings.max_step=.35;}
-    if(constrained_features){
+    settings.adaptive_boundaries=adaptive;
+    if(constrained_features&&!adaptive){
       for(std::size_t i=0;i<samples.size();++i)if(feature[i]){
         if(samples[i].weight>0.)++geometry_pinned;
         samples[i].weight=0.;
@@ -768,7 +822,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         float3 v{float(d[0]),float(d[1]),float(d[2])};
         // Feature motion already has its own tangent constraint; the generic
         // normal attenuation would rotate it away from that constraint.
-        if(!feature[i] && (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE))
+        if((!feature[i]||(adaptive&&!hard_feature[i])) && (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE))
           smooth_preserve_shape_translation(v,normals[id]);
         if(math::length_squared(v)>0.f){batch.ids.append(id);batch.motion.append(v);}
       }
@@ -829,7 +883,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         }
         std::vector<std::size_t> bad;
         uv_proposals.clear();
-        if(!feature_uv_probe_d15(mesh,pos.eval,normals,changes,&uv_proposals,&bad,uv_sculpt)){
+        if(!feature_uv_probe_d15(mesh,pos.eval,normals,changes,&uv_proposals,&bad,uv_sculpt,adaptive)){
           std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=projection_preflight\n");
           return false;
         }
@@ -854,7 +908,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
           auto it=remaining.find(id);
           if(it==remaining.end())continue;
           const auto i=slot.at(int(id));
-          if(uv_sculpt && i<active && !tried_normal[i] && !feature[i] && !blocked[i]){
+          if(uv_sculpt && i<active && !tried_normal[i] && !(adaptive?hard_feature[i]:feature[i]) && !blocked[i]){
             tried_normal[i]=1;
             // Do not discard safe shape smoothing solely because tangent
             // UV correspondence failed. Keep the ORIGINAL clipped normal
@@ -934,6 +988,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
                  std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
     std::fprintf(stderr,"[D15 UV Boundary] layers=%zu split_edges=%zu invalid_edges=%zu pinned_vertices=%zu\n",
                  uv_layers,uv_splits,uv_invalid,uv_pinned_count);
+    if(adaptive)std::fprintf(stderr,"[D15 C8 Adaptive] sliding=%zu pinned=%zu protect_facesets=%d\n",result.sliding,result.pinned,int(protect_facesets));
     if(uv_sculpt)std::fprintf(stderr,"[D15 C7.1 Coverage] active=%zu moved=%zu seam_normal=%zu normal_recovered=%zu uv_removed=%zu geometry_pinned=%zu blocked=%zu clip_pinned=%zu\n",
                               active,changes.size(),seam_normal_count,normal_recovered,uv_removed,geometry_pinned,blocked_count,clip_pinned);
   }

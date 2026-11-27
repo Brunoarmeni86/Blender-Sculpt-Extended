@@ -45,5 +45,20 @@ int main(){
  e={{0,9,0}};check(!evaluate(v,e,k,r)&&r.motion==expected,"bad edge transactional");
  v[0].weight=std::numeric_limits<double>::quiet_NaN();e={{0,1,0}};
  check(!evaluate(v,e,k,r)&&r.motion==expected,"NaN rejection transactional");
+ std::vector<Vertex> c8{{{0,0,0},{0,0,1},1.},{{-2,0,1},{0,0,1},0.},
+                        {{1,0,1},{0,0,1},0.},{{0,1,1},{0,0,1},0.}};
+ Settings ak;ak.normal_keep=1.;ak.adaptive_boundaries=true;
+ Result ar;
+ check(evaluate(c8,{{0,1,Seam},{0,2,0},{0,3,0}},ak,ar)&&
+       ar.motion[0][2]>0.&&ar.motion[0][0]==0.,"C8 soft endpoint follows surface");
+ check(evaluate(c8,{{0,1,UVChart},{0,2,UVChart},{0,3,FaceSet}},ak,ar)&&
+       ar.motion[0][2]>0.&&ar.motion[0][0]==0.,"C8 soft junction normal only");
+ c8[1].co={-2,0,0};c8[2].co={1,0,0};
+ check(evaluate(c8,{{0,1,UVChart},{0,2,UVChart},{0,3,0}},ak,ar)&&
+       ar.motion[0][0]<0.&&ar.motion[0][2]>0.,"C8 soft chain tangent and normal");
+ check(evaluate(c8,{{0,1,Sharp},{0,2,Sharp},{0,3,0}},ak,ar)&&
+       ar.motion[0][0]<0.&&ar.motion[0][2]==0.,"C8 hard chain slides only");
+ check(evaluate(c8,{{0,1,Sharp},{0,2,Sharp},{0,3,Sharp}},ak,ar)&&
+       ar.motion[0]==V{},"C8 hard junction pinned");
  std::puts("D15_FEATURE_SMOOTH_REFERENCE_OK");
 }

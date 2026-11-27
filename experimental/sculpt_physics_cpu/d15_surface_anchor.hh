@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <vector>
+#include <utility>
 
 namespace sculpt_physics::surface_anchor_d15 {
 using V = std::array<double,3>;
@@ -78,6 +79,26 @@ inline bool linked(const Triangle& a,const Triangle& b,double eps){
   ++count;if(a.co[i]!=b.co[j]||!same_uv(a.uv[i],b.uv[j],eps))return false;
  }
  return count==2;
+}
+// C8: connected UV wedges, not just equal UV coordinates at the center.
+inline bool partition_wedges(const std::vector<Triangle>& fan,double eps,
+                             std::vector<std::vector<std::size_t>>& out){
+ if(fan.empty()||fan.size()>256||!std::isfinite(eps)||eps<0.)return false;
+ std::vector<Id> ids;
+ for(const auto& t:fan){V n;if(!triangle_normal(t,n))return false;ids.push_back(t.id);}
+ std::sort(ids.begin(),ids.end());
+ if(std::adjacent_find(ids.begin(),ids.end())!=ids.end())return false;
+ std::vector<std::vector<std::size_t>> trial;
+ std::vector<unsigned char> seen(fan.size(),0);
+ for(std::size_t i=0;i<fan.size();++i){
+  if(seen[i])continue;
+  trial.push_back({i});seen[i]=1;auto& group=trial.back();
+  for(std::size_t k=0;k<group.size();++k)for(std::size_t j=0;j<fan.size();++j){
+   if(!seen[j]&&linked(fan[group[k]],fan[j],eps)){seen[j]=1;group.push_back(j);}
+  }
+  std::sort(group.begin(),group.end());
+ }
+ out=std::move(trial);return true;
 }
 struct Link {std::size_t a,b;};
 enum class Status { Ok,Invalid,NoMatch,Ambiguous };
