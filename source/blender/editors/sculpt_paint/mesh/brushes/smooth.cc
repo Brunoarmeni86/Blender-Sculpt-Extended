@@ -501,23 +501,45 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
   bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
+  const bool diag=std::getenv("BLENDER_SCULPT_SMOOTH_DIAG")!=nullptr;
+  const auto reject=[&](const char *reason){
+    if(diag)std::fprintf(stderr,"[D15 C6.2 BLOCK] reason=%s preserve=%d probe=%d tangent=%d\n",
+                        reason,int(uv_preserve),int(uv_probe),int(tangent_only));
+    return false;
+  };
   const auto &layer=layer_delta_smooth_v01::state();
-  if(pbvh.type()!=bke::pbvh::Type::Mesh || ss.deform_modifiers_active ||
-     ss.shapekey_active || bke::multires_layers::base_modifier(object)!=nullptr ||
-     (layer.object==&object && layer.mesh_l0) ||
-     cache.reference_symmetry || cache.reference_combined ||
-     cache.tile_pass!=0 || cache.radial_symmetry_pass!=0 || cache.mirror_symmetry_pass!=0)
-    return false;
+  if(pbvh.type()!=bke::pbvh::Type::Mesh)return reject("pbvh_not_mesh");
+  if(ss.deform_modifiers_active)return reject("deform_modifiers_active");
+  if(ss.shapekey_active)return reject("shapekey_active");
+  if(bke::multires_layers::base_modifier(object)!=nullptr)return reject("multires_base_modifier");
+  if(layer.object==&object && layer.mesh_l0)return reject("isolated_layer_mesh_l0");
+  if(cache.reference_symmetry)return reject("reference_symmetry");
+  if(cache.reference_combined)return reject("reference_combined");
+  if(cache.tile_pass!=0 || cache.radial_symmetry_pass!=0 || cache.mirror_symmetry_pass!=0){
+    if(diag)std::fprintf(stderr,"[D15 C6.2 PASS] tile=%d radial=%d mirror=%d\n",
+                         int(cache.tile_pass),int(cache.radial_symmetry_pass),int(cache.mirror_symmetry_pass));
+    return reject("non_main_pass");
+  }
   const Mesh &mesh=*id_cast<const Mesh *>(object.data);
-  if(stroke_symmetry_xyz_get(object)!=PAINT_SYMM_NONE ||
-     mesh.radial_symmetry[0]!=1 || mesh.radial_symmetry[1]!=1 || mesh.radial_symmetry[2]!=1 ||
-     (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))!=0)
-    return false;
+  if(stroke_symmetry_xyz_get(object)!=PAINT_SYMM_NONE){
+    if(diag)std::fprintf(stderr,"[D15 C6.2 SYMM] xyz=%d\n",int(stroke_symmetry_xyz_get(object)));
+    return reject("xyz_symmetry");
+  }
+  if(mesh.radial_symmetry[0]!=1 || mesh.radial_symmetry[1]!=1 || mesh.radial_symmetry[2]!=1){
+    if(diag)std::fprintf(stderr,"[D15 C6.2 SYMM] radial=%d,%d,%d\n",
+                         int(mesh.radial_symmetry[0]),int(mesh.radial_symmetry[1]),int(mesh.radial_symmetry[2]));
+    return reject("radial_symmetry");
+  }
+  if((sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))!=0)
+    return reject("tile_symmetry");
   const PositionDeformData pos(depsgraph,object);
-  if(pos.eval.size()!=mesh.verts_num || !std::isfinite(brush_strength))return false;
+  if(pos.eval.size()!=mesh.verts_num)return reject("position_count_mismatch");
+  if(!std::isfinite(brush_strength))return reject("nonfinite_strength");
   const MeshAttributeData attrs(mesh);
   const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
-  if(normals.size()!=pos.eval.size())return false;
+  if(normals.size()!=pos.eval.size())return reject("normal_count_mismatch");
+  if(diag)std::fprintf(stderr,"[D15 C6.2 ENTER] preserve=%d probe=%d tangent=%d verts=%d strength=%.6g\n",
+                       int(uv_preserve),int(uv_probe),int(tangent_only),mesh.verts_num,double(brush_strength));
   const auto faces=mesh.faces();
   const auto v2f=mesh.vert_to_face_map();
   const auto native_edges=mesh.edges();
@@ -571,15 +593,15 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         if(samples.size()>500000){rejected=true;return;}
       }
     });
-    if(rejected)return false;
+    if(rejected)return reject("invalid_factor_or_active_cap");
     active=samples.size();
-    if(active==0)return true;
+    if(active==0){if(diag)std::fprintf(stderr,"[D15 C6.2 NOOP] reason=no_active_vertices\n");return true;}
     if(ss.vert_to_edge_map.is_empty() && !native_edges.is_empty()){
       ss.vert_to_edge_map=bke::mesh::build_vert_to_edge_map(
           native_edges,mesh.verts_num,ss.vert_to_edge_offsets,ss.vert_to_edge_indices);
     }
-    if(native_edges.is_empty())return true;
-    if(ss.vert_to_edge_map.size()!=mesh.verts_num)return false;
+    if(native_edges.is_empty()){if(diag)std::fprintf(stderr,"[D15 C6.2 NOOP] reason=no_edges\n");return true;}
+    if(ss.vert_to_edge_map.size()!=mesh.verts_num)return reject("edge_map_count_mismatch");
     std::vector<int> edge_ids;
     std::vector<int> incident_faces;
     for(std::size_t i=0;i<active;++i){
@@ -594,7 +616,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
     edge_ids.erase(std::unique(edge_ids.begin(),edge_ids.end()),edge_ids.end());
     std::sort(incident_faces.begin(),incident_faces.end());
     incident_faces.erase(std::unique(incident_faces.begin(),incident_faces.end()),incident_faces.end());
-    if(edge_ids.size()>4000000)return false;
+    if(edge_ids.size()>4000000)return reject("edge_cap");
     struct EdgeInfo {
       int count=0,first_set=0,first_face=-1;
       bool mixed=false,hidden=false;
@@ -636,7 +658,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
     const auto uv_names=mesh.uv_map_names();
     for(const auto name:uv_names){
       const auto reader=attributes.lookup<float2>(name,bke::AttrDomain::Corner);
-      if(!reader || reader.varray.size()!=corner_verts.size())return false;
+      if(!reader || reader.varray.size()!=corner_verts.size())return reject("invalid_uv_layer");
       ++uv_layers;
       const auto sample_pair=[&](const uvb::Corners &ids)->uvb::Pair{
         const float2 a=reader.varray[ids[0]],b=reader.varray[ids[1]];
@@ -656,9 +678,9 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
     edges.reserve(edge_ids.size());
     for(std::size_t i=0;i<edge_ids.size();++i){
       const int e=edge_ids[i];const int2 v=native_edges[e];
-      if(v[0]==v[1])return false;
+      if(v[0]==v[1])return reject("self_edge");
       const auto a=add(v[0],0.),b=add(v[1],0.);
-      if(samples.size()>1000000)return false;
+      if(samples.size()>1000000)return reject("sample_cap");
       const auto &q=info[i];
       unsigned flags=0;
       if(sharp[e])flags|=fs::Sharp;
@@ -690,7 +712,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       settings.normal_keep=0.;
       for(std::size_t i=0;i<samples.size();++i)if(feature[i])samples[i].weight=0.;
     }
-    if(!fs::evaluate(samples,std::move(edges),settings,result))return false;
+    if(!fs::evaluate(samples,std::move(edges),settings,result))return reject("feature_evaluate");
     std::unordered_map<std::size_t,float3> changes;
     changes.reserve(active);
     std::vector<unsigned char> staged(active,0);
@@ -723,16 +745,16 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       }
       batches.push_back(std::move(batch));
     });
-    if(rejected)return false;
+    if(rejected)return reject("invalid_clipped_motion");
     if(changes.empty()){
       if(uv_probe||uv_preserve)std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=no_eligible_motion active=%zu feature_edges=%zu\n",active,feature_count);
       return true;
     }
     if(!uv_preserve){
       guard_scale=smooth_local_contact_guard(mesh,pos.eval,changes);
-      if(!std::isfinite(guard_scale)||guard_scale<0.||guard_scale>1.)return false;
+      if(!std::isfinite(guard_scale)||guard_scale<0.||guard_scale>1.)return reject("invalid_geometry_guard");
       // Do not partially scale a clipping snap/lock correction.
-      if(adjusted_by_clip && guard_scale<1.)return false;
+      if(adjusted_by_clip && guard_scale<1.)return reject("clip_guard_conflict");
     }
     if(uv_probe)return feature_uv_probe_d15(mesh,pos.eval,normals,changes,nullptr);
     if(uv_preserve){
@@ -751,10 +773,10 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
           std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=invalid_geometry_guard\n");
           return false;
         }
-        if(adjusted_by_clip&&pass_scale<1.)return false;
+        if(adjusted_by_clip&&pass_scale<1.)return reject("preserve_clip_guard_conflict");
         for(auto it=changes.begin();it!=changes.end();){
           const auto v=it->second;
-          if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))return false;
+          if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))return reject("nonfinite_motion");
           if(math::length_squared(v)==0.f)it=changes.erase(it);else ++it;
         }
         if(changes.empty()){
@@ -797,7 +819,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       const auto it=changes.find(std::size_t(batch.ids[j]));
       batch.motion[j]=it==changes.end()?float3(0.f):it->second;
       const auto v=batch.motion[j];
-      if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))return false;
+      if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))return reject("nonfinite_motion");
     }
     if(uv_preserve){
       // Every position writer must belong to a captured native Undo node.
