@@ -262,11 +262,16 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
                                 const Span<float3> positions,
                                 const Span<float3> normals,
                                 const std::unordered_map<std::size_t,float3> &changes,
-                                Vector<undo::UVCornerProposalD15> *proposals)
+                                Vector<undo::UVCornerProposalD15> *proposals,
+                                std::vector<std::size_t> *rejected_vertices=nullptr)
 {
   namespace a=sculpt_physics::surface_anchor_d15;
   const auto names=mesh.uv_map_names();
-  if(names.is_empty() || names.size()>16 || changes.size()>4096)return false;
+  if(names.is_empty() || names.size()>16 || changes.size()>4096){
+    std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=scope layers=%lld vertices=%zu\n",
+                 static_cast<long long>(names.size()),changes.size());
+    return false;
+  }
   const auto attrs=mesh.attributes();
   const auto faces=mesh.faces();
   const auto v2f=mesh.vert_to_face_map();
@@ -282,8 +287,13 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
     layer_names.emplace_back(name.data(),name.size());
   }
   std::size_t projected=0,refused=0,corner_values=0;
+  std::size_t normal_reject=0,fan_reject=0,residual_reject=0,uv_reject=0;
   double max_uv_delta=0.;
   for(const auto &entry:changes){
+    const auto reject=[&](std::size_t &reason){
+      ++refused;++reason;
+      if(rejected_vertices)rejected_vertices->push_back(entry.first);
+    };
     const int v=int(entry.first);
     const auto motion=as_v(entry.second);
     const double travel=a::norm(motion);
@@ -292,11 +302,11 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
     const auto target=a::add(old,motion);
     const auto normal=as_v(normals[v]);
     const double nl=a::norm(normal);
-    if(!(nl>0.) || !std::isfinite(travel) || !std::isfinite(nl)){++refused;continue;}
+    if(!(nl>0.) || !std::isfinite(travel) || !std::isfinite(nl)){reject(normal_reject);continue;}
     const auto n=a::mul(normal,1./nl);
     // Diagnostic only: a tangent proposal should have negligible normal
     // motion. Reject native clip corrections that violate this assumption.
-    if(std::abs(a::dot(motion,n))>travel*1e-4){++refused;continue;}
+    if(std::abs(a::dot(motion,n))>travel*1e-4){reject(normal_reject);continue;}
     struct Candidate {int tri;int3 corners;a::V bary;double distance;};
     std::vector<Candidate> hits;
     std::vector<int> dest;
@@ -318,7 +328,7 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
       }
       if(bad || dest.size()>256){bad=true;break;}
     }
-    if(bad || hits.empty() || dest.empty()){++refused;continue;}
+    if(bad || hits.empty() || dest.empty()){reject(fan_reject);continue;}
     // Require one connected triangle fan around the vertex, even when two
     // disconnected fans happen to share the same point and UV coordinates.
     std::vector<unsigned char> seen(hits.size(),0);seen[0]=1;
@@ -330,12 +340,12 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
         if(cv[hits[queue[k]].corners[x]]==cv[hits[j].corners[y]])++common;
       if(common==2){seen[j]=1;queue.push_back(j);}
     }
-    if(queue.size()!=hits.size()){++refused;continue;}
+    if(queue.size()!=hits.size()){reject(fan_reject);continue;}
     std::sort(hits.begin(),hits.end(),[](const Candidate &x,const Candidate &y){
       return x.distance!=y.distance?x.distance<y.distance:x.tri<y.tri;
     });
     const auto &best=hits.front();
-    if(best.distance>travel*.25){++refused;continue;}
+    if(best.distance>travel*.25){reject(residual_reject);continue;}
     // All maps use the same geometric correspondence. Inspect every
     // destination corner and reject incompatible equidistant UV samples.
     double local_delta=0.;
@@ -372,7 +382,7 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
         }
       }
     }
-    if(bad){++refused;continue;}
+    if(bad){reject(uv_reject);continue;}
     if(proposals){
       if(proposals->size()+local.size()>262144)return false;
       for(const auto &value:local)proposals->append(value);
@@ -382,7 +392,10 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
   }
   std::fprintf(stderr,"[D15 UV %s] layers=%zu projected=%zu refused=%zu corner_values=%zu max_uv_delta=%.9g\n",
                proposals?"STAGE":"Probe READ ONLY",layers.size(),projected,refused,corner_values,max_uv_delta);
-  return !proposals || refused==0;
+  if(refused)
+    std::fprintf(stderr,"[D15 UV Reject] normal=%zu fan=%zu residual=%zu uv=%zu\n",
+                 normal_reject,fan_reject,residual_reject,uv_reject);
+  return !proposals || rejected_vertices || refused==0;
 }
 
 /* C6 guarded writer set. Allocation and UV triangle checks happen before
@@ -400,7 +413,8 @@ public:
     for(auto &l:layers_)if(l.writer && *l.writer)l.writer->finish();
   }
   bool prepare(Mesh &mesh,Span<undo::UVCornerProposalD15> proposals,
-               const std::unordered_map<std::size_t,float3> &changes)
+               const std::unordered_map<std::size_t,float3> &changes,
+               std::vector<std::size_t> &bad_vertices)
   {
     std::map<std::string,std::map<int,UV>> grouped;
     for(const auto &p:proposals){
@@ -411,6 +425,7 @@ public:
     }
     const auto faces=mesh.faces();
     const auto tris=mesh.corner_tris();
+    const auto cv=mesh.corner_verts();
     const auto v2f=mesh.vert_to_face_map();
     std::vector<int> affected;
     for(const auto &entry:changes)
@@ -444,8 +459,12 @@ public:
         const double a=area(old),b=area(next);
         if(!std::isfinite(a)||!std::isfinite(b)||a==0.||
            ((a>0.)!=(b>0.))||std::abs(b)<.05*std::abs(a)){
-          std::fprintf(stderr,"[D15 UV Preserve] rejected UV fold/degenerate triangle\n");
-          return false;
+          // Freeze every moving endpoint of this unsafe triangle. Never
+          // retain a UV proposal for a vertex whose geometry is rejected.
+          for(int j=0;j<3;++j){
+            const auto v=std::size_t(cv[c[j]]);
+            if(changes.find(v)!=changes.end())bad_vertices.push_back(v);
+          }
         }
       }
     }
@@ -508,7 +527,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
   struct WriteBatch {int node=0;Vector<int> ids;Vector<float3> motion;};
   std::vector<WriteBatch> batches;
   Vector<undo::UVCornerProposalD15> uv_proposals;
-  FeatureUVPublishD15 uv_publish;
+  std::unique_ptr<FeatureUVPublishD15> uv_publish;
   fs::Result result;
   std::size_t active=0,edge_count=0,feature_count=0,blocked_count=0;
   std::size_t uv_layers=0,uv_splits=0,uv_invalid=0,uv_pinned_count=0;
@@ -697,7 +716,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         auto &v=batch.motion[j];
         const bool changed=v.x!=before[j].x||v.y!=before[j].y||v.z!=before[j].z;
         const auto i=slot.at(batch.ids[j]);
-        if(changed && feature[i])v=float3(0.f); // do not rotate a feature slide off its chain
+        if(changed && (feature[i]||tangent_only))v=float3(0.f); // do not rotate a tangent proposal off its constraint
         else if(changed)adjusted_by_clip=true;
         if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z)){rejected=true;return;}
         if(math::length_squared(v)>0.f)changes.emplace(std::size_t(batch.ids[j]),v);
@@ -706,7 +725,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
     });
     if(rejected)return false;
     if(changes.empty()){
-      if(uv_probe)std::fprintf(stderr,"[D15 UV Probe READ ONLY] no eligible motion\n");
+      if(uv_probe||uv_preserve)std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=no_eligible_motion active=%zu feature_edges=%zu\n",active,feature_count);
       return true;
     }
     guard_scale=smooth_local_contact_guard(mesh,pos.eval,changes);
@@ -715,6 +734,57 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
     // publishing when native clipping and geometry safety disagree.
     if(adjusted_by_clip && guard_scale<1.)return false;
     if(uv_probe)return feature_uv_probe_d15(mesh,pos.eval,normals,changes,nullptr);
+    if(uv_preserve){
+      // A single unsafe vertex must not freeze an otherwise safe dab.
+      // Prune locally, re-run the geometric guard and regenerate EVERY UV
+      // proposal from the original snapshot after each rejection round.
+      const auto original_changes=changes;
+      auto remaining=original_changes;
+      bool ready=false;
+      constexpr int max_rounds=6;
+      for(int round=0;round<max_rounds;++round){
+        changes=remaining;
+        if(changes.empty())break;
+        const double pass_scale=smooth_local_contact_guard(mesh,pos.eval,changes);
+        if(!std::isfinite(pass_scale)||pass_scale<0.||pass_scale>1.)return false;
+        for(auto it=changes.begin();it!=changes.end();){
+          const auto v=it->second;
+          if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))return false;
+          if(math::length_squared(v)==0.f)it=changes.erase(it);else ++it;
+        }
+        if(changes.empty())break;
+        std::vector<std::size_t> bad;
+        uv_proposals.clear();
+        if(!feature_uv_probe_d15(mesh,pos.eval,normals,changes,&uv_proposals,&bad)){
+          std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=projection_preflight\n");
+          return false;
+        }
+        if(bad.empty()){
+          auto writer=std::make_unique<FeatureUVPublishD15>();
+          Mesh &writable_mesh=*id_cast<Mesh *>(object.data);
+          if(!writer->prepare(writable_mesh,uv_proposals.as_span(),changes,bad)){
+            std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=writer_preflight\n");
+            return false;
+          }
+          if(bad.empty()){
+            uv_publish=std::move(writer);
+            guard_scale*=pass_scale;
+            ready=true;break;
+          }
+          // Writer destructs before next read/guard pass; no UV was written.
+        }
+        std::sort(bad.begin(),bad.end());
+        bad.erase(std::unique(bad.begin(),bad.end()),bad.end());
+        std::size_t removed=0;
+        for(const auto id:bad)removed+=remaining.erase(id);
+        std::fprintf(stderr,"[D15 UV Preserve FILTER] round=%d removed=%zu remaining=%zu\n",round+1,removed,remaining.size());
+        if(!removed)break;
+      }
+      if(!ready){
+        std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=no_safe_subset\n");
+        return false;
+      }
+    }
     for(auto &batch:batches)for(const int j:batch.ids.index_range()){
       const auto it=changes.find(std::size_t(batch.ids[j]));
       batch.motion[j]=it==changes.end()?float3(0.f):it->second;
@@ -722,16 +792,19 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))return false;
     }
     if(uv_preserve){
-      if(!feature_uv_probe_d15(mesh,pos.eval,normals,changes,&uv_proposals))return false;
       // Every position writer must belong to a captured native Undo node.
       for(const auto &batch:batches)
-        if(!orig_position_data_lookup_mesh(object,nodes[batch.node]))return false;
-      Mesh &writable_mesh=*id_cast<Mesh *>(object.data);
-      if(!uv_publish.prepare(writable_mesh,uv_proposals.as_span(),changes))return false;
+        if(!orig_position_data_lookup_mesh(object,nodes[batch.node])){
+          std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=position_undo_node\n");
+          return false;
+        }
       // Capture last: all proposals and writers have been acquired. No
       // fallback after this point. Only ordinary Mesh without deform/shape/
       // Multires is supported by this opt-in experimental path.
-      if(!undo::capture_uv_corners_d15(object,uv_proposals.as_span()))return false;
+      if(!undo::capture_uv_corners_d15(object,uv_proposals.as_span())){
+        std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=uv_undo_capture\n");
+        return false;
+      }
     }
   }catch(const std::exception &error){
     std::fprintf(stderr,"[D15 Feature Smooth] rejected before write: %s\n",error.what());
@@ -740,12 +813,12 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
   // Existing native position Undo transaction covers node_mask. No fallback
   // or alternate mode after any publish; GPU state is stale after CPU writes.
   for(auto &batch:batches)pos.deform(batch.motion,batch.ids);
-  if(uv_preserve)uv_publish.write_values();
+  if(uv_preserve)uv_publish->write_values();
   for(auto &batch:batches)bke::pbvh::update_node_bounds_mesh(pos.eval,nodes[batch.node]);
   if(uv_preserve){
     IndexMaskMemory uv_memory;
     const IndexMask uv_nodes=bke::pbvh::all_leaf_nodes(pbvh,uv_memory);
-    uv_publish.finish(pbvh,uv_nodes);
+    uv_publish->finish(pbvh,uv_nodes);
     std::fprintf(stderr,"[D15 UV Preserve COMMIT] corner_values=%lld guard=%.4f\n",
                  static_cast<long long>(uv_proposals.size()),guard_scale);
   }

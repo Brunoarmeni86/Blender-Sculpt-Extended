@@ -927,7 +927,10 @@ bool capture_uv_corners_d15(Object &object, Span<UVCornerProposalD15> proposals)
   StepData *step = get_step_data();
   if (!step || !uv_scope_d15(object, *step) ||
       !object.runtime->sculpt_session->cache || step->position_step_storage ||
-      step->undo_nodes_by_pbvh_node.is_empty()) return false;
+      step->undo_nodes_by_pbvh_node.is_empty()) {
+    std::fprintf(stderr,"[D15 UV Undo BLOCK] reason=active_position_step present=%d\n",int(step!=nullptr));
+    return false;
+  }
   if (proposals.is_empty()) return true;
   const Mesh &mesh = *id_cast<const Mesh *>(object.data);
   if (mesh.corners_num != step->mesh.corners_num ||
@@ -937,7 +940,10 @@ bool capture_uv_corners_d15(Object &object, Span<UVCornerProposalD15> proposals)
         std::make_unique<UVUndoSidecarD15>(*step->uv_corners_d15) :
         std::make_unique<UVUndoSidecarD15>();
     if (step->uv_corners_d15) {
-      if (!uv_validate_live_d15(mesh, *trial)) return false;
+      if (!uv_validate_live_d15(mesh, *trial)) {
+        std::fprintf(stderr,"[D15 UV Undo BLOCK] reason=stale_live_state\n");
+        return false;
+      }
     }
     else {
       trial->mesh_name = mesh.id.name;

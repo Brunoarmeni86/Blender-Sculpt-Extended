@@ -140,3 +140,7 @@ See [D15_NATIVE_UV_UNDO_C5.md](D15_NATIVE_UV_UNDO_C5.md). Dormant sparse UV capt
 ## Implementation checkpoint — D15-C6 BSE Preservation Engine pilot
 
 See [D15_UV_PRESERVE_C6.md](D15_UV_PRESERVE_C6.md). User C5 build/C4 read-only log succeeded on one map; C6 adds explicit experimental tangent-only A/B and actual UV writer path, conservative all-or-nothing preflight, C5 sparse capture and UV triangle fold check. No UI, default change or native validation yet. Preserve stays opt-in; use disposable mesh and verify native Undo/Redo/Esc before extending. Shared preservation architecture: attribute transport, source anchoring, detail preservation, topology transfer, distinct material transport and tangent reprojection policies.
+
+## D15-C6.1 recovery
+
+User reported B not moving. [D15_UV_PRESERVE_C6_1.md](D15_UV_PRESERVE_C6_1.md): local unsafe-vertex pruning with complete revalidation and explicit block diagnostics; native build/runtime untested, exact original cause not confirmed without C6 log.
