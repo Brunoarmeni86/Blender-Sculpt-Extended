@@ -3,6 +3,9 @@
 #include "d12_clay_engine.hh"
 #include "artistic_paired_flux.hh"
 #include <array>
+#include <limits>
+#include <queue>
+#include <functional>
 namespace sculpt_physics::dedicated_d13::clay_fusion {
 namespace d=dedicated_d12;
 using Edge=std::array<std::size_t,2>;
@@ -35,9 +38,24 @@ inline std::vector<unsigned char> contact(const std::vector<PhysicalBrushIntentS
   if(d::dot(d::unit_normal(s[a].surface_normal),d::unit_normal(s[b].surface_normal))<.2)continue;
   adj[a].push_back(b);adj[b].push_back(a);
  }
- std::vector<std::size_t> queue{seed};selected[seed]=1;
- for(std::size_t k=0;k<queue.size();++k)for(auto j:adj[queue[k]])
-  if(!selected[j]){selected[j]=1;queue.push_back(j);}
+ // Bound intrinsic travel, not only Euclidean proximity. Avoid wrapping
+ // around a thin fold into the opposite sheet through a long connected path.
+ const double reach=1.5*radius+std::min(travel,1.5*radius);
+ using Entry=std::pair<double,std::size_t>;
+ std::priority_queue<Entry,std::vector<Entry>,std::greater<Entry>> queue;
+ std::vector<double> distance(n,std::numeric_limits<double>::infinity());
+ distance[seed]=0.;queue.push({0.,seed});
+ while(!queue.empty()){
+  const auto [length,i]=queue.top();queue.pop();
+  if(length!=distance[i])continue;
+  selected[i]=1;
+  for(auto j:adj[i]){
+   const double candidate=length+d::norm(s[i].position-s[j].position);
+   if(candidate<=reach&&candidate<distance[j]){
+    distance[j]=candidate;queue.push({candidate,j});
+   }
+  }
+ }
  return selected;
 }
 // Redistribute only NEW positive deposition. No implicit smooth of old mesh.

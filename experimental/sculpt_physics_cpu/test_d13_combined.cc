@@ -40,6 +40,12 @@ int main(){
    {2,{0,0,-.01},1,1,true,{0,0,-1}},{3,{.02,0,.15},1,1,true,{0,0,1}}};
  auto selected=fusion::contact(patch,{{0,1},{0,2}},{0,0,.2},{0,0,1},1.,0.);
  check(selected[0]&&selected[1]&&!selected[2]&&!selected[3],"oriented connected contact");
+ // A close point reached only through a long winding surface is excluded.
+ std::vector<PhysicalBrushIntentSample> fold{
+  {0,{0,0,0},1,1,true,{0,0,1}},{1,{.8,0,0},1,1,true,{0,0,1}},
+  {2,{.8,.8,0},1,1,true,{0,0,1}},{3,{.02,.02,0},1,1,true,{0,0,1}}};
+ auto reached=fusion::contact(fold,{{0,1},{1,2},{2,3}},{0,0,0},{0,0,1},1.,0.);
+ check(reached[0]&&reached[1]&&!reached[2]&&!reached[3],"intrinsic reach");
  std::vector<Vec3> deposit{{0,0,.04},{0,0,.02},{},{}};
  check(fusion::redistribute(patch,{{0,1},{0,2}},{1.,2.,1.,1.},{.1,.1,0.,0.},
                             {0,0,1},1.,deposit),"fusion");
