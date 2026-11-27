@@ -40,6 +40,7 @@
 #include <mutex>
 #include <map>
 #include <array>
+#include <exception>
 #include <vector>
 #include "BLI_set.hh"
 #include <zstd.h>
@@ -893,7 +894,7 @@ static bool uv_finite_d15(const UVUndoSidecarD15::UV &v)
 {
   return std::isfinite(v[0]) && std::isfinite(v[1]);
 }
-static bool uv_scope_d15(const Object &object, const StepData &step)
+static bool uv_scope_d15(Object &object, const StepData &step)
 {
   if (object.type != OB_MESH || step.type != Type::Position ||
       step.object_name != object.id.name || !object.runtime->sculpt_session ||
