@@ -120,3 +120,7 @@ D15-B1 adds an explicit environment-only adapter in smooth.cc; see [D15_FEATURE_
 ## Implementation checkpoint — D15-B2 real UV boundaries
 
 Added independent corner-pair classifier plus native all-UV-layer classification in the existing hidden Feature Smooth CPU pilot. Actual split edges pin their endpoints until chart-safe reprojection is available; no attribute mutation. Standalone GCC and Clang ASan/UBSan tests passed. Native compilation and runtime not tested. See [D15_FEATURE_SMOOTH_REFERENCE.md](D15_FEATURE_SMOOTH_REFERENCE.md).
+
+## Implementation checkpoint — D15-C1/C2 CPU reference
+
+Read [D15_SURFACE_ANCHOR_REFERENCE.md](D15_SURFACE_ANCHOR_REFERENCE.md). Bounded source-triangle relocation and single-layer barycentric UV sampling reference, with independent GCC and Clang ASan/UBSan tests passed. No native mesh/attribute writes or UI changes. Native wedge assembly and Undo are mandatory before exposing UV reprojection; existing D15-B2 UV pinning remains in place. Volumetric attribute transfer still needs material provenance and reconstruction integration.
