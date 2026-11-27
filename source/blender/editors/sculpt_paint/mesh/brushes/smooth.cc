@@ -1266,6 +1266,71 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
   const char *c9_flag=std::getenv("BLENDER_SCULPT_D15_GPU_PRESERVE");
   const bool c9_requested=c9_flag&&STREQ(c9_flag,"1");
   bool c9_publish_started=false;
+  const char *coverage_flag=std::getenv("BLENDER_SCULPT_D15_COVERAGE_DIAG");
+  const bool coverage=coverage_flag&&STREQ(coverage_flag,"1")&&
+      mesh.verts_num<=250000&&cache.radius>0.f;
+  struct CoverageVertex {
+    float distance=0.f,factor=0.f;
+    float3 before=float3(0.f);
+    float native_goal=0.f,gpu_goal=0.f,clipped_goal=0.f;
+    bool gathered=false,submitted=false,staged=false;
+  };
+  std::vector<CoverageVertex> audit;
+  if(coverage){
+    Array<float> distances(mesh.verts_num);
+    calc_brush_distances(ss,position_data.eval,eBrushFalloffShape(brush.falloff_shape),
+                         distances.as_mutable_span());
+    audit.resize(mesh.verts_num);
+    for(const int v:position_data.eval.index_range()){
+      audit[v].distance=distances[v];
+      audit[v].before=position_data.eval[v];
+    }
+  }
+  const auto report_coverage=[&](){
+    if(!coverage)return;
+    std::size_t core=0,hidden=0,masked=0,missing=0,zero_factor=0,submitted=0,
+        zero_gpu=0,zero_clipped=0,unwritten=0,moved=0,flat_goal=0;
+    int samples=0;
+    const float epsilon=std::max(cache.radius*1e-6f,1e-12f);
+    for(const int v:position_data.eval.index_range()){
+      const auto &x=audit[v];
+      // The central 75% of the actual native 3D/tube footprint, not
+      // the projected outline of the cursor. Back-side hits may be
+      // deliberately excluded by Front Faces Only.
+      if(!std::isfinite(x.distance)||x.distance>=cache.radius*.75f)continue;
+      ++core;
+      const float mask=attributes.mask.is_empty()?0.f:attributes.mask[v];
+      const bool hide=!attributes.hide_vert.is_empty()&&attributes.hide_vert[v];
+      const float moved_distance=math::distance(position_data.eval[v],x.before);
+      const float ndot=math::dot(cache.view_normal_symm,normals[v]);
+      const char *reason=nullptr;
+      if(hide){++hidden;continue;}
+      if(mask>=.999f){++masked;continue;}
+      if(!x.gathered){++missing;reason="not_gathered";}
+      else if(!x.submitted){++zero_factor;reason="factor_zero_or_invalid";}
+      else{
+        ++submitted;
+        if(!x.staged){++unwritten;reason="not_staged";}
+        else if(moved_distance>epsilon){++moved;}
+        else if(x.gpu_goal<=epsilon){
+          if(x.native_goal<=epsilon){++flat_goal;reason="near_zero_native_and_gpu_goal";}
+          else{++zero_gpu;reason="gpu_goal_zero";}
+        }else if(x.clipped_goal<=epsilon){++zero_clipped;reason="post_clip_or_shape_zero";}
+        else{++unwritten;reason="staged_not_moved";}
+      }
+      if(reason&&samples<12){
+        ++samples;
+        std::fprintf(stderr,"[D15 C9.1 Vertex] id=%d reason=%s co=%.7g,%.7g,%.7g dist_ratio=%.5g factor=%.6g mask=%.5g view_dot=%.5g native_goal=%.7g gpu_goal=%.7g clipped=%.7g actual=%.7g\n",
+                     v,reason,double(x.before.x),double(x.before.y),double(x.before.z),
+                     double(x.distance/cache.radius),double(x.factor),double(mask),double(ndot),
+                     double(x.native_goal),double(x.gpu_goal),double(x.clipped_goal),double(moved_distance));
+      }
+    }
+    std::fprintf(stderr,"[D15 C9.1 Coverage] core=%zu hidden=%zu masked=%zu missing=%zu zero_factor=%zu submitted=%zu flat_goal=%zu zero_gpu=%zu zero_clip=%zu unwritten=%zu moved=%zu nodes=%lld frontface=%d falloff=%d strength=%.6g eps=%.7g\n",
+                 core,hidden,masked,missing,zero_factor,submitted,flat_goal,zero_gpu,zero_clipped,
+                 unwritten,moved,static_cast<long long>(node_mask.size()),int(bool(brush.flag&BRUSH_FRONTFACE)),
+                 int(brush.falloff_shape),double(brush_strength),double(epsilon));
+  };
 
   try {
     auto session = std::static_pointer_cast<sculpt_physics::StrokeSolverSession>(
@@ -1342,12 +1407,19 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
       smooth::neighbor_data_average_mesh_check_loose(
           position_data.eval, verts, neighbors, tls.new_positions.as_mutable_span());
       for (const int i : verts.index_range()) {
+        if(coverage){
+          auto &x=audit[verts[i]];
+          x.gathered=true;
+          x.factor=std::max(x.factor,tls.factors[i]);
+          x.native_goal=math::distance(position_data.eval[verts[i]],tls.new_positions[i]);
+        }
         if (tls.factors[i] > 0.0f && std::isfinite(tls.factors[i])) {
           gathered.push_back({verts[i], tls.factors[i], tls.new_positions[i]});
         }
       }
     });
     if (gathered.empty()) {
+      report_coverage();
       return true;
     }
     std::sort(gathered.begin(), gathered.end(), [](const Target &a, const Target &b) {
@@ -1373,6 +1445,7 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
                           double(target.position.z)},
                          compliance});
       active_region.push_back(std::size_t(target.vertex));
+      if(coverage)audit[target.vertex].submitted=true;
       compact_weights.push_back(float(weight));
       const float3 normal = normals[target.vertex];
       compact_normals.push_back({double(normal.x), double(normal.y), double(normal.z)});
@@ -1443,14 +1516,17 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
           current,
           float3(float(target.goal.x), float(target.goal.y), float(target.goal.z)));
       const sculpt_physics::Vec3 solved = solver.particles()[target.particle_index].position;
-      solved_motion += math::distance(
+      const float distance=math::distance(
           current, float3(float(solved.x), float(solved.y), float(solved.z)));
+      solved_motion += distance;
+      if(coverage)audit[target.particle_index].gpu_goal=distance;
     }
     if (!std::isfinite(solved_motion) ||
         (expected_motion > 1.0e-12 && solved_motion <= 1.0e-15))
     {
       /* No Blender positions have been written yet: abandoning the GPU result
        * here is atomic and lets the unchanged standard Smooth execute. */
+      report_coverage();
       throw std::runtime_error("GPU Smooth produced no valid deformation");
     }
 
@@ -1500,6 +1576,15 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
       clip_and_lock_translations(sd, ss, position_data.eval, verts, translations);
       for(const int i:verts.index_range())if(math::is_zero(before_clip[i]))
         translations[i]=float3(0.f);
+      if(coverage){
+        for(const int i:verts.index_range()){
+          auto &x=audit[verts[i]];
+          if(x.submitted){
+            x.staged=true;
+            x.clipped_goal=std::max(x.clipped_goal,math::length(translations[i]));
+          }
+        }
+      }
       if(c9){
         for(const int i:verts.index_range()){
           const auto v=translations[i];
@@ -1606,6 +1691,7 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
     }else if(c9_requested){
       std::fprintf(stderr,"[D15 C9 GPU Preserve] inactive: requires dedicated DenseStrong GPU\n");
     }
+    report_coverage();
     pbvh.tag_positions_changed(node_mask);
     pbvh.flush_bounds_to_parents();
     // Published geometry is authoritative. Never run fallback after write.

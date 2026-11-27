@@ -10064,11 +10064,42 @@ void calc_factors_common_mesh_indexed(const Depsgraph &depsgraph,
 
   const Span<int> verts = node.verts();
 
+  // C9.1: diagnostic-only observation of the exact native factor stages.
+  // Never re-run automasking or texture evaluation, and never modify factors.
+  const char *coverage_flag=std::getenv("BLENDER_SCULPT_D15_COVERAGE_DIAG");
+  const bool coverage=coverage_flag&&STREQ(coverage_flag,"1")&&
+      brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_SMOOTH&&cache.radius>0.f;
+  Vector<float> audit_distances;
+  std::vector<unsigned char> alive;
+  std::size_t core=0;
+  if(coverage){
+    audit_distances.resize(verts.size());
+    calc_brush_distances(ss,vert_positions,verts,eBrushFalloffShape(brush.falloff_shape),
+                         audit_distances.as_mutable_span());
+    alive.resize(verts.size(),0);
+    for(const int i:verts.index_range()){
+      if(std::isfinite(audit_distances[i])&&audit_distances[i]<cache.radius*.75f){
+        alive[i]=1;++core;
+      }
+    }
+  }
+  const auto observe=[&](){
+    std::size_t dropped=0;
+    if(coverage)for(const int i:verts.index_range()){
+      if(alive[i]&&(!(factors[i]>0.f)||!std::isfinite(factors[i]))){
+        alive[i]=0;++dropped;
+      }
+    }
+    return dropped;
+  };
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
+  const auto hide_mask=observe();
   filter_region_clip_factors(ss, vert_positions, verts, factors);
+  const auto region_clip=observe();
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
   }
+  const auto frontface=observe();
 
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
   if(brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY &&
@@ -10082,12 +10113,20 @@ void calc_factors_common_mesh_indexed(const Depsgraph &depsgraph,
         ss, vert_positions, verts, eBrushFalloffShape(brush.falloff_shape), distances);
   }
   filter_distances_with_radius(cache.radius, distances, factors);
+  const auto radius_drop=observe();
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
+  const auto falloff=observe();
 
   auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
+  const auto automask=observe();
 
   calc_brush_texture_factors(ss, brush, vert_positions, verts, factors);
+  const auto texture=observe();
+  if(coverage&&core&&(hide_mask||region_clip||frontface||radius_drop||falloff||automask||texture)){
+    std::fprintf(stderr,"[D15 C9.1 Factors] core=%zu hide_mask=%zu region_clip=%zu frontface=%zu radius=%zu falloff=%zu automask=%zu texture=%zu\n",
+                 core,hide_mask,region_clip,frontface,radius_drop,falloff,automask,texture);
+  }
 }
 
 void calc_factors_common_mesh(const Depsgraph &depsgraph,
