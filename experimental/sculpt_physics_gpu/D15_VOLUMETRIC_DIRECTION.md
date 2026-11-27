@@ -9,3 +9,7 @@ Next: validate D15 compile and native Smooth/Clay asset, then GPU MLS-MPM/APIC, 
 ## External geometry research
 
 Read [SCULPTCORE_INTEGRATION_MEMO.md](SCULPTCORE_INTEGRATION_MEMO.md) before feature-aware Smooth, Multires GPU, Dyntopo/attribute transfer or volumetric surface reconstruction work. Preserve D15 direction; memo is a research backlog, not blanket implementation authorization.
+
+## D15 UI and runtime retirement
+
+The Advanced Sculpt panel exposes no legacy Physical Brush/Engine, XPBD Grab, Physical Material, Balloon or Lesion controls. GPU Smooth modes and Roll Alpha remain. The D15 macro also disables legacy material finish (including old brushes saved with MATERIAL mode), lesion and balloon at native execution, independent of stale environment flags. Old DNA/RNA are retained for .blend compatibility; legacy asset libraries already registered in user preferences must still be removed manually. This is a D15 branch UI policy even if someone builds legacy CMake options manually. No claim of compilation or visual validation yet. Verify native Inflate/Crease/Draw Sharp and old material assets do not run experimental finish, GPU Smooth unchanged, all legacy panels absent.

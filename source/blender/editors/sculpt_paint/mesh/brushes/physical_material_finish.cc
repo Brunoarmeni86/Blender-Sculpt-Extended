@@ -34,6 +34,10 @@ bool apply_physical_lesion_preview(const Depsgraph &depsgraph,
                                    Object &object,
                                    const IndexMask &node_mask)
 {
+#ifdef BSE_VOLUMETRIC_ONLY
+  (void)depsgraph; (void)sd; (void)brush; (void)object; (void)node_mask;
+  return false;
+#else
   const char *enabled = std::getenv("BLENDER_SCULPT_LESION_PREVIEW");
   if (!enabled || enabled[0] != '1') {
     return false;
@@ -103,6 +107,7 @@ bool apply_physical_lesion_preview(const Depsgraph &depsgraph,
     bke::pbvh::update_node_bounds_mesh(position_data.eval, node);
   });
   return true;
+#endif
 }
 
 bool apply_physical_material_finish(const Depsgraph &depsgraph,
@@ -111,7 +116,8 @@ bool apply_physical_material_finish(const Depsgraph &depsgraph,
                                     Object &object,
                                     const IndexMask &node_mask)
 {
-#ifndef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+#if defined(BSE_VOLUMETRIC_ONLY) || !defined(WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL)
+  (void)depsgraph; (void)sd; (void)brush; (void)object; (void)node_mask;
   return false;
 #else
   const char *enabled = std::getenv("BLENDER_SCULPT_PHYSICAL_CLAY_V01");

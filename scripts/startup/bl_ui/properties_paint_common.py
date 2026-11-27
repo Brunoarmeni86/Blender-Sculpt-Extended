@@ -1402,90 +1402,8 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
     if mode == 'SCULPT':
         container.prop(brush, "sculpt_brush_type")
 
-        if (brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS', 'DRAW', 'SMOOTH', 'NUDGE'} and
-                hasattr(brush, "sculpt_physics_mode")):
-            box = container.box()
-            box.label(text="Physical Brush (Experimental)")
-            box.prop(brush, "sculpt_physics_mode")
-            if brush.sculpt_physics_mode in {'ASSISTED', 'MATERIAL'}:
-                box.prop(brush, "sculpt_physics_assist", slider=True)
-                if (brush.sculpt_physics_mode == 'MATERIAL' and
-                        brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS', 'DRAW', 'NUDGE'}):
-                    engine = 'AUTO'
-                    if (brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'} and
-                            hasattr(brush, "sculpt_physics_engine")):
-                        box.prop(brush, "sculpt_physics_engine", text="Engine")
-                        engine = brush.sculpt_physics_engine
-                    if engine in {'CLAY', 'FLESH', 'MELT_SURFACE'}:
-                        box.label(text={
-                            'CLAY': "Adaptive plane deposition",
-                            'FLESH': "Elastic gesture flow",
-                            'MELT_SURFACE': "Surface fusion (no thermal simulation)",
-                        }[engine])
-                        if brush.stroke_method != 'SPACE' and engine in {'CLAY', 'FLESH'}:
-                            box.label(text="Select Space stroke method", icon='INFO')
-                        if brush.auto_smooth_factor > 0:
-                            box.label(text="Auto Smooth can alter engine output", icon='INFO')
-                    else:
-                        box.prop(brush, "sculpt_physics_material", text="Material")
-                        box.prop(brush, "sculpt_physics_clay_behavior", text="Material Action")
-                        if brush.sculpt_physics_clay_behavior.startswith("AUTONOMOUS_"):
-                            box.label(text="Assist controls independent action intensity")
-                            if brush.sculpt_physics_clay_behavior in {
-                                    'AUTONOMOUS_COMPACT', 'AUTONOMOUS_PRESS',
-                                    'AUTONOMOUS_PRESSURE_FLOW', 'AUTONOMOUS_HYBRID_FLOW',
-                                    'AUTONOMOUS_MELT', 'AUTONOMOUS_GATHER', 'AUTONOMOUS_SMEAR'}:
-                                box.label(text="Space: stamp/gesture; Airbrush: held pressure")
-                            else:
-                                box.label(text="Gesture-driven; no persistent plasticity yet")
-                        elif brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'}:
-                            box.prop(brush, "sculpt_physics_yield", slider=True)
-                            box.prop(brush, "sculpt_physics_plasticity", slider=True)
-                        else:
-                            box.label(text="V2/V3 actions apply only to Clay; choose Autonomous")
-                        if (brush.sculpt_physics_clay_behavior.startswith("AUTONOMOUS_") or
-                                brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'}):
-                            box.prop(brush, "sculpt_physics_spread", slider=True)
-                box.label(text="UV coordinates preserved", icon='LOCKED')
-                box.label(text="CPU preview; symmetry and Multires unsupported")
-        if brush.sculpt_brush_type == 'GRAB':
-            header, xpbd_panel = container.panel("xpbd_grab_panel", default_closed=False)
-            header.label(text="XPBD Grab")
-            if xpbd_panel is not None:
-                runtime = context.window_manager
-                xpbd_panel.prop(runtime, "sculpt_xpbd_grab_solver", text="Solver")
-                if runtime.sculpt_xpbd_grab_solver == 'XPBD':
-                    xpbd_panel.prop(runtime, "sculpt_xpbd_backend", text="Compute")
-                    if runtime.sculpt_xpbd_backend == 'CUDA':
-                        xpbd_panel.label(text="Experimental Warp Jacobi solver", icon='INFO')
-                    xpbd_panel.prop(
-                        runtime, "sculpt_xpbd_physical_assist", text="Physical Assist", slider=True)
-                    xpbd_panel.prop(
-                        runtime, "sculpt_xpbd_material_compliance", text="Compliance")
-                    xpbd_panel.prop(runtime, "sculpt_xpbd_velocity_damping", text="Damping")
-
-        if brush.sculpt_brush_type in {
-                'CLAY', 'CLAY_STRIPS', 'CLAY_THUMB', 'LAYER', 'BLOB', 'CREASE',
-                'PLANE', 'MULTIPLANE_SCRAPE', 'DRAW_SHARP', 'PINCH',
-                'ELASTIC_DEFORM', 'SNAKE_HOOK', 'THUMB', 'ROTATE', 'POSE'}:
-            header, physical_panel = container.panel("physical_clay_panel", default_closed=False)
-            header.label(text="Physical Material")
-            if physical_panel is not None:
-                runtime = context.window_manager
-                physical_panel.prop(runtime, "sculpt_physical_clay_v01", text="Material Response")
-                if runtime.sculpt_physical_clay_v01:
-                    physical_panel.prop(brush, "sculpt_physics_material", text="Material")
-                    physical_panel.prop(runtime, "sculpt_xpbd_backend", text="Compute")
-                    if runtime.sculpt_xpbd_backend == 'CUDA':
-                        physical_panel.label(text="NVIDIA Warp CUDA preview", icon='EXPERIMENTAL')
-                    else:
-                        physical_panel.label(text="CPU reference · ordinary mesh", icon='INFO')
-                    physical_panel.prop(runtime, "sculpt_physical_clay_compression", slider=True)
-                    physical_panel.prop(runtime, "sculpt_physical_clay_plasticity", slider=True)
-                    physical_panel.prop(runtime, "sculpt_physical_clay_drag", slider=True)
-                    physical_panel.prop(runtime, "sculpt_physical_clay_volume", slider=True)
-                    physical_panel.prop(runtime, "sculpt_physical_clay_recovery", slider=True)
-
+        # D15: legacy material controls are deliberately not exposed.
+        # Old brush DNA/RNA remains readable, but the clean build does not execute them.
         if brush.sculpt_brush_type == 'SMOOTH':
             header, gpu_smooth_panel = container.panel("gpu_smooth_a1_panel", default_closed=False)
             header.label(text="GPU Smooth")
@@ -1495,33 +1413,12 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
                 if runtime.sculpt_gpu_smooth_a1:
                     gpu_smooth_panel.prop(runtime, "sculpt_gpu_smooth_mode", text="Mode")
                     if runtime.sculpt_gpu_smooth_mode in {'STRONG', 'MULTISCALE'}:
-                        gpu_smooth_panel.label(text="Original A3 two-ring CUDA" if
+                        gpu_smooth_panel.label(text="Very Strong · Warp CUDA (startup policy)" if
                             runtime.sculpt_gpu_smooth_mode == 'STRONG' else
                             "D12 multiscale · CPU fallback available")
                         if brush.use_smooth_shape_preserve:
                             gpu_smooth_panel.label(text="Preserve Shape reduces normal motion by 80%", icon='INFO')
                     gpu_smooth_panel.label(text="Experimental · ordinary mesh only", icon='EXPERIMENTAL')
-
-        if brush.sculpt_brush_type == 'INFLATE':
-            header, balloon_panel = container.panel("physical_balloon_panel", default_closed=False)
-            header.label(text="Physical Balloon")
-            if balloon_panel is not None:
-                runtime = context.window_manager
-                balloon_panel.prop(runtime, "sculpt_physical_balloon", text="Balloon Membrane")
-                if runtime.sculpt_physical_balloon:
-                    balloon_panel.prop(runtime, "sculpt_balloon_pressure", slider=True)
-                    balloon_panel.prop(runtime, "sculpt_balloon_tension", slider=True)
-                    balloon_panel.label(text="Detail-preserving mesh preview", icon='EXPERIMENTAL')
-
-        if brush.sculpt_brush_type in {'CREASE', 'DRAW_SHARP'}:
-            header, lesion_panel = container.panel("physical_lesion_panel", default_closed=True)
-            header.label(text="Lesion Preview")
-            if lesion_panel is not None:
-                runtime = context.window_manager
-                lesion_panel.prop(runtime, "sculpt_lesion_preview", text="Surface Opening")
-                if runtime.sculpt_lesion_preview:
-                    lesion_panel.prop(runtime, "sculpt_lesion_opening", slider=True)
-                    lesion_panel.label(text="Surface-only · topology unchanged", icon='EXPERIMENTAL')
 
         header, roll_panel = container.panel("standard_roll_alpha_panel", default_closed=True)
         header.label(text="Roll Alpha")

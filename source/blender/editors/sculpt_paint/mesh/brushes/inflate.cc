@@ -42,6 +42,7 @@ struct LocalData {
   Vector<float3> translations;
 };
 
+#ifndef BSE_VOLUMETRIC_ONLY
 static float environment_unit(const char *name, const float fallback, const float maximum = 1.0f)
 {
   const char *value = std::getenv(name);
@@ -265,6 +266,8 @@ static bool apply_physical_balloon_mesh(const Depsgraph &depsgraph,
   return true;
 }
 
+#endif
+
 BLI_NOINLINE static void apply_scale(const MutableSpan<float3> translations, const float3 &scale)
 {
   PRF_scope(ProfileCategory::Editor);
@@ -374,9 +377,11 @@ void do_inflate_brush(const Depsgraph &depsgraph,
   threading::EnumerableThreadSpecific<LocalData> all_tls;
   switch (pbvh.type()) {
     case bke::pbvh::Type::Mesh: {
+#ifndef BSE_VOLUMETRIC_ONLY
       if (apply_physical_balloon_mesh(depsgraph, sd, brush, object, node_mask, scale, pbvh)) {
         break;
       }
+#endif
       const Mesh &mesh = *id_cast<Mesh *>(object.data);
       const MeshAttributeData attribute_data(mesh);
       const PositionDeformData position_data(depsgraph, object, true);
