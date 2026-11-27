@@ -93,7 +93,7 @@ def update_grid(gm: wp.array(dtype=float),mom: wp.array(dtype=wp.vec3),
 @wp.kernel
 def g2p(x: wp.array(dtype=wp.vec3),volume: wp.array(dtype=float),
         stress: wp.array(dtype=wp.mat33),plastic: wp.array(dtype=float),
-        gv: wp.array(dtype=wp.vec3),origin: wp.vec3,n: int,dx: float,dt: float,
+        gm: wp.array(dtype=float),gv: wp.array(dtype=wp.vec3),origin: wp.vec3,n: int,dx: float,dt: float,
         rest: float,bulk: float,shear: float,cohesion: float,friction: float,
         viscosity: float,floor: int,z: float,
         xn: wp.array(dtype=wp.vec3),vn: wp.array(dtype=wp.vec3),
@@ -113,7 +113,15 @@ def g2p(x: wp.array(dtype=wp.vec3),volume: wp.array(dtype=float),
                     w=shape(f,i,j,k)
                     vel=gv[flat_id(base+wp.vec3i(i,j,k),n)]
                     u+=vel*(w[0]*w[1]*w[2])
-                    L+=wp.outer(vel,grad(w,i,j,k,dx))
+        # Match the corrected CPU oracle. Empty nodes are extrapolated by
+        # u, which contributes zero to the relative velocity gradient.
+        for i in range(2):
+            for j in range(2):
+                for k in range(2):
+                    a=flat_id(base+wp.vec3i(i,j,k),n)
+                    if gm[a]>1.0e-15:
+                        w=shape(f,i,j,k)
+                        L+=wp.outer(gv[a]-u,grad(w,i,j,k,dx))
         div=L[0,0]+L[1,1]+L[2,2]
         if not wp.isfinite(div) or wp.abs(div*dt)>0.25 or wp.length(u)*dt>0.5*dx:
             wp.atomic_max(error,0,1)
@@ -149,13 +157,20 @@ class MPM:
         if (x.ndim!=2 or x.shape[1]!=3 or len(x)==0 or v.shape!=x.shape or
             not np.isfinite(x).all() or not np.isfinite(v).all() or
             not all(math.isfinite(a) and a>0 for a in (dx,particle_spacing,density)) or
-            len(origin)!=3 or not all(math.isfinite(a) for a in origin) or not 4<=n<=160):
+            len(origin)!=3 or not all(math.isfinite(a) for a in origin) or
+            not isinstance(n,int) or not 4<=n<=160):
             raise ValueError("invalid MPM grid/state")
         self.device=wp.get_device(device)
         self.count=len(x)
         self.dx=float(dx)
         self.rest=float(particle_spacing**3)
         self.mass=float(density*self.rest)
+        if not (np.isfinite(np.float32(self.mass)) and np.float32(self.mass)>0 and
+                np.isfinite(np.float32(self.rest)) and np.float32(self.rest)>0):
+            raise ValueError("MPM mass/volume outside float32 range")
+        q=(x-np.asarray(origin,dtype=np.float64))/dx
+        if np.any(q<0.) or np.any(q>=n-1):
+            raise ValueError("initial MPM particles outside stencil domain")
         self.origin=wp.vec3(*origin)
         self.n=int(n)
         self.x=wp.array(x,dtype=wp.vec3,device=self.device)
@@ -192,7 +207,7 @@ class MPM:
         z=float(floor if floor is not None else 0.)
         wp.launch(update_grid,dim=self.n**3,inputs=[self.gm,self.mom,self.gv,self.n,self.origin,self.dx,dt,
             wp.vec3(*gravity),enabled,center,wp.vec3(*tool_velocity),radius,.5,f,z,.35,self.error],device=self.device)
-        wp.launch(g2p,dim=self.count,inputs=[self.x,self.volume,self.stress,self.plastic,self.gv,self.origin,
+        wp.launch(g2p,dim=self.count,inputs=[self.x,self.volume,self.stress,self.plastic,self.gm,self.gv,self.origin,
             self.n,self.dx,dt,self.rest,bulk,shear,cohesion,friction,viscosity,f,z,
             self.xn,self.vn,self.voln,self.sn,self.pn,self.error],device=self.device)
         status=int(self.error.numpy()[0])
@@ -215,6 +230,7 @@ def fixture(device):
     s.step(.001)
     np.testing.assert_allclose(s.x.numpy(),x+np.array([0.,0.,-9.81e-6]),atol=2e-6)
     np.testing.assert_allclose(s.volume.numpy(),s.rest,rtol=2e-5)
+    np.testing.assert_allclose(s.stress.numpy(),0.,atol=2e-6)
     before=s.x.numpy().copy()
     try:
         s.step(1.)

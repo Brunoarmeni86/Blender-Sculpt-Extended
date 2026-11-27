@@ -31,6 +31,10 @@ def collide(p: wp.vec3, tool: int, center: wp.vec3, radius: float,
         q = wp.vec3(q[0],q[1],wp.max(q[2],z))
     return q
 
+@wp.func
+def safe_grid_position(p: wp.vec3,h: float):
+    return wp.isfinite(wp.length(p/h)) and wp.length(p/h)<1.0e7
+
 @wp.kernel
 def predict(x: wp.array(dtype=wp.vec3), v: wp.array(dtype=wp.vec3),
             dt: float, gravity: wp.vec3, h: float, tool: int, center: wp.vec3,
@@ -43,7 +47,11 @@ def predict(x: wp.array(dtype=wp.vec3), v: wp.array(dtype=wp.vec3),
         wp.atomic_max(invalid,0,1)
         p[i]=x[i]
     else:
-        p[i]=collide(x[i]+u*dt,tool,center,radius,floor,z)
+        q=collide(x[i]+u*dt,tool,center,radius,floor,z)
+        if not safe_grid_position(q,h):
+            wp.atomic_max(invalid,0,3)
+            q=x[i]
+        p[i]=q
 
 @wp.kernel
 def density_lambda(grid: wp.uint64, p: wp.array(dtype=wp.vec3), h: float,
@@ -103,10 +111,15 @@ def corrections(grid: wp.uint64, p: wp.array(dtype=wp.vec3), h: float,
 @wp.kernel
 def apply_correction(p: wp.array(dtype=wp.vec3), dx: wp.array(dtype=wp.vec3),
                      peak: wp.array(dtype=float), h: float, tool: int,
-                     center: wp.vec3, radius: float, floor: int, z: float):
+                     center: wp.vec3, radius: float, floor: int, z: float,
+                     invalid: wp.array(dtype=wp.int32)):
     i=wp.tid()
     scale=wp.min(1.0,0.15*h/wp.max(peak[0],1.0e-30))
-    p[i]=collide(p[i]+dx[i]*scale,tool,center,radius,floor,z)
+    q=collide(p[i]+dx[i]*scale,tool,center,radius,floor,z)
+    if not safe_grid_position(q,h):
+        wp.atomic_max(invalid,0,3)
+    else:
+        p[i]=q
 
 @wp.kernel
 def velocities(x: wp.array(dtype=wp.vec3), p: wp.array(dtype=wp.vec3),
@@ -143,6 +156,10 @@ class PBF:
                 not np.isfinite(x).all() or not np.isfinite(v).all() or
                 not all(math.isfinite(a) and a>0 for a in (h,mass,rho0))):
             raise ValueError("invalid PBF initial state")
+        if np.max(np.linalg.norm(x.astype(np.float64)/h,axis=1))>=1e7:
+            raise ValueError("PBF initial positions exceed hash-grid coordinate range")
+        if not all(np.isfinite(np.float32(a)) and np.float32(a)>0 for a in (h,mass,rho0)):
+            raise ValueError("PBF parameter outside float32 range")
         self.device=wp.get_device(device)
         self.n=len(x)
         self.h,self.mass,self.rho0=float(h),float(mass),float(rho0)
@@ -182,7 +199,7 @@ class PBF:
             launch(density_lambda,[self.grid.id,self.p,self.h,self.mass,self.rho0,relaxation,self.rho,self.lam,self.invalid])
             self.peak.zero_()
             launch(corrections,[self.grid.id,self.p,self.h,self.mass/self.rho0,self.lam,self.dx,self.peak,self.invalid])
-            launch(apply_correction,[self.p,self.dx,self.peak,self.h,*contact])
+            launch(apply_correction,[self.p,self.dx,self.peak,self.h,*contact,self.invalid])
         self.grid.build(self.p,self.h)
         launch(density_lambda,[self.grid.id,self.p,self.h,self.mass,self.rho0,relaxation,self.rho,self.lam,self.invalid])
         launch(velocities,[self.x,self.p,dt,self.raw_v])

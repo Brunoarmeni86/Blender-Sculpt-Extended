@@ -142,11 +142,19 @@ inline MaterialPointStepV21 step_material_points_v21(
     auto &p=out.particles[i];
     MaterialMatrix L{};
     Vec3 velocity{};
-    visit(points[i].position,[&](const Key &key,double w,Vec3 grad){
+    visit(points[i].position,[&](const Key &key,double w,Vec3){
       const auto &n=grid.at(key);
       velocity+=n.velocity*w;
+    });
+    // Empty nodes carry no material velocity. Extrapolate the particle PIC
+    // velocity there for the gradient: a rigid translation must induce no
+    // spurious strain at a grid-aligned free surface.
+    visit(points[i].position,[&](const Key &key,double,Vec3 grad){
+      const auto &n=grid.at(key);
+      if(n.mass<=1e-15)return;
+      const auto relative=n.velocity-velocity;
       for(int a=0;a<3;++a)for(int b=0;b<3;++b)
-        L[a][b]+=component(n.velocity,a)*component(grad,b);
+        L[a][b]+=component(relative,a)*component(grad,b);
     });
     const double div=L[0][0]+L[1][1]+L[2][2];
     if(!std::isfinite(div)||std::abs(div*s.dt)>0.25||
