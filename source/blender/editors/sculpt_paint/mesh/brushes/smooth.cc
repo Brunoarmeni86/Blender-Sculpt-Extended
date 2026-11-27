@@ -48,6 +48,8 @@
 #  include "d13_multiscale_flatten.hh"
 #  include "brush_contact.hh"
 #  include "d15_feature_smooth.hh"
+#  include "d15_uv_boundary.hh"
+#  include "BLI_vector_set.hh"
 #  include "BKE_attribute.hh"
 #  include "BKE_mesh_mapping.hh"
 #  include "BKE_multires_sculpt_layers.hh"
@@ -258,6 +260,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
                                   const float brush_strength)
 {
   namespace fs=sculpt_physics::feature_smooth_d15;
+  namespace uvb=sculpt_physics::uv_boundary_d15;
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
   bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
@@ -282,18 +285,20 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
   const auto v2f=mesh.vert_to_face_map();
   const auto native_edges=mesh.edges();
   const auto corner_edges=mesh.corner_edges();
+  const auto corner_verts=mesh.corner_verts();
   MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
   struct WriteBatch {int node=0;Vector<int> ids;Vector<float3> motion;};
   std::vector<WriteBatch> batches;
   fs::Result result;
   std::size_t active=0,edge_count=0,feature_count=0,blocked_count=0;
+  std::size_t uv_layers=0,uv_splits=0,uv_invalid=0,uv_pinned_count=0;
   double guard_scale=1.;
   const auto start=std::chrono::steady_clock::now();
   try{
     std::unordered_map<int,std::size_t> slot;
     std::vector<int> global;
     std::vector<fs::Vertex> samples;
-    std::vector<unsigned char> feature,blocked;
+    std::vector<unsigned char> feature,blocked,uv_pinned;
     const auto cv=[](const float3 &v)->fs::V{return {double(v.x),double(v.y),double(v.z)};};
     const auto visible=[&](int id){return attrs.hide_vert.is_empty() || !attrs.hide_vert[id];};
     const auto add=[&](int id,double weight){
@@ -306,7 +311,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       const auto i=samples.size();
       slot.emplace(id,i);global.push_back(id);
       samples.push_back({cv(pos.eval[id]),cv(normals[id]),weight,visible(id)});
-      feature.push_back(0);blocked.push_back(0);
+      feature.push_back(0);blocked.push_back(0);uv_pinned.push_back(0);
       return i;
     };
     LocalData tls;
@@ -351,7 +356,12 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
     std::sort(incident_faces.begin(),incident_faces.end());
     incident_faces.erase(std::unique(incident_faces.begin(),incident_faces.end()),incident_faces.end());
     if(edge_ids.size()>4000000)return false;
-    struct EdgeInfo {int count=0,first_set=0;bool mixed=false,hidden=false;};
+    struct EdgeInfo {
+      int count=0,first_set=0,first_face=-1;
+      bool mixed=false,hidden=false;
+      std::array<uvb::Corners,2> corners{};
+      uvb::Status uv=uvb::Status::Continuous;
+    };
     std::vector<EdgeInfo> info(edge_ids.size());
     std::unordered_map<int,std::size_t> edge_slot;
     edge_slot.reserve(edge_ids.size());
@@ -359,16 +369,48 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
     for(const int face:incident_faces){
       const bool hidden=!attrs.hide_poly.is_empty() && attrs.hide_poly[face];
       const int set=attrs.face_sets.is_empty()?0:attrs.face_sets[face];
-      for(const int corner:faces[face]){
-        const auto it=edge_slot.find(corner_edges[corner]);
+      const IndexRange face_corners=faces[face];
+      for(const int corner:face_corners){
+        const int e=corner_edges[corner];
+        const auto it=edge_slot.find(e);
         if(it==edge_slot.end())continue;
         auto &q=info[it->second];
-        if(q.count==0)q.first_set=set;
+        if(q.count==0){q.first_set=set;q.first_face=face;}
         else if(q.first_set!=set)q.mixed=true;
+        if(q.count<2){
+          const int next=corner==face_corners.last()?face_corners.first():corner+1;
+          const int2 endpoints=native_edges[e];
+          if((q.count==1 && q.first_face==face) ||
+             !uvb::ordered_corners(endpoints[0],endpoints[1],
+                                   corner_verts[corner],corner_verts[next],
+                                   corner,next,q.corners[q.count])){
+            q.uv=uvb::Status::Invalid;
+          }
+        }
         ++q.count;q.hidden=q.hidden||hidden;
       }
     }
     const auto attributes=mesh.attributes();
+    // Read every native UV map, not just the active one. Corner values are
+    // matched by vertex identity; opposite face winding cannot fake a seam.
+    // No persistent UV cache or attribute write in this pilot.
+    const auto uv_names=mesh.uv_map_names();
+    for(const auto name:uv_names){
+      const auto reader=attributes.lookup<float2>(name,bke::AttrDomain::Corner);
+      if(!reader || reader.varray.size()!=corner_verts.size())return false;
+      ++uv_layers;
+      const auto sample_pair=[&](const uvb::Corners &ids)->uvb::Pair{
+        const float2 a=reader.varray[ids[0]],b=reader.varray[ids[1]];
+        return {uvb::UV{double(a.x),double(a.y)},uvb::UV{double(b.x),double(b.y)}};
+      };
+      for(auto &q:info){
+        if(q.count<1 || q.count>2 || q.uv==uvb::Status::Invalid)continue;
+        const auto a=sample_pair(q.corners[0]);
+        const auto status=q.count==2?uvb::classify(a,sample_pair(q.corners[1])):
+            (uvb::valid(a)?uvb::Status::Continuous:uvb::Status::Invalid);
+        q.uv=uvb::combine(q.uv,status);
+      }
+    }
     const auto sharp=*attributes.lookup_or_default<bool>("sharp_edge",bke::AttrDomain::Edge,false);
     const auto seams=*attributes.lookup_or_default<bool>("uv_seam",bke::AttrDomain::Edge,false);
     std::vector<fs::Edge> edges;
@@ -384,14 +426,26 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       if(seams[e])flags|=fs::Seam;
       if(q.mixed)flags|=fs::FaceSet;
       if(q.count==1)flags|=fs::Open;
-      const bool unsafe=q.count==0||q.count>2||q.hidden;
+      if(q.uv==uvb::Status::Split){
+        flags|=fs::UVChart;
+        // A true UV discontinuity is pinned until chart-aware reprojection
+        // and corner-attribute Undo exist. Sliding now could stretch texture.
+        uv_pinned[a]=uv_pinned[b]=1;
+        ++uv_splits;
+      }
+      if(q.uv==uvb::Status::Invalid)++uv_invalid;
+      const bool unsafe=q.count==0||q.count>2||q.hidden||q.uv==uvb::Status::Invalid;
       if(unsafe){blocked[a]=1;blocked[b]=1;}
       if(flags){feature[a]=feature[b]=1;++feature_count;}
       edges.push_back({a,b,flags,!unsafe});
     }
     edge_count=edges.size();
-    for(std::size_t i=0;i<samples.size();++i)
-      if(blocked[i] && samples[i].weight>0.){samples[i].weight=0.;++blocked_count;}
+    for(std::size_t i=0;i<samples.size();++i){
+      if(samples[i].weight<=0.)continue;
+      if(uv_pinned[i])++uv_pinned_count;
+      if(blocked[i])++blocked_count;
+      if(blocked[i]||uv_pinned[i])samples[i].weight=0.;
+    }
     if(!fs::evaluate(samples,std::move(edges),fs::Settings{},result))return false;
     std::unordered_map<std::size_t,float3> changes;
     changes.reserve(active);
@@ -451,10 +505,13 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
   pbvh.tag_positions_changed(node_mask);
   pbvh.flush_bounds_to_parents();
   cache.physical_solver_session.reset();
-  if(std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
+  if(std::getenv("BLENDER_SCULPT_SMOOTH_DIAG")){
     std::fprintf(stderr,"[D15 Feature Smooth CPU] active=%zu edges=%zu feature_edges=%zu sliding=%zu pinned=%zu blocked=%zu guard=%.4f ms=%.3f\n",
                  active,edge_count,feature_count,result.sliding,result.pinned,blocked_count,guard_scale,
                  std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+    std::fprintf(stderr,"[D15 UV Boundary] layers=%zu split_edges=%zu invalid_edges=%zu pinned_vertices=%zu\n",
+                 uv_layers,uv_splits,uv_invalid,uv_pinned_count);
+  }
   return true;
 }
 

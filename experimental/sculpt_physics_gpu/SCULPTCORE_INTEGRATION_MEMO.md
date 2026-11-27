@@ -116,3 +116,7 @@ See [D15_FEATURE_SMOOTH_REFERENCE.md](D15_FEATURE_SMOOTH_REFERENCE.md). Independ
 ## Implementation checkpoint — native Feature Smooth CPU pilot
 
 D15-B1 adds an explicit environment-only adapter in smooth.cc; see [D15_FEATURE_SMOOTH_REFERENCE.md](D15_FEATURE_SMOOTH_REFERENCE.md) for gates and test procedure. No new menu entry, no changes to existing Smooth modes without opt-in. Baseline native compilation and artist test still required. UV discontinuities/attribute transfer and CUDA not implemented in this checkpoint.
+
+## Implementation checkpoint — D15-B2 real UV boundaries
+
+Added independent corner-pair classifier plus native all-UV-layer classification in the existing hidden Feature Smooth CPU pilot. Actual split edges pin their endpoints until chart-safe reprojection is available; no attribute mutation. Standalone GCC and Clang ASan/UBSan tests passed. Native compilation and runtime not tested. See [D15_FEATURE_SMOOTH_REFERENCE.md](D15_FEATURE_SMOOTH_REFERENCE.md).
