@@ -20,6 +20,7 @@
 #include <cstdio>
 #include "sculpt_layer_delta_smooth_v01.hh"
 #include "sculpt_sample_runs.hh"
+#include "sculpt_coverage_diag_d15.hh"
 #include "sculpt_layer_detail_v01.hh"
 #include <cmath>
 #include <cstdlib>
@@ -10071,6 +10072,11 @@ void calc_factors_common_mesh_indexed(const Depsgraph &depsgraph,
       brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_SMOOTH&&cache.radius>0.f;
   Vector<float> audit_distances;
   std::vector<unsigned char> alive;
+  const auto watched=coverage?coverage_diag_d15::watched_vertices():std::vector<int>{};
+  std::vector<int> watch_slots;
+  if(!watched.empty())for(const int i:verts.index_range()){
+    if(std::binary_search(watched.begin(),watched.end(),verts[i]))watch_slots.push_back(i);
+  }
   std::size_t core=0;
   if(coverage){
     audit_distances.resize(verts.size());
@@ -10083,7 +10089,11 @@ void calc_factors_common_mesh_indexed(const Depsgraph &depsgraph,
       }
     }
   }
-  const auto observe=[&](){
+  const auto observe=[&](const char *stage){
+    for(const int i:watch_slots){
+      std::fprintf(stderr,"[D15 C9.2 Factor] id=%d stage=%s value=%.9g\n",
+                   verts[i],stage,double(factors[i]));
+    }
     std::size_t dropped=0;
     if(coverage)for(const int i:verts.index_range()){
       if(alive[i]&&(!(factors[i]>0.f)||!std::isfinite(factors[i]))){
@@ -10093,13 +10103,13 @@ void calc_factors_common_mesh_indexed(const Depsgraph &depsgraph,
     return dropped;
   };
   fill_factor_from_hide_and_mask(attribute_data.hide_vert, attribute_data.mask, verts, factors);
-  const auto hide_mask=observe();
+  const auto hide_mask=observe("hide_mask");
   filter_region_clip_factors(ss, vert_positions, verts, factors);
-  const auto region_clip=observe();
+  const auto region_clip=observe("region_clip");
   if (brush.flag & BRUSH_FRONTFACE) {
     calc_front_face(cache.view_normal_symm, vert_normals, verts, factors);
   }
-  const auto frontface=observe();
+  const auto frontface=observe("frontface");
 
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
   if(brush.sculpt_brush_type==SCULPT_BRUSH_TYPE_CLAY &&
@@ -10113,16 +10123,16 @@ void calc_factors_common_mesh_indexed(const Depsgraph &depsgraph,
         ss, vert_positions, verts, eBrushFalloffShape(brush.falloff_shape), distances);
   }
   filter_distances_with_radius(cache.radius, distances, factors);
-  const auto radius_drop=observe();
+  const auto radius_drop=observe("radius");
   apply_hardness_to_distances(cache, distances);
   calc_brush_strength_factors(cache, brush, distances, factors);
-  const auto falloff=observe();
+  const auto falloff=observe("falloff");
 
   auto_mask::calc_vert_factors(depsgraph, object, cache.automasking.get(), node, verts, factors);
-  const auto automask=observe();
+  const auto automask=observe("automask");
 
   calc_brush_texture_factors(ss, brush, vert_positions, verts, factors);
-  const auto texture=observe();
+  const auto texture=observe("texture");
   if(coverage&&core&&(hide_mask||region_clip||frontface||radius_drop||falloff||automask||texture)){
     std::fprintf(stderr,"[D15 C9.1 Factors] core=%zu hide_mask=%zu region_clip=%zu frontface=%zu radius=%zu falloff=%zu automask=%zu texture=%zu\n",
                  core,hide_mask,region_clip,frontface,radius_drop,falloff,automask,texture);
