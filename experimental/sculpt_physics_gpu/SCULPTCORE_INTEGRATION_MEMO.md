@@ -128,3 +128,7 @@ Read [D15_SURFACE_ANCHOR_REFERENCE.md](D15_SURFACE_ANCHOR_REFERENCE.md). Bounded
 ## Implementation checkpoint — D15-C3 multi-domain attribute staging
 
 See [D15_ATTRIBUTE_TRANSFER_REFERENCE.md](D15_ATTRIBUTE_TRANSFER_REFERENCE.md). Added tested batch staging for all UV maps, point/corner colors, masks and discrete face attributes with per-map chart validation. Audited the actual native Position/Geometry Undo paths. No native UV writes yet: sparse corner journal and read-only snapshot adapter are the next gates. GCC and Clang ASan/UBSan standalone tests passed; Blender runtime unverified. Keep D15-B2 pinning and current UI intact.
+
+## Implementation checkpoint — D15-C4 native diagnostic and UV journal reference
+
+See [D15_UV_PROBE_AND_JOURNAL.md](D15_UV_PROBE_AND_JOURNAL.md). Environment-only read-only UV probe stages tangent proposals on native local fans; independent sparse first-capture/exchange reference passed GCC and Clang ASan/UBSan. Native build, journal StepData integration and actual writes remain open. No UI changes. Do not advertise texture-preserving Smooth until native tests and Undo/Redo/cancel pass.

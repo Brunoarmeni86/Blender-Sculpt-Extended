@@ -49,6 +49,7 @@
 #  include "brush_contact.hh"
 #  include "d15_feature_smooth.hh"
 #  include "d15_uv_boundary.hh"
+#  include "d15_surface_anchor.hh"
 #  include "BLI_vector_set.hh"
 #  include "BKE_attribute.hh"
 #  include "BKE_mesh_mapping.hh"
@@ -252,6 +253,118 @@ static bool feature_smooth_d15_requested()
   return enabled && STREQ(enabled,"1");
 }
 
+/* C4 read-only diagnostic: project the guarded tangent proposal onto the
+ * old incident triangle fan. Only interior vertices with one continuous
+ * wedge across every UV layer are eligible. No geometry or UV publication. */
+static bool feature_uv_probe_d15(const Mesh &mesh,
+                                const Span<float3> positions,
+                                const Span<float3> normals,
+                                const std::unordered_map<std::size_t,float3> &changes)
+{
+  namespace a=sculpt_physics::surface_anchor_d15;
+  const auto names=mesh.uv_map_names();
+  if(names.is_empty() || names.size()>16 || changes.size()>4096)return false;
+  const auto attrs=mesh.attributes();
+  const auto faces=mesh.faces();
+  const auto v2f=mesh.vert_to_face_map();
+  const auto cv=mesh.corner_verts();
+  const auto tris=mesh.corner_tris();
+  const auto as_v=[](const float3 &v)->a::V{return {double(v.x),double(v.y),double(v.z)};};
+  std::vector<VArray<float2>> layers;
+  for(const auto name:names){
+    auto r=attrs.lookup<float2>(name,bke::AttrDomain::Corner);
+    if(!r || r.varray.size()!=cv.size())return false;
+    layers.push_back(std::move(r.varray));
+  }
+  std::size_t projected=0,refused=0,corner_values=0;
+  double max_uv_delta=0.;
+  for(const auto &entry:changes){
+    const int v=int(entry.first);
+    const auto motion=as_v(entry.second);
+    const double travel=a::norm(motion);
+    if(!(travel>0.))continue;
+    const auto old=as_v(positions[v]);
+    const auto target=a::add(old,motion);
+    const auto normal=as_v(normals[v]);
+    const double nl=a::norm(normal);
+    if(!(nl>0.) || !std::isfinite(travel) || !std::isfinite(nl)){++refused;continue;}
+    const auto n=a::mul(normal,1./nl);
+    // Diagnostic only: a tangent proposal should have negligible normal
+    // motion. Reject native clip corrections that violate this assumption.
+    if(std::abs(a::dot(motion,n))>travel*1e-4){++refused;continue;}
+    struct Candidate {int tri;int3 corners;a::V bary;double distance;};
+    std::vector<Candidate> hits;
+    std::vector<int> dest;
+    bool bad=false;
+    for(const int face:v2f[v]){
+      for(const int c:faces[face])if(cv[c]==v)dest.push_back(c);
+      for(const int ti:bke::mesh::face_triangles_range(faces,face)){
+        const int3 c=tris[ti];
+        if(cv[c[0]]!=v && cv[c[1]]!=v && cv[c[2]]!=v)continue;
+        if(hits.size()>=256){bad=true;break;}
+        a::Triangle t;
+        t.id=std::uint64_t(ti);
+        for(int j=0;j<3;++j){t.vertices[j]=std::uint64_t(cv[c[j]]);t.co[j]=as_v(positions[cv[c[j]]]);}
+        a::V tn,bary;double distance=0.;
+        if(!a::triangle_normal(t,tn) || a::dot(tn,n)<.5 || !a::closest(t,target,bary,distance)){
+          bad=true;break;
+        }
+        hits.push_back({ti,c,bary,distance});
+      }
+      if(bad || dest.size()>256){bad=true;break;}
+    }
+    if(bad || hits.empty() || dest.empty()){++refused;continue;}
+    // Require one connected triangle fan around the vertex, even when two
+    // disconnected fans happen to share the same point and UV coordinates.
+    std::vector<unsigned char> seen(hits.size(),0);seen[0]=1;
+    std::vector<std::size_t> queue{0};
+    for(std::size_t k=0;k<queue.size();++k)for(std::size_t j=0;j<hits.size();++j){
+      if(seen[j])continue;
+      int common=0;
+      for(int x=0;x<3;++x)for(int y=0;y<3;++y)
+        if(cv[hits[queue[k]].corners[x]]==cv[hits[j].corners[y]])++common;
+      if(common==2){seen[j]=1;queue.push_back(j);}
+    }
+    if(queue.size()!=hits.size()){++refused;continue;}
+    std::sort(hits.begin(),hits.end(),[](const Candidate &x,const Candidate &y){
+      return x.distance!=y.distance?x.distance<y.distance:x.tri<y.tri;
+    });
+    const auto &best=hits.front();
+    if(best.distance>travel*.25){++refused;continue;}
+    // All maps use the same geometric correspondence. Inspect every
+    // destination corner and reject incompatible equidistant UV samples.
+    double local_delta=0.;
+    for(const auto &layer:layers){
+      const auto read=[&](int c)->a::UV{const float2 uv=layer[c];return {double(uv.x),double(uv.y)};};
+      const auto original=read(dest.front());
+      if(!a::finite(original)){bad=true;break;}
+      for(const int c:dest){const auto uv=read(c);if(!a::finite(uv)||!a::same_uv(uv,original,1e-6)){bad=true;break;}}
+      if(bad)break;
+      const auto sample=[&](const Candidate &h,a::UV &out){
+        out={};
+        for(int j=0;j<3;++j){const auto uv=read(h.corners[j]);if(!a::finite(uv))return false;
+          for(int u=0;u<2;++u)out[u]+=h.bary[j]*uv[u];}
+        return a::finite(out);
+      };
+      a::UV proposed;
+      if(!sample(best,proposed)){bad=true;break;}
+      for(const auto &hit:hits){
+        if(hit.distance-best.distance>std::max(1e-12,travel*1e-6))break;
+        a::UV other;
+        if(!sample(hit,other)||!a::same_uv(other,proposed,1e-6)){bad=true;break;}
+      }
+      if(bad)break;
+      local_delta=std::max(local_delta,std::hypot(proposed[0]-original[0],proposed[1]-original[1]));
+    }
+    if(bad){++refused;continue;}
+    ++projected;corner_values+=dest.size()*layers.size();
+    max_uv_delta=std::max(max_uv_delta,local_delta);
+  }
+  std::fprintf(stderr,"[D15 UV Probe READ ONLY] layers=%zu projected=%zu refused=%zu corner_values=%zu max_uv_delta=%.9g\n",
+               layers.size(),projected,refused,corner_values,max_uv_delta);
+  return true;
+}
+
 static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
                                   const Sculpt &sd,
                                   const Brush &brush,
@@ -261,6 +374,8 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
 {
   namespace fs=sculpt_physics::feature_smooth_d15;
   namespace uvb=sculpt_physics::uv_boundary_d15;
+  const char *probe_flag=std::getenv("BLENDER_SCULPT_D15_UV_PROBE");
+  const bool uv_probe=probe_flag && STREQ(probe_flag,"1");
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
   bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
@@ -446,7 +561,12 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       if(blocked[i])++blocked_count;
       if(blocked[i]||uv_pinned[i])samples[i].weight=0.;
     }
-    if(!fs::evaluate(samples,std::move(edges),fs::Settings{},result))return false;
+    fs::Settings settings;
+    if(uv_probe){
+      settings.normal_keep=0.;
+      for(std::size_t i=0;i<samples.size();++i)if(feature[i])samples[i].weight=0.;
+    }
+    if(!fs::evaluate(samples,std::move(edges),settings,result))return false;
     std::unordered_map<std::size_t,float3> changes;
     changes.reserve(active);
     std::vector<unsigned char> staged(active,0);
@@ -480,12 +600,16 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       batches.push_back(std::move(batch));
     });
     if(rejected)return false;
-    if(changes.empty())return true;
+    if(changes.empty()){
+      if(uv_probe)std::fprintf(stderr,"[D15 UV Probe READ ONLY] no eligible motion\n");
+      return true;
+    }
     guard_scale=smooth_local_contact_guard(mesh,pos.eval,changes);
     if(!std::isfinite(guard_scale)||guard_scale<0.||guard_scale>1.)return false;
     // Do not partially scale a clipping snap/lock correction. Refuse before
     // publishing when native clipping and geometry safety disagree.
     if(adjusted_by_clip && guard_scale<1.)return false;
+    if(uv_probe)return feature_uv_probe_d15(mesh,pos.eval,normals,changes);
     for(auto &batch:batches)for(const int j:batch.ids.index_range()){
       const auto it=changes.find(std::size_t(batch.ids[j]));
       batch.motion[j]=it==changes.end()?float3(0.f):it->second;
