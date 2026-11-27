@@ -195,7 +195,7 @@ static bool gpu_smooth_requested()
 static bool multiscale_smooth_requested()
 {
   const char *mode=std::getenv("BLENDER_SCULPT_GPU_SMOOTH_MODE");
-  return gpu_smooth_requested() && mode && STREQ(mode,"strong");
+  return gpu_smooth_requested() && mode && STREQ(mode,"multiscale");
 }
 
 /* D12 Very Strong: current PBVH region only. Do not initialize a full mesh
@@ -350,7 +350,7 @@ static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
       if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))return false;
     }
   }catch(const std::exception& e){
-    std::fprintf(stderr,"[D12 Very Strong] pre-write fallback: %s\n",e.what());
+    std::fprintf(stderr,"[D12 Multiscale] pre-write fallback: %s\n",e.what());
     return false;
   }
   // Existing Blender sculpt Undo transaction owns these positions. Do not
@@ -364,7 +364,7 @@ static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
   // A legacy GPU world (if a prior chart was rejected) is now stale.
   session->solver.reset();
   if(session->multiscale_dabs++%32==0 || std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
-    std::fprintf(stderr,"[D12 Very Strong %s] active=%zu guard=%.4f total_ms=%.3f%s\n",
+    std::fprintf(stderr,"[D12 Multiscale %s] active=%zu guard=%.4f total_ms=%.3f%s\n",
       gpu?"Warp CUDA":"CPU multiscale",active,guard_scale,
       std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),
       brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE?" preserve-shape":"");
@@ -542,7 +542,7 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
       else if (STREQ(mode, "dense")) {
         smooth_mode = sculpt_physics::SmoothSolverMode::DenseStrong;
       }
-      else if (STREQ(mode, "strong")) {
+      else if (STREQ(mode, "strong") || STREQ(mode, "multiscale")) {
         smooth_mode = sculpt_physics::SmoothSolverMode::DenseStrong;
       }
       else if (STREQ(mode, "physical")) {
@@ -976,7 +976,7 @@ void do_smooth_brush(const Depsgraph &depsgraph,
     if(multiscale_smooth_requested()){
       static thread_local unsigned int rejects=0;
       if(rejects++%32==0 || std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
-        std::fprintf(stderr,"[D12 Very Strong] chart unsupported; A3/standard fallback\n");
+        std::fprintf(stderr,"[D12 Multiscale] chart unsupported; A3/standard fallback\n");
     }
     if(try_gpu_smooth_a1(depsgraph,sd,brush,object,node_mask,brush_strength)){
       pbvh.update_bounds(depsgraph,object);return;
