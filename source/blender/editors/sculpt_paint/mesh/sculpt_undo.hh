@@ -8,8 +8,10 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "BLI_index_mask_fwd.hh"
 #include "BLI_span.hh"
@@ -99,6 +101,17 @@ void push_enter_sculpt_mode(const Scene &scene, Object &ob, const wmOperator *op
 void push_begin_ex(const Scene &scene, Object &ob, const char *name);
 // Sparse compaction snapshot, paired with native Position Undo/Redo.
 bool capture_physics_compaction_v29(const Object &object,Span<int> ids,Span<float> values);
+/* D15-C5: reserved for a future, fully staged UV/position publication.
+ * Captures old values and expected new values before any mesh write.
+ * No current brush calls this API. */
+struct UVCornerProposalD15 {
+  std::string layer;
+  int corner = -1;
+  std::array<float, 2> after{};
+};
+bool capture_uv_corners_d15(Object &object, Span<UVCornerProposalD15> proposals);
+/* Restore stroke-start UVs without swapping the journal (cancel / replay). */
+bool restore_uv_corners_from_active_step_d15(Object &object);
 void push_end(Object &ob);
 void push_end_ex(Object &ob, bool use_nested_undo);
 

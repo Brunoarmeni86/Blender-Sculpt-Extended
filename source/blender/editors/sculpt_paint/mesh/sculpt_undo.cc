@@ -39,6 +39,8 @@
 #include <limits>
 #include <mutex>
 #include <map>
+#include <array>
+#include <vector>
 #include "BLI_set.hh"
 #include <zstd.h>
 
@@ -333,6 +335,18 @@ static bool sculpt_layer_undo_persistent_enabled()
 }
 
 
+/* Sparse UV sidecar owned by the native Position step, not a second Undo
+ * stack. Both ends are recorded so a stale live value cannot be exchanged
+ * silently into the journal. Ordinary Position steps allocate nothing. */
+struct UVUndoSidecarD15 {
+  using UV = std::array<float, 2>;
+  struct Entry { UV original{}, expected{}; };
+  std::string mesh_name;
+  std::uint64_t topology = 0;
+  int corners = 0;
+  std::map<std::string, std::map<int, Entry>> layers;
+};
+
 struct StepData {
  private:
   bool applied_ = true;
@@ -450,6 +464,8 @@ struct StepData {
   Vector<std::unique_ptr<Node>> nodes;
   std::unique_ptr<PositionUndoStorage> position_step_storage;
   std::map<int,float> physics_compaction_v29;
+  std::unique_ptr<UVUndoSidecarD15> uv_corners_d15;
+  bool uv_restore_ok_d15 = true;
   size_t undo_size;
 
   /** Whether processing code needs to handle the current data as an undo step. */
@@ -739,6 +755,15 @@ static size_t sculpt_metadata_memory_size(const StepData &data)
 {
   size_t size = data.base_layer_deltas.size() * sizeof(float3);
   size=undo_memory_add(size,data.physics_compaction_v29.size()*(sizeof(std::pair<const int,float>)+4*sizeof(void *)));
+  if (data.uv_corners_d15) {
+    const auto &uv = *data.uv_corners_d15;
+    size = undo_memory_add(size, sizeof(uv) + uv.mesh_name.capacity());
+    for (const auto &[name, entries] : uv.layers) {
+      size = undo_memory_add(size, sizeof(name) + name.capacity() + sizeof(entries) + 4*sizeof(void *));
+      size = undo_memory_add(size, entries.size() *
+          (sizeof(std::pair<const int, UVUndoSidecarD15::Entry>) + 4*sizeof(void *)));
+    }
+  }
   size = undo_memory_add(size, data.mask_master_claimed_grids.size_in_bytes());
   size = undo_memory_add(size, data.layer_frame.size() * sizeof(SculptLayerUndoFrameItem));
   size = undo_memory_add(size, data.layer_frame_modifier.size());
@@ -844,6 +869,187 @@ static void exchange_physics_compaction_v29(Mesh &mesh,StepData &step)
   }
   for(auto &[id,value]:step.physics_compaction_v29){const float old=writer.span[id];writer.span[id]=value;value=old;}
   writer.finish();
+}
+
+static std::uint64_t uv_topology_fingerprint_d15(const Mesh &mesh)
+{
+  // Deliberately validate connectivity, not just vertex/corner counts.
+  // Reference cost is O(mesh topology); no persistent pointer identity.
+  std::uint64_t hash = 14695981039346656037ull;
+  const auto mix = [&](int v) {
+    hash ^= std::uint64_t(std::uint32_t(v));
+    hash *= 1099511628211ull;
+  };
+  mix(mesh.verts_num); mix(mesh.edges_num); mix(mesh.faces_num); mix(mesh.corners_num);
+  for (const int2 edge : mesh.edges()) { mix(edge[0]); mix(edge[1]); }
+  for (const int v : mesh.face_offsets()) mix(v);
+  for (const int v : mesh.corner_verts()) mix(v);
+  for (const int e : mesh.corner_edges()) mix(e);
+  return hash;
+}
+
+static UVUndoSidecarD15::UV uv_array_d15(const float2 &v) { return {v.x, v.y}; }
+static bool uv_finite_d15(const UVUndoSidecarD15::UV &v)
+{
+  return std::isfinite(v[0]) && std::isfinite(v[1]);
+}
+static bool uv_scope_d15(const Object &object, const StepData &step)
+{
+  if (object.type != OB_MESH || step.type != Type::Position ||
+      step.object_name != object.id.name || !object.runtime->sculpt_session ||
+      !step.base_layer_name.empty() || step.grids.grids_num != 0) return false;
+  const SculptSession &ss = *object.runtime->sculpt_session;
+  return !ss.deform_modifiers_active && !ss.shapekey_active &&
+         bke::multires_layers::base_modifier(object) == nullptr;
+}
+
+static bool uv_validate_live_d15(const Mesh &mesh, const UVUndoSidecarD15 &sidecar)
+{
+  if (sidecar.mesh_name != mesh.id.name || sidecar.corners != mesh.corners_num ||
+      sidecar.topology != uv_topology_fingerprint_d15(mesh)) return false;
+  const auto attrs = mesh.attributes();
+  for (const auto &[name, entries] : sidecar.layers) {
+    if (!bke::mesh::is_uv_map(attrs.lookup_meta_data(name))) return false;
+    const auto reader = attrs.lookup<float2>(name, bke::AttrDomain::Corner);
+    if (!reader || reader.varray.size() != mesh.corners_num) return false;
+    for (const auto &[corner, entry] : entries) {
+      if (corner < 0 || corner >= mesh.corners_num ||
+          !uv_finite_d15(entry.original) || !uv_finite_d15(entry.expected) ||
+          uv_array_d15(reader.varray[corner]) != entry.expected) return false;
+    }
+  }
+  return true;
+}
+
+bool capture_uv_corners_d15(Object &object, Span<UVCornerProposalD15> proposals)
+{
+  StepData *step = get_step_data();
+  if (!step || !uv_scope_d15(object, *step) ||
+      !object.runtime->sculpt_session->cache || step->position_step_storage ||
+      step->undo_nodes_by_pbvh_node.is_empty()) return false;
+  if (proposals.is_empty()) return true;
+  const Mesh &mesh = *id_cast<const Mesh *>(object.data);
+  if (mesh.corners_num != step->mesh.corners_num ||
+      mesh.verts_num != step->mesh.verts_num) return false;
+  try {
+    auto trial = step->uv_corners_d15 ?
+        std::make_unique<UVUndoSidecarD15>(*step->uv_corners_d15) :
+        std::make_unique<UVUndoSidecarD15>();
+    if (step->uv_corners_d15) {
+      if (!uv_validate_live_d15(mesh, *trial)) return false;
+    }
+    else {
+      trial->mesh_name = mesh.id.name;
+      trial->topology = uv_topology_fingerprint_d15(mesh);
+      trial->corners = mesh.corners_num;
+    }
+    std::map<std::string, std::map<int, UVUndoSidecarD15::UV>> incoming;
+    for (const auto &proposal : proposals) {
+      if (proposal.layer.empty() || proposal.corner < 0 ||
+          proposal.corner >= mesh.corners_num || !uv_finite_d15(proposal.after)) return false;
+      auto &values = incoming[proposal.layer];
+      const auto inserted = values.emplace(proposal.corner, proposal.after);
+      if (!inserted.second && inserted.first->second != proposal.after) return false;
+    }
+    const auto attrs = mesh.attributes();
+    for (const auto &[name, values] : incoming) {
+      if (!bke::mesh::is_uv_map(attrs.lookup_meta_data(name))) return false;
+      const auto reader = attrs.lookup<float2>(name, bke::AttrDomain::Corner);
+      if (!reader || reader.varray.size() != mesh.corners_num) return false;
+      for (const auto &[corner, after] : values) {
+        const auto before = uv_array_d15(reader.varray[corner]);
+        if (!uv_finite_d15(before)) return false;
+        if (before == after) continue;
+        auto &entries = trial->layers[name];
+        const auto inserted = entries.try_emplace(corner, UVUndoSidecarD15::Entry{before, after});
+        if (!inserted.second) {
+          if (inserted.first->second.expected != before) return false;
+          inserted.first->second.expected = after;
+        }
+      }
+    }
+    if (!trial->layers.empty()) step->uv_corners_d15 = std::move(trial);
+    return true;
+  }
+  catch (const std::exception &error) {
+    std::fprintf(stderr, "[D15 UV Undo] capture rejected: %s\n", error.what());
+    return false;
+  }
+}
+
+/* Acquire every layer writer before the position exchange. On an unsuccessful
+ * preparation no corner value changes. finish() may still invalidate caches.
+ * No native caller captures UV changes yet; keep this path dormant until
+ * combined publication, cancellation and Undo/Redo tests are available. */
+class UVUndoPreparedD15 {
+  struct Layer {
+    const std::string *name;
+    std::map<int, UVUndoSidecarD15::Entry> *entries;
+    std::unique_ptr<bke::SpanAttributeWriter<float2>> writer;
+  };
+  std::vector<Layer> layers_;
+public:
+  ~UVUndoPreparedD15()
+  {
+    for (auto &layer : layers_) if (layer.writer && *layer.writer) layer.writer->finish();
+  }
+  bool prepare(Object &object, StepData &step)
+  {
+    if (!step.uv_corners_d15) return true;
+    if (!uv_scope_d15(object, step)) return false;
+    Mesh &mesh = *id_cast<Mesh *>(object.data);
+    auto &sidecar = *step.uv_corners_d15;
+    if (!uv_validate_live_d15(mesh, sidecar)) return false;
+    try {
+      layers_.reserve(sidecar.layers.size());
+      for (auto &[name, entries] : sidecar.layers) {
+        auto writer = std::make_unique<bke::SpanAttributeWriter<float2>>(
+            mesh.attributes_for_write().lookup_for_write_span<float2>(name));
+        layers_.push_back({&name, &entries, std::move(writer)});
+        const auto &w = *layers_.back().writer;
+        if (!w || w.domain != bke::AttrDomain::Corner || w.span.size() != mesh.corners_num) return false;
+        for (const auto &[corner, entry] : entries)
+          if (uv_array_d15(w.span[corner]) != entry.expected) return false;
+      }
+    }
+    catch (const std::exception &error) {
+      std::fprintf(stderr, "[D15 UV Undo] writer preparation rejected: %s\n", error.what());
+      return false;
+    }
+    return true;
+  }
+  void publish(bke::pbvh::Tree &pbvh, const IndexMask &nodes, bool exchange)
+  {
+    for (auto &layer : layers_) {
+      auto &writer = *layer.writer;
+      for (auto &[corner, entry] : *layer.entries) {
+        const auto before = entry.original;
+        writer.span[corner] = float2(before[0], before[1]);
+        if (exchange) std::swap(entry.original, entry.expected);
+        else entry.expected = before;
+      }
+      writer.finish();
+      pbvh.tag_attribute_changed(nodes, *layer.name);
+      layer.writer.reset();
+    }
+    layers_.clear();
+  }
+};
+
+bool restore_uv_corners_from_active_step_d15(Object &object)
+{
+  StepData *step = get_step_data();
+  if (!step || !step->uv_corners_d15) return true;
+  UVUndoPreparedD15 prepared;
+  if (!prepared.prepare(object, *step)) {
+    std::fprintf(stderr, "[D15 UV Undo] stroke restore refused before position restore\n");
+    return false;
+  }
+  bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  IndexMaskMemory memory;
+  const IndexMask nodes = bke::pbvh::all_leaf_nodes(pbvh, memory);
+  prepared.publish(pbvh, nodes, false);
+  return true;
 }
 
 static bool use_multires_undo(const StepData &step_data, const SculptSession &ss)
@@ -2609,6 +2815,7 @@ static bool restore_mask_master_step(Object &object, StepData &step)
 
 static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
 {
+  step_data.uv_restore_ok_d15 = !step_data.uv_corners_d15;
   /* A pivot placement is a runtime metadata transaction. Do not refresh or
    * publish Multires coordinates when undoing it. Exchange for exact redo. */
   if (step_data.pivot_only) {
@@ -2635,6 +2842,12 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
   BKE_view_layer_synced_ensure(*bmain, scene, view_layer);
   Object &object = *BKE_view_layer_active_object_get(view_layer);
   if (step_data.object_name != object.id.name) {
+    return;
+  }
+  if (step_data.uv_corners_d15 &&
+      (!uv_scope_d15(object, step_data) ||
+       !uv_validate_live_d15(*id_cast<const Mesh *>(object.data), *step_data.uv_corners_d15))) {
+    std::fprintf(stderr, "[D15 UV Undo] stale topology or attribute; restore refused\n");
     return;
   }
 
@@ -2772,7 +2985,14 @@ static void restore_list(bContext *C, Depsgraph *depsgraph, StepData &step_data)
         }
         const Mesh &mesh = *id_cast<const Mesh *>(object.data);
         Array<bool> modified_verts(mesh.verts_num, false);
+        UVUndoPreparedD15 uv_prepared;
+        if (!uv_prepared.prepare(object, step_data)) {
+          std::fprintf(stderr, "[D15 UV Undo] writer preflight failed; no position exchange\n");
+          return;
+        }
         restore_position_mesh(object, *step_data.position_step_storage, modified_verts);
+        uv_prepared.publish(pbvh, node_mask, true);
+        step_data.uv_restore_ok_d15 = true;
         exchange_physics_compaction_v29(*id_cast<Mesh *>(object.data),step_data);
 
         const IndexMask changed_nodes = IndexMask::from_predicate(
@@ -4623,24 +4843,28 @@ static void sculpt_layer_undo_trace_state(bContext *C,
   fflush(stdout);
 }
 
-static void step_decode_undo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoStep *us)
+static bool step_decode_undo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoStep *us)
 {
   BLI_assert(us->step.is_applied == true);
 
   sculpt_layer_undo_trace_state(C, *us, "UNDO_BEFORE");
   restore_list(C, depsgraph, us->data);
   sculpt_layer_undo_trace_state(C, *us, "UNDO_AFTER");
+  if (!us->data.uv_restore_ok_d15) return false;
   us->step.is_applied = false;
+  return true;
 }
 
-static void step_decode_redo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoStep *us)
+static bool step_decode_redo_impl(bContext *C, Depsgraph *depsgraph, SculptUndoStep *us)
 {
   BLI_assert(us->step.is_applied == false);
 
   sculpt_layer_undo_trace_state(C, *us, "REDO_BEFORE");
   restore_list(C, depsgraph, us->data);
   sculpt_layer_undo_trace_state(C, *us, "REDO_AFTER");
+  if (!us->data.uv_restore_ok_d15) return false;
   us->step.is_applied = true;
+  return true;
 }
 
 /* SCULPT_LAYER_UNDO_BOUNDARY_V31
@@ -4806,7 +5030,7 @@ static void step_decode_undo(bContext *C,
     BLI_assert(us_iter->step.type == us->step.type); /* Previous loop ensures this. */
 
     set_active_layer(C, &us_iter->active_color_start);
-    step_decode_undo_impl(C, depsgraph, us_iter);
+    if (!step_decode_undo_impl(C, depsgraph, us_iter)) return;
 
     if (us_iter == us) {
       if (us_iter->step.prev && us_iter->step.prev->type == BKE_UNDOSYS_TYPE_SCULPT) {
@@ -4836,7 +5060,7 @@ static void step_decode_redo(bContext *C, Depsgraph *depsgraph, SculptUndoStep *
   }
   while (us_iter && (us_iter->step.is_applied == false)) {
     set_active_layer(C, &us_iter->active_color_end);
-    step_decode_redo_impl(C, depsgraph, us_iter);
+    if (!step_decode_redo_impl(C, depsgraph, us_iter)) return;
 
     if (us_iter == us) {
       if (us_iter->step.prev && us_iter->step.prev->type == BKE_UNDOSYS_TYPE_SCULPT) {

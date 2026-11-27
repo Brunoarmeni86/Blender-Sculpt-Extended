@@ -132,3 +132,7 @@ See [D15_ATTRIBUTE_TRANSFER_REFERENCE.md](D15_ATTRIBUTE_TRANSFER_REFERENCE.md). 
 ## Implementation checkpoint — D15-C4 native diagnostic and UV journal reference
 
 See [D15_UV_PROBE_AND_JOURNAL.md](D15_UV_PROBE_AND_JOURNAL.md). Environment-only read-only UV probe stages tangent proposals on native local fans; independent sparse first-capture/exchange reference passed GCC and Clang ASan/UBSan. Native build, journal StepData integration and actual writes remain open. No UI changes. Do not advertise texture-preserving Smooth until native tests and Undo/Redo/cancel pass.
+
+## Implementation checkpoint — D15-C5 native Position Undo sidecar
+
+See [D15_NATIVE_UV_UNDO_C5.md](D15_NATIVE_UV_UNDO_C5.md). Dormant sparse UV capture/restore scaffold, expected-live validation, topology fingerprint, memory accounting, regular Undo/Redo and separate stroke restore hooks. No caller captures or publishes UV edits yet. Native compilation, global undo rejection/cursor semantics, cancellation atomicity and writer lifetime remain mandatory gates. No UI changes. C4 journal tests do not establish C5 native correctness.

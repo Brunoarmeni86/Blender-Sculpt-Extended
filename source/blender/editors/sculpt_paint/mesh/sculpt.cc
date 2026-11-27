@@ -1371,6 +1371,8 @@ static void restore_face_set_from_undo_step(Object &object)
 
 void restore_position_from_undo_step(const Depsgraph &depsgraph, Object &object)
 {
+  // C5: this path also serves stroke cancellation/replay, unlike stack decode.
+  if (!restore_uv_corners_from_active_step_d15(object)) return;
   SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   IndexMaskMemory memory;
