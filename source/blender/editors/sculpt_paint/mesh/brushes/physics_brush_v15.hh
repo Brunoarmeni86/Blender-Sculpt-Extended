@@ -27,6 +27,7 @@
 #  include "artistic_relief_v31d1110.hh"
 #  include "artistic_build_v31d1114.hh"
 #  include "d12_clay_engine.hh"
+#  include "d13_clay_fusion.hh"
 #  include "d12_flesh_engine.hh"
 #  ifdef WITH_SCULPT_WARP_CUDA
 #    include "warp_cuda_backend.hh"
@@ -1752,6 +1753,51 @@ inline bool try_apply_intent(
         d::Frame next_frame=state->d12_clay_frame;
         d::FleshState next_flesh=state->d12_flesh_state;
         if(clay_tool){
+          namespace fusion=sculpt_physics::dedicated_d13::clay_fusion;
+          const bool fusion_enabled=sign>0 && stroke_option_v31d5("BLENDER_SCULPT_D13_CLAY_FUSION");
+          const bool thin_enabled=stroke_option_v31d5("BLENDER_SCULPT_D13_THIN_CONTACT");
+          std::vector<fusion::Edge> local_edges;
+          std::vector<double> local_area;
+          if(fusion_enabled||thin_enabled){
+            // Reuse the native incident-face triangulation. No global
+            // proximity links between disconnected sheets.
+            const auto v2f=mesh.vert_to_face_map();
+            const auto faces=mesh.faces();
+            const auto corners=mesh.corner_verts();
+            const auto tris=mesh.corner_tris();
+            std::vector<int> incident;
+            std::unordered_map<std::size_t,std::size_t> slots;
+            slots.reserve(samples.size());local_area.assign(samples.size(),0.);
+            for(std::size_t i=0;i<samples.size();++i)if(d::valid_sample(samples[i])){
+              const auto id=samples[i].global_index;
+              slots.emplace(id,i);
+              for(int face:v2f[int(id)])incident.push_back(face);
+            }
+            std::sort(incident.begin(),incident.end());
+            incident.erase(std::unique(incident.begin(),incident.end()),incident.end());
+            for(int face:incident)for(int ti:bke::mesh::face_triangles_range(faces,face)){
+              const int3 c=tris[ti];
+              std::array<std::size_t,3> ids{std::size_t(corners[c[0]]),std::size_t(corners[c[1]]),std::size_t(corners[c[2]])};
+              const auto a=convert(position_data.eval[int(ids[0])]);
+              const auto b=convert(position_data.eval[int(ids[1])]);
+              const auto cc=convert(position_data.eval[int(ids[2])]);
+              const double share=d::norm(d::cross(b-a,cc-a))/6.;
+              if(!std::isfinite(share)||share<=1e-24)continue;
+              for(int j=0;j<3;++j){
+                const auto x=slots.find(ids[j]),y=slots.find(ids[(j+1)%3]);
+                if(x!=slots.end())local_area[x->second]+=share;
+                if(x!=slots.end()&&y!=slots.end()&&x->second!=y->second)
+                  local_edges.push_back({std::min(x->second,y->second),std::max(x->second,y->second)});
+              }
+            }
+            std::sort(local_edges.begin(),local_edges.end());
+            local_edges.erase(std::unique(local_edges.begin(),local_edges.end()),local_edges.end());
+            if(thin_enabled){
+              const auto keep=fusion::contact(samples,local_edges,intent.center,convert(normal),radius,
+                                               std::min(travel,1.5)*radius);
+              for(std::size_t i=0;i<samples.size();++i)if(!keep[i])samples[i].envelope=0.;
+            }
+          }
           d::ClayParams params;
           // Two modes are tool geometry, not separate material solvers.
           params.roundness=kind==NativeSculptBrushKind::ClayStrips?
@@ -1767,15 +1813,38 @@ inline bool try_apply_intent(
           dose=cache.xpbd_v17_intent_started?(travel<=1.5?
               std::min(swept?1.5:.25,d::norm(tangent)/radius):0.):.06;
           const auto kernel=d::prepare_clay(next_frame,radius,dose,intensity,sign,params);
-          for(const auto& sample:samples){
+          std::vector<Vec3> fusion_motion;
+          std::vector<double> headroom;
+          if(fusion_enabled){fusion_motion.resize(samples.size());headroom.resize(samples.size());}
+          for(std::size_t i=0;i<samples.size();++i){
+            const auto& sample=samples[i];
             if(!d::valid_sample(sample))continue;
-            // Captured before any writer changes on first contact. The
-            // existing stroke-owned cache is reset with the StrokeCache.
             const auto ref=state->d12_clay_reference.try_emplace(sample.global_index,
                 d::ClayReference{sample.position,sample.surface_normal,radius}).first;
             const auto displacement=swept?d::swept_clay_vertex(kernel,sample,tangent,&ref->second):
                                           d::clay_vertex(kernel,sample,&ref->second);
-            if(d::norm2(displacement)>1e-30)goals.push_back({sample.global_index,displacement});
+            if(fusion_enabled){
+              fusion_motion[i]=displacement;
+              const double cap=kernel.stroke_height*std::min(radius,ref->second.radius);
+              headroom[i]=std::max(0.,cap-d::norm(sample.position-ref->second.position)-d::norm(displacement));
+            }else if(d::norm2(displacement)>1e-30)goals.push_back({sample.global_index,displacement});
+          }
+          if(fusion_enabled){
+#  ifdef WITH_SCULPT_WARP_CUDA
+            if(!state->artistic_flux_attempted && stroke_option_v31d5("BLENDER_SCULPT_D11_WARP")){
+              state->artistic_flux_attempted=true;
+              state->artistic_flux=sculpt_physics::create_artistic_flux_cuda();
+            }
+#  endif
+            bool gpu_used=false;
+            if(!fusion::redistribute(samples,local_edges,local_area,headroom,next_frame.axis,radius,
+                                     fusion_motion,state->artistic_flux.get(),&gpu_used))
+              throw std::runtime_error("D13 Clay fusion invalid patch");
+            for(std::size_t i=0;i<samples.size();++i)if(d::norm2(fusion_motion[i])>1e-30)
+              goals.push_back({samples[i].global_index,fusion_motion[i]});
+            if(state->d12_dabs%32==0 || profile_v26b_requested())
+              std::fprintf(stderr,"[D13 Clay fusion] backend=%s edges=%zu goals=%zu\n",
+                           gpu_used?"CUDA":"CPU",local_edges.size(),goals.size());
           }
         }else{
           d::FleshParams params;

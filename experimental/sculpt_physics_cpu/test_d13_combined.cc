@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "global_collision_v29.hh"
 #include "d12_clay_engine.hh"
+#include "d13_clay_fusion.hh"
 #include "artistic_paired_flux.hh"
 #include "volume_session_v25.hh"
 #include <cstdio>
@@ -33,5 +34,17 @@ int main(){
  VolumeFrameV25 step;step.gravity={0,0,0};step.tool_enabled=true;step.tool_start={5,0,0};step.tool_end={5.1,0,0};step.substeps=1;
  const auto after=stage_volume_adaptive_d13(v,step);
  check(v.time==0.&&after.time==step.dt&&after.liquid.size()==1,"atomic volume adaptive");
+ namespace fusion=dedicated_d13::clay_fusion;
+ std::vector<PhysicalBrushIntentSample> patch{
+   {0,{0,0,.2},1,1,true,{0,0,1}},{1,{.1,0,0},1,1,true,{0,0,1}},
+   {2,{0,0,-.01},1,1,true,{0,0,-1}},{3,{.02,0,.15},1,1,true,{0,0,1}}};
+ auto selected=fusion::contact(patch,{{0,1},{0,2}},{0,0,.2},{0,0,1},1.,0.);
+ check(selected[0]&&selected[1]&&!selected[2]&&!selected[3],"oriented connected contact");
+ std::vector<Vec3> deposit{{0,0,.04},{0,0,.02},{},{}};
+ check(fusion::redistribute(patch,{{0,1},{0,2}},{1.,2.,1.,1.},{.1,.1,0.,0.},
+                            {0,0,1},1.,deposit),"fusion");
+ check(deposit[0].z<.04&&deposit[1].z>.02&&std::abs(deposit[0].z+2*deposit[1].z-.08)<1e-12,
+       "fusion conserves new axial deposit");
+ check(deposit[2].z==0.&&deposit[3].z==0.,"fusion cannot widen host support");
  std::puts("D13_COMBINED_REFERENCE_OK");
 }
