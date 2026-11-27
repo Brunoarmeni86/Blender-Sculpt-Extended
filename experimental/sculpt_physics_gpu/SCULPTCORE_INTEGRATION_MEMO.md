@@ -108,3 +108,7 @@ Every PR: inspect source and tests; report changed paths, commit SHA, exact test
 ## 10. Present status
 
 Research memo only. No SculptCore code imported, no CMake or runtime change, no tests executed. Priorities are recommendations based on the verified source evidence and D15 design decision, not a completed roadmap. Next action is A (baseline) then E in parallel with small opt-in geometry improvements, subject to resource and dependency review.
+
+## Implementation checkpoint — feature-aware Smooth CPU oracle
+
+See [D15_FEATURE_SMOOTH_REFERENCE.md](D15_FEATURE_SMOOTH_REFERENCE.md). Independent CPU reference and synthetic regression tests now exist; GCC and Clang ASan/UBSan standalone tests passed. No native dispatcher or UI change, no CUDA parity or full build yet. Baseline D15 remains a prerequisite to native integration. This is not a resurrected surface physical brush.

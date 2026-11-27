@@ -1,0 +1,15 @@
+# D15 feature-aware Smooth — CPU reference checkpoint
+
+Independent implementation inspired by the feature-aware smoothing research in SCULPTCORE_INTEGRATION_MEMO.md. No upstream source copied. No native brush/UI or GPU changes; D15 baseline remains the gate for integration.
+
+API: immutable positions/normals, native writable weights [0,1], visible/readable markers and actual incident feature-edge flags. Caller must supply full incident connectivity for writable vertices plus read-only halo. Canonical edge sorting yields deterministic reductions for fixed vertex numbering; duplicate edges rejected. Interior: one-ring mean, normal component retained by .20 default. On exactly two readable incident feature edges with equal type masks and sufficiently straight local chain, slide along the chord. Pin endpoints, mixed flags, junctions, sharp bends and inaccessible feature edges. This deliberately differs from SculptCore endpoint normal motion. Max displacement .25 shortest readable incident edge times writable weight, provisional; not a collision guarantee or exact volume conservation. Chord on a curved feature is an approximation; repeated updates may drift. Distinct chain IDs, actual UV corner discontinuity detection and attribute invalidation are native adapter tasks; tags are supplied by caller, not auto-classified. No attribute write. Zero-weight and hidden vertices remain immobile. Invalid input leaves output unchanged (allocation exceptions propagate). O(V+E log E) CPU reference, not production timing.
+
+## Validation performed
+Standalone files compiled/executed in Linux container:
+- g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -O2 test_d15_feature_smooth.cc -o test_gcc && ./test_gcc
+- clang++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -O1 -g test_d15_feature_smooth.cc -o test_clang && ./test_clang
+Both printed D15_FEATURE_SMOOTH_REFERENCE_OK; no sanitizer diagnostic.
+Fixtures: crease slide, displacement cap, mask/halo, edge order and orientation, translated fixture, half weight, UV seam tag, mixed junction/pair, endpoints, hidden feature, sharp bend, interior attenuation, disconnected nearby sample, tangent projection, hidden active, degenerate normal, transactional malformed/duplicate/NaN rejection. These are small synthetic fixtures, not dense mesh, native clipping, Undo, actual UV/Face Set classification, or Blender/Warp parity tests. CMake target registered but full CMake suite and Windows Blender build not executed here.
+
+## Native integration next
+Audit MeshAttributeData and existing sculpt_boundary cache; classify actual edge/face/corner features on compact PBVH region plus complete incident halo. Reuse existing factors, no duplicate pressure. Native stage-and-guard writer; preserve clipping/lock, mask/hidden, Undo, dirty bounds, accepted-position synchronization. Explicit opt-in CPU pilot only after baseline validation, then GPU CSR/kernel and parity. Never add a user-visible untested mode; leave Classic and other existing paths untouched.

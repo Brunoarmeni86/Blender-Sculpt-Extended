@@ -450,3 +450,10 @@ add_test(NAME sculpt_d13_multiscale_flatten_tests COMMAND test_d13_multiscale_fl
 
 
 
+
+add_executable(test_d15_feature_smooth test_d15_feature_smooth.cc)
+target_compile_features(test_d15_feature_smooth PRIVATE cxx_std_17)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_d15_feature_smooth PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_d15_feature_smooth_tests COMMAND test_d15_feature_smooth)
