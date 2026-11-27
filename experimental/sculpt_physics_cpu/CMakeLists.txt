@@ -458,3 +458,7 @@ add_test(NAME sculpt_d13_combined_tests COMMAND test_d13_combined)
 add_executable(test_d14_clay_bulb test_d14_clay_bulb.cc)
 target_link_libraries(test_d14_clay_bulb PRIVATE sculpt_physics_reference)
 add_test(NAME sculpt_d14_clay_bulb_tests COMMAND test_d14_clay_bulb)
+
+add_executable(test_d14_adaptive_median_fusion test_d14_adaptive_median_fusion.cc)
+target_link_libraries(test_d14_adaptive_median_fusion PRIVATE sculpt_physics_reference)
+add_test(NAME sculpt_d14_adaptive_median_fusion_tests COMMAND test_d14_adaptive_median_fusion)

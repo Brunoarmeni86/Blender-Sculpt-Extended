@@ -29,6 +29,7 @@
 #  include "d12_clay_engine.hh"
 #  include "d13_clay_fusion.hh"
 #  include "d14_clay_bulb.hh"
+#  include "d14_adaptive_median_fusion.hh"
 #  include "d12_flesh_engine.hh"
 #  ifdef WITH_SCULPT_WARP_CUDA
 #    include "warp_cuda_backend.hh"
@@ -1789,7 +1790,9 @@ inline bool try_apply_intent(
         if(clay_tool){
           namespace fusion=sculpt_physics::dedicated_d13::clay_fusion;
           namespace bulb_engine=sculpt_physics::dedicated_d14::bulb;
-          const bool fusion_enabled=sign>0 && (bulb || stroke_option_v31d5("BLENDER_SCULPT_D13_CLAY_FUSION"));
+          namespace median_engine=sculpt_physics::dedicated_d14::median_fusion;
+          const bool median_enabled=sign>0 && stroke_option_v31d5("BLENDER_SCULPT_D14_MEDIAN_FUSION");
+          const bool fusion_enabled=sign>0 && (median_enabled || bulb || stroke_option_v31d5("BLENDER_SCULPT_D13_CLAY_FUSION"));
           const bool thin_enabled=stroke_option_v31d5("BLENDER_SCULPT_D13_THIN_CONTACT");
           std::vector<fusion::Edge> local_edges;
           std::vector<double> local_area;
@@ -1879,8 +1882,13 @@ inline bool try_apply_intent(
 #  endif
             bool gpu_used=false;
             double transferred=0.;
-            const bool fused=bulb?
-                bulb_engine::fuse(bulb_kernel,samples,local_edges,local_area,headroom,
+            median_engine::Statistics median_stats;
+            median_engine::Settings median_settings;
+            median_settings.radius=radius;median_settings.axis=next_frame.axis;
+            const bool fused=median_enabled?
+                median_engine::apply(median_settings,samples,local_edges,local_area,headroom,
+                                     fusion_motion,state->artistic_flux.get(),&median_stats):
+                bulb?bulb_engine::fuse(bulb_kernel,samples,local_edges,local_area,headroom,
                                   fusion_motion,state->artistic_flux.get(),&gpu_used,&transferred):
                 fusion::redistribute(samples,local_edges,local_area,headroom,next_frame.axis,radius,
                                      fusion_motion,state->artistic_flux.get(),&gpu_used);
@@ -1888,7 +1896,10 @@ inline bool try_apply_intent(
             for(std::size_t i=0;i<samples.size();++i)if(d::norm2(fusion_motion[i])>1e-30)
               goals.push_back({samples[i].global_index,fusion_motion[i]});
             if(state->d12_dabs%32==0 || profile_v26b_requested()){
-              if(bulb)std::fprintf(stderr,"[D14 ClayBulb fusion] backend=%s edges=%zu goals=%zu transferred=%.9g\n",
+              if(median_enabled)std::fprintf(stderr,"[D14 Median Fusion] asset=%s backend=%s links=%zu goals=%zu transferred=%.9g old_donors=%zu old_mobilized=%.9g balance=%.9g\n",
+                  brush.id.name+2,median_stats.gpu?"CUDA":"CPU",median_stats.links,goals.size(),
+                  median_stats.transferred,median_stats.old_donors,median_stats.old_mobilized,median_stats.axial_balance);
+              else if(bulb)std::fprintf(stderr,"[D14 ClayBulb fusion] backend=%s edges=%zu goals=%zu transferred=%.9g\n",
                            gpu_used?"CUDA":"CPU",local_edges.size(),goals.size(),transferred);
               else std::fprintf(stderr,"[D13 Clay fusion] backend=%s edges=%zu goals=%zu\n",
                            gpu_used?"CUDA":"CPU",local_edges.size(),goals.size());
