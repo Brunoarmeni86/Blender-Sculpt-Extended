@@ -93,7 +93,8 @@ def _register_xpbd_runtime_settings():
             ('NORMAL', "Normal", "Fast density-normalized smoothing"),
             ('RELAX', "Relax", "Shape-aware tangential and normal relaxation"),
             ('VOLUME', "Preserve Volume", "Smooth while strongly attenuating surface shrinkage"),
-            ('STRONG', "Very Strong", "D12 local multiscale smoothing; CUDA when available, CPU chart otherwise"),
+            ('STRONG', "Very Strong", "Original A3 two-ring density-scaled CUDA smoothing"),
+            ('MULTISCALE', "Very Strong Multiscale (D12)", "Experimental geometric-radius local chart; CUDA or CPU chart fallback"),
         ),
         default='NORMAL',
         update=_xpbd_sync_environment)
