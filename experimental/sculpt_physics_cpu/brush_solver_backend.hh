@@ -3,6 +3,7 @@
 
 #include "physics_core.hh"
 #include "d12_smooth_multiscale.hh"
+#include "d13_multiscale_flatten.hh"
 
 #include <cstdint>
 #include <memory>
@@ -121,6 +122,7 @@ struct StrokeSolverSession {
    * densities without rescanning every edge on each dab. */
   double topology_mean_edge_length = 0.0;
   std::unique_ptr<BrushSolverBackend> solver;
+  dedicated_d13::flatten::PlaneState flatten_plane;
   bool multiscale_attempted=false;
   std::size_t multiscale_dabs=0;
   std::unique_ptr<dedicated_d12::smooth_multiscale::Backend> multiscale;

@@ -219,12 +219,22 @@ static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
   namespace ms=sculpt_physics::dedicated_d12::smooth_multiscale;
   namespace flat=sculpt_physics::dedicated_d13::flatten;
   flat::Params flatten_params;
+  const char *version=std::getenv("BLENDER_SCULPT_D13_FLATTEN_V2");
+  const bool flatten_v2=flatten && version && STREQ(version,"1");
+  double plane_follow=0.,edge_start=.65;
+  flat::PlaneState pending_plane;
   if(flatten){
     flatten_params.mode=flat::parse(std::getenv("BLENDER_SCULPT_D13_FLATTEN"));
     if(flatten_params.mode==flat::Mode::Invalid ||
        !flat::number(std::getenv("BLENDER_SCULPT_D13_FLATTEN_MIX"),flatten_params.plane_mix,0.,1.) ||
        !flat::number(std::getenv("BLENDER_SCULPT_D13_FLATTEN_OFFSET"),flatten_params.offset,-.25,.25))
       return false;
+    if(flatten_v2){
+      plane_follow=flatten_params.mode==flat::Mode::Adaptive?.35:0.;
+      if(!flat::number(std::getenv("BLENDER_SCULPT_D13_FLATTEN_FOLLOW"),plane_follow,0.,1.) ||
+         !flat::number(std::getenv("BLENDER_SCULPT_D13_FLATTEN_EDGE"),edge_start,0.,.95))
+        return false;
+    }
   }
   SculptSession &ss=*object.runtime->sculpt_session;
   StrokeCache &cache=*ss.cache;
@@ -323,18 +333,27 @@ static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
       session->vertex_count=std::size_t(mesh.verts_num);
       cache.physical_solver_session=session;
     }
-    if(!session->multiscale_attempted){
-      session->multiscale_attempted=true;
-      session->multiscale=ms::create_cuda();
-    }
+    const bool need_filter=!flatten_v2 || flatten_params.mode==flat::Mode::Adaptive;
     std::vector<double> displacement;
-    gpu=session->multiscale && session->multiscale->evaluate(chart,displacement) &&
-        ms::validate(chart,displacement);
-    if(!gpu)displacement=ms::cpu(chart);
-    if(!ms::validate(chart,displacement))return false;
+    if(need_filter){
+      if(!session->multiscale_attempted){
+        session->multiscale_attempted=true;
+        session->multiscale=ms::create_cuda();
+      }
+      gpu=session->multiscale && session->multiscale->evaluate(chart,displacement) &&
+          ms::validate(chart,displacement);
+      if(!gpu)displacement=ms::cpu(chart);
+      if(!ms::validate(chart,displacement))return false;
+    }
     if(flatten){
       std::vector<double> result;
-      if(!flat::evaluate(chart,displacement,flatten_params,result))return false;
+      if(flatten_v2){
+        pending_plane=session->flatten_plane;
+        if(!flat::update_plane(chart,flatten_params.mode,plane_follow,pending_plane) ||
+           !flat::evaluate_v2(chart,samples,displacement,flatten_params,pending_plane,edge_start,result))
+          return false;
+      }
+      else if(!flat::evaluate(chart,displacement,flatten_params,result))return false;
       displacement=std::move(result);
     }
     // Stage exact native clipped motion before checking local triangles.
@@ -359,7 +378,10 @@ static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
         changes.emplace(std::size_t(batch.ids[i]),batch.motion[i]);
       batches.push_back(std::move(batch));
     });
-    if(changes.empty())return true;
+    if(changes.empty()){
+      if(flatten_v2)session->flatten_plane=pending_plane;
+      return true;
+    }
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
     const auto guard=physics_v15::limit_drag_contact(mesh,pos.eval,changes,true);
     guard_scale=guard.final_scale;
@@ -386,14 +408,17 @@ static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
   pbvh.flush_bounds_to_parents();
   // A legacy GPU world (if a prior chart was rejected) is now stale.
   session->solver.reset();
+  if(flatten_v2 && guard_scale>0.)session->flatten_plane=pending_plane;
   if(session->multiscale_dabs++%32==0 || std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
     std::fprintf(stderr,"[D12 Multiscale %s] active=%zu guard=%.4f total_ms=%.3f%s\n",
       gpu?"Warp CUDA":"CPU multiscale",active,guard_scale,
       std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),
       brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE?" preserve-shape":"");
   if(flatten && std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
-    std::fprintf(stderr,"[D13 Flatten] mode=%s base=%s guard=%.4f\n",
-                 flat::name(flatten_params.mode),gpu?"CUDA":"CPU",guard_scale);
+    std::fprintf(stderr,"[D13 Flatten] version=%d mode=%s base=%s guard=%.4f follow=%.3f edge=%.3f\n",
+                 flatten_v2?2:1,flat::name(flatten_params.mode),
+                 flatten_v2 && flatten_params.mode!=flat::Mode::Adaptive?"direct CPU":gpu?"CUDA":"CPU",
+                 guard_scale,plane_follow,edge_start);
   return true;
 }
 

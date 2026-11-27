@@ -10,7 +10,11 @@ constexpr int side=33, cells=side*side;
 constexpr double grid_scale=12.;
 struct Sample {Vec3 p{},normal{};double weight=0.,area=0.;};
 struct Point {double x=0.,y=0.,h=0.,mass=0.,weight=0.;};
-struct Chart {Vec3 axis{};double radius=1.;std::vector<Point> points;};
+struct Chart {
+ Vec3 axis{};double radius=1.;std::vector<Point> points;
+ // Fitted plane in object coordinates; the original D12 GPU contract is unchanged.
+ Vec3 plane_point{},plane_normal{},center{};
+};
 // Local height chart, affine detrended. Caller supplies a connected native
 // writable region and area proxy. Reject folded sheets instead of blending.
 inline bool prepare(const std::vector<Sample>& s,Vec3 center,double radius,Chart& c){
@@ -48,6 +52,10 @@ inline bool prepare(const std::vector<Sample>& s,Vec3 center,double radius,Chart
  const double e=xh-x*h/w,f=yh-y*h/w,det=a*d-b*b;
  if(det<=1e-10*w*w)return false;
  const double bx=(d*e-b*f)/det,by=(a*f-b*e)/det,base=(h-bx*x-by*y)/w;
+ c.center=center;
+ c.plane_point=center+n*(base*radius);
+ c.plane_normal=unit(n-u*bx-v*by);
+ if(!finite(c.plane_point)||!finite(c.plane_normal)||norm2(c.plane_normal)<.5)return false;
  for(auto& q:c.points)q.h-=base+bx*q.x+by*q.y;
  return true;
 }

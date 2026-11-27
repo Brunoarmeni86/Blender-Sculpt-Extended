@@ -1,0 +1,5 @@
+# D13 Flatten V2 (opt-in)
+
+Set BLENDER_SCULPT_D13_FLATTEN_V2=1. Existing V1 remains unchanged when unset.
+Hard/Scrape/Fill capture the first accepted fitted plane in object coordinates for the stroke. Adaptive follows by traveled brush distance (default .35); BLENDER_SCULPT_D13_FLATTEN_FOLLOW=0..1 overrides. At a stationary dab, no plane tracking. The local chart still rejects folded/disconnected patches. BLENDER_SCULPT_D13_FLATTEN_EDGE=.65 (0.. .95) starts a quintic geometric taper; actual native weights remain separate. Existing motion cap, clipping and contact guard remain. The taper may reduce the effective plane width and does not guarantee no rim.
+Hard/Scrape/Fill skip the grid filter in V2, using direct CPU line-plane projection with bounded displacement. Adaptive retains the D12 GPU/CPU filter and mixes it with the projection; the result is constrained to approach the target. No new PTX required. V1 and Classic are retained. No separate asset or UI yet. Ordinary mesh with symmetry and Preserve Shape off for comparison. No runtime or build validation performed here.
