@@ -562,6 +562,13 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
             active_region, compact_weights, compact_normals, smooth_mode, double(cache.radius));
     if(!dedicated_gpu)
     {
+      // Recovery comparison must not masquerade as one-pass Jacobi. Reset
+      // the session through the catch below before native Smooth runs.
+      const char *recovery = std::getenv("BLENDER_SCULPT_D13_SMOOTH_RECOVERY");
+      if (smooth_mode == sculpt_physics::SmoothSolverMode::DenseStrong &&
+          recovery && recovery[0]) {
+        throw std::runtime_error("D13 recovery dedicated CUDA failed; comparison invalid");
+      }
       if (!solver.set_active_region(active_region) || !solver.set_targets(targets)) {
         throw std::runtime_error("GPU Smooth rejected its active region");
       }

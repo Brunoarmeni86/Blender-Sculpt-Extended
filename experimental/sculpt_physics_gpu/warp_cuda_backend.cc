@@ -4,6 +4,7 @@
 
 #include "warp.h"
 #include "d12_smooth_multiscale.hh"
+#include "d13_smooth_recovery.hh"
 #include <fstream>
 #include <string>
 
@@ -291,6 +292,10 @@ class WarpCudaBrushSolverBackend final : public BrushSolverBackend {
         active.empty() || active.size() != weights.size() || active.size() != normals.size() ||
         active.size() > particles_.size())
     {
+      if (std::getenv("BLENDER_SCULPT_SMOOTH_DIAG")) {
+        std::fprintf(stderr,"[D13 Smooth CUDA REJECT] uploaded=%d laplacian=%d scatter=%d active=%zu\n",
+                     int(uploaded_),int(smooth_kernel_!=nullptr),int(smooth_scatter_kernel_!=nullptr),active.size());
+      }
       return false;
     }
     smooth_active_.resize(active.size());
@@ -328,22 +333,22 @@ class WarpCudaBrushSolverBackend final : public BrushSolverBackend {
                                float(edge_length_sum_ / double(edge_length_count_)) :
                                1.0f;
     const double edge_ratio = std::max(1.0, spatial_scale / double(reference_edge));
-    /* Dense Strong uses a two-ring kernel, so each launch covers roughly four
-     * times the diffusion area of the one-ring modes. Bound the launch count
-     * while retaining scale equivalence across common sculpt densities. */
-    const int requested_density_passes = std::clamp(
-        int(std::ceil(edge_ratio * edge_ratio * 0.004)), 3, 12);
-    /* Bound latency by the actual edited region, not total mesh size. Large
-     * brushes receive fewer interactive passes; continuous dabs accumulate
-     * the same response without producing a long single-frame stall. */
-    const int interactive_pass_cap = active.size() > 500000 ? 4 :
-                                     active.size() > 200000 ? 6 :
-                                     active.size() > 75000  ? 8 :
-                                                               12;
-    const int density_passes = std::min(requested_density_passes, interactive_pass_cap);
-    const int passes = mode == SmoothSolverMode::Taubin ? 2 :
-                       mode == SmoothSolverMode::DenseStrong ? density_passes :
-                                                               1;
+    namespace recovery = smooth_recovery_d13;
+    const auto policy = recovery::parse(std::getenv("BLENDER_SCULPT_D13_SMOOTH_RECOVERY"));
+    int passes = mode == SmoothSolverMode::Taubin ? 2 : 1;
+    int requested = passes;
+    if (mode == SmoothSolverMode::DenseStrong) {
+      const auto plan = recovery::plan(policy,edge_ratio,active.size());
+      if (plan.executed <= 0) {
+        std::fprintf(stderr,"[D13 Smooth] invalid recovery policy or scale\n");
+        return false;
+      }
+      // The unmodified A3 PTX uses the same one-ring math for mode 0
+      // as pre-ef1c762f223 mode 4. Host retains DenseStrong weight scaling.
+      kernel_mode = plan.kernel_mode;
+      requested = plan.requested;
+      passes = plan.executed;
+    }
     for (int pass = 0; pass < passes; pass++) {
       /* A net-positive Taubin pair preserves volume without cancelling almost
        * the whole continuous stroke. Dense Strong performs three bounded
@@ -382,9 +387,20 @@ class WarpCudaBrushSolverBackend final : public BrushSolverBackend {
     {
       return false;
     }
+    for (const Float3 &p : smooth_output_) {
+      if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {
+        return false;
+      }
+    }
     for (std::size_t i = 0; i < active.size(); i++) {
       const Float3 &p = smooth_output_[i];
       particles_[active[i]].position = {p.x, p.y, p.z};
+    }
+    if (mode == SmoothSolverMode::DenseStrong &&
+        std::getenv("BLENDER_SCULPT_SMOOTH_DIAG")) {
+      std::fprintf(stderr,
+                   "[D13 Smooth CUDA OK] policy=%s kernel_mode=%d active=%zu requested=%d executed=%d edge_ratio=%.3f\n",
+                   recovery::name(policy),kernel_mode,active.size(),requested,passes,edge_ratio);
     }
     return true;
   }

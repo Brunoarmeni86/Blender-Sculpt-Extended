@@ -3,6 +3,7 @@
 #include "brush_solver_backend.hh"
 
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 
@@ -60,5 +61,30 @@ int main()
   require(neighbor.z > 0.01, "Warp CUDA did not propagate into the active material halo");
   std::cout << "WARP_CUDA_BACKEND_OK center_z=" << result.z
             << " neighbor_z=" << neighbor.z << '\n';
+  // Opt-in so historical Jacobi-only installations retain their existing test.
+  // Run once per recovery policy in a fresh process, with matching A3 PTX.
+  if (std::getenv("BLENDER_SCULPT_D13_SMOOTH_TEST")) {
+    auto smooth = create_brush_solver_backend(BackendKind::WarpCuda,&selected);
+    require(smooth && selected==BackendKind::WarpCuda,"Smooth CUDA unavailable");
+    for(int y=0;y<side;++y)for(int x=0;x<side;++x) {
+      const bool peak=x==side/2 && y==side/2;
+      smooth->add_particle({double(x),double(y),peak?1.:0.},1.);
+    }
+    for(int y=0;y<side;++y)for(int x=0;x<side;++x){
+      const std::size_t i=std::size_t(y*side+x);
+      if(x+1<side)smooth->add_bond(i,i+1,0.);
+      if(y+1<side)smooth->add_bond(i,i+side,0.);
+    }
+    smooth->begin_stroke();
+    std::vector<float> weights(active_region.size(),.5f);
+    std::vector<Vec3> normals(active_region.size(),Vec3{0,0,1});
+    require(smooth->smooth_compact(active_region,weights,normals,
+                                  SmoothSolverMode::DenseStrong,50.),
+            "D13 dedicated Smooth failed; no Jacobi fallback allowed");
+    const double z=smooth->particles()[center].position.z;
+    require(std::isfinite(z)&&z>=0.&&z<.5,"D13 peak did not relax");
+    require(smooth->particles()[0].position.z==0.,"D13 read-only collar changed");
+    std::cout<<"D13_SMOOTH_CUDA_OK center_z="<<z<<'\n';
+  }
   return 0;
 }
