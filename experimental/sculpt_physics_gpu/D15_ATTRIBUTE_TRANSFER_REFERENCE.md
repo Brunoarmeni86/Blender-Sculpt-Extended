@@ -1,0 +1,29 @@
+# D15-C3 — staged multi-domain attribute transfer
+
+Independent C++17 reference after D15-C1/C2. No native dispatch, GUI, PTX or Blender mesh writes. The module consumes already resolved source-triangle IDs, generation, component and barycentric coordinates (adapter must convert a verified D15-C2 anchor or material provenance into a Request). It does not resolve source geometry or automatically build charts. Per-corner requests carry layer-specific chart membership for every UV map; all maps sample the same triangle and barycentric point. A mismatch in any map rejects the entire batch. Independent corner IDs preserve wedge discontinuities. The caller must enforce consistent wedge grouping and destination identity. Point and corner color layers are distinct; caller decodes byte/sRGB color to linear before sampling, and encodes on write. Linear HDR components are not clamped; mask interpolation is bounded to [0,1]. Face Sets and material IDs are copied from explicitly chosen source faces (not interpolated or nearest-corner guessed). No arbitrary attribute interpolation; no fabricated attributes on newly exposed surfaces. Caller must choose explicit interior material policy later. During ordinary tangent Smooth only UV reprojection should be attempted initially; do not advect masks, Face Sets, material IDs or other sculpt constraints as an incidental effect. Reconstruction can request the additional domains as appropriate.
+
+All source layer IDs must be sorted and consistent across triangles in their own domain; IDs and generation are caller-defined snapshot identity, not persistent Blender indices. Duplicate destination/domain pairs, missing/stale sources, chart mismatch and invalid input leave previously published output batch unchanged. Deterministic sorted output. Allocation failures propagate without modifying output. This is staging atomicity only, not a native geometry transaction. No geometric continuity or interpolation-error guarantee, no automatic conflict resolution for a destination crossing multiple source faces; destination bounds, actual chart validation, source face policy, dirty tagging, and resource limits belong to the adapter. No performance measurements.
+
+## Native Undo audit at D15 base 421cb2a6712e6fd613eb0ccfc194b47675140ffb
+
+Inspected source/blender/editors/sculpt_paint/mesh/sculpt_undo.hh and .cc:
+- Type enum separates Position, Mask, Color, FaceSet, Geometry; no general corner UV step (header lines 30–42).
+- Position stores position/normal, optionally orig_position; see store_mesh_node_data switch around 3400–3468. Separate Mask, Color and FaceSet cases do not automatically join position capture.
+- Position restore around 2734–2810 validates topology, restores positions and exchanges existing physics_compaction_v29 sidecar. capture_physics_compaction_v29 and exchange_physics_compaction_v29 around 821–850 provide first-capture/swap precedent, not a suitable multi-layer journal as-is. Do not use disabled physical compaction as a new engine.
+- Geometry storage around 1514–1578 wraps attribute_storage and CustomData for all domains; geometry_push around 3338 sets step type Geometry. Potential reference for a standalone topology-changing operator. Do not switch a running Position stroke into Geometry, push a nested undo step on each dab, or assume geometry capture can be added to an already active Position step.
+
+Native integration design: introduce an explicit sparse corner UV sidecar owned by Position StepData, keyed by object/topology generation and layer identity, storing first old value per corner across dabs. Before writing, preflight existing active step, all affected layer metadata, exact domain/type, corner bounds, native writable span acquisition and undo payload allocation. On restore/redo, prevalidate sidecar and topology BEFORE any position exchange, and exchange values only within the same native undo step. Validate both cancellation and ordinary restore paths, step memory accounting, attribute writer.finish()/dirty tags, rename/delete/layer order and undo-stack object lifecycle. Keep all writer acquisition before mutation; define failure rollback, not fallback after partial publication. First native trial should only stage UV proposals in read-only diagnostics on small ordinary meshes with explicit opt-in and known valid charts. Only enable actual UV writes after full native build and Undo/Redo/cancel regression. Keep D15-B2 UV pinning and working Smooth variants untouched until that gate. For topology changes use dedicated native geometry transaction with validated mesh splice, not sparse IDs across changed topology. Reference test is not a native test.
+
+## Tests executed
+
+Standalone Linux:
+- g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -O2 test_d15_attribute_transfer.cc -o test_gcc && ./test_gcc
+- clang++ -std=c++17 -Wall -Wextra -Wpedantic -Werror -fsanitize=address,undefined -O1 -g test_d15_attribute_transfer.cc -o test_clang && ./test_clang
+
+Both emitted D15_ATTRIBUTE_TRANSFER_REFERENCE_OK, no sanitizer diagnostic. Cases: simultaneous domains, multiple UV maps and UDIM, distinct wedges, point/corner colors, mask interpolation and absent mask, discrete face attributes, secondary-map mismatch, stale/invalid/missing anchors, duplicate destinations/sources, schema mismatch, NaN, deterministic ordering, empty batch and no output mutation on failed batch.
+
+Tested file SHA-256:
+- d15_attribute_transfer.hh: 8d8c29ab904aad8f1fefed7b74449aca7ef36f3fcfe3d886ad22114b8a66bf3b
+- test_d15_attribute_transfer.cc: 8030aaa9109532400441fc0bb1c1d253539a52420cb4e596792bbaa8d76cef35
+
+Full CMake suite, native MSVC/Blender build, runtime, native Undo and GPU not tested. No new UI or user asset. Next: read-only native snapshot/anchor adapter, sparse UV Undo sidecar, then guarded opt-in publication; volumetric provenance and interior material rules remain a separate task.
