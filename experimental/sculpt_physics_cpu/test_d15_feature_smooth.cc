@@ -7,6 +7,13 @@ static void check(bool b,const char* s){if(!b){std::fprintf(stderr,"FAIL: %s\n",
 static bool close(V a,V b){return length(sub(a,b))<1e-12;}
 int main(){
  Settings k;Result r;
+ V normal_part{9,9,9};
+ check(normal_component({3,-2,4},{0,0,2},normal_part)&&close(normal_part,{0,0,4}),"normal material component, non-unit normal");
+ check(normal_component({3,-2,0},{0,0,1},normal_part)&&normal_part==V{},"pure tangent cannot invent normal movement");
+ check(normal_component({-1,-1,2},{1,1,0},normal_part)&&close(normal_part,{-1,-1,0}),"oblique normal component");
+ const V saved_normal=normal_part;
+ check(!normal_component({1,2,3},{0,0,0},normal_part)&&normal_part==saved_normal,"invalid normal transactional");
+ check(!normal_component({NAN,0,0},{0,0,1},normal_part)&&normal_part==saved_normal,"nonfinite motion transactional");
  std::vector<Vertex> v{{{0,0,0},{0,0,1},1.},{{-2,0,0},{0,0,1},0.},
                        {{1,0,0},{0,0,1},0.},{{0,1,1},{0,0,1},0.}};
  std::vector<Edge> e{{0,1,Sharp},{0,2,Sharp},{0,3,0}};

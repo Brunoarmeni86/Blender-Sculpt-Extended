@@ -318,7 +318,9 @@ static bool feature_uv_probe_d15(const Mesh &mesh,
     if(!std::isfinite(travel)){reject(normal_reject);continue;}
     max_normal_motion=std::max(max_normal_motion,std::abs(normal_motion));
     max_tangent_motion=std::max(max_tangent_motion,travel);
-    if(sculpt_normal_transport && travel<=full_travel*1e-8){++normal_only;continue;}
+    // float32 publication and contact scaling introduce rounding in a pure
+    // normal vector. This tolerance is relative, not a world-space bypass.
+    if(sculpt_normal_transport && travel<=full_travel*1e-6){++normal_only;continue;}
     const auto target=a::add(old,tangent);
     struct Candidate {int tri;int3 corners;a::V bary;double distance;};
     std::vector<Candidate> hits;
@@ -475,11 +477,11 @@ public:
         const double a=area(old),b=area(next);
         if(!std::isfinite(a)||!std::isfinite(b)||a==0.||
            ((a>0.)!=(b>0.))||std::abs(b)<.05*std::abs(a)){
-          // Freeze every moving endpoint of this unsafe triangle. Never
-          // retain a UV proposal for a vertex whose geometry is rejected.
+          // Only endpoints whose corner UV actually changed can cause
+          // the invalid UV triangle. Normal-only material motion keeps UVs.
           for(int j=0;j<3;++j){
             const auto v=std::size_t(cv[c[j]]);
-            if(changes.find(v)!=changes.end())bad_vertices.push_back(v);
+            if(old[j]!=next[j] && changes.find(v)!=changes.end())bad_vertices.push_back(v);
           }
         }
       }
@@ -573,13 +575,14 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
   fs::Result result;
   std::size_t active=0,edge_count=0,feature_count=0,blocked_count=0;
   std::size_t uv_layers=0,uv_splits=0,uv_invalid=0,uv_pinned_count=0;
+  std::size_t geometry_pinned=0,seam_normal_count=0,clip_pinned=0,normal_recovered=0,uv_removed=0;
   double guard_scale=1.;
   const auto start=std::chrono::steady_clock::now();
   try{
     std::unordered_map<int,std::size_t> slot;
     std::vector<int> global;
     std::vector<fs::Vertex> samples;
-    std::vector<unsigned char> feature,blocked,uv_pinned;
+    std::vector<unsigned char> feature,blocked,uv_pinned,uv_normal;
     const auto cv=[](const float3 &v)->fs::V{return {double(v.x),double(v.y),double(v.z)};};
     const auto visible=[&](int id){return attrs.hide_vert.is_empty() || !attrs.hide_vert[id];};
     const auto add=[&](int id,double weight){
@@ -592,7 +595,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       const auto i=samples.size();
       slot.emplace(id,i);global.push_back(id);
       samples.push_back({cv(pos.eval[id]),cv(normals[id]),weight,visible(id)});
-      feature.push_back(0);blocked.push_back(0);uv_pinned.push_back(0);
+      feature.push_back(0);blocked.push_back(0);uv_pinned.push_back(0);uv_normal.push_back(0);
       return i;
     };
     LocalData tls;
@@ -718,21 +721,31 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       if(q.uv==uvb::Status::Invalid)++uv_invalid;
       const bool unsafe=q.count==0||q.count>2||q.hidden||q.uv==uvb::Status::Invalid;
       if(unsafe){blocked[a]=1;blocked[b]=1;}
+      // A UV chart boundary is not necessarily a geometric feature.
+      // C7 normal material transport may smooth a UV-only seam without
+      // changing either wedge; real sharp/open/Face Set features remain pinned.
+      if(uv_sculpt && (flags&(fs::Seam|fs::UVChart))){
+        uv_normal[a]=uv_normal[b]=1;
+        flags&=~unsigned(fs::Seam|fs::UVChart);
+      }
       if(flags){feature[a]=feature[b]=1;++feature_count;}
       edges.push_back({a,b,flags,!unsafe});
     }
     edge_count=edges.size();
     for(std::size_t i=0;i<samples.size();++i){
       if(samples[i].weight<=0.)continue;
-      if(uv_pinned[i])++uv_pinned_count;
+      if(uv_pinned[i]&&(!uv_sculpt||blocked[i]||feature[i]))++uv_pinned_count;
       if(blocked[i])++blocked_count;
-      if(blocked[i]||uv_pinned[i])samples[i].weight=0.;
+      if(blocked[i]||(!uv_sculpt&&uv_pinned[i]))samples[i].weight=0.;
     }
     fs::Settings settings;
     if(tangent_only)settings.normal_keep=0.;
     if(uv_sculpt){settings.normal_keep=1.;settings.max_step=.35;}
     if(constrained_features){
-      for(std::size_t i=0;i<samples.size();++i)if(feature[i])samples[i].weight=0.;
+      for(std::size_t i=0;i<samples.size();++i)if(feature[i]){
+        if(samples[i].weight>0.)++geometry_pinned;
+        samples[i].weight=0.;
+      }
     }
     if(!fs::evaluate(samples,std::move(edges),settings,result))return reject("feature_evaluate");
     std::unordered_map<std::size_t,float3> changes;
@@ -745,7 +758,13 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         const auto it=slot.find(id);
         if(it==slot.end()||it->second>=active||staged[it->second])continue;
         const auto i=it->second;staged[i]=1;
-        const auto d=result.motion[i];
+        auto d=result.motion[i];
+        if(uv_sculpt && uv_normal[i] && samples[i].weight>0.){
+          fs::V normal_d{};
+          if(!fs::normal_component(d,samples[i].normal,normal_d)){rejected=true;return;}
+          d=normal_d;
+          if(fs::length(d)>0.)++seam_normal_count;
+        }
         float3 v{float(d[0]),float(d[1]),float(d[2])};
         // Feature motion already has its own tangent constraint; the generic
         // normal attenuation would rotate it away from that constraint.
@@ -760,7 +779,9 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         auto &v=batch.motion[j];
         const bool changed=v.x!=before[j].x||v.y!=before[j].y||v.z!=before[j].z;
         const auto i=slot.at(batch.ids[j]);
-        if(changed && (feature[i]||constrained_features))v=float3(0.f); // do not rotate a tangent proposal off its constraint
+        if(changed && (feature[i]||constrained_features)){
+          v=float3(0.f);++clip_pinned; // retain native clip/lock contract
+        }
         else if(changed)adjusted_by_clip=true;
         if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z)){rejected=true;return;}
         if(math::length_squared(v)>0.f)changes.emplace(std::size_t(batch.ids[j]),v);
@@ -785,6 +806,7 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
       // proposal from the original snapshot after each rejection round.
       const auto original_changes=changes;
       auto remaining=original_changes;
+      std::vector<unsigned char> tried_normal(active,0);
       bool ready=false;
       constexpr int max_rounds=6;
       for(int round=0;round<max_rounds;++round){
@@ -827,10 +849,39 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
         }
         std::sort(bad.begin(),bad.end());
         bad.erase(std::unique(bad.begin(),bad.end()),bad.end());
-        std::size_t removed=0;
-        for(const auto id:bad)removed+=remaining.erase(id);
-        std::fprintf(stderr,"[D15 UV Preserve FILTER] round=%d removed=%zu remaining=%zu\n",round+1,removed,remaining.size());
-        if(!removed)break;
+        std::size_t removed=0,recovered=0;
+        for(const auto id:bad){
+          auto it=remaining.find(id);
+          if(it==remaining.end())continue;
+          const auto i=slot.at(int(id));
+          if(uv_sculpt && i<active && !tried_normal[i] && !feature[i] && !blocked[i]){
+            tried_normal[i]=1;
+            // Do not discard safe shape smoothing solely because tangent
+            // UV correspondence failed. Keep the ORIGINAL clipped normal
+            // component, re-check native constraints, then re-run ALL
+            // geometry and UV guards on the new complete candidate set.
+            const float3 before=it->second;
+            fs::V normal_d{};
+            if(fs::normal_component(cv(before),samples[i].normal,normal_d)){
+              float3 nmove{float(normal_d[0]),float(normal_d[1]),float(normal_d[2])};
+              const float3 candidate=nmove;
+              const int vertex=int(id);
+              if(math::length_squared(candidate)>0.f &&
+                 (candidate.x!=before.x||candidate.y!=before.y||candidate.z!=before.z)){
+                clip_and_lock_translations(sd,ss,pos.eval,Span<int>(&vertex,1),
+                                           MutableSpan<float3>(&nmove,1));
+                if(nmove.x==candidate.x&&nmove.y==candidate.y&&nmove.z==candidate.z){
+                  it->second=nmove;++recovered;continue;
+                }
+              }
+            }
+          }
+          removed+=remaining.erase(id);
+        }
+        normal_recovered+=recovered;uv_removed+=removed;
+        std::fprintf(stderr,"[D15 UV Preserve FILTER] round=%d removed=%zu recovered_normal=%zu remaining=%zu\n",
+                     round+1,removed,recovered,remaining.size());
+        if(!removed&&!recovered)break;
       }
       if(!ready){
         std::fprintf(stderr,"[D15 UV Preserve BLOCK] reason=no_safe_subset\n");
@@ -883,6 +934,8 @@ static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
                  std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
     std::fprintf(stderr,"[D15 UV Boundary] layers=%zu split_edges=%zu invalid_edges=%zu pinned_vertices=%zu\n",
                  uv_layers,uv_splits,uv_invalid,uv_pinned_count);
+    if(uv_sculpt)std::fprintf(stderr,"[D15 C7.1 Coverage] active=%zu moved=%zu seam_normal=%zu normal_recovered=%zu uv_removed=%zu geometry_pinned=%zu blocked=%zu clip_pinned=%zu\n",
+                              active,changes.size(),seam_normal_count,normal_recovered,uv_removed,geometry_pinned,blocked_count,clip_pinned);
   }
   return true;
 }

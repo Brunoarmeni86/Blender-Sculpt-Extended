@@ -16,6 +16,16 @@ inline V mul(V a,double s){return {a[0]*s,a[1]*s,a[2]*s};}
 inline double dot(V a,V b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
 inline double length(V a){return std::hypot(a[0],a[1],a[2]);}
 inline bool finite(V a){return std::isfinite(a[0])&&std::isfinite(a[1])&&std::isfinite(a[2]);}
+// Normal-only material transport preserves corner attributes exactly.
+// Fail closed for invalid input, without modifying the output.
+inline bool normal_component(V motion,V normal,V &out){
+ const double n=length(normal);
+ if(!finite(motion)||!finite(normal)||!std::isfinite(n)||n<=0.)return false;
+ const V unit=mul(normal,1./n);
+ const V trial=mul(unit,dot(motion,unit));
+ if(!finite(trial))return false;
+ out=trial;return true;
+}
 enum Feature : unsigned { Sharp=1, Seam=2, FaceSet=4, Open=8, UVChart=16, Guide=32 };
 struct Vertex { V co{},normal{}; double weight=0.; bool visible=true; };
 struct Edge { std::size_t a,b; unsigned flags=0; bool readable=true; };
