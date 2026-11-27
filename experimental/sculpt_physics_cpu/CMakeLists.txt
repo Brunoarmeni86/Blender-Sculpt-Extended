@@ -437,3 +437,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_d12_smooth_multiscale PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 add_test(NAME sculpt_d12_smooth_multiscale_tests COMMAND test_d12_smooth_multiscale)
+
+add_executable(test_d13_reference_primitives test_d13_reference_primitives.cc)
+target_compile_features(test_d13_reference_primitives PRIVATE cxx_std_17)
+add_test(NAME sculpt_d13_reference_primitives_tests COMMAND test_d13_reference_primitives)
