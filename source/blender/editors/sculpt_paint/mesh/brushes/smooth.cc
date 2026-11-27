@@ -47,6 +47,9 @@
 #  include "d12_smooth_multiscale.hh"
 #  include "d13_multiscale_flatten.hh"
 #  include "brush_contact.hh"
+#  include "d15_feature_smooth.hh"
+#  include "BKE_attribute.hh"
+#  include "BKE_mesh_mapping.hh"
 #  include "BKE_multires_sculpt_layers.hh"
 #endif
 
@@ -234,6 +237,225 @@ static double smooth_local_contact_guard(const Mesh &mesh,const Span<float3> pos
     if(it!=changes.end())it->second=float3(float(motion[i].x),float(motion[i].y),float(motion[i].z));
   }
   return result.final_scale;
+}
+
+/* D15 CPU pilot, deliberately independent of the existing Smooth modes.
+ * Only actual PBVH brush vertices may move; adjacent samples are read-only.
+ * Edge tags are derived from current native attributes each dab, so changing
+ * a Face Set or explicit seam does not require a separate dirty cache.
+ * Keep UI hidden until native verification and CUDA parity. */
+static bool feature_smooth_d15_requested()
+{
+  const char *enabled=std::getenv("BLENDER_SCULPT_D15_FEATURE_SMOOTH");
+  return enabled && STREQ(enabled,"1");
+}
+
+static bool try_feature_smooth_d15(const Depsgraph &depsgraph,
+                                  const Sculpt &sd,
+                                  const Brush &brush,
+                                  Object &object,
+                                  const IndexMask &node_mask,
+                                  const float brush_strength)
+{
+  namespace fs=sculpt_physics::feature_smooth_d15;
+  SculptSession &ss=*object.runtime->sculpt_session;
+  StrokeCache &cache=*ss.cache;
+  bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
+  const auto &layer=layer_delta_smooth_v01::state();
+  if(pbvh.type()!=bke::pbvh::Type::Mesh || ss.deform_modifiers_active ||
+     ss.shapekey_active || bke::multires_layers::base_modifier(object)!=nullptr ||
+     (layer.object==&object && layer.mesh_l0) ||
+     cache.reference_symmetry || cache.reference_combined ||
+     cache.tile_pass!=0 || cache.radial_symmetry_pass!=0 || cache.mirror_symmetry_pass!=0)
+    return false;
+  const Mesh &mesh=*id_cast<const Mesh *>(object.data);
+  if(stroke_symmetry_xyz_get(object)!=PAINT_SYMM_NONE ||
+     mesh.radial_symmetry[0]!=1 || mesh.radial_symmetry[1]!=1 || mesh.radial_symmetry[2]!=1 ||
+     (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))!=0)
+    return false;
+  const PositionDeformData pos(depsgraph,object);
+  if(pos.eval.size()!=mesh.verts_num || !std::isfinite(brush_strength))return false;
+  const MeshAttributeData attrs(mesh);
+  const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
+  if(normals.size()!=pos.eval.size())return false;
+  const auto faces=mesh.faces();
+  const auto v2f=mesh.vert_to_face_map();
+  const auto native_edges=mesh.edges();
+  const auto corner_edges=mesh.corner_edges();
+  MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
+  struct WriteBatch {int node=0;Vector<int> ids;Vector<float3> motion;};
+  std::vector<WriteBatch> batches;
+  fs::Result result;
+  std::size_t active=0,edge_count=0,feature_count=0,blocked_count=0;
+  double guard_scale=1.;
+  const auto start=std::chrono::steady_clock::now();
+  try{
+    std::unordered_map<int,std::size_t> slot;
+    std::vector<int> global;
+    std::vector<fs::Vertex> samples;
+    std::vector<unsigned char> feature,blocked;
+    const auto cv=[](const float3 &v)->fs::V{return {double(v.x),double(v.y),double(v.z)};};
+    const auto visible=[&](int id){return attrs.hide_vert.is_empty() || !attrs.hide_vert[id];};
+    const auto add=[&](int id,double weight){
+      const auto found=slot.find(id);
+      if(found!=slot.end()){
+        auto &x=samples[found->second];
+        x.weight=std::max(x.weight,weight);
+        return found->second;
+      }
+      const auto i=samples.size();
+      slot.emplace(id,i);global.push_back(id);
+      samples.push_back({cv(pos.eval[id]),cv(normals[id]),weight,visible(id)});
+      feature.push_back(0);blocked.push_back(0);
+      return i;
+    };
+    LocalData tls;
+    bool rejected=false;
+    node_mask.foreach_index([&](const int ni){
+      if(rejected)return;
+      const auto &node=nodes[ni];
+      const Span<int> verts=node.verts();
+      tls.factors.resize(verts.size());tls.distances.resize(verts.size());
+      calc_factors_common_mesh_indexed(depsgraph,brush,object,attrs,pos.eval,normals,node,
+                                      tls.factors,tls.distances);
+      scale_factors(tls.factors,std::clamp(brush_strength,0.f,1.f));
+      for(const int j:verts.index_range()){
+        const float factor=tls.factors[j];
+        if(!std::isfinite(factor)){rejected=true;return;}
+        if(factor<=0.f || !visible(verts[j]))continue;
+        add(verts[j],std::clamp(double(factor),0.,1.));
+        if(samples.size()>500000){rejected=true;return;}
+      }
+    });
+    if(rejected)return false;
+    active=samples.size();
+    if(active==0)return true;
+    if(ss.vert_to_edge_map.is_empty() && !native_edges.is_empty()){
+      ss.vert_to_edge_map=bke::mesh::build_vert_to_edge_map(
+          native_edges,mesh.verts_num,ss.vert_to_edge_offsets,ss.vert_to_edge_indices);
+    }
+    if(native_edges.is_empty())return true;
+    if(ss.vert_to_edge_map.size()!=mesh.verts_num)return false;
+    std::vector<int> edge_ids;
+    std::vector<int> incident_faces;
+    for(std::size_t i=0;i<active;++i){
+      const int v=global[i];
+      for(const int e:ss.vert_to_edge_map[v])edge_ids.push_back(e);
+      for(const int face:v2f[v]){
+        incident_faces.push_back(face);
+        if(!attrs.hide_poly.is_empty() && attrs.hide_poly[face])blocked[i]=1;
+      }
+    }
+    std::sort(edge_ids.begin(),edge_ids.end());
+    edge_ids.erase(std::unique(edge_ids.begin(),edge_ids.end()),edge_ids.end());
+    std::sort(incident_faces.begin(),incident_faces.end());
+    incident_faces.erase(std::unique(incident_faces.begin(),incident_faces.end()),incident_faces.end());
+    if(edge_ids.size()>4000000)return false;
+    struct EdgeInfo {int count=0,first_set=0;bool mixed=false,hidden=false;};
+    std::vector<EdgeInfo> info(edge_ids.size());
+    std::unordered_map<int,std::size_t> edge_slot;
+    edge_slot.reserve(edge_ids.size());
+    for(std::size_t i=0;i<edge_ids.size();++i)edge_slot.emplace(edge_ids[i],i);
+    for(const int face:incident_faces){
+      const bool hidden=!attrs.hide_poly.is_empty() && attrs.hide_poly[face];
+      const int set=attrs.face_sets.is_empty()?0:attrs.face_sets[face];
+      for(const int corner:faces[face]){
+        const auto it=edge_slot.find(corner_edges[corner]);
+        if(it==edge_slot.end())continue;
+        auto &q=info[it->second];
+        if(q.count==0)q.first_set=set;
+        else if(q.first_set!=set)q.mixed=true;
+        ++q.count;q.hidden=q.hidden||hidden;
+      }
+    }
+    const auto attributes=mesh.attributes();
+    const auto sharp=*attributes.lookup_or_default<bool>("sharp_edge",bke::AttrDomain::Edge,false);
+    const auto seams=*attributes.lookup_or_default<bool>("uv_seam",bke::AttrDomain::Edge,false);
+    std::vector<fs::Edge> edges;
+    edges.reserve(edge_ids.size());
+    for(std::size_t i=0;i<edge_ids.size();++i){
+      const int e=edge_ids[i];const int2 v=native_edges[e];
+      if(v[0]==v[1])return false;
+      const auto a=add(v[0],0.),b=add(v[1],0.);
+      if(samples.size()>1000000)return false;
+      const auto &q=info[i];
+      unsigned flags=0;
+      if(sharp[e])flags|=fs::Sharp;
+      if(seams[e])flags|=fs::Seam;
+      if(q.mixed)flags|=fs::FaceSet;
+      if(q.count==1)flags|=fs::Open;
+      const bool unsafe=q.count==0||q.count>2||q.hidden;
+      if(unsafe){blocked[a]=1;blocked[b]=1;}
+      if(flags){feature[a]=feature[b]=1;++feature_count;}
+      edges.push_back({a,b,flags,!unsafe});
+    }
+    edge_count=edges.size();
+    for(std::size_t i=0;i<samples.size();++i)
+      if(blocked[i] && samples[i].weight>0.){samples[i].weight=0.;++blocked_count;}
+    if(!fs::evaluate(samples,std::move(edges),fs::Settings{},result))return false;
+    std::unordered_map<std::size_t,float3> changes;
+    changes.reserve(active);
+    std::vector<unsigned char> staged(active,0);
+    bool adjusted_by_clip=false;
+    node_mask.foreach_index([&](const int ni){
+      WriteBatch batch;batch.node=ni;
+      for(const int id:nodes[ni].verts()){
+        const auto it=slot.find(id);
+        if(it==slot.end()||it->second>=active||staged[it->second])continue;
+        const auto i=it->second;staged[i]=1;
+        const auto d=result.motion[i];
+        float3 v{float(d[0]),float(d[1]),float(d[2])};
+        // Feature motion already has its own tangent constraint; the generic
+        // normal attenuation would rotate it away from that constraint.
+        if(!feature[i] && (brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE))
+          smooth_preserve_shape_translation(v,normals[id]);
+        if(math::length_squared(v)>0.f){batch.ids.append(id);batch.motion.append(v);}
+      }
+      if(batch.ids.is_empty())return;
+      const Vector<float3> before=batch.motion;
+      clip_and_lock_translations(sd,ss,pos.eval,batch.ids,batch.motion);
+      for(const int j:batch.ids.index_range()){
+        auto &v=batch.motion[j];
+        const bool changed=v.x!=before[j].x||v.y!=before[j].y||v.z!=before[j].z;
+        const auto i=slot.at(batch.ids[j]);
+        if(changed && feature[i])v=float3(0.f); // do not rotate a feature slide off its chain
+        else if(changed)adjusted_by_clip=true;
+        if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z)){rejected=true;return;}
+        if(math::length_squared(v)>0.f)changes.emplace(std::size_t(batch.ids[j]),v);
+      }
+      batches.push_back(std::move(batch));
+    });
+    if(rejected)return false;
+    if(changes.empty())return true;
+    guard_scale=smooth_local_contact_guard(mesh,pos.eval,changes);
+    if(!std::isfinite(guard_scale)||guard_scale<0.||guard_scale>1.)return false;
+    // Do not partially scale a clipping snap/lock correction. Refuse before
+    // publishing when native clipping and geometry safety disagree.
+    if(adjusted_by_clip && guard_scale<1.)return false;
+    for(auto &batch:batches)for(const int j:batch.ids.index_range()){
+      const auto it=changes.find(std::size_t(batch.ids[j]));
+      batch.motion[j]=it==changes.end()?float3(0.f):it->second;
+      const auto v=batch.motion[j];
+      if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))return false;
+    }
+  }catch(const std::exception &error){
+    std::fprintf(stderr,"[D15 Feature Smooth] rejected before write: %s\n",error.what());
+    return false;
+  }
+  // Existing native position Undo transaction covers node_mask. No fallback
+  // or alternate mode after any publish; GPU state is stale after CPU writes.
+  for(auto &batch:batches){
+    pos.deform(batch.motion,batch.ids);
+    bke::pbvh::update_node_bounds_mesh(pos.eval,nodes[batch.node]);
+  }
+  pbvh.tag_positions_changed(node_mask);
+  pbvh.flush_bounds_to_parents();
+  cache.physical_solver_session.reset();
+  if(std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
+    std::fprintf(stderr,"[D15 Feature Smooth CPU] active=%zu edges=%zu feature_edges=%zu sliding=%zu pinned=%zu blocked=%zu guard=%.4f ms=%.3f\n",
+                 active,edge_count,feature_count,result.sliding,result.pinned,blocked_count,guard_scale,
+                 std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+  return true;
 }
 
 static bool gpu_smooth_requested()
@@ -1106,6 +1328,14 @@ void do_smooth_brush(const Depsgraph &depsgraph,
   boundary::ensure_boundary_info(object);
   [[maybe_unused]] bool gpu_selected=false;
 #ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+  if(feature_smooth_d15_requested()){
+    if(try_feature_smooth_d15(depsgraph,sd,brush,object,node_mask,brush_strength)){
+      pbvh.update_bounds(depsgraph,object);
+    }else if(std::getenv("BLENDER_SCULPT_SMOOTH_DIAG")){
+      std::fprintf(stderr,"[D15 Feature Smooth] unsupported or rejected; no write\n");
+    }
+    return; // explicit pilot never silently substitutes another Smooth
+  }
   gpu_selected=gpu_smooth_requested() && pbvh.type()==bke::pbvh::Type::Mesh;
   if(gpu_selected){
     if(try_smooth_multiscale_d12(depsgraph,sd,brush,object,node_mask,brush_strength)){

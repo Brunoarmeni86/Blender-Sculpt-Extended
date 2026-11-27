@@ -112,3 +112,7 @@ Research memo only. No SculptCore code imported, no CMake or runtime change, no 
 ## Implementation checkpoint — feature-aware Smooth CPU oracle
 
 See [D15_FEATURE_SMOOTH_REFERENCE.md](D15_FEATURE_SMOOTH_REFERENCE.md). Independent CPU reference and synthetic regression tests now exist; GCC and Clang ASan/UBSan standalone tests passed. No native dispatcher or UI change, no CUDA parity or full build yet. Baseline D15 remains a prerequisite to native integration. This is not a resurrected surface physical brush.
+
+## Implementation checkpoint — native Feature Smooth CPU pilot
+
+D15-B1 adds an explicit environment-only adapter in smooth.cc; see [D15_FEATURE_SMOOTH_REFERENCE.md](D15_FEATURE_SMOOTH_REFERENCE.md) for gates and test procedure. No new menu entry, no changes to existing Smooth modes without opt-in. Baseline native compilation and artist test still required. UV discontinuities/attribute transfer and CUDA not implemented in this checkpoint.
