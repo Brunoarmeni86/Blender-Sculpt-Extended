@@ -6,23 +6,41 @@ import numpy as np
 import prototype_warp_volume_pbf_d14 as pbf
 import prototype_warp_volume_mpm_d14 as mpm
 
+def require_cpu_compiler():
+    try:
+        wp.get_cpu_kernel_cache_key()
+    except RuntimeError as exc:
+        raise SystemExit("Warp CPU compiler unavailable: " + str(exc) +
+                         "\nFor CUDA fixtures only use --device cuda:0 --skip-cpu-parity. "
+                         "CPU/CUDA parity remains unverified.") from exc
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device",choices=("cpu","cuda:0"),default="cuda:0")
     parser.add_argument("--solver",choices=("both","pbf","mpm"),default="both")
+    parser.add_argument("--skip-cpu-parity",action="store_true",help="Run CUDA fixtures only, without requiring Warp's LLVM CPU compiler")
     args=parser.parse_args()
+    if args.skip_cpu_parity and args.device!="cuda:0":
+        parser.error("--skip-cpu-parity requires --device cuda:0")
     wp.init()
     if str(wp.__version__)!="1.19.0":
         raise RuntimeError("Pinned Warp 1.19.0 required")
     if args.device=="cuda:0" and not wp.is_cuda_available():
         raise RuntimeError("CUDA unavailable; no fallback")
+    # CUDA-only native builds can expose a CPU device without LLVM support.
+    # Detect this explicitly before a CPU kernel is launched.
+    if args.device=="cpu":
+        require_cpu_compiler()
     if args.solver in ("both","pbf"):
         pbf.fixture(args.device)
     if args.solver in ("both","mpm"):
         mpm.fixture(args.device)
     # The same float32 Warp implementation on both devices is a codegen/
     # backend comparison, not independent parity against the C++ oracle.
-    if args.device=="cuda:0":
+    if args.device=="cuda:0" and args.skip_cpu_parity:
+        print("D14_WARP_CPU_CUDA_PARITY_SKIPPED (explicit --skip-cpu-parity)")
+    if args.device=="cuda:0" and not args.skip_cpu_parity:
+        require_cpu_compiler()
         x=np.array([[a*.1,b*.1,.2+c*.1] for a in range(3) for b in range(3) for c in range(3)],np.float32)
         if args.solver in ("both","pbf"):
             a=pbf.PBF(x,h=.2,mass=.001,rho0=.8,device="cpu")
