@@ -958,7 +958,10 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
   allow_stationary=physics_v15::requested(object,brush) &&
       physics_v15::autonomous_requested(*ss.cache) &&
-      (physics_v15::fast_v26b_requested() || ss.cache->xpbd_v16_clay_behavior>=7 ||
+      ((physics_v15::dedicated_engine_requested(brush) &&
+        (physics_v15::effective_material(brush)==0 || physics_v15::effective_material(brush)==1) &&
+        (physics_v15::effective_action(brush)==1 || physics_v15::effective_action(brush)==4) &&
+        physics_v15::live_surface_v30_brush(object,brush)) || physics_v15::fast_v26b_requested() || ss.cache->xpbd_v16_clay_behavior>=7 ||
        (physics_v15::drag_contact_requested() &&
         (ss.cache->xpbd_v16_clay_behavior==2 || ss.cache->xpbd_v16_clay_behavior==5))) &&
       pbvh.type()==bke::pbvh::Type::Mesh && !layer_detail_v01::state().active;
@@ -1331,12 +1334,15 @@ CursorSampleResult calc_node_mask(const Depsgraph &depsgraph,
   bool independent_contact=false;
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
   independent_contact=brush.sculpt_physics_mode==3 &&
-      ((physics_v15::shape_v24_requested() &&
-        brush.sculpt_physics_clay_behavior>=2 && brush.sculpt_physics_clay_behavior<=14 &&
-        brush.sculpt_physics_clay_behavior!=4) ||
-       (brush.sculpt_physics_clay_behavior>=7 && brush.sculpt_physics_clay_behavior<=14) ||
+      ((physics_v15::dedicated_engine_requested(brush) &&
+        (physics_v15::effective_material(brush)==0 || physics_v15::effective_material(brush)==1) &&
+        (physics_v15::effective_action(brush)==1 || physics_v15::effective_action(brush)==4) &&
+        physics_v15::live_surface_v30_brush(object,brush)) || (physics_v15::shape_v24_requested() &&
+        physics_v15::effective_action(brush)>=2 && physics_v15::effective_action(brush)<=14 &&
+        physics_v15::effective_action(brush)!=4) ||
+       (physics_v15::effective_action(brush)>=7 && physics_v15::effective_action(brush)<=14) ||
        (physics_v15::drag_contact_requested() &&
-        (brush.sculpt_physics_clay_behavior==2 || brush.sculpt_physics_clay_behavior==5))) &&
+        (physics_v15::effective_action(brush)==2 || physics_v15::effective_action(brush)==5))) &&
       pbvh.type()==bke::pbvh::Type::Mesh && !isolated;
 #endif
   if ((!independent_contact && math::is_zero(ss.cache->grab_delta_symm)) ||

@@ -422,3 +422,18 @@ add_executable(test_artistic_material_v31d1110 test_artistic_material_v31d1110.c
 target_compile_features(test_artistic_material_v31d1110 PRIVATE cxx_std_17)
 target_link_libraries(test_artistic_material_v31d1110 PRIVATE sculpt_physics_reference)
 add_test(NAME sculpt_artistic_material_v31d1110_tests COMMAND test_artistic_material_v31d1110)
+
+add_executable(test_d12_dedicated_engines test_d12_dedicated_engines.cc)
+target_compile_features(test_d12_dedicated_engines PRIVATE cxx_std_17)
+target_link_libraries(test_d12_dedicated_engines PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_d12_dedicated_engines PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_d12_dedicated_engines_tests COMMAND test_d12_dedicated_engines)
+
+add_executable(test_d12_smooth_multiscale test_d12_smooth_multiscale.cc)
+target_link_libraries(test_d12_smooth_multiscale PRIVATE sculpt_physics_reference)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(test_d12_smooth_multiscale PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+add_test(NAME sculpt_d12_smooth_multiscale_tests COMMAND test_d12_smooth_multiscale)

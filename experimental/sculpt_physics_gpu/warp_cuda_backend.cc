@@ -3,6 +3,9 @@
 #include "warp_cuda_backend.hh"
 
 #include "warp.h"
+#include "d12_smooth_multiscale.hh"
+#include <fstream>
+#include <string>
 
 #include <algorithm>
 #include <array>
@@ -33,6 +36,8 @@ struct SharedWarpRuntime {
   void *artistic_kernel = nullptr;
   void *flux_module = nullptr;
   void *flux_kernel = nullptr;
+  void *multiscale_module = nullptr;
+  void *multiscale_kernel = nullptr;
 
   SharedWarpRuntime()
   {
@@ -71,6 +76,16 @@ struct SharedWarpRuntime {
     if(flux_path && flux_path[0] && flux_symbol && flux_symbol[0]){
       flux_module=wp_cuda_load_module(context,flux_path);
       if(flux_module)flux_kernel=wp_cuda_get_kernel(context,flux_module,flux_symbol);
+    }
+    const char *multi_path=std::getenv("BLENDER_SCULPT_WARP_MULTISCALE_PTX");
+    const char *multi_symbols=std::getenv("BLENDER_SCULPT_WARP_MULTISCALE_SYMBOLS");
+    if(multi_path && multi_path[0] && multi_symbols && multi_symbols[0]){
+      std::ifstream manifest(multi_symbols);
+      std::string symbol;
+      if(manifest>>symbol && symbol.rfind("sculpt_smooth_multiscale_",0)==0){
+        multiscale_module=wp_cuda_load_module(context,multi_path);
+        if(multiscale_module)multiscale_kernel=wp_cuda_get_kernel(context,multiscale_module,symbol.c_str());
+      }
     }
     const char *smooth_ptx_path = std::getenv("BLENDER_SCULPT_WARP_SMOOTH_PTX");
     if (smooth_ptx_path != nullptr && smooth_ptx_path[0] != '\0') {
@@ -871,7 +886,90 @@ class ArtisticFluxCuda final : public PairedFluxBackend {
   }
 };
 
+namespace ms=dedicated_d12::smooth_multiscale;
+class MultiscaleCuda final:public ms::Backend {
+  struct Float3 {float x,y,z;};
+  void *context_=nullptr,*kernel_=nullptr;
+  std::array<void*,8> dev_{};
+  std::size_t capacity_=0;
+  bool failed_=false;
+  std::vector<Float3> points_;
+  std::vector<float> mass_,weight_,output_;
+  void release(){
+    for(auto& d:dev_)if(d){wp_free_device(context_,d);d=nullptr;}
+    capacity_=0;
+  }
+  bool reserve(std::size_t n){
+    if(capacity_>=n)return true;
+    release();
+    const auto cap=std::min<std::size_t>(500000,std::max<std::size_t>(1024,n*2));
+    const std::array<std::size_t,8> sizes{
+      cap*sizeof(Float3),cap*sizeof(float),cap*sizeof(float),
+      ms::cells*sizeof(float),ms::cells*sizeof(float),
+      ms::cells*sizeof(float),ms::cells*sizeof(float),cap*sizeof(float)};
+    for(std::size_t i=0;i<dev_.size();++i){
+      dev_[i]=wp_alloc_device(context_,sizes[i]);
+      if(!dev_[i]){release();return false;}
+    }
+    capacity_=cap;return true;
+  }
+  template<class T> bool upload(std::size_t i,std::vector<T>& v){
+    return wp_memcpy_h2d(context_,dev_[i],v.data(),sizeof(T)*v.size());
+  }
+ public:
+  MultiscaleCuda(){
+    auto& runtime=shared_warp_runtime();
+    context_=runtime.context;kernel_=runtime.multiscale_kernel;
+    if(!kernel_)throw std::runtime_error("D12 Multiscale PTX unavailable");
+  }
+  ~MultiscaleCuda() override {release();}
+  bool evaluate(const ms::Chart& c,std::vector<double>& out) override {
+    const auto n=c.points.size();
+    if(failed_||n<256||n>500000)return false;
+    if(!reserve(n)){failed_=true;return false;}
+    points_.resize(n);mass_.resize(n);weight_.resize(n);output_.resize(n);
+    for(std::size_t i=0;i<n;++i){
+      const auto& p=c.points[i];
+      points_[i]={float(p.x),float(p.y),float(p.h)};
+      mass_[i]=float(p.mass);weight_[i]=float(p.weight);
+    }
+    if(!upload(0,points_)||!upload(1,mass_)||!upload(2,weight_)){
+      failed_=true;return false;
+    }
+    wp::array_t<wp::vec3> points(static_cast<wp::vec3*>(dev_[0]),int(n));
+    wp::array_t<float> mass(static_cast<float*>(dev_[1]),int(n));
+    wp::array_t<float> weight(static_cast<float*>(dev_[2]),int(n));
+    wp::array_t<float> gm(static_cast<float*>(dev_[3]),ms::cells);
+    wp::array_t<float> gh(static_cast<float*>(dev_[4]),ms::cells);
+    wp::array_t<float> field(static_cast<float*>(dev_[5]),ms::cells);
+    wp::array_t<float> support(static_cast<float*>(dev_[6]),ms::cells);
+    wp::array_t<float> output(static_cast<float*>(dev_[7]),int(n));
+    for(int phase=0;phase<4;++phase){
+      const std::size_t size=(phase==0||phase==2)?std::size_t(ms::cells):n;
+      wp::launch_bounds_t<1> bounds;
+      bounds.shape[0]=uint32_t(size);bounds.size=size;bounds.coord_mult=1;
+      void *args[]={&bounds,&points,&mass,&weight,&gm,&gh,&field,&support,&output,&phase};
+      if(wp_cuda_launch_kernel(context_,kernel_,size,0,256,1,1,0,args,nullptr,nullptr)!=0){
+        failed_=true;return false;
+      }
+    }
+    if(!wp_cuda_context_synchronize(context_)||
+       !wp_memcpy_d2h(context_,output_.data(),dev_[7],sizeof(float)*n)){
+      failed_=true;return false;
+    }
+    out.assign(output_.begin(),output_.end());
+    if(!ms::validate(c,out)){failed_=true;return false;}
+    return true;
+  }
+};
+
 }  // namespace
+
+std::unique_ptr<dedicated_d12::smooth_multiscale::Backend> create_multiscale_cuda_backend()
+{
+  try{return std::make_unique<MultiscaleCuda>();}
+  catch(const std::exception&){return nullptr;}
+}
 
 std::unique_ptr<PairedFluxBackend> create_artistic_flux_cuda()
 {

@@ -1411,24 +1411,41 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
                 box.prop(brush, "sculpt_physics_assist", slider=True)
                 if (brush.sculpt_physics_mode == 'MATERIAL' and
                         brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS', 'DRAW', 'NUDGE'}):
-                    box.prop(brush, "sculpt_physics_clay_behavior", text="Material Action")
-                    if brush.sculpt_physics_clay_behavior.startswith("AUTONOMOUS_"):
-                        box.label(text="Assist controls independent action intensity")
-                        if brush.sculpt_physics_clay_behavior in {
-                                'AUTONOMOUS_COMPACT', 'AUTONOMOUS_PRESS',
-                                'AUTONOMOUS_PRESSURE_FLOW', 'AUTONOMOUS_HYBRID_FLOW',
-                                'AUTONOMOUS_MELT', 'AUTONOMOUS_GATHER', 'AUTONOMOUS_SMEAR'}:
-                            box.label(text="Space: stamp/gesture; Airbrush: held pressure")
-                        else:
-                            box.label(text="Gesture-driven; no persistent plasticity yet")
-                    elif brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'}:
-                        box.prop(brush, "sculpt_physics_yield", slider=True)
-                        box.prop(brush, "sculpt_physics_plasticity", slider=True)
+                    engine = 'AUTO'
+                    if (brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'} and
+                            hasattr(brush, "sculpt_physics_engine")):
+                        box.prop(brush, "sculpt_physics_engine", text="Engine")
+                        engine = brush.sculpt_physics_engine
+                    if engine in {'CLAY', 'FLESH', 'MELT_SURFACE'}:
+                        box.label(text={
+                            'CLAY': "Adaptive plane deposition",
+                            'FLESH': "Elastic gesture flow",
+                            'MELT_SURFACE': "Surface fusion (no thermal simulation)",
+                        }[engine])
+                        if brush.stroke_method != 'SPACE' and engine in {'CLAY', 'FLESH'}:
+                            box.label(text="Select Space stroke method", icon='INFO')
+                        if brush.auto_smooth_factor > 0:
+                            box.label(text="Auto Smooth can alter engine output", icon='INFO')
                     else:
-                        box.label(text="V2/V3 actions apply only to Clay; choose Autonomous")
-                    if (brush.sculpt_physics_clay_behavior.startswith("AUTONOMOUS_") or
-                            brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'}):
-                        box.prop(brush, "sculpt_physics_spread", slider=True)
+                        box.prop(brush, "sculpt_physics_material", text="Material")
+                        box.prop(brush, "sculpt_physics_clay_behavior", text="Material Action")
+                        if brush.sculpt_physics_clay_behavior.startswith("AUTONOMOUS_"):
+                            box.label(text="Assist controls independent action intensity")
+                            if brush.sculpt_physics_clay_behavior in {
+                                    'AUTONOMOUS_COMPACT', 'AUTONOMOUS_PRESS',
+                                    'AUTONOMOUS_PRESSURE_FLOW', 'AUTONOMOUS_HYBRID_FLOW',
+                                    'AUTONOMOUS_MELT', 'AUTONOMOUS_GATHER', 'AUTONOMOUS_SMEAR'}:
+                                box.label(text="Space: stamp/gesture; Airbrush: held pressure")
+                            else:
+                                box.label(text="Gesture-driven; no persistent plasticity yet")
+                        elif brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'}:
+                            box.prop(brush, "sculpt_physics_yield", slider=True)
+                            box.prop(brush, "sculpt_physics_plasticity", slider=True)
+                        else:
+                            box.label(text="V2/V3 actions apply only to Clay; choose Autonomous")
+                        if (brush.sculpt_physics_clay_behavior.startswith("AUTONOMOUS_") or
+                                brush.sculpt_brush_type in {'CLAY', 'CLAY_STRIPS'}):
+                            box.prop(brush, "sculpt_physics_spread", slider=True)
                 box.label(text="UV coordinates preserved", icon='LOCKED')
                 box.label(text="CPU preview; symmetry and Multires unsupported")
         if brush.sculpt_brush_type == 'GRAB':
@@ -1474,9 +1491,15 @@ def brush_settings_advanced(layout, context, settings, brush, popover=False):
             header.label(text="GPU Smooth")
             if gpu_smooth_panel is not None:
                 runtime = context.window_manager
-                gpu_smooth_panel.prop(runtime, "sculpt_gpu_smooth_a1", text="NVIDIA Warp A3")
+                gpu_smooth_panel.prop(runtime, "sculpt_gpu_smooth_a1", text="NVIDIA Warp Smooth")
                 if runtime.sculpt_gpu_smooth_a1:
                     gpu_smooth_panel.prop(runtime, "sculpt_gpu_smooth_mode", text="Mode")
+                    if runtime.sculpt_gpu_smooth_mode in {'STRONG', 'MULTISCALE'}:
+                        gpu_smooth_panel.label(text="Original A3 two-ring CUDA" if
+                            runtime.sculpt_gpu_smooth_mode == 'STRONG' else
+                            "D12 multiscale · CPU fallback available")
+                        if brush.use_smooth_shape_preserve:
+                            gpu_smooth_panel.label(text="Preserve Shape reduces normal motion by 80%", icon='INFO')
                     gpu_smooth_panel.label(text="Experimental · ordinary mesh only", icon='EXPERIMENTAL')
 
         if brush.sculpt_brush_type == 'INFLATE':

@@ -5,6 +5,10 @@
 #include "editors/sculpt_paint/mesh/brushes/brushes.hh"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <unordered_map>
+#include <utility>
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
@@ -40,6 +44,8 @@
 
 #ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
 #  include "brush_solver_backend.hh"
+#  include "d12_smooth_multiscale.hh"
+#  include "BKE_multires_sculpt_layers.hh"
 #endif
 
 namespace blender::ed::sculpt_paint::brushes {
@@ -181,6 +187,190 @@ static bool try_smooth_physics_v15(const Depsgraph &depsgraph,
 #endif
 
 #ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+static bool gpu_smooth_requested()
+{
+  const char *enabled=std::getenv("BLENDER_SCULPT_GPU_SMOOTH_A1");
+  return enabled && enabled[0]=='1' && enabled[1]=='\0';
+}
+static bool multiscale_smooth_requested()
+{
+  const char *mode=std::getenv("BLENDER_SCULPT_GPU_SMOOTH_MODE");
+  return gpu_smooth_requested() && mode && STREQ(mode,"multiscale");
+}
+
+/* D12 Very Strong: current PBVH region only. Do not initialize a full mesh
+ * particle world, copy full topology, or run the old two-ring solver first.
+ * Only one connected, locally graph-like sheet is accepted. Boundary,
+ * hidden and nonwritable vertices are never published as new goals. */
+static bool try_smooth_multiscale_d12(const Depsgraph &depsgraph,
+    const Sculpt &sd,const Brush &brush,Object &object,const IndexMask &node_mask,
+    const float brush_strength)
+{
+  if(!multiscale_smooth_requested())return false;
+  namespace ms=sculpt_physics::dedicated_d12::smooth_multiscale;
+  SculptSession &ss=*object.runtime->sculpt_session;
+  StrokeCache &cache=*ss.cache;
+  bke::pbvh::Tree &pbvh=*bke::object::pbvh_get(object);
+  const auto &layer=layer_delta_smooth_v01::state();
+  if(pbvh.type()!=bke::pbvh::Type::Mesh || ss.deform_modifiers_active || ss.shapekey_active ||
+     bke::multires_layers::base_modifier(object)!=nullptr ||
+     (layer.object==&object && layer.mesh_l0) ||
+     cache.reference_symmetry || cache.reference_combined ||
+     cache.tile_pass!=0 || cache.radial_symmetry_pass!=0 || cache.mirror_symmetry_pass!=0)
+    return false;
+  const Mesh &mesh=*id_cast<const Mesh *>(object.data);
+  if(stroke_symmetry_xyz_get(object)!=PAINT_SYMM_NONE ||
+     mesh.radial_symmetry[0]!=1 || mesh.radial_symmetry[1]!=1 || mesh.radial_symmetry[2]!=1 ||
+     (sd.paint.symmetry_flags & (PAINT_TILE_X | PAINT_TILE_Y | PAINT_TILE_Z))!=0)
+    return false;
+  const PositionDeformData pos(depsgraph,object);
+  if(pos.eval.size()!=mesh.verts_num)return false;
+  const MeshAttributeData attrs(mesh);
+  const Span<float3> normals=bke::pbvh::vert_normals_eval(depsgraph,object);
+  const auto faces=mesh.faces();
+  const auto corners=mesh.corner_verts();
+  const auto v2f=mesh.vert_to_face_map();
+  MutableSpan<bke::pbvh::MeshNode> nodes=pbvh.nodes<bke::pbvh::MeshNode>();
+  struct WriteBatch {int node=0;Vector<int> ids;Vector<float3> motion;};
+  std::vector<WriteBatch> batches;
+  std::shared_ptr<sculpt_physics::StrokeSolverSession> session;
+  const auto start=std::chrono::steady_clock::now();
+  bool gpu=false;
+  std::size_t active=0;
+  double guard_scale=1.;
+  try {
+    std::vector<ms::Sample> samples;
+    std::vector<int> global;
+    std::vector<std::pair<int,int>> links;
+    std::unordered_map<int,std::size_t> slot;
+    const auto cv=[](const float3& p)->sculpt_physics::Vec3{
+      return {double(p.x),double(p.y),double(p.z)};
+    };
+    LocalData tls;
+    bool rejected=false;
+    node_mask.foreach_index([&](const int ni){
+      if(rejected)return;
+      const auto &node=nodes[ni];
+      const Span<int> verts=node.verts();
+      tls.factors.resize(verts.size());tls.distances.resize(verts.size());
+      calc_factors_common_mesh_indexed(depsgraph,brush,object,attrs,pos.eval,normals,node,
+                                      tls.factors,tls.distances);
+      scale_factors(tls.factors,std::clamp(brush_strength,0.f,1.f));
+      const auto neighbors=calc_vert_neighbors_interior(faces,corners,v2f,
+          ss.boundary_info_cache->verts,ss.boundary_info_cache->edges,attrs.hide_poly,verts,
+          tls.factors,tls.neighbor_offsets,tls.neighbor_data);
+      for(const int j:verts.index_range()){
+        const int id=verts[j];
+        const float factor=tls.factors[j];
+        if(!(factor>0.f)||!std::isfinite(factor)||neighbors[j].is_empty())continue;
+        if(boundary::vert_is_boundary(v2f,attrs.hide_poly,ss.boundary_info_cache->verts,id)){
+          rejected=true;return;
+        }
+        if(samples.size()>=500000){rejected=true;return;}
+        if(!slot.emplace(id,samples.size()).second)continue;
+        double area=0.;
+        for(const int neighbor:neighbors[j]){
+          const auto q=cv(pos.eval[neighbor])-cv(pos.eval[id]);
+          area+=sculpt_physics::dedicated_d12::norm2(q);
+          links.emplace_back(id,neighbor);
+        }
+        area/=double(neighbors[j].size());
+        samples.push_back({cv(pos.eval[id]),cv(normals[id]),std::clamp(double(factor),0.,1.),area});
+        global.push_back(id);
+      }
+    });
+    if(rejected)return false;
+    if(samples.empty())return true;
+    // Do not mix disconnected islands or opposite walls into one height map.
+    std::vector<std::size_t> parent(samples.size());
+    for(std::size_t i=0;i<parent.size();++i)parent[i]=i;
+    const auto root=[&](std::size_t i){
+      while(parent[i]!=i){parent[i]=parent[parent[i]];i=parent[i];}
+      return i;
+    };
+    for(const auto& edge:links){
+      const auto a=slot.find(edge.first),b=slot.find(edge.second);
+      if(a!=slot.end()&&b!=slot.end())parent[root(a->second)]=root(b->second);
+    }
+    const auto component=root(0);
+    for(std::size_t i=1;i<parent.size();++i)if(root(i)!=component)return false;
+    ms::Chart chart;
+    if(!ms::prepare(samples,cv(cache.location_symm),double(cache.radius),chart))return false;
+    active=samples.size();
+    session=std::static_pointer_cast<sculpt_physics::StrokeSolverSession>(cache.physical_solver_session);
+    if(!session || session->purpose!=sculpt_physics::StrokeSolverPurpose::Smooth ||
+       session->vertex_count!=std::size_t(mesh.verts_num)){
+      session=std::make_shared<sculpt_physics::StrokeSolverSession>();
+      session->purpose=sculpt_physics::StrokeSolverPurpose::Smooth;
+      session->vertex_count=std::size_t(mesh.verts_num);
+      cache.physical_solver_session=session;
+    }
+    if(!session->multiscale_attempted){
+      session->multiscale_attempted=true;
+      session->multiscale=ms::create_cuda();
+    }
+    std::vector<double> displacement;
+    gpu=session->multiscale && session->multiscale->evaluate(chart,displacement) &&
+        ms::validate(chart,displacement);
+    if(!gpu)displacement=ms::cpu(chart);
+    if(!ms::validate(chart,displacement))return false;
+    // Stage exact native clipped motion before checking local triangles.
+    std::unordered_map<std::size_t,float3> changes;
+    changes.reserve(active);
+    std::unordered_map<int,bool> staged;
+    staged.reserve(active);
+    node_mask.foreach_index([&](const int ni){
+      WriteBatch batch;batch.node=ni;
+      for(const int id:nodes[ni].verts()){
+        const auto it=slot.find(id);
+        if(it==slot.end()||!staged.emplace(id,true).second)continue;
+        const auto d=chart.axis*(chart.radius*displacement[it->second]);
+        float3 v{float(d.x),float(d.y),float(d.z)};
+        if(brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE)
+          smooth_preserve_shape_translation(v,normals[id]);
+        if(math::length_squared(v)>0.f){batch.ids.append(id);batch.motion.append(v);}
+      }
+      if(batch.ids.is_empty())return;
+      clip_and_lock_translations(sd,ss,pos.eval,batch.ids,batch.motion);
+      for(const int i:batch.ids.index_range())
+        changes.emplace(std::size_t(batch.ids[i]),batch.motion[i]);
+      batches.push_back(std::move(batch));
+    });
+    if(changes.empty())return true;
+#ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
+    const auto guard=physics_v15::limit_drag_contact(mesh,pos.eval,changes,true);
+    guard_scale=guard.final_scale;
+#else
+    // Require the native local contact guard for this experimental strong mode.
+    return false;
+#endif
+    for(auto& batch:batches)for(const int i:batch.ids.index_range()){
+      batch.motion[i]=changes.at(std::size_t(batch.ids[i]));
+      const auto v=batch.motion[i];
+      if(!std::isfinite(v.x)||!std::isfinite(v.y)||!std::isfinite(v.z))return false;
+    }
+  }catch(const std::exception& e){
+    std::fprintf(stderr,"[D12 Multiscale] pre-write fallback: %s\n",e.what());
+    return false;
+  }
+  // Existing Blender sculpt Undo transaction owns these positions. Do not
+  // fall back to another algorithm after any geometry has been published.
+  for(auto& batch:batches){
+    pos.deform(batch.motion,batch.ids);
+    bke::pbvh::update_node_bounds_mesh(pos.eval,nodes[batch.node]);
+  }
+  pbvh.tag_positions_changed(node_mask);
+  pbvh.flush_bounds_to_parents();
+  // A legacy GPU world (if a prior chart was rejected) is now stale.
+  session->solver.reset();
+  if(session->multiscale_dabs++%32==0 || std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
+    std::fprintf(stderr,"[D12 Multiscale %s] active=%zu guard=%.4f total_ms=%.3f%s\n",
+      gpu?"Warp CUDA":"CPU multiscale",active,guard_scale,
+      std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),
+      brush.flag2 & BRUSH_SCULPT_SMOOTH_SHAPE_PRESERVE?" preserve-shape":"");
+  return true;
+}
+
 /* A1 hybrid validation path. Adjacency and positions stay resident in the
  * selected Warp backend for the stroke; Blender still computes brush factors
  * and the reference neighbor average. This deliberately validates lifetime,
@@ -201,8 +391,11 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
   SculptSession &ss = *object.runtime->sculpt_session;
   StrokeCache &cache = *ss.cache;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
+  const auto &layer=layer_delta_smooth_v01::state();
   if (pbvh.type() != bke::pbvh::Type::Mesh || ss.deform_modifiers_active ||
-      ss.shapekey_active || cache.tile_pass != 0 || cache.radial_symmetry_pass != 0)
+      ss.shapekey_active || (layer.object==&object && layer.mesh_l0) ||
+      bke::multires_layers::base_modifier(object)!=nullptr ||
+      cache.tile_pass != 0 || cache.radial_symmetry_pass != 0)
   {
     return false;
   }
@@ -223,14 +416,15 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
     auto session = std::static_pointer_cast<sculpt_physics::StrokeSolverSession>(
         cache.physical_solver_session);
     if (!session || session->purpose != sculpt_physics::StrokeSolverPurpose::Smooth ||
-        session->vertex_count != std::size_t(mesh.verts_num))
+        session->vertex_count != std::size_t(mesh.verts_num) || !session->solver)
     {
       session = sculpt_physics::create_stroke_solver_session(
           sculpt_physics::StrokeSolverPurpose::Smooth,
           sculpt_physics::BackendKind::WarpCuda,
           std::size_t(mesh.verts_num));
       if (session->selected_backend != sculpt_physics::BackendKind::WarpCuda) {
-        cache.physical_solver_session.reset();
+        std::fprintf(stderr,"[GPU Smooth A1] CUDA backend unavailable; standard Smooth fallback\n");
+        cache.physical_solver_session=session; // do not retry failed CUDA each dab
         return false;
       }
       sculpt_physics::BrushSolverBackend &solver = *session->solver;
@@ -254,6 +448,7 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
       cache.physical_solver_session = session;
     }
 
+    if(session->selected_backend!=sculpt_physics::BackendKind::WarpCuda)return false;
     sculpt_physics::BrushSolverBackend &solver = *session->solver;
     struct Target {
       int vertex;
@@ -347,7 +542,7 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
       else if (STREQ(mode, "dense")) {
         smooth_mode = sculpt_physics::SmoothSolverMode::DenseStrong;
       }
-      else if (STREQ(mode, "strong")) {
+      else if (STREQ(mode, "strong") || STREQ(mode, "multiscale")) {
         smooth_mode = sculpt_physics::SmoothSolverMode::DenseStrong;
       }
       else if (STREQ(mode, "physical")) {
@@ -363,15 +558,17 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
         weight = std::min(1.0f, weight * 1.75f);
       }
     }
-    if (physical_relax ||
-        !solver.smooth_compact(
-            active_region, compact_weights, compact_normals, smooth_mode, double(cache.radius)))
+    const bool dedicated_gpu=!physical_relax && solver.smooth_compact(
+            active_region, compact_weights, compact_normals, smooth_mode, double(cache.radius));
+    if(!dedicated_gpu)
     {
       if (!solver.set_active_region(active_region) || !solver.set_targets(targets)) {
         throw std::runtime_error("GPU Smooth rejected its active region");
       }
       solver.step_local(1.0 / 60.0, 1, physical_relax ? 2 : 1, 0);
     }
+    if(session->multiscale_dabs++%32==0 || std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
+      std::fprintf(stderr,"[GPU Smooth %s] mode=%d active=%zu\n",dedicated_gpu?"A3 CUDA":"Jacobi fallback",int(smooth_mode),active_region.size());
 
     double expected_motion = 0.0;
     double solved_motion = 0.0;
@@ -440,11 +637,6 @@ BLI_NOINLINE static void do_smooth_brush_mesh(const Depsgraph &depsgraph,
                                               const IndexMask &node_mask,
                                               const float brush_strength)
 {
-#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
-  if (try_gpu_smooth_a1(depsgraph, sd, brush, object, node_mask, brush_strength)) {
-    return;
-  }
-#endif
   const SculptSession &ss = *object.runtime->sculpt_session;
   bke::pbvh::Tree &pbvh = *bke::object::pbvh_get(object);
   MutableSpan<bke::pbvh::MeshNode> nodes = pbvh.nodes<bke::pbvh::MeshNode>();
@@ -774,9 +966,26 @@ void do_smooth_brush(const Depsgraph &depsgraph,
   const Brush &brush = *BKE_paint_brush_for_read(&sd.paint);
 
   boundary::ensure_boundary_info(object);
+  [[maybe_unused]] bool gpu_selected=false;
+#ifdef WITH_SCULPT_XPBD_GRAB_EXPERIMENTAL
+  gpu_selected=gpu_smooth_requested() && pbvh.type()==bke::pbvh::Type::Mesh;
+  if(gpu_selected){
+    if(try_smooth_multiscale_d12(depsgraph,sd,brush,object,node_mask,brush_strength)){
+      pbvh.update_bounds(depsgraph,object);return;
+    }
+    if(multiscale_smooth_requested()){
+      static thread_local unsigned int rejects=0;
+      if(rejects++%32==0 || std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
+        std::fprintf(stderr,"[D12 Multiscale] chart unsupported; A3/standard fallback\n");
+    }
+    if(try_gpu_smooth_a1(depsgraph,sd,brush,object,node_mask,brush_strength)){
+      pbvh.update_bounds(depsgraph,object);return;
+    }
+  }
+#endif
 
 #ifdef WITH_SCULPT_XPBD_OTHER_BRUSHES_V15
-  if (try_smooth_physics_v15(
+  if (!gpu_selected && try_smooth_physics_v15(
           depsgraph,sd,brush,object,node_mask,brush_strength)) {
     pbvh.tag_positions_changed(node_mask);
     pbvh.update_bounds(depsgraph,object);

@@ -46,6 +46,13 @@ SPECS = (
     ("Mud Melt (Surface)", "Clay", "MATERIAL", "AUTONOMOUS_MELT", "melt", 1., 1., "Physical Brushes/Thermal", "MUD"),
 )
 
+# Dedicated experimental assets. Preserve the existing D11 library and presets.
+D12_SPECS = (
+    ("D12 Clay Buildup", "Clay Strips", "MATERIAL", "AUTONOMOUS_DEPOSIT", "d12_clay", 1., .55, "Physical Brushes/Build", "FIRM_CLAY"),
+    ("D12 Flesh Flow", "Clay", "MATERIAL", "AUTONOMOUS_SMEAR", "d12_flesh", 1., .55, "Physical Brushes/Transport", "FLESH"),
+    ("D12 Melt Surface", "Clay", "MATERIAL", "AUTONOMOUS_MELT", "melt", 1., .85, "Physical Brushes/Thermal", "MUD"),
+)
+
 def preview_height(kind, x, y):
     # Broad exaggerated sculpt forms read at 32-48 px. These depict
     # intended brush behavior, not solver output.
@@ -55,6 +62,10 @@ def preview_height(kind, x, y):
         return math.exp(-((v-c)/width)**2)
     end = math.exp(-((x+.05)/.82)**8)
     v = y - .20*math.sin(3*x)
+    if kind == "d12_clay":
+        return .43*end*ridge(-.16,.19,v)+.55*end*ridge(.16,.19,v)
+    if kind == "d12_flesh":
+        return .46*g(.35,0,.40,.34)-.19*g(-.35,0,.37,.31)+.17*end*ridge(.29,.20,v)
     if kind == "clay":
         return .46*end*ridge(0,.33,v)
     if kind == "strips":
@@ -256,7 +267,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output",required=True)
     parser.add_argument("--source")
+    group=parser.add_mutually_exclusive_group()
+    group.add_argument("--dedicated-d12",action="store_true")
+    group.add_argument("--dedicated-d12-melt",action="store_true",help="Generate only Melt in a new separate library")
     args = parser.parse_args(sys.argv[sys.argv.index("--")+1:] if "--" in sys.argv else [])
+    dedicated=args.dedicated_d12 or args.dedicated_d12_melt
+    specs=(D12_SPECS[-1:] if args.dedicated_d12_melt else D12_SPECS) if dedicated else SPECS
     # Built-in RNA properties belong to instances; hasattr on bpy.types.Brush
     # does not reliably detect them. Inspect the registered RNA schema.
     required = ("sculpt_physics_mode", "sculpt_physics_clay_behavior",
@@ -270,7 +286,7 @@ def main():
             f"Experimental Brush RNA unavailable in {bpy.app.binary_path}: "
             + ", ".join(missing))
     actions = set(props["sculpt_physics_clay_behavior"].enum_items.keys())
-    missing_actions = sorted({spec[3] for spec in SPECS if spec[3]}-actions)
+    missing_actions = sorted({spec[3] for spec in specs if spec[3]}-actions)
     if missing_actions:
         raise RuntimeError("Install V23 build first; missing actions: "+", ".join(missing_actions))
     print("[BSE Physical Brushes] Brush RNA verified", flush=True)
@@ -280,7 +296,7 @@ def main():
     source = find_source(args.source)
     # Blender replaces entries of the destination list with loaded IDs
     # on leaving the context. Keep requested string names independently.
-    names = tuple(sorted({spec[1] for spec in SPECS}))
+    names = tuple(sorted({spec[1] for spec in specs}))
     with bpy.data.libraries.load(str(source),link=False) as (src,dst):
         missing = set(names)-set(src.brushes)
         if missing:
@@ -295,7 +311,7 @@ def main():
             raise RuntimeError(f"Failed to load Essentials brush: {name}")
     print("[BSE Physical Brushes] Loaded base brushes: "+", ".join(names), flush=True)
     assets = set()
-    for name, base, mode, action, icon, assist, spread, category, material in SPECS:
+    for name, base, mode, action, icon, assist, spread, category, material in specs:
         brush = bases[base].copy()
         if brush.asset_data:
             brush.asset_clear()
@@ -332,6 +348,29 @@ def main():
                     brush.strength = 1.4
                 if "SMOOTH" in props["curve_distance_falloff_preset"].enum_items.keys():
                     brush.curve_distance_falloff_preset = "SMOOTH"
+        if dedicated:
+            # One physical operation per dab; avoid inherited post-smoothing.
+            brush.auto_smooth_factor=0.0
+            brush.use_accumulate=True
+            brush.use_plane_trim=False
+            # Direction is a tool-dependent RNA enum (some expose DEFAULT only).
+            # Keep the copied Essentials direction; the dedicated assets use
+            # its stock positive direction and the host handles stroke inversion.
+            brush.strength=1.0
+            brush.spacing=8 if action=="AUTONOMOUS_MELT" else 6
+            brush.tip_roundness=.30 if action=="AUTONOMOUS_DEPOSIT" else 1.0
+            brush.tip_scale_x=1.0
+            brush.hardness=.25 if action=="AUTONOMOUS_DEPOSIT" else .15 if action=="AUTONOMOUS_MELT" else .05
+            brush.sculpt_physics_assist=1.0
+            if "SMOOTH" in props["curve_distance_falloff_preset"].enum_items.keys():
+                brush.curve_distance_falloff_preset="SMOOTH"
+            if props.get("sculpt_physics_engine") is not None:
+                brush.sculpt_physics_engine = {
+                    "AUTONOMOUS_DEPOSIT": "CLAY",
+                    "AUTONOMOUS_SMEAR": "FLESH",
+                    "AUTONOMOUS_MELT": "MELT_SURFACE",
+                }[action]
+            brush["bse_engine_generation"]="D12"
         brush.asset_mark()
         brush.asset_data.catalog_id = CATALOGS[category]
         brush.asset_data.description = (
@@ -351,7 +390,7 @@ def main():
         bpy.data.libraries.write(str(temp),assets,fake_user=True,compress=True)
         # Verify the saved library includes all expected brush names.
         with bpy.data.libraries.load(str(temp),link=False) as (src,dst):
-            if not {s[0] for s in SPECS}.issubset(src.brushes):
+            if not {s[0] for s in specs}.issubset(src.brushes):
                 raise RuntimeError("Written library is missing brush assets")
         os.replace(temp,target)
         (output/"blender_assets.cats.txt").write_text(
