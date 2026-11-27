@@ -101,9 +101,9 @@ void push_enter_sculpt_mode(const Scene &scene, Object &ob, const wmOperator *op
 void push_begin_ex(const Scene &scene, Object &ob, const char *name);
 // Sparse compaction snapshot, paired with native Position Undo/Redo.
 bool capture_physics_compaction_v29(const Object &object,Span<int> ids,Span<float> values);
-/* D15-C5: reserved for a future, fully staged UV/position publication.
- * Captures old values and expected new values before any mesh write.
- * No current brush calls this API. */
+/* D15-C5/C6: used only by the explicit experimental UV preservation path.
+ * Captures old values and expected new values before any mesh write. Caller
+ * must prepare all writers and publish the exact proposals immediately. */
 struct UVCornerProposalD15 {
   std::string layer;
   int corner = -1;

@@ -980,8 +980,8 @@ bool capture_uv_corners_d15(Object &object, Span<UVCornerProposalD15> proposals)
 
 /* Acquire every layer writer before the position exchange. On an unsuccessful
  * preparation no corner value changes. finish() may still invalidate caches.
- * No native caller captures UV changes yet; keep this path dormant until
- * combined publication, cancellation and Undo/Redo tests are available. */
+ * C6 captures only in the explicit opt-in experimental path. Native
+ * cancellation and Undo/Redo must be validated before any default enable. */
 class UVUndoPreparedD15 {
   struct Layer {
     const std::string *name;
