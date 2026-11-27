@@ -119,4 +119,22 @@ inline Vec3 clay_vertex(const ClayKernel& k,const PhysicalBrushIntentSample& s,
  }
  return direction*(k.sign*amount);
 }
+// Approximate integrated contact with a translated tip. Host envelope stays
+// authoritative; no interpolation of tablet pressure or texture here.
+inline Vec3 swept_clay_vertex(const ClayKernel& k,PhysicalBrushIntentSample s,
+                             Vec3 tangent,const ClayReference* reference)
+{
+ const double travel=norm(tangent)/k.radius;
+ if(!std::isfinite(travel)||travel>1.5)return {};
+ if(travel<=1e-12)return clay_vertex(k,s,reference);
+ const int count=std::clamp(int(std::ceil(travel/.08)),1,20);
+ Vec3 total{};
+ for(int i=0;i<count;++i){
+  auto sub=k;sub.exposure/=count;
+  sub.frame.center=k.frame.center-tangent*(1.-(double(i)+.5)/count);
+  const auto d=clay_vertex(sub,s,reference);
+  total+=d;s.position+=d;
+ }
+ return total;
+}
 }

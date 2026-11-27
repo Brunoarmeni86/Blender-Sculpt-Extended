@@ -29,6 +29,7 @@ enum class SmoothSolverMode {
   VolumePreserve = 2,
   Relax = 3,
   DenseStrong = 4,
+  DenseStrongRecovery = 5, // host selector only
 };
 
 BackendKind backend_kind_from_name(std::string_view name);

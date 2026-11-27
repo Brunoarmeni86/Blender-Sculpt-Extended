@@ -79,7 +79,7 @@ int main()
     std::vector<float> weights(active_region.size(),.5f);
     std::vector<Vec3> normals(active_region.size(),Vec3{0,0,1});
     require(smooth->smooth_compact(active_region,weights,normals,
-                                  SmoothSolverMode::DenseStrong,50.),
+                                  SmoothSolverMode::DenseStrongRecovery,50.),
             "D13 dedicated Smooth failed; no Jacobi fallback allowed");
     const double z=smooth->particles()[center].position.z;
     require(std::isfinite(z)&&z>=0.&&z<.5,"D13 peak did not relax");

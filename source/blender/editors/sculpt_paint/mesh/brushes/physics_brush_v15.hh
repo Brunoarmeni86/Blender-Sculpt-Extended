@@ -249,6 +249,22 @@ inline bool direct_material_action_v31(int action)
 {
   return action==2 || action==5 || action==7 || action==8 || action==14;
 }
+inline bool clay_sweep_d13_active(const StrokeCache &cache,const Brush &brush)
+{
+  const char *flag=std::getenv("BLENDER_SCULPT_D13_CLAY_SWEEP");
+  if(!flag || !STREQ(flag,"1") || !dedicated_engine_requested(brush) ||
+     brush.sculpt_brush_type!=SCULPT_BRUSH_TYPE_CLAY_STRIPS ||
+     brush.sculpt_physics_mode!=3 || brush.sculpt_physics_assist<=0 ||
+     brush.stroke_method!=BRUSH_STROKE_SPACE ||
+     (effective_action(brush)!=1 && effective_action(brush)!=4) ||
+     (effective_material(brush)!=0 && effective_material(brush)!=1) ||
+     !cache.xpbd_v17_intent_started || cache.xpbd_v15_failed ||
+     cache.reference_symmetry || cache.reference_combined ||
+     cache.tile_pass!=0 || cache.radial_symmetry_pass!=0 || cache.mirror_symmetry_pass!=0)
+    return false;
+  const double distance=math::length(cache.location_symm-cache.xpbd_v17_last_center);
+  return std::isfinite(distance)&&cache.radius>0&&distance>1e-12&&distance<=1.5*cache.radius;
+}
 inline bool swept_v29_requested()
 {
   static const bool enabled=[](){const char *v=std::getenv("BLENDER_SCULPT_SWEEP_V29");return v && v[0]=='1' && v[1]=='\0';}();
@@ -874,7 +890,8 @@ inline bool try_apply(const Sculpt &sd,
       }
     }
 
-    if(global_collision_v29_requested()){
+    const bool strict_collision=stroke_option_v31d5("BLENDER_SCULPT_D13_COLLISION");
+    if(global_collision_v29_requested() || strict_collision){
       const auto tris=mesh.corner_tris();
       const auto corners=mesh.corner_verts();
       const auto tri_at=[&](std::size_t i){
@@ -888,7 +905,7 @@ inline bool try_apply(const Sculpt &sd,
       };
       const auto guarded=sculpt_physics::guard_global_collision_v29(
           std::size_t(tris.size()),tri_at,current_position,motion_at,
-          std::max(1e-12,double(cache.radius)*1e-6));
+          std::max(1e-12,double(cache.radius)*1e-6),200000,strict_collision);
       if(profile || guarded.scale<1)
         std::fprintf(stderr,"[V29 collision] scale=%.7g pairs=%zu limited=%zu unresolved=%zu budget=%d\n",
             guarded.scale,guarded.tested_pairs,guarded.limited_pairs,guarded.unresolved_pairs,int(guarded.budget_exhausted));
@@ -1746,8 +1763,9 @@ inline bool try_apply_intent(
           // Count tangential motion only, and bound a single accepted dab.
           const auto motion=convert(delta);
           const auto tangent=motion-next_frame.axis*d::dot(motion,next_frame.axis);
+          const bool swept=clay_sweep_d13_active(cache,brush);
           dose=cache.xpbd_v17_intent_started?(travel<=1.5?
-              std::min(.25,d::norm(tangent)/radius):0.):.06;
+              std::min(swept?1.5:.25,d::norm(tangent)/radius):0.):.06;
           const auto kernel=d::prepare_clay(next_frame,radius,dose,intensity,sign,params);
           for(const auto& sample:samples){
             if(!d::valid_sample(sample))continue;
@@ -1755,7 +1773,8 @@ inline bool try_apply_intent(
             // existing stroke-owned cache is reset with the StrokeCache.
             const auto ref=state->d12_clay_reference.try_emplace(sample.global_index,
                 d::ClayReference{sample.position,sample.surface_normal,radius}).first;
-            const auto displacement=d::clay_vertex(kernel,sample,&ref->second);
+            const auto displacement=swept?d::swept_clay_vertex(kernel,sample,tangent,&ref->second):
+                                          d::clay_vertex(kernel,sample,&ref->second);
             if(d::norm2(displacement)>1e-30)goals.push_back({sample.global_index,displacement});
           }
         }else{
@@ -2057,7 +2076,8 @@ inline bool try_apply_intent(
       }
       const Mesh &mesh=*id_cast<Mesh *>(object.data);
       if (position_data.eval.size()!=mesh.verts_num) return false;
-      clay.plastic_v29=clay.stable_v28 && plastic_v29_requested() &&
+      clay.plastic_v29=clay.stable_v28 && (plastic_v29_requested() ||
+           stroke_option_v31d5("BLENDER_SCULPT_D13_PERSISTENT_MATERIAL")) &&
           (action==5 || action==7 || action==8) &&
           bool(mesh.attributes().lookup<float>(".bse_plastic_compaction",bke::AttrDomain::Point));
       // Reuse the pre-existing point attribute and native compaction Undo.

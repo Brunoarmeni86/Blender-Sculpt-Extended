@@ -609,8 +609,12 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
         weight = std::min(1.0f, weight * 1.75f);
       }
     }
+    const char *recovery_mode=std::getenv("BLENDER_SCULPT_D13_SMOOTH_RECOVERY");
+    const auto gpu_mode=smooth_mode==sculpt_physics::SmoothSolverMode::DenseStrong &&
+        recovery_mode && recovery_mode[0] ?
+        sculpt_physics::SmoothSolverMode::DenseStrongRecovery : smooth_mode;
     const bool dedicated_gpu=!physical_relax && solver.smooth_compact(
-            active_region, compact_weights, compact_normals, smooth_mode, double(cache.radius));
+            active_region, compact_weights, compact_normals, gpu_mode, double(cache.radius));
     if(!dedicated_gpu)
     {
       // Recovery comparison must not masquerade as one-pass Jacobi. Reset
@@ -648,6 +652,11 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
     }
 
     Vector<float3> translations;
+    std::vector<unsigned char> written(active_region.size(),0);
+    std::vector<std::size_t> correction_ids;
+    std::vector<sculpt_physics::Vec3> correction_positions;
+    correction_ids.reserve(active_region.size());
+    correction_positions.reserve(active_region.size());
     node_mask.foreach_index([&](const int node_i) {
       const Span<int> verts = nodes[node_i].verts();
       translations.resize(verts.size());
@@ -664,6 +673,9 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
           translations[i] = float3(0.0f);
           continue;
         }
+        const auto slot=std::size_t(target-targets.begin());
+        if(written[slot]){translations[i]=float3(0.f);continue;}
+        written[slot]=1;
         const sculpt_physics::Vec3 p = solver.particles()[verts[i]].position;
         translations[i] = float3(float(p.x) - position_data.eval[verts[i]].x,
                                  float(p.y) - position_data.eval[verts[i]].y,
@@ -672,12 +684,39 @@ static bool try_gpu_smooth_a1(const Depsgraph &depsgraph,
           smooth_preserve_shape_translation(translations[i], normals[verts[i]]);
         }
       }
+      const Vector<float3> before_clip=translations;
       clip_and_lock_translations(sd, ss, position_data.eval, verts, translations);
+      for(const int i:verts.index_range())if(math::is_zero(before_clip[i]))
+        translations[i]=float3(0.f);
       position_data.deform(translations, verts);
       bke::pbvh::update_node_bounds_mesh(position_data.eval, nodes[node_i]);
     });
     pbvh.tag_positions_changed(node_mask);
     pbvh.flush_bounds_to_parents();
+    // Published geometry is authoritative. Never run fallback after write.
+    if(dedicated_gpu){
+      try{
+        for(auto id:active_region){
+          const float3 p=position_data.eval[int(id)];
+          const auto q=solver.particles()[id].position;
+          if(double(p.x)!=q.x || double(p.y)!=q.y || double(p.z)!=q.z){
+            correction_ids.push_back(id);
+            correction_positions.push_back({double(p.x),double(p.y),double(p.z)});
+          }
+        }
+        if(!correction_ids.empty() &&
+           !solver.synchronize_positions_compact(correction_ids,correction_positions,false))
+          throw std::runtime_error("accepted position scatter failed");
+        if(std::getenv("BLENDER_SCULPT_SMOOTH_DIAG"))
+          std::fprintf(stderr,"[D13 Smooth sync] corrected=%zu active=%zu\n",
+                       correction_ids.size(),active_region.size());
+      }catch(const std::exception &error){
+        std::fprintf(stderr,"[D13 Smooth sync] reset after write: %s\n",error.what());
+        cache.physical_solver_session.reset();
+      }
+    }else{
+      cache.physical_solver_session.reset();
+    }
     return true;
   }
   catch (const std::exception &error) {

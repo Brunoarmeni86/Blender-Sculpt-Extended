@@ -43,13 +43,44 @@ inline bool overlap(const Box &a,const Box &b,double eps)
   for(int j=0;j<3;++j)if(a.hi[j]+eps<b.lo[j] || b.hi[j]+eps<a.lo[j])return false;
   return true;
 }
+// A fixed separating axis certifies a positive gap throughout the linear
+// motion interval. Conservative, not exact feature CCD.
+inline Vec3 axis_cross(Vec3 a,Vec3 b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
+inline double axis_dot(Vec3 a,Vec3 b){return a.x*b.x+a.y*b.y+a.z*b.z;}
+inline double separating_scale(const std::array<Vec3,3>& a,const std::array<Vec3,3>& b,
+                               const std::array<Vec3,3>& ma,const std::array<Vec3,3>& mb,
+                               double margin,double limit)
+{
+ const std::array<Vec3,3> ea{a[1]-a[0],a[2]-a[1],a[0]-a[2]},eb{b[1]-b[0],b[2]-b[1],b[0]-b[2]};
+ const Vec3 na=axis_cross(ea[0],ea[1]),nb=axis_cross(eb[0],eb[1]);
+ double best=0.;
+ const auto test=[&](Vec3 axis){
+  const double n=std::hypot(axis.x,axis.y,axis.z);
+  if(!std::isfinite(n)||n<=1e-24)return;
+  axis=axis/n;
+  for(double sign:{-1.,1.}){
+   double safe=limit;const auto u=axis*sign;
+   for(int i=0;i<3;++i)for(int j=0;j<3;++j){
+    const double gap=axis_dot(b[j]-a[i],u)-margin;
+    const double speed=axis_dot(mb[j]-ma[i],u);
+    if(!std::isfinite(gap)||!std::isfinite(speed)||gap<=0.){safe=0.;continue;}
+    if(speed<0. && gap+limit*speed<=0.)safe=std::min(safe,.98*gap/-speed);
+   }
+   best=std::max(best,safe);
+  }
+ };
+ test(na);test(nb);
+ for(auto u:ea){test(axis_cross(na,u));for(auto v:eb)test(axis_cross(u,v));}
+ for(auto v:eb)test(axis_cross(nb,v));
+ return best;
+}
 struct Item {Box initial,swept;bool moving=false;};
 struct Node {Box box;std::size_t start=0,end=0,left=0,right=0;};
 }
 template<class TriangleAt,class PositionAt,class MotionAt>
 GlobalCollisionV29Result guard_global_collision_v29(std::size_t triangle_count,
     TriangleAt triangle_at,PositionAt position_at,MotionAt motion_at,
-    double margin=0.0,std::size_t pair_budget=200000)
+    double margin=0.0,std::size_t pair_budget=200000,bool strict=false)
 {
   using namespace collision_v29;
   if(!std::isfinite(margin) || margin<0 || pair_budget==0)
@@ -106,7 +137,17 @@ GlobalCollisionV29Result guard_global_collision_v29(std::size_t triangle_count,
         for(auto a:triangle_at(i))for(auto b:triangle_at(j))adjacent|=a==b;
         if(adjacent)continue;
         if(++out.tested_pairs>pair_budget){out.scale=0;out.budget_exhausted=true;return out;}
-        if(overlap(items[i].initial,items[j].initial,margin)){++out.unresolved_pairs;continue;}
+        if(overlap(items[i].initial,items[j].initial,margin)){
+          if(!strict){++out.unresolved_pairs;continue;}
+          std::array<Vec3,3> a{},b{},ma{},mb{};
+          const auto ta=triangle_at(i),tb=triangle_at(j);
+          for(int k=0;k<3;++k){a[k]=position_at(ta[k]);b[k]=position_at(tb[k]);
+            ma[k]=motion_at(ta[k]);mb[k]=motion_at(tb[k]);}
+          const double safe=separating_scale(a,b,ma,mb,margin,out.scale);
+          if(safe==0.){++out.unresolved_pairs;out.scale=0.;return out;}
+          if(safe<out.scale){out.scale=safe;++out.limited_pairs;}
+          continue;
+        }
         if(!overlap(bounds(i,out.scale),bounds(j,out.scale),margin))continue;
         double lo=0,hi=out.scale;
         for(int step=0;step<32;++step){

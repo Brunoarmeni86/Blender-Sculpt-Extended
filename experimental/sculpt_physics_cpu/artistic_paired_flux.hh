@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <stdexcept>
 #include <vector>
 
@@ -44,12 +45,25 @@ inline bool paired_flux_dispatch(PairedFluxBackend* backend,
  const std::vector<PairedFluxLink>& links,const std::vector<double>& outgoing_cap,
  const std::vector<double>& incoming_cap,std::vector<double>& change,double& transferred){
  bool ok=false;
- if(backend && !links.empty() && outgoing_cap.size()==incoming_cap.size()){
+ // Check all indices and capacity inputs BEFORE the accelerator consumes them.
+ if(outgoing_cap.size()!=incoming_cap.size())throw std::invalid_argument("paired flux capacities");
+ for(std::size_t i=0;i<outgoing_cap.size();++i)
+  if(!std::isfinite(outgoing_cap[i])||outgoing_cap[i]<0||
+     !std::isfinite(incoming_cap[i])||incoming_cap[i]<0)
+   throw std::invalid_argument("paired flux capacity");
+ double total=0.;
+ for(const auto& l:links){
+  if(l.a>=outgoing_cap.size()||l.b>=outgoing_cap.size()||l.a==l.b||
+     !std::isfinite(l.amount)||l.amount<0.)throw std::invalid_argument("paired flux link");
+  total+=l.amount;
+  if(!std::isfinite(total))throw std::overflow_error("paired flux total overflow");
+ }
+ if(backend && !links.empty()){
   try{
    ok=backend->exchange(links,outgoing_cap,incoming_cap,change,transferred);
    ok=ok&&change.size()==outgoing_cap.size()&&std::isfinite(transferred)&&transferred>=0;
-   double balance=0.,magnitude=0.,proposal=0.;
-   for(const auto& f:links)proposal+=f.amount;
+   double balance=0.,magnitude=0.;
+   const double proposal=total;
    const double tol=1e-5*std::max(1e-30,proposal);
    if(ok)for(std::size_t i=0;i<change.size();++i){
     const double x=change[i];
@@ -57,7 +71,16 @@ inline bool paired_flux_dispatch(PairedFluxBackend* backend,
        ((outgoing_cap[i]==0&&incoming_cap[i]==0)&&x!=0.)){ok=false;break;}
     balance+=x;magnitude+=std::abs(x);
    }
-   ok=ok&&std::abs(balance)<=tol&&magnitude<=2.*transferred+tol&&transferred<=proposal+tol;
+   ok=ok&&std::isfinite(balance)&&std::isfinite(magnitude)&&std::abs(balance)<=tol&&
+       magnitude<=2.*transferred+tol&&transferred<=proposal+tol;
+   if(ok&&std::getenv("BLENDER_SCULPT_D13_FLUX_PARITY")){
+    std::vector<double> reference;double moved=0.;
+    paired_flux_reference(links,outgoing_cap,incoming_cap,reference,moved);
+    if(std::abs(moved-transferred)>tol)ok=false;
+    for(std::size_t i=0;ok&&i<reference.size();++i)
+      if(std::abs(reference[i]-change[i])>1e-5*std::max({1e-30,std::abs(reference[i]),std::abs(change[i])})+tol)
+        ok=false;
+   }
   }catch(const std::exception&){ok=false;}
  }
  if(!ok)paired_flux_reference(links,outgoing_cap,incoming_cap,change,transferred);

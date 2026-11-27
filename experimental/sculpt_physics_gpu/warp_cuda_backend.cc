@@ -177,7 +177,7 @@ class WarpCudaBrushSolverBackend final : public BrushSolverBackend {
       smooth_output_[i] = {
           float(positions[i].x), float(positions[i].y), float(positions[i].z)};
       particles_[indices[i]].position = positions[i];
-      rest_[indices[i]] = smooth_output_[i];
+      if (update_rest) rest_[indices[i]] = smooth_output_[i];
     }
     if (!copy_h2d(d_active_indices_, smooth_active_) ||
         !copy_h2d(d_smooth_output_, smooth_output_))
@@ -334,10 +334,11 @@ class WarpCudaBrushSolverBackend final : public BrushSolverBackend {
                                1.0f;
     const double edge_ratio = std::max(1.0, spatial_scale / double(reference_edge));
     namespace recovery = smooth_recovery_d13;
-    const auto policy = recovery::parse(std::getenv("BLENDER_SCULPT_D13_SMOOTH_RECOVERY"));
+    const bool recovering=mode==SmoothSolverMode::DenseStrongRecovery;
+    const auto policy=recovery::parse(recovering?std::getenv("BLENDER_SCULPT_D13_SMOOTH_RECOVERY"):nullptr);
     int passes = mode == SmoothSolverMode::Taubin ? 2 : 1;
     int requested = passes;
-    if (mode == SmoothSolverMode::DenseStrong) {
+    if (mode == SmoothSolverMode::DenseStrong || recovering) {
       const auto plan = recovery::plan(policy,edge_ratio,active.size());
       if (plan.executed <= 0) {
         std::fprintf(stderr,"[D13 Smooth] invalid recovery policy or scale\n");
@@ -396,7 +397,7 @@ class WarpCudaBrushSolverBackend final : public BrushSolverBackend {
       const Float3 &p = smooth_output_[i];
       particles_[active[i]].position = {p.x, p.y, p.z};
     }
-    if (mode == SmoothSolverMode::DenseStrong &&
+    if ((mode == SmoothSolverMode::DenseStrong || recovering) &&
         std::getenv("BLENDER_SCULPT_SMOOTH_DIAG")) {
       std::fprintf(stderr,
                    "[D13 Smooth CUDA OK] policy=%s kernel_mode=%d active=%zu requested=%d executed=%d edge_ratio=%.3f\n",

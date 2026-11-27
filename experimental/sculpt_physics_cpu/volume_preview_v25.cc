@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "volume_session_v25.hh"
 #include <filesystem>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -70,7 +71,8 @@ int main(int argc,char **argv){
                            VolumeBackendV25::ViscoplasticMPM,dx);
     std::cout<<"particles="<<s.liquid.size()+s.clay.size()<<std::endl;
     for(int i=0;i<frames;++i){
-      s=stage_volume_frame_v25(s,f);
+      s=std::getenv("BLENDER_SCULPT_D13_VOLUME_ADAPTIVE")?
+          stage_volume_adaptive_d13(s,f):stage_volume_frame_v25(s,f);
       std::cout<<"frame="<<i+1<<" time="<<s.time<<std::endl;
     }
     auto result=reconstruct_volume_v25(s,dx*.5,dx*.95);

@@ -5595,9 +5595,10 @@ static void do_brush_action(const Depsgraph &depsgraph,
       bke::object::pbvh_get(ob)->type()==bke::pbvh::Type::Mesh &&
       !ss.deform_modifiers_active && !ss.shapekey_active &&
       bke::multires_layers::base_modifier(ob)==nullptr &&
-      brushes::physics_v15::swept_v29_active(*ss.cache,brush)){
+      (brushes::physics_v15::swept_v29_active(*ss.cache,brush) ||
+       brushes::physics_v15::clay_sweep_d13_active(*ss.cache,brush))){
     const float3 a=ss.cache->xpbd_v17_last_center,b=ss.cache->location_symm;
-    const float r=ss.cache->radius+math::length(b-a)*.5f;
+    const float r=ss.cache->radius*(brushes::physics_v15::clay_sweep_d13_active(*ss.cache,brush)?1.6f:1.f)+math::length(b-a)*.5f;
     const IndexMask swept=gather_nodes(*bke::object::pbvh_get(ob),PAINT_FALLOFF_SHAPE_SPHERE,
                                       false,(a+b)*.5f,r*r,std::nullopt,memory);
     cursor_sample_result.node_mask=IndexMask::from_union(cursor_sample_result.node_mask,swept,memory);

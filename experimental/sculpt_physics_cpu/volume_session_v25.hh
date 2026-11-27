@@ -3,6 +3,7 @@
 #include "volume_surface_v25.hh"
 #include "material_point_reference_v21.hh"
 #include "fluid_pbf_v23.hh"
+#include <string_view>
 
 namespace sculpt_physics {
 enum class VolumeBackendV25 { LiquidPBF, ViscoplasticMPM };
@@ -90,6 +91,25 @@ inline VolumeSessionV25 stage_volume_frame_v25(const VolumeSessionV25 &before,
   // Atomic staging: exceptions leave input untouched. Persist particles,
   // velocities and stress across frames; no resampling each dab/frame.
   return out;
+}
+// Retry only identified stability failures; all failed trials are immutable.
+inline VolumeSessionV25 stage_volume_adaptive_d13(const VolumeSessionV25 &before,VolumeFrameV25 f)
+{
+ if(f.substeps<1||f.substeps>64)return stage_volume_frame_v25(before,f);
+ if(f.tool_enabled&&std::isfinite(before.particle_spacing)&&before.particle_spacing>0.){
+  const double ratio=volume_norm_v25(f.tool_end-f.tool_start)/(.25*before.particle_spacing);
+  if(!std::isfinite(ratio)||ratio>64.)throw std::invalid_argument("D13 tool travel exceeds substep budget");
+  f.substeps=std::max(f.substeps,int(std::ceil(ratio)));
+ }
+ for(;;){
+  try{return stage_volume_frame_v25(before,f);}
+  catch(const std::exception& e){
+   const std::string_view m=e.what();
+   if(f.substeps==64 || (m!="Material point step exceeds explicit stability budget" &&
+     m!="MPM trial needs smaller substeps" && m!="Fluid trial requires smaller step"))throw;
+   f.substeps=std::min(64,f.substeps*2);
+  }
+ }
 }
 inline VolumeSurfaceV25 reconstruct_volume_v25(const VolumeSessionV25 &s,
                                                double spacing,double radius){

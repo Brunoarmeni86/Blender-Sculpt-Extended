@@ -1019,7 +1019,16 @@ void do_clay_strips_brush(const Depsgraph &depsgraph,
           distances[j]=dist/std::max(ss.cache->radius,1e-12f);
         }
       }
-      else calc_brush_cube_distances<float2>(brush,tls.xy_positions,distances);
+      else {
+        if(autonomous && physics_v15::clay_sweep_d13_active(*ss.cache,brush)){
+          const float2 a=math::transform_point(mat,ss.cache->xpbd_v17_last_center).xy()-
+                         math::transform_point(mat,ss.cache->location_symm).xy();
+          const float den=math::dot(a,a);
+          if(den>1e-20f)for(auto &p:tls.xy_positions)
+            p-=a*std::clamp(math::dot(p,a)/den,0.f,1.f);
+        }
+        calc_brush_cube_distances<float2>(brush,tls.xy_positions,distances);
+      }
       if(audit)for(const float dist:distances)if(dist<1.0f)++coverage.geometric;
       fill_factor_from_hide_and_mask(attributes.hide_vert,attributes.mask,verts,factors);
       filter_region_clip_factors(ss,pos.eval,verts,factors);
